@@ -99,6 +99,7 @@ impl Resampler {
     }
 
     /// Resample input from native SILK sample rate to 48kHz using polyphase filtering
+    #[inline]
     pub fn resample(&self, input: &[f32]) -> Vec<f32> {
         if self.ratio == 1 {
             return input.to_vec();
@@ -107,27 +108,184 @@ impl Resampler {
         let output_len = input.len() * self.ratio;
         let mut output = vec![0.0f32; output_len];
 
-        // Polyphase filtering
-        for out_idx in 0..output_len {
+        // Use specialized implementations for common ratios
+        match self.ratio {
+            2 => self.resample_2x(input, &mut output),
+            3 => self.resample_3x(input, &mut output),
+            4 => self.resample_4x(input, &mut output),
+            6 => self.resample_6x(input, &mut output),
+            _ => self.resample_generic(input, &mut output),
+        }
+
+        output
+    }
+
+    #[inline(always)]
+    fn resample_generic(&self, input: &[f32], output: &mut [f32]) {
+        let half_taps = self.taps_per_phase / 2;
+
+        for out_idx in 0..output.len() {
             let phase = out_idx % self.ratio;
             let in_idx_base = out_idx / self.ratio;
 
             let mut acc = 0.0f32;
 
-            // Convolve with the appropriate polyphase filter
-            for tap in 0..self.taps_per_phase {
-                let coeff_idx = phase + tap * self.ratio;
-                let in_idx = in_idx_base as isize - tap as isize + self.taps_per_phase as isize / 2;
+            // Manual loop unrolling for better performance
+            let mut tap = 0;
+            while tap + 4 <= self.taps_per_phase {
+                let in_idx0 = in_idx_base as isize - tap as isize + half_taps as isize;
+                let in_idx1 = in_idx0 - 1;
+                let in_idx2 = in_idx0 - 2;
+                let in_idx3 = in_idx0 - 3;
 
-                if in_idx >= 0 && (in_idx as usize) < input.len() {
-                    acc += input[in_idx as usize] * self.coefficients[coeff_idx];
+                if in_idx0 >= 0 && in_idx0 < input.len() as isize {
+                    acc += unsafe { *input.get_unchecked(in_idx0 as usize) }
+                         * unsafe { *self.coefficients.get_unchecked(phase + tap * self.ratio) };
+                }
+                if in_idx1 >= 0 && in_idx1 < input.len() as isize {
+                    acc += unsafe { *input.get_unchecked(in_idx1 as usize) }
+                         * unsafe { *self.coefficients.get_unchecked(phase + (tap + 1) * self.ratio) };
+                }
+                if in_idx2 >= 0 && in_idx2 < input.len() as isize {
+                    acc += unsafe { *input.get_unchecked(in_idx2 as usize) }
+                         * unsafe { *self.coefficients.get_unchecked(phase + (tap + 2) * self.ratio) };
+                }
+                if in_idx3 >= 0 && in_idx3 < input.len() as isize {
+                    acc += unsafe { *input.get_unchecked(in_idx3 as usize) }
+                         * unsafe { *self.coefficients.get_unchecked(phase + (tap + 3) * self.ratio) };
+                }
+
+                tap += 4;
+            }
+
+            // Handle remaining taps
+            while tap < self.taps_per_phase {
+                let in_idx = in_idx_base as isize - tap as isize + half_taps as isize;
+                if in_idx >= 0 && in_idx < input.len() as isize {
+                    acc += unsafe { *input.get_unchecked(in_idx as usize) }
+                         * unsafe { *self.coefficients.get_unchecked(phase + tap * self.ratio) };
+                }
+                tap += 1;
+            }
+
+            unsafe { *output.get_unchecked_mut(out_idx) = acc; }
+        }
+    }
+
+    // Optimized 2x upsampling
+    #[inline]
+    fn resample_2x(&self, input: &[f32], output: &mut [f32]) {
+        let half_taps = self.taps_per_phase / 2;
+
+        for i in 0..input.len() {
+            // Even samples (phase 0)
+            let mut acc0 = 0.0f32;
+            // Odd samples (phase 1)
+            let mut acc1 = 0.0f32;
+
+            for tap in 0..self.taps_per_phase {
+                let in_idx = i as isize - tap as isize + half_taps as isize;
+                if in_idx >= 0 && in_idx < input.len() as isize {
+                    let sample = unsafe { *input.get_unchecked(in_idx as usize) };
+                    acc0 += sample * unsafe { *self.coefficients.get_unchecked(tap * 2) };
+                    acc1 += sample * unsafe { *self.coefficients.get_unchecked(1 + tap * 2) };
                 }
             }
 
-            output[out_idx] = acc;
+            unsafe {
+                *output.get_unchecked_mut(i * 2) = acc0;
+                *output.get_unchecked_mut(i * 2 + 1) = acc1;
+            }
         }
+    }
 
-        output
+    // Optimized 3x upsampling
+    #[inline]
+    fn resample_3x(&self, input: &[f32], output: &mut [f32]) {
+        let half_taps = self.taps_per_phase / 2;
+
+        for i in 0..input.len() {
+            let mut acc0 = 0.0f32;
+            let mut acc1 = 0.0f32;
+            let mut acc2 = 0.0f32;
+
+            for tap in 0..self.taps_per_phase {
+                let in_idx = i as isize - tap as isize + half_taps as isize;
+                if in_idx >= 0 && in_idx < input.len() as isize {
+                    let sample = unsafe { *input.get_unchecked(in_idx as usize) };
+                    acc0 += sample * unsafe { *self.coefficients.get_unchecked(tap * 3) };
+                    acc1 += sample * unsafe { *self.coefficients.get_unchecked(1 + tap * 3) };
+                    acc2 += sample * unsafe { *self.coefficients.get_unchecked(2 + tap * 3) };
+                }
+            }
+
+            unsafe {
+                *output.get_unchecked_mut(i * 3) = acc0;
+                *output.get_unchecked_mut(i * 3 + 1) = acc1;
+                *output.get_unchecked_mut(i * 3 + 2) = acc2;
+            }
+        }
+    }
+
+    // Optimized 4x upsampling
+    #[inline]
+    fn resample_4x(&self, input: &[f32], output: &mut [f32]) {
+        let half_taps = self.taps_per_phase / 2;
+
+        for i in 0..input.len() {
+            let mut acc0 = 0.0f32;
+            let mut acc1 = 0.0f32;
+            let mut acc2 = 0.0f32;
+            let mut acc3 = 0.0f32;
+
+            for tap in 0..self.taps_per_phase {
+                let in_idx = i as isize - tap as isize + half_taps as isize;
+                if in_idx >= 0 && in_idx < input.len() as isize {
+                    let sample = unsafe { *input.get_unchecked(in_idx as usize) };
+                    acc0 += sample * unsafe { *self.coefficients.get_unchecked(tap * 4) };
+                    acc1 += sample * unsafe { *self.coefficients.get_unchecked(1 + tap * 4) };
+                    acc2 += sample * unsafe { *self.coefficients.get_unchecked(2 + tap * 4) };
+                    acc3 += sample * unsafe { *self.coefficients.get_unchecked(3 + tap * 4) };
+                }
+            }
+
+            unsafe {
+                *output.get_unchecked_mut(i * 4) = acc0;
+                *output.get_unchecked_mut(i * 4 + 1) = acc1;
+                *output.get_unchecked_mut(i * 4 + 2) = acc2;
+                *output.get_unchecked_mut(i * 4 + 3) = acc3;
+            }
+        }
+    }
+
+    // Optimized 6x upsampling
+    #[inline]
+    fn resample_6x(&self, input: &[f32], output: &mut [f32]) {
+        let half_taps = self.taps_per_phase / 2;
+
+        for i in 0..input.len() {
+            let mut acc = [0.0f32; 6];
+
+            for tap in 0..self.taps_per_phase {
+                let in_idx = i as isize - tap as isize + half_taps as isize;
+                if in_idx >= 0 && in_idx < input.len() as isize {
+                    let sample = unsafe { *input.get_unchecked(in_idx as usize) };
+                    for phase in 0..6 {
+                        acc[phase] += sample * unsafe { *self.coefficients.get_unchecked(phase + tap * 6) };
+                    }
+                }
+            }
+
+            unsafe {
+                let out_base = i * 6;
+                *output.get_unchecked_mut(out_base) = acc[0];
+                *output.get_unchecked_mut(out_base + 1) = acc[1];
+                *output.get_unchecked_mut(out_base + 2) = acc[2];
+                *output.get_unchecked_mut(out_base + 3) = acc[3];
+                *output.get_unchecked_mut(out_base + 4) = acc[4];
+                *output.get_unchecked_mut(out_base + 5) = acc[5];
+            }
+        }
     }
 
     /// Calculate output sample count after resampling

@@ -604,6 +604,7 @@ impl Decoder {
         return Ok(());
     }
 
+    #[inline]
     fn ltp_synthesis(excitation: &[f32], pitch_lag: u16, ltp_coeffs: &[i8], ltp_scale: f32) -> Vec<f32> {
         let mut ltp_signal = vec![0.0; excitation.len()];
 
@@ -690,6 +691,7 @@ impl Decoder {
 
 
     /// Upsample excitation from 16 samples to target subframe size
+    #[inline]
     fn upsample_excitation(&self, excitation: &[f32], target_size: usize) -> Vec<f32> {
         if excitation.len() == target_size {
             return excitation.to_vec();
@@ -697,27 +699,35 @@ impl Decoder {
 
         let mut upsampled = vec![0.0f32; target_size];
         let ratio = target_size as f32 / excitation.len() as f32;
+        let inv_ratio = 1.0 / ratio;
 
-        // Linear interpolation with energy preservation
+        // Fast linear interpolation
         for i in 0..target_size {
-            let src_index_f = i as f32 / ratio;
-            let src_index = src_index_f.floor() as usize;
+            let src_index_f = i as f32 * inv_ratio;
+            let src_index = src_index_f as usize;
             let frac = src_index_f - src_index as f32;
 
             if src_index + 1 < excitation.len() {
-                // Linear interpolation between adjacent samples
-                upsampled[i] = excitation[src_index] * (1.0 - frac) + excitation[src_index + 1] * frac;
+                let a = unsafe { *excitation.get_unchecked(src_index) };
+                let b = unsafe { *excitation.get_unchecked(src_index + 1) };
+                unsafe { *upsampled.get_unchecked_mut(i) = a + frac * (b - a); }
             } else if src_index < excitation.len() {
-                // Last sample - just copy
-                upsampled[i] = excitation[src_index];
+                unsafe { *upsampled.get_unchecked_mut(i) = *excitation.get_unchecked(src_index); }
             }
         }
 
-        // Normalize to preserve energy
-        let src_energy: f32 = excitation.iter().map(|x| x * x).sum();
-        let dst_energy: f32 = upsampled.iter().map(|x| x * x).sum();
+        // Fast energy calculation with manual loop for better optimization
+        let mut src_energy = 0.0f32;
+        let mut dst_energy = 0.0f32;
 
-        if dst_energy > 0.0 {
+        for &x in excitation {
+            src_energy += x * x;
+        }
+        for &x in &upsampled {
+            dst_energy += x * x;
+        }
+
+        if dst_energy > 1e-10 {
             let scale = (src_energy / dst_energy).sqrt();
             for sample in upsampled.iter_mut() {
                 *sample *= scale;
@@ -926,26 +936,86 @@ impl Decoder {
     }
 
 
+    #[inline]
     fn lpc_synthesis(lpc_coeffs: &[i32], excitation: &[f32], subframe_size: usize) -> Vec<f32> {
         let order = lpc_coeffs.len();
         let mut output = vec![0.0; subframe_size];
 
-        // Excitation should already be upsampled to subframe_size
-        debug_assert_eq!(excitation.len(), subframe_size,
-                        "Excitation size {} != subframe size {}",
-                        excitation.len(), subframe_size);
+        debug_assert_eq!(excitation.len(), subframe_size);
 
-        for i in 0..subframe_size {
-            let mut y = excitation[i];
-            for j in 0..order.min(i) {
-                y -= lpc_coeffs[j] as f32 / 4096.0 * output[i - j - 1];
-            }
-            output[i] = y;
+        // Pre-scale coefficients to avoid division in inner loop
+        const SCALE: f32 = 1.0 / 4096.0;
+        let mut scaled_coeffs = [0.0f32; 16]; // Max LPC order is 16
+        for (i, &coeff) in lpc_coeffs.iter().enumerate().take(16) {
+            scaled_coeffs[i] = coeff as f32 * SCALE;
         }
 
-        return output;
+        // Optimized LPC synthesis with loop unrolling
+        for i in 0..subframe_size {
+            let mut y = unsafe { *excitation.get_unchecked(i) };
+
+            // Common case: order = 10 or 16
+            match order {
+                10 => {
+                    if i >= 10 {
+                        // Full order, unrolled
+                        y -= scaled_coeffs[0] * unsafe { *output.get_unchecked(i - 1) };
+                        y -= scaled_coeffs[1] * unsafe { *output.get_unchecked(i - 2) };
+                        y -= scaled_coeffs[2] * unsafe { *output.get_unchecked(i - 3) };
+                        y -= scaled_coeffs[3] * unsafe { *output.get_unchecked(i - 4) };
+                        y -= scaled_coeffs[4] * unsafe { *output.get_unchecked(i - 5) };
+                        y -= scaled_coeffs[5] * unsafe { *output.get_unchecked(i - 6) };
+                        y -= scaled_coeffs[6] * unsafe { *output.get_unchecked(i - 7) };
+                        y -= scaled_coeffs[7] * unsafe { *output.get_unchecked(i - 8) };
+                        y -= scaled_coeffs[8] * unsafe { *output.get_unchecked(i - 9) };
+                        y -= scaled_coeffs[9] * unsafe { *output.get_unchecked(i - 10) };
+                    } else {
+                        // Startup phase
+                        for j in 0..i {
+                            y -= scaled_coeffs[j] * unsafe { *output.get_unchecked(i - j - 1) };
+                        }
+                    }
+                }
+                16 => {
+                    if i >= 16 {
+                        // Full order, unrolled
+                        y -= scaled_coeffs[0] * unsafe { *output.get_unchecked(i - 1) };
+                        y -= scaled_coeffs[1] * unsafe { *output.get_unchecked(i - 2) };
+                        y -= scaled_coeffs[2] * unsafe { *output.get_unchecked(i - 3) };
+                        y -= scaled_coeffs[3] * unsafe { *output.get_unchecked(i - 4) };
+                        y -= scaled_coeffs[4] * unsafe { *output.get_unchecked(i - 5) };
+                        y -= scaled_coeffs[5] * unsafe { *output.get_unchecked(i - 6) };
+                        y -= scaled_coeffs[6] * unsafe { *output.get_unchecked(i - 7) };
+                        y -= scaled_coeffs[7] * unsafe { *output.get_unchecked(i - 8) };
+                        y -= scaled_coeffs[8] * unsafe { *output.get_unchecked(i - 9) };
+                        y -= scaled_coeffs[9] * unsafe { *output.get_unchecked(i - 10) };
+                        y -= scaled_coeffs[10] * unsafe { *output.get_unchecked(i - 11) };
+                        y -= scaled_coeffs[11] * unsafe { *output.get_unchecked(i - 12) };
+                        y -= scaled_coeffs[12] * unsafe { *output.get_unchecked(i - 13) };
+                        y -= scaled_coeffs[13] * unsafe { *output.get_unchecked(i - 14) };
+                        y -= scaled_coeffs[14] * unsafe { *output.get_unchecked(i - 15) };
+                        y -= scaled_coeffs[15] * unsafe { *output.get_unchecked(i - 16) };
+                    } else {
+                        for j in 0..i {
+                            y -= scaled_coeffs[j] * unsafe { *output.get_unchecked(i - j - 1) };
+                        }
+                    }
+                }
+                _ => {
+                    // Generic case
+                    for j in 0..order.min(i) {
+                        y -= scaled_coeffs[j] * unsafe { *output.get_unchecked(i - j - 1) };
+                    }
+                }
+            }
+
+            unsafe { *output.get_unchecked_mut(i) = y; }
+        }
+
+        output
     }
 
+    #[inline]
     fn lsf_to_lpc(lsf_q15: &[i16], bandwidth: Bandwidth) -> Result<Vec<i32>> {
         let order = lsf_q15.len();
         let lsf_ordering: &[u8] = match bandwidth {
