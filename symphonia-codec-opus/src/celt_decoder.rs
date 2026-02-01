@@ -97,6 +97,11 @@ impl CeltDecoder {
             return Err("Output buffer too small");
         }
 
+        // Check minimum frame size
+        if data.len() < 2 {
+            return Err("Frame too short");
+        }
+
         // Create range decoder
         let mut dec = RangeDecoder::new(data)
             .map_err(|_| "Failed to initialize range decoder")?;
@@ -155,15 +160,19 @@ impl CeltDecoder {
         for i in 0..NB_BANDS {
             if pulses[i] > 0 {
                 let n = (EBANDS_48K[i + 1] - EBANDS_48K[i]) as usize;
-                let mut y = vec![0; n];
 
-                decode_pulses(&mut y, n, pulses[i] as usize, &mut dec);
+                // Skip bands with only 1 bin (PVQ requires n > 1)
+                if n > 1 {
+                    let mut y = vec![0; n];
 
-                // Convert to float and store
-                let start = EBANDS_48K[i] as usize;
-                for (j, &val) in y.iter().enumerate() {
-                    if start + j < x.len() {
-                        x[start + j] = val as f32;
+                    decode_pulses(&mut y, n, pulses[i] as usize, &mut dec);
+
+                    // Convert to float and store
+                    let start = EBANDS_48K[i] as usize;
+                    for (j, &val) in y.iter().enumerate() {
+                        if start + j < x.len() {
+                            x[start + j] = val as f32;
+                        }
                     }
                 }
             }

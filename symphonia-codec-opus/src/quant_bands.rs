@@ -164,7 +164,7 @@ pub fn unquant_coarse_energy(
 
             let qi = if budget >= tell + 15 {
                 // Use full Laplace decoder
-                let pi = (i.min(20)) * 2;
+                let pi = i.min(20);
                 ec_laplace_decode(
                     dec,
                     (prob_model[pi][0] as u32) << 7,
