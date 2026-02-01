@@ -14,5 +14,7 @@ mod laplace;
 mod quant_bands;
 mod bands;
 mod mdct;
+mod celt_decoder;
 
 pub use entdec::RangeDecoder;
+pub use celt_decoder::CeltDecoder;
