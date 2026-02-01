@@ -30,6 +30,7 @@ mp1 = ["symphonia-bundle-mp3/mp1"]
 mp2 = ["symphonia-bundle-mp3/mp2"]
 mp3 = ["symphonia-bundle-mp3/mp3"]
 ogg = ["symphonia-format-ogg"]
+opus = ["symphonia-codec-opus"]
 pcm = ["symphonia-codec-pcm"]
 aiff = ["symphonia-format-riff/aiff"]
 vorbis = ["symphonia-codec-vorbis"]
@@ -47,6 +48,7 @@ all-codecs = [
     "mp1",
     "mp2",
     "mp3",
+    "opus",
     "pcm",
     "vorbis",
 ]
@@ -125,6 +127,11 @@ optional = true
 [dependencies.symphonia-codec-vorbis]
 version = "0.5.5"
 path = "../symphonia-codec-vorbis"
+optional = true
+
+[dependencies.symphonia-codec-opus]
+version = "0.0.1"
+path = "../symphonia-codec-opus"
 optional = true
 
 [dependencies.symphonia-format-riff]

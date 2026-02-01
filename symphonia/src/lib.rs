@@ -50,6 +50,7 @@
 //! | MP1      | `mp1`, `mpa` | No      | No      |
 //! | MP2      | `mp2`, `mpa` | No      | No      |
 //! | MP3      | `mp3`, `mpa` | Yes     | No      |
+//! | Opus     | `opus`       | Yes     | No      |
 //! | PCM      | `pcm`        | Yes     | Yes     |
 //! | Vorbis   | `vorbis`     | Yes     | Yes     |
 //!
@@ -152,6 +153,8 @@ pub mod default {
         pub use symphonia_codec_adpcm::AdpcmDecoder;
         #[cfg(feature = "alac")]
         pub use symphonia_codec_alac::AlacDecoder;
+        #[cfg(feature = "opus")]
+        pub use symphonia_codec_opus::OpusDecoder;
         #[cfg(feature = "pcm")]
         pub use symphonia_codec_pcm::PcmDecoder;
         #[cfg(feature = "vorbis")]
@@ -250,6 +253,9 @@ pub mod default {
 
         #[cfg(any(feature = "mp1", feature = "mp2", feature = "mp3"))]
         registry.register_all::<codecs::MpaDecoder>();
+
+        #[cfg(feature = "opus")]
+        registry.register_all::<codecs::OpusDecoder>();
 
         #[cfg(feature = "pcm")]
         registry.register_all::<codecs::PcmDecoder>();
