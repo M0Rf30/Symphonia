@@ -1205,6 +1205,10 @@ impl Celt {
         high = low;
         low -= 1;
 
+        // Clamp indices to valid range for STATIC_ALLOC (0..11)
+        high = high.min(10);
+        low = low.min(10);
+
         let mut bits1 = [0; MAX_BANDS];
         let mut bits2 = [0; MAX_BANDS];
 
@@ -2078,7 +2082,8 @@ impl Celt {
 
             let b = if i <= self.codedband - 1 {
                 println!("rem {} rem2 {}", self.remaining, self.remaining2);
-                let remaining = self.remaining / ((self.codedband - 1).min(3) as i32);
+                let divisor = ((self.codedband - 1).min(3) as i32).max(1);
+                let remaining = self.remaining / divisor;
                 (self.remaining2 + 1)
                     .min(self.pulses[i] + remaining)
                     .max(0)
@@ -2239,7 +2244,7 @@ impl Celt {
     ) {
         assert!(band.end <= MAX_BANDS);
 
-        let frame_size = frame_duration as usize;
+        let frame_size = frame_duration.sample_count();
 
         self.lm = (frame_size / SHORT_BLOCKSIZE).celt_ilog2() - 1;
 
