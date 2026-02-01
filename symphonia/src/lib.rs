@@ -153,6 +153,8 @@ pub mod default {
         pub use symphonia_codec_adpcm::AdpcmDecoder;
         #[cfg(feature = "alac")]
         pub use symphonia_codec_alac::AlacDecoder;
+        #[cfg(feature = "dsd")]
+        pub use symphonia_codec_dsd::DsdDecoder;
         #[cfg(feature = "opus")]
         pub use symphonia_codec_opus::OpusDecoder;
         #[cfg(feature = "pcm")]
@@ -176,6 +178,8 @@ pub mod default {
         pub use symphonia_codec_aac::AdtsReader;
         #[cfg(feature = "caf")]
         pub use symphonia_format_caf::CafReader;
+        #[cfg(feature = "dsd")]
+        pub use symphonia_format_dsd::{DffReader, DsfReader, CODEC_TYPE_DSD};
         #[cfg(feature = "isomp4")]
         pub use symphonia_format_isomp4::IsoMp4Reader;
         #[cfg(feature = "mkv")]
@@ -248,6 +252,9 @@ pub mod default {
         #[cfg(feature = "alac")]
         registry.register_all::<codecs::AlacDecoder>();
 
+        #[cfg(feature = "dsd")]
+        registry.register_all::<codecs::DsdDecoder>();
+
         #[cfg(feature = "flac")]
         registry.register_all::<codecs::FlacDecoder>();
 
@@ -278,6 +285,12 @@ pub mod default {
 
         #[cfg(feature = "caf")]
         probe.register_all::<formats::CafReader>();
+
+        #[cfg(feature = "dsd")]
+        probe.register_all::<formats::DsfReader>();
+
+        #[cfg(feature = "dsd")]
+        probe.register_all::<formats::DffReader>();
 
         #[cfg(feature = "flac")]
         probe.register_all::<formats::FlacReader>();
