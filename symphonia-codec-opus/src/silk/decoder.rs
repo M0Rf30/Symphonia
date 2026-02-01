@@ -188,7 +188,7 @@ impl Decoder {
             self.state = State::try_new(self.channels, frame_packet.frame_size, frame_packet.bandwidth)?;
         }
 
-        for frame_data in frame_packet.frames.iter() {
+        for (idx, frame_data) in frame_packet.frames.iter().enumerate() {
             let frame = self.decode_frame(frame_data)?;
             self.synthesize_frame(&frame)?;
         }
@@ -325,7 +325,7 @@ impl Decoder {
     ///
     /// https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.7.5
     fn decode_lsf<R: RangeDecoder>(&self, decoder: &mut R, frame: &mut Frame) -> Result<()> {
-        for subframe in frame.subframes.iter_mut() {
+        for (idx, subframe) in frame.subframes.iter_mut().enumerate() {
             let i1 = self.decode_lsf_stage1(decoder, frame.vad_flag, frame.frame_type.signal_type)?;
             let (d_lpc, res_q10) = self.decode_lsf_stage2(decoder, i1)?;
             let nlsf_q15 = self.reconstruct_nlsf(d_lpc, &res_q10, i1)?;
@@ -372,7 +372,7 @@ impl Decoder {
             Bandwidth::WideBand | Bandwidth::SuperWideBand | Bandwidth::FullBand => &constant::CODEBOOK_NORMALIZED_LSF_STAGE_TWO_INDEX_WIDEBAND,
         };
 
-        for res_q10 in res_q10.iter_mut() {
+        for (idx, res_q10) in res_q10.iter_mut().enumerate() {
             let icdf = codebook[i1 as usize];
 
             let symbol = decoder.decode_symbol_with_icdf(icdf)?;
@@ -401,9 +401,17 @@ impl Decoder {
         };
 
         for k in 0..d_lpc {
-            let cb_value = cb1_q8[i1 as usize][k] as i32;
-            let res_value = res_q10[k] as i32;
-            nlsf_q15[k] = ((cb_value << 7) + (res_value << 14) / 10) as i16;
+            // CB1_Q8 is in Q8 format, left shift by 7 to get Q15
+            let cb_value = (cb1_q8[i1 as usize][k] as i32) << 7;
+
+            // RES_Q10 is in Q10 format, convert to Q15: multiply by 2^5 = 32
+            // But per RFC 6716, we also scale by 0.1, so: res * 32 * 0.1 = res * 3.2
+            // In fixed point: (res * 256) / 80 = (res << 8) / 80
+            let res_value = ((res_q10[k] as i32) * 256) / 80;
+
+            // Combine and clamp to i16 range
+            let combined = cb_value + res_value;
+            nlsf_q15[k] = combined.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
         }
 
         return Ok(nlsf_q15);
@@ -416,11 +424,18 @@ impl Decoder {
             _ => &constant::MINIMUM_SPACING_NORMALIZED_LSF_NARROWBAND_MEDIUMBAND,
         };
 
+        // First, ensure all values are non-negative and within valid range
+        for val in stable_nlsf.iter_mut() {
+            *val = (*val).clamp(0, 32767);
+        }
+
+        // Enforce minimum spacing between LSF values
         const MAX_STABILIZATION_ITERATIONS: usize = 20;
         for _ in 0..MAX_STABILIZATION_ITERATIONS {
             let mut min_diff = i32::MAX;
             let mut min_diff_index = 0;
 
+            // Check spacing between adjacent LSFs
             for i in 1..stable_nlsf.len() {
                 let diff = stable_nlsf[i] as i32 - stable_nlsf[i - 1] as i32 - min_delta[i];
                 if diff < min_diff {
@@ -429,13 +444,25 @@ impl Decoder {
                 }
             }
 
+            // Also check that first LSF is above minimum
+            let first_diff = stable_nlsf[0] as i32 - min_delta[0];
+            if first_diff < min_diff {
+                min_diff = first_diff;
+                min_diff_index = 0;
+            }
+
             if min_diff >= 0 {
                 break;
             }
 
-            let center = (stable_nlsf[min_diff_index - 1] as i32 + stable_nlsf[min_diff_index] as i32) / 2;
-            stable_nlsf[min_diff_index - 1] = (center - min_delta[min_diff_index] / 2) as i16;
-            stable_nlsf[min_diff_index] = (stable_nlsf[min_diff_index - 1] as i32 + min_delta[min_diff_index]) as i16;
+            // Adjust values to maintain spacing
+            if min_diff_index == 0 {
+                stable_nlsf[0] = min_delta[0] as i16;
+            } else {
+                let center = (stable_nlsf[min_diff_index - 1] as i32 + stable_nlsf[min_diff_index] as i32) / 2;
+                stable_nlsf[min_diff_index - 1] = (center - min_delta[min_diff_index] / 2).clamp(0, 32767) as i16;
+                stable_nlsf[min_diff_index] = (stable_nlsf[min_diff_index - 1] as i32 + min_delta[min_diff_index]).clamp(0, 32767) as i16;
+            }
         }
 
         return Ok(stable_nlsf);
@@ -816,8 +843,18 @@ impl Decoder {
         let order = lpc_coeffs.len();
         let mut output = vec![0.0; subframe_size];
 
+        // If excitation is shorter than subframe_size, we need to upsample it
+        // For now, use simple repetition/padding as a workaround
+        // TODO: Implement proper SILK excitation upsampling
         for i in 0..subframe_size {
-            let mut y = excitation[i];
+            let excitation_value = if i < excitation.len() {
+                excitation[i]
+            } else {
+                // Pad with zeros if excitation is too short
+                0.0
+            };
+
+            let mut y = excitation_value;
             for j in 0..order.min(i) {
                 y -= lpc_coeffs[j] as f32 / 4096.0 * output[i - j - 1];
             }
@@ -839,7 +876,11 @@ impl Decoder {
         let mut q = vec![1 << 16; order + 1];
 
         for &index in lsf_ordering.iter().take(order) {
-            let f = constant::Q12_COSINE_TABLE_FOR_LSF_CONVERSION[(lsf_q15[index as usize] >> 5) as usize];
+            // Scale LSF value (0-32767 in Q15) to table index (0-128)
+            // Table has 129 entries covering the full LSF range
+            let lsf_value = lsf_q15[index as usize] as i32;
+            let table_index = ((lsf_value * 128) / 32768).clamp(0, 128) as usize;
+            let f = constant::Q12_COSINE_TABLE_FOR_LSF_CONVERSION[table_index];
 
             let update_vector = |vec: &mut Vec<i32>| {
                 let mut prev = vec[0];
@@ -892,6 +933,7 @@ impl Decoder {
                     &subframe.ltp_coeffs,
                     frame.ltp_scale,
                 );
+
 
                 let lpc_coeffs = Self::lsf_to_lpc(&subframe.nlsf_q15, self.state.bandwidth)?;
                 let lpc_signal = Self::lpc_synthesis(&lpc_coeffs, &ltp_signal, samples_per_subframe);

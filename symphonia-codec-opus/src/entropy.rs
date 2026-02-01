@@ -282,6 +282,10 @@ impl<R: ReadBitsLtr + FiniteBitStream> Decoder<R> {
         let (total, table) = table.split_first()
             .ok_or_else(|| Error::DecodeError("cumulative distribution table is empty"))?;
 
+        if *total == 0 {
+            return Err(Error::DecodeError("cumulative distribution table has zero total"));
+        }
+
         let scale = self.rng / total;
         let symbol = self.val / scale;
         let sym = total.saturating_sub(std::cmp::min(symbol, *total));
