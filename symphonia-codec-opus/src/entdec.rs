@@ -96,26 +96,43 @@ impl<'a> RangeDecoder<'a> {
 
     /// Decode symbol - ec_decode()
     pub fn decode(&mut self, ft: u32) -> u32 {
+        if ft == 0 {
+            return 0;
+        }
         self.ext = self.rng / ft;
         let s = self.val / self.ext;
-        ft - s.min(ft) - 1
+        let clamped = s.min(ft);
+        if clamped >= ft {
+            0
+        } else {
+            ft.wrapping_sub(clamped).wrapping_sub(1)
+        }
     }
 
     /// Decode binary - ec_decode_bin()
     pub fn decode_bin(&mut self, bits: u32) -> u32 {
+        if bits >= 32 {
+            return 0;
+        }
         self.ext = self.rng >> bits;
         let s = self.val / self.ext;
-        (1u32 << bits) - s.min(1u32 << bits) - 1
+        let ft = 1u32 << bits;
+        let clamped = s.min(ft);
+        if clamped >= ft {
+            0
+        } else {
+            ft.wrapping_sub(clamped).wrapping_sub(1)
+        }
     }
 
     /// Update state - ec_dec_update()
     pub fn update(&mut self, fl: u32, fh: u32, ft: u32) {
-        let s = self.ext * (ft - fh);
+        let s = self.ext.wrapping_mul(ft.wrapping_sub(fh));
         self.val = self.val.wrapping_sub(s);
         self.rng = if fl > 0 {
-            self.ext * (fh - fl)
+            self.ext.wrapping_mul(fh.wrapping_sub(fl))
         } else {
-            self.rng - s
+            self.rng.wrapping_sub(s)
         };
         self.normalize();
     }
@@ -168,7 +185,9 @@ impl<'a> RangeDecoder<'a> {
 
     /// Decode unsigned integer - ec_dec_uint()
     pub fn decode_uint(&mut self, mut ft: u32) -> u32 {
-        debug_assert!(ft > 1);
+        if ft <= 1 {
+            return 0;
+        }
 
         ft -= 1;
         let mut ftb = 0u32;

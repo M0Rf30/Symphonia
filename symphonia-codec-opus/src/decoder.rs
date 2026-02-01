@@ -11,6 +11,7 @@ use symphonia_core::formats::Packet;
 use symphonia_core::support_codec;
 
 use crate::celt_decoder::CeltDecoder;
+use crate::silk_decoder::SilkDecoder;
 use crate::packet::{OpusMode, OpusPacket};
 
 /// Opus decoder implementing Symphonia's Decoder trait
@@ -25,6 +26,8 @@ pub struct OpusDecoder {
     pre_skip: u32,
     /// CELT decoder for music/fullband content
     celt_decoder: CeltDecoder,
+    /// SILK decoder for speech content
+    silk_decoder: Option<SilkDecoder>,
     /// Output audio buffer
     output: AudioBuffer<f32>,
     /// Total samples decoded (for pre-skip handling)
@@ -93,12 +96,16 @@ impl Decoder for OpusDecoder {
         let spec = SignalSpec::new(sample_rate, params.channels.unwrap_or_default());
         let output = AudioBuffer::new(2880, spec);
 
+        // Create SILK decoder (initially None, will be created on first SILK packet)
+        let silk_decoder = None;
+
         Ok(Self {
             params: params.clone(),
             channels,
             sample_rate,
             pre_skip,
             celt_decoder,
+            silk_decoder,
             output,
             samples_decoded: 0,
         })
@@ -110,6 +117,9 @@ impl Decoder for OpusDecoder {
 
     fn reset(&mut self) {
         self.celt_decoder.reset();
+        if let Some(ref mut silk) = self.silk_decoder {
+            silk.reset();
+        }
         self.output.clear();
         self.samples_decoded = 0;
     }
@@ -192,7 +202,75 @@ impl Decoder for OpusDecoder {
                 Ok(self.output.as_audio_buffer_ref())
             }
             OpusMode::SilkOnly => {
-                unsupported_error("opus: SILK decoder not yet implemented")
+                // Create SILK decoder if not already initialized
+                if self.silk_decoder.is_none() {
+                    // SILK operates at internal sample rate (8/12/16/24 kHz)
+                    // For now, use 16 kHz as default
+                    self.silk_decoder = Some(SilkDecoder::new(16000));
+                }
+
+                let silk = self.silk_decoder.as_mut().unwrap();
+
+                // Decode SILK frame
+                let frame_size = opus_packet.frame_size;
+                let mut silk_output = vec![0i16; frame_size * self.channels];
+
+                // Use the first frame for simplicity
+                if let Some(frame) = opus_packet.frames.first() {
+                    use crate::entdec::RangeDecoder;
+
+                    // Create range decoder for this frame
+                    let mut ec = match RangeDecoder::new(frame) {
+                        Ok(dec) => dec,
+                        Err(_) => return decode_error("opus: failed to initialize range decoder"),
+                    };
+
+                    // Decode SILK frame
+                    match silk.decode_frame(&mut ec, &mut silk_output, false, 0) {
+                        Ok(_) => {},
+                        Err(_) => return decode_error("opus: SILK decode failed"),
+                    }
+
+                    // SILK outputs 16-bit PCM at internal rate (e.g., 16 kHz)
+                    // Need to resample to 48 kHz for Opus output
+                    // For now, do simple linear interpolation
+                    let upsample_factor = 3; // 16 kHz -> 48 kHz
+                    let output_samples = frame_size * upsample_factor;
+
+                    // Ensure output buffer has enough capacity
+                    if self.output.capacity() < output_samples {
+                        let spec = SignalSpec::new(self.sample_rate, self.params.channels.unwrap_or_default());
+                        self.output = AudioBuffer::new(output_samples as u64, spec);
+                    }
+
+                    self.output.render_reserved(Some(output_samples));
+
+                    // Upsample and convert to f32
+                    for ch in 0..self.channels {
+                        let channel_buf = self.output.chan_mut(ch);
+                        for i in 0..frame_size {
+                            let sample = silk_output[i * self.channels + ch] as f32 / 32768.0;
+                            // Simple linear interpolation
+                            for j in 0..upsample_factor {
+                                let idx = i * upsample_factor + j;
+                                if idx < output_samples {
+                                    let next_sample = if i + 1 < frame_size {
+                                        silk_output[(i + 1) * self.channels + ch] as f32 / 32768.0
+                                    } else {
+                                        sample
+                                    };
+                                    let t = j as f32 / upsample_factor as f32;
+                                    channel_buf[idx] = sample * (1.0 - t) + next_sample * t;
+                                }
+                            }
+                        }
+                    }
+
+                    self.samples_decoded += self.output.frames() as u64;
+                    Ok(self.output.as_audio_buffer_ref())
+                } else {
+                    decode_error("opus: no SILK frames in packet")
+                }
             }
             OpusMode::Hybrid => {
                 unsupported_error("opus: Hybrid mode not yet implemented")

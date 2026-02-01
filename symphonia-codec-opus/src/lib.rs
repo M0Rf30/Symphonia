@@ -16,10 +16,12 @@ mod bands;
 mod mdct;
 mod rate;
 mod celt_decoder;
+mod silk_decoder;
 mod packet;
 mod decoder;
 
 pub use entdec::RangeDecoder;
 pub use celt_decoder::CeltDecoder;
+pub use silk_decoder::SilkDecoder;
 pub use packet::{OpusPacket, OpusMode, OpusBandwidth};
 pub use decoder::OpusDecoder;

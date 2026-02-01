@@ -321,9 +321,9 @@ pub fn decode_pulses_from_index(n: usize, mut k: usize, mut i: u32, y: &mut [i32
     let k0 = k;
     k = ((i + 1) / 2) as usize;
     if k > 0 {
-        i -= (2 * k - 1) as u32;
+        i = i.wrapping_sub((2 * k).wrapping_sub(1) as u32);
     }
-    let val = ((k0 - k) as i32 + s) ^ s;
+    let val = ((k0.wrapping_sub(k)) as i32 + s) ^ s;
     y[y_idx] = val;
     yy += (val as f32) * (val as f32);
     y_idx += 1;
