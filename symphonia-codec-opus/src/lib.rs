@@ -13,5 +13,6 @@ mod cwrs;
 mod laplace;
 mod quant_bands;
 mod bands;
+mod mdct;
 
 pub use entdec::RangeDecoder;
