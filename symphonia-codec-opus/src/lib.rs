@@ -12,5 +12,6 @@ mod celt_constants;
 mod cwrs;
 mod laplace;
 mod quant_bands;
+mod bands;
 
 pub use entdec::RangeDecoder;
