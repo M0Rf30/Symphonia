@@ -19,3 +19,4 @@ rustfft = "6.0"
 
 [dev-dependencies]
 symphonia = { version = "0.5.5", path = "../symphonia" }
+cpal = "0.15"

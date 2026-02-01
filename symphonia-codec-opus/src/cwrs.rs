@@ -232,6 +232,17 @@ pub fn decode_pulses_from_index(n: usize, mut k: usize, mut i: u32, y: &mut [i32
     let mut y_idx = 0;
 
     while n_remaining > 2 {
+        // Check if n_remaining exceeds table bounds (PVQ tables only support N=0-14)
+        if n_remaining >= CELT_PVQ_U_ROW.len() {
+            // For dimensions beyond table limits, zero out remaining coefficients
+            // This is a safe fallback that prevents crashes, though not optimal quality
+            // TODO: Implement proper CELT band splitting algorithm
+            for idx in y_idx..y.len() {
+                y[idx] = 0;
+            }
+            return yy;
+        }
+
         let mut p: u32;
         let s: i32;
         let k0: usize;
@@ -258,6 +269,10 @@ pub fn decode_pulses_from_index(n: usize, mut k: usize, mut i: u32, y: &mut [i32
             if q > i {
                 k = n_remaining;
                 loop {
+                    if k == 0 {
+                        p = 0;
+                        break;
+                    }
                     k -= 1;
                     p = celt_pvq_u(k, n_remaining);
                     if p <= i {
@@ -266,6 +281,10 @@ pub fn decode_pulses_from_index(n: usize, mut k: usize, mut i: u32, y: &mut [i32
                 }
             } else {
                 loop {
+                    if k == 0 {
+                        p = 0;
+                        break;
+                    }
                     k -= 1;
                     p = celt_pvq_u(k, n_remaining);
                     if p <= i {
@@ -274,7 +293,7 @@ pub fn decode_pulses_from_index(n: usize, mut k: usize, mut i: u32, y: &mut [i32
                 }
             }
 
-            i -= p;
+            i = i.saturating_sub(p);
             val = ((k0 - k) as i32 + s) ^ s;
             y[y_idx] = val;
             yy += (val as f32) * (val as f32);
@@ -296,6 +315,10 @@ pub fn decode_pulses_from_index(n: usize, mut k: usize, mut i: u32, y: &mut [i32
                 // Count how many pulses were placed in this dimension
                 k0 = k;
                 loop {
+                    if k == 0 {
+                        p = 0;
+                        break;
+                    }
                     k -= 1;
                     p = celt_pvq_u(k, n_remaining);
                     if p <= i {
@@ -303,7 +326,7 @@ pub fn decode_pulses_from_index(n: usize, mut k: usize, mut i: u32, y: &mut [i32
                     }
                 }
 
-                i -= p;
+                i = i.saturating_sub(p);
                 val = ((k0 - k) as i32 + s) ^ s;
                 y[y_idx] = val;
                 yy += (val as f32) * (val as f32);

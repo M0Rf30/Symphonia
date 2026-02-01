@@ -86,6 +86,75 @@ pub fn denormalise_bands(
     }
 }
 
+/// Denormalize bands for stereo with per-channel energy
+///
+/// Takes unit-normalized frequency domain coefficients and applies the
+/// decoded energy values to restore full amplitude for each channel.
+///
+/// Arguments:
+/// - x: Normalized input coefficients (frame_size * channels)
+/// - freq: Output frequency-domain signal (frame_size * channels)
+/// - band_log_e: Log energy for each band (nb_bands * channels)
+/// - ebands: Band boundaries
+/// - start: First band to process
+/// - end: Last band to process + 1
+/// - m: Multiplier for band boundaries (related to frame size)
+/// - channels: Number of channels
+/// - nb_bands: Number of bands
+/// - frame_size: Frame size per channel
+pub fn denormalise_bands_stereo(
+    x: &[f32],
+    freq: &mut [f32],
+    band_log_e: &[f32],
+    ebands: &[i16],
+    start: usize,
+    end: usize,
+    m: usize,
+    channels: usize,
+    nb_bands: usize,
+    frame_size: usize,
+) {
+    let half_frame = frame_size; // Size per channel
+    let bound = m * ebands[end] as usize;
+
+    for c in 0..channels {
+        let freq_offset = c * half_frame;
+        let x_offset = c * half_frame;
+        let energy_offset = c * nb_bands;
+
+        // Zero out bins before start
+        if start != 0 {
+            for i in 0..(m * ebands[start] as usize) {
+                freq[freq_offset + i] = 0.0;
+            }
+        }
+
+        // Process each band
+        for i in start..end {
+            let band_start = m * ebands[i] as usize;
+            let band_end = m * ebands[i + 1] as usize;
+
+            // Compute gain from log energy for this channel
+            let lg = band_log_e[energy_offset + i] + E_MEANS[i];
+            let g = exp2_db(lg.min(32.0));
+
+            // Apply gain to normalized coefficients
+            for j in band_start..band_end {
+                if x_offset + j < x.len() && freq_offset + j < freq.len() {
+                    freq[freq_offset + j] = x[x_offset + j] * g;
+                }
+            }
+        }
+
+        // Zero out remaining bins
+        for i in bound..half_frame {
+            if freq_offset + i < freq.len() {
+                freq[freq_offset + i] = 0.0;
+            }
+        }
+    }
+}
+
 /// Anti-collapse processing
 ///
 /// Prevents energy collapse for transients with multiple short MDCTs by
