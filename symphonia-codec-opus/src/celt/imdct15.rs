@@ -87,7 +87,7 @@ impl IMDCT15 {
             })
             .collect();
 
-        let mut exptab: Vec<Vec<Complex32>> = (0..6)
+        let mut exptab: Vec<Vec<Complex32>> = (0..7)
             .map(|i| {
                 let len = p2len(i);
                 (0..len.max(19))
