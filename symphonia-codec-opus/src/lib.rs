@@ -14,9 +14,12 @@ mod laplace;
 mod quant_bands;
 mod bands;
 mod mdct;
+mod rate;
 mod celt_decoder;
 mod packet;
+mod decoder;
 
 pub use entdec::RangeDecoder;
 pub use celt_decoder::CeltDecoder;
 pub use packet::{OpusPacket, OpusMode, OpusBandwidth};
+pub use decoder::OpusDecoder;

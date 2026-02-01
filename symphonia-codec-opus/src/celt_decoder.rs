@@ -10,6 +10,7 @@ use crate::cwrs::decode_pulses;
 use crate::bands::{denormalise_bands, anti_collapse};
 use crate::mdct::{MdctContext, vorbis_window};
 use crate::celt_constants::{EBANDS_48K, NB_BANDS};
+use crate::rate::compute_allocation;
 
 /// CELT decoder state
 pub struct CeltDecoder {
@@ -18,7 +19,7 @@ pub struct CeltDecoder {
     /// Number of channels (1 or 2)
     channels: usize,
     /// Frame size in samples (120, 240, 480, or 960)
-    frame_size: usize,
+    pub frame_size: usize,
     /// log2(frame_size / 120)
     lm: usize,
 
@@ -122,10 +123,10 @@ impl CeltDecoder {
             NB_BANDS,
         );
 
-        // Allocate bits to bands (simplified - equal allocation for now)
-        let _bits_per_band = 100; // Simplified allocation
-        let fine_quant = vec![2; NB_BANDS];
-        let fine_priority = vec![0; NB_BANDS];
+        // Compute bit allocation
+        let bits_available = dec.bits_left() as i32;
+        let (pulses, fine_quant, fine_priority) =
+            compute_allocation(bits_available, self.lm, self.channels, 0, NB_BANDS, &mut dec);
 
         // Decode fine energy
         unquant_fine_energy(
@@ -154,7 +155,6 @@ impl CeltDecoder {
 
         // Decode pulses for each band
         let mut x = vec![0.0; self.frame_size];
-        let pulses = vec![10; NB_BANDS]; // Simplified pulse allocation
         let collapse_masks = vec![0xff; NB_BANDS * self.channels];
 
         for i in 0..NB_BANDS {
