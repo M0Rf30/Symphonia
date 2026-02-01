@@ -82,6 +82,156 @@ pub trait RangeDecoder: Send + Sync {
     fn decode_symbol_logp(&mut self, probability: u32) -> Result<u32>;
 }
 
+/// ICDF (Inverse Cumulative Distribution Function) context for entropy decoding.
+/// Used by CELT decoder for probability-based symbol decoding.
+#[derive(Debug)]
+pub struct ICDFContext {
+    pub total: usize,
+    pub dist: &'static [usize],
+}
+
+/// CELT-specific range decoder with raw bits support.
+/// This is a simplified implementation for CELT that extends the base range decoder
+/// with additional methods needed for CELT packet decoding.
+pub struct CeltRangeDecoder<'a> {
+    data: &'a [u8],
+    pos: usize,
+    pub range: u32,
+    value: u32,
+    total_bits: usize,
+}
+
+impl<'a> CeltRangeDecoder<'a> {
+    pub fn new(data: &'a [u8]) -> Result<Self> {
+        if data.is_empty() {
+            return Ok(Self {
+                data,
+                pos: 0,
+                range: 128,
+                value: 0,
+                total_bits: 0,
+            });
+        }
+
+        let mut decoder = Self {
+            data,
+            pos: 0,
+            range: 128,
+            value: 127 - ((data[0] >> 1) as u32),
+            total_bits: 0,
+        };
+
+        decoder.normalize()?;
+        Ok(decoder)
+    }
+
+    fn normalize(&mut self) -> Result<()> {
+        while self.range <= (1 << 23) {
+            if self.pos < self.data.len() {
+                let sym = self.data[self.pos];
+                self.pos += 1;
+                self.value = ((self.value << 8) + (255 - sym as u32)) & 0x7FFFFFFF;
+                self.range <<= 8;
+                self.total_bits += 8;
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn decode_logp(&mut self, logp: usize) -> bool {
+        let scale = self.range >> logp;
+        let k = self.value >= scale;
+
+        if k {
+            self.value -= scale;
+            self.range -= scale;
+        } else {
+            self.range = scale;
+        }
+
+        let _ = self.normalize();
+        k
+    }
+
+    pub fn decode_icdf(&mut self, icdf: &ICDFContext) -> usize {
+        let scale = self.range / icdf.total as u32;
+        let sym = icdf.total - ((self.value / scale + 1).min(icdf.total as u32) as usize);
+
+        let k = icdf.dist.iter().position(|&v| v > sym).unwrap_or(icdf.dist.len());
+
+        let low = if k > 0 { icdf.dist[k - 1] } else { 0 };
+        let high = if k < icdf.dist.len() { icdf.dist[k] } else { icdf.total };
+
+        self.value -= scale * (icdf.total - high) as u32;
+        self.range = if low != 0 {
+            scale * (high - low) as u32
+        } else {
+            self.range - scale * (icdf.total - high) as u32
+        };
+
+        let _ = self.normalize();
+        k
+    }
+
+    pub fn decode_uniform(&mut self, n: usize) -> usize {
+        let scale = self.range / n as u32;
+        let k = (self.value / scale).min(n as u32 - 1) as usize;
+
+        self.value -= scale * k as u32;
+        self.range = scale;
+
+        let _ = self.normalize();
+        k
+    }
+
+    pub fn decode_step(&mut self, n: usize) -> usize {
+        // TODO: Implement proper step decoding
+        self.decode_uniform(n)
+    }
+
+    pub fn decode_triangular(&mut self, n: usize) -> usize {
+        // TODO: Implement proper triangular decoding
+        self.decode_uniform(n)
+    }
+
+    pub fn decode_laplace(&mut self, _model: usize, _limit: isize) -> isize {
+        // TODO: Implement Laplace decoding
+        0
+    }
+
+    pub fn rawbits(&mut self, len: usize) -> usize {
+        // Read raw bits from the end of the buffer
+        // TODO: Implement proper raw bits reading
+        0
+    }
+
+    pub fn available(&self) -> usize {
+        (self.data.len() - self.pos) * 8
+    }
+
+    pub fn available_frac(&self) -> usize {
+        self.available() * 8
+    }
+
+    pub fn tell(&self) -> usize {
+        self.total_bits / 8
+    }
+
+    pub fn tell_frac(&self) -> usize {
+        self.total_bits
+    }
+
+    pub fn to_end(&mut self) {
+        self.pos = self.data.len();
+    }
+
+    pub fn len(&self) -> usize {
+        self.data.len() * 8
+    }
+}
+
 pub struct Decoder<R> {
     reader: R,
     rng: u32,
