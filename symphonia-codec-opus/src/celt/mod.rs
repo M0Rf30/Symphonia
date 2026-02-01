@@ -2267,13 +2267,97 @@ impl Celt {
     }
 
     /// IMDCT synthesis with windowing and overlap-add
-    /// Simplified synthesis - outputs silence for now
-    /// TODO: Implement proper IMDCT synthesis with band reconstruction
-    fn synthesize_output(&mut self, out_buf: &mut [f32], _coeff0: &[f32], _coeff1: &[f32], _frame_size: usize) {
-        // Fill output with silence
-        // Proper IMDCT synthesis requires reconstructing the time-domain signal from
-        // the decoded frequency bands, which is complex and needs careful implementation
-        out_buf.fill(0.0);
+    fn synthesize_output(&mut self, out_buf: &mut [f32], coeff0: &[f32], coeff1: &[f32], frame_size: usize) {
+        let num_channels = if self.stereo { 2 } else { 1 };
+        let block_size = self.blocksize;
+        let num_blocks = self.blocks;
+
+        // Safety check: if blocksize is 0, fill with silence
+        if block_size == 0 {
+            out_buf.fill(0.0);
+            return;
+        }
+
+        // Scale factor for IMDCT output
+        let scale = 1.0 / (block_size as f32).sqrt();
+
+        // Temporary buffer for IMDCT output
+        // IMDCT needs 4*blocksize buffer for FFT intermediate results
+        // Only the first blocksize samples contain actual output
+        let mut time_data = vec![0.0f32; block_size * 4];
+
+        // Process each channel
+        for ch in 0..num_channels {
+            let coeffs = if ch == 0 { coeff0 } else { coeff1 };
+            let overlap = &mut self.overlap[ch];
+
+            // Process each block in this frame
+            for block_idx in 0..num_blocks {
+                let block_start = block_idx * block_size;
+
+                // Get coefficients for this block
+                // IMDCT takes N/2 frequency coefficients and produces N time samples
+                let coeff_start = block_start;
+                let coeff_end = (coeff_start + block_size).min(coeffs.len());
+
+                if coeff_start >= coeffs.len() {
+                    // No more coefficients, fill rest with zeros
+                    for i in block_start..frame_size.min(block_start + block_size) {
+                        let out_idx = i * num_channels + ch;
+                        if out_idx < out_buf.len() {
+                            out_buf[out_idx] = overlap[i - block_start];
+                            overlap[i - block_start] = 0.0;
+                        }
+                    }
+                    continue;
+                }
+
+                let block_coeffs = &coeffs[coeff_start..coeff_end];
+
+                // Apply IMDCT using the appropriate instance for current lm
+                time_data.fill(0.0);
+
+                // imdct15_half expects N coefficients and produces time samples in a 4N buffer
+                // The actual IMDCT output is in the first N samples after windowing
+                // Pad with zeros if we don't have enough coefficients
+                if block_coeffs.len() < block_size {
+                    let mut padded = vec![0.0f32; block_size];
+                    padded[..block_coeffs.len()].copy_from_slice(block_coeffs);
+                    self.imdct[self.lm].imdct15_half(&mut time_data, &padded, 1, scale);
+                } else {
+                    self.imdct[self.lm].imdct15_half(&mut time_data, block_coeffs, 1, scale);
+                }
+
+                // Apply window and overlap-add (TDAC - Time Domain Aliasing Cancellation)
+                // CELT uses a sine window
+                // Only use the first half of the IMDCT output (block_size samples)
+                use std::f32::consts::PI;
+
+                for i in 0..block_size {
+                    // Sine window
+                    let window = ((i as f32 + 0.5) * PI / block_size as f32).sin();
+
+                    // Overlap-add: current windowed sample + previous frame's overlap
+                    let sample = time_data[i] * window + overlap[i];
+
+                    // Write to output buffer (interleaved for multi-channel)
+                    let out_idx = (block_start + i) * num_channels + ch;
+                    if out_idx < out_buf.len() {
+                        out_buf[out_idx] = sample;
+                    }
+
+                    // Store windowed tail for next frame's overlap
+                    // The second half of the window is stored with proper sign for TDAC
+                    if i < block_size / 2 {
+                        // First half: store from end of time_data, negated
+                        overlap[i] = -time_data[block_size - 1 - i] * window;
+                    } else {
+                        // Second half: store from end of time_data
+                        overlap[i] = time_data[block_size - 1 - i] * window;
+                    }
+                }
+            }
+        }
     }
 }
 
