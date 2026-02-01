@@ -125,8 +125,9 @@ impl CeltDecoder {
 
         // Compute bit allocation
         let bits_available = dec.bits_left() as i32;
+        let alloc_trim = 0; // TODO: decode from bitstream with decode_trim()
         let (pulses, fine_quant, fine_priority) =
-            compute_allocation(bits_available, self.lm, self.channels, 0, NB_BANDS, &mut dec);
+            compute_allocation(bits_available, self.lm, self.channels, 0, NB_BANDS, alloc_trim);
 
         // Decode fine energy
         unquant_fine_energy(
