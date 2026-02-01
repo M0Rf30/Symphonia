@@ -959,10 +959,11 @@ impl Celt {
                         -1
                     } as f32;
 
-                    println!(
-                        "energy {}/{} {:.6} * {:.6} + {:.6} + {:.6}",
-                        i, j, *en, alpha, prev[j], value
-                    );
+                    // Debug output
+                    // println!(
+                    //     "energy {}/{} {:.6} * {:.6} + {:.6} + {:.6}",
+                    //     i, j, *en, alpha, prev[j], value
+                    // );
                     *en = en.max(-9f32) * alpha + prev[j] + value;
                     prev[j] += beta * value;
                 }

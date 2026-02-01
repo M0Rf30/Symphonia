@@ -53,6 +53,7 @@ use crate::packet::FramePacket;
 use crate::silk::error::Error;
 use crate::toc::{Bandwidth, FrameDuration};
 use crate::silk::constant;
+use crate::silk::resampler::Resampler;
 
 use symphonia_core::audio::{AsAudioBufferRef, AudioBuffer, AudioBufferRef, Channels, Signal, SignalSpec};
 use symphonia_core::codecs::CodecParameters;
@@ -188,17 +189,41 @@ impl Decoder {
             self.state = State::try_new(self.channels, frame_packet.frame_size, frame_packet.bandwidth)?;
         }
 
-        for (idx, frame_data) in frame_packet.frames.iter().enumerate() {
+        // Decode all frames first
+        let mut decoded_frames = Vec::new();
+        for frame_data in frame_packet.frames.iter() {
             let frame = self.decode_frame(frame_data)?;
-            self.synthesize_frame(&frame)?;
+            decoded_frames.push(frame);
         }
 
         if self.state.lbrr_flag {
             let lbrr_frames_data = self.extract_lbrr_frames(&packet.data)?;
             for lbrr_data in lbrr_frames_data.iter() {
                 let lbrr_frame = self.decode_frame(lbrr_data)?;
-                self.synthesize_frame(&lbrr_frame)?;
+                decoded_frames.push(lbrr_frame);
             }
+        }
+
+        // Create resampler for current bandwidth
+        let resampler = Resampler::new(self.state.bandwidth);
+
+        // Calculate total samples needed after resampling to 48kHz
+        let total_samples: usize = decoded_frames.iter()
+            .map(|f| resampler.output_sample_count(f.sample_count))
+            .sum();
+
+        // Clear buffer once and reserve total space
+        self.buffer.clear();
+        if total_samples > self.buffer.capacity() {
+            return Err(Error::BufferOverflow.into());
+        }
+        self.buffer.render_reserved(Some(total_samples));
+
+        // Synthesize all frames into the buffer with resampling
+        let mut sample_offset = 0;
+        for frame in &decoded_frames {
+            self.synthesize_frame_at_offset(&frame, sample_offset, &resampler)?;
+            sample_offset += resampler.output_sample_count(frame.sample_count);
         }
 
         return Ok(self.buffer.as_audio_buffer_ref());
@@ -325,7 +350,7 @@ impl Decoder {
     ///
     /// https://datatracker.ietf.org/doc/html/rfc6716#section-4.2.7.5
     fn decode_lsf<R: RangeDecoder>(&self, decoder: &mut R, frame: &mut Frame) -> Result<()> {
-        for (idx, subframe) in frame.subframes.iter_mut().enumerate() {
+        for subframe in frame.subframes.iter_mut() {
             let i1 = self.decode_lsf_stage1(decoder, frame.vad_flag, frame.frame_type.signal_type)?;
             let (d_lpc, res_q10) = self.decode_lsf_stage2(decoder, i1)?;
             let nlsf_q15 = self.reconstruct_nlsf(d_lpc, &res_q10, i1)?;
@@ -360,7 +385,9 @@ impl Decoder {
             (true, _) => &constant::ICDF_NORMALIZED_LSF_STAGE_ONE_INDEX_WIDEBAND_UNVOICED,
         };
 
-        return decoder.decode_symbol_with_icdf(icdf);
+        let i1 = decoder.decode_symbol_with_icdf(icdf)?;
+
+        return Ok(i1);
     }
 
     fn decode_lsf_stage2<R: RangeDecoder>(&self, decoder: &mut R, i1: u32) -> Result<(usize, Vec<i16>)> {
@@ -372,8 +399,24 @@ impl Decoder {
             Bandwidth::WideBand | Bandwidth::SuperWideBand | Bandwidth::FullBand => &constant::CODEBOOK_NORMALIZED_LSF_STAGE_TWO_INDEX_WIDEBAND,
         };
 
+        // Validate i1 index
+        if i1 as usize >= codebook.len() {
+            eprintln!("ERROR: i1={} exceeds codebook length {}", i1, codebook.len());
+            return Err(Error::InvalidLSFIndex.into());
+        }
+
         for (idx, res_q10) in res_q10.iter_mut().enumerate() {
-            let icdf = codebook[i1 as usize];
+            // The codebook contains indices into the ICDF table array, not the ICDF tables themselves
+            let icdf_index = codebook[i1 as usize][idx] as usize;
+
+            // Validate ICDF index
+            if icdf_index >= constant::ICDF_NORMALIZED_LSF_STAGE_TWO_INDEX.len() {
+                eprintln!("ERROR: ICDF index {} at codebook[{}][{}] exceeds ICDF table array length",
+                          icdf_index, i1, idx);
+                return Err(Error::InvalidLSFIndex.into());
+            }
+
+            let icdf = &constant::ICDF_NORMALIZED_LSF_STAGE_TWO_INDEX[icdf_index];
 
             let symbol = decoder.decode_symbol_with_icdf(icdf)?;
 
@@ -617,6 +660,9 @@ impl Decoder {
         let (pulse_counts, lsb_counts) = self.decode_pulse_counts(decoder, rate_level)?;
         let lcg_seed = decoder.decode_symbol_with_icdf(&constant::ICDF_LINEAR_CONGRUENTIAL_GENERATOR_SEED)?;
 
+        // Calculate target excitation size per subframe
+        let samples_per_subframe = frame.sample_count / frame.subframes.len();
+
         for subframe in frame.subframes.iter_mut() {
             let pulse_locations = self.decode_pulse_locations(decoder, pulse_counts, lsb_counts)?;
             subframe.excitation = pulse_locations;
@@ -634,11 +680,52 @@ impl Decoder {
                 frame.frame_type,
                 lcg_seed,
             )?;
+
+            // Upsample excitation from 16 samples to subframe size
+            subframe.excitation = self.upsample_excitation(&subframe.excitation, samples_per_subframe);
         }
 
         return Ok(());
     }
 
+
+    /// Upsample excitation from 16 samples to target subframe size
+    fn upsample_excitation(&self, excitation: &[f32], target_size: usize) -> Vec<f32> {
+        if excitation.len() == target_size {
+            return excitation.to_vec();
+        }
+
+        let mut upsampled = vec![0.0f32; target_size];
+        let ratio = target_size as f32 / excitation.len() as f32;
+
+        // Linear interpolation with energy preservation
+        for i in 0..target_size {
+            let src_index_f = i as f32 / ratio;
+            let src_index = src_index_f.floor() as usize;
+            let frac = src_index_f - src_index as f32;
+
+            if src_index + 1 < excitation.len() {
+                // Linear interpolation between adjacent samples
+                upsampled[i] = excitation[src_index] * (1.0 - frac) + excitation[src_index + 1] * frac;
+            } else if src_index < excitation.len() {
+                // Last sample - just copy
+                upsampled[i] = excitation[src_index];
+            }
+        }
+
+        // Normalize to preserve energy
+        let src_energy: f32 = excitation.iter().map(|x| x * x).sum();
+        let dst_energy: f32 = upsampled.iter().map(|x| x * x).sum();
+
+        if dst_energy > 0.0 {
+            let scale = (src_energy / dst_energy).sqrt();
+            for sample in upsampled.iter_mut() {
+                *sample *= scale;
+            }
+        }
+
+        upsampled
+    }
 
     fn apply_sign_and_scaling(
         &self,
@@ -843,18 +930,13 @@ impl Decoder {
         let order = lpc_coeffs.len();
         let mut output = vec![0.0; subframe_size];
 
-        // If excitation is shorter than subframe_size, we need to upsample it
-        // For now, use simple repetition/padding as a workaround
-        // TODO: Implement proper SILK excitation upsampling
-        for i in 0..subframe_size {
-            let excitation_value = if i < excitation.len() {
-                excitation[i]
-            } else {
-                // Pad with zeros if excitation is too short
-                0.0
-            };
+        // Excitation should already be upsampled to subframe_size
+        debug_assert_eq!(excitation.len(), subframe_size,
+                        "Excitation size {} != subframe size {}",
+                        excitation.len(), subframe_size);
 
-            let mut y = excitation_value;
+        for i in 0..subframe_size {
+            let mut y = excitation[i];
             for j in 0..order.min(i) {
                 y -= lpc_coeffs[j] as f32 / 4096.0 * output[i - j - 1];
             }
@@ -914,37 +996,39 @@ impl Decoder {
     }
 
 
-    fn synthesize_frame(&mut self, frame: &Frame) -> Result<()> {
+    fn synthesize_frame_at_offset(&mut self, frame: &Frame, offset: usize, resampler: &Resampler) -> Result<()> {
         let samples_per_subframe = frame.sample_count / frame.subframes.len();
         let channels = self.buffer.spec().channels.count();
 
-        if self.buffer.frames() + frame.sample_count > self.buffer.capacity() {
-            return Err(Error::BufferOverflow.into());
-        }
+        // Synthesize at native sample rate first
+        let mut native_samples = vec![0.0f32; frame.sample_count];
 
-        let start = self.buffer.frames();
+        for (s, subframe) in frame.subframes.iter().enumerate() {
+            let ltp_signal = Self::ltp_synthesis(
+                &subframe.excitation,
+                subframe.pitch_lag,
+                &subframe.ltp_coeffs,
+                frame.ltp_scale,
+            );
 
-        for ch in 0..channels {
-            let dst = self.buffer.chan_mut(ch);
-            for (s, subframe) in frame.subframes.iter().enumerate() {
-                let ltp_signal = Self::ltp_synthesis(
-                    &subframe.excitation,
-                    subframe.pitch_lag,
-                    &subframe.ltp_coeffs,
-                    frame.ltp_scale,
-                );
+            let lpc_coeffs = Self::lsf_to_lpc(&subframe.nlsf_q15, self.state.bandwidth)?;
+            let lpc_signal = Self::lpc_synthesis(&lpc_coeffs, &ltp_signal, samples_per_subframe);
 
-
-                let lpc_coeffs = Self::lsf_to_lpc(&subframe.nlsf_q15, self.state.bandwidth)?;
-                let lpc_signal = Self::lpc_synthesis(&lpc_coeffs, &ltp_signal, samples_per_subframe);
-
-                for (i, &sample) in lpc_signal.iter().enumerate() {
-                    dst[start + s * samples_per_subframe + i] = sample;
-                }
+            for (i, &sample) in lpc_signal.iter().enumerate() {
+                native_samples[s * samples_per_subframe + i] = sample;
             }
         }
 
-        self.buffer.render_reserved(Some(frame.sample_count));
+        // Resample to 48kHz
+        let resampled = resampler.resample(&native_samples);
+
+        // Write resampled samples to buffer for all channels
+        for ch in 0..channels {
+            let dst = self.buffer.chan_mut(ch);
+            for (i, &sample) in resampled.iter().enumerate() {
+                dst[offset + i] = sample;
+            }
+        }
 
         return Ok(());
     }

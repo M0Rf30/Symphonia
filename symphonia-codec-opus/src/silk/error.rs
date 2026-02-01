@@ -65,6 +65,12 @@ pub enum Error {
     
     #[error("Frame length exceeds data size")]
     FrameLengthExceedsDataSize,
+
+    #[error("Invalid LSF index")]
+    InvalidLSFIndex,
+
+    #[error("Invalid ICDF table")]
+    InvalidICDFTable,
 }
 
 impl From<Error> for SymphoniaError {
