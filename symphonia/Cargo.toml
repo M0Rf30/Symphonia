@@ -23,6 +23,7 @@ default = ["opt-simd", "all-meta", "adpcm", "flac", "mkv", "ogg", "pcm", "vorbis
 
 # Feature flags to enable specific codecs, container, and standalone metadata formats.
 aac = ["dep:symphonia-codec-aac"]
+dsd = ["dep:symphonia-codec-dsd", "dep:symphonia-format-dsd"]
 adpcm = ["dep:symphonia-codec-adpcm"]
 alac = ["dep:symphonia-codec-alac"]
 flac = ["dep:symphonia-bundle-flac"]
@@ -49,6 +50,7 @@ all-codecs = [
     "aac",
     "adpcm",
     "alac",
+    "dsd",
     "flac",
     "mp1",
     "mp2",
@@ -60,6 +62,7 @@ all-codecs = [
 # Enable all supported container formats.
 all-formats = [
     "caf",
+    "dsd",
     "isomp4",
     "mkv",
     "ogg",
@@ -167,6 +170,16 @@ optional = true
 [dependencies.symphonia-format-mkv]
 version = "0.6.0-alpha.2"
 path = "../symphonia-format-mkv"
+optional = true
+
+[dependencies.symphonia-codec-dsd]
+version = "0.6.0-alpha.2"
+path = "../symphonia-codec-dsd"
+optional = true
+
+[dependencies.symphonia-format-dsd]
+version = "0.6.0-alpha.2"
+path = "../symphonia-format-dsd"
 optional = true
 
 [dependencies.symphonia-format-caf]

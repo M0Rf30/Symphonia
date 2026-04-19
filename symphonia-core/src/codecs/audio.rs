@@ -73,6 +73,24 @@ pub enum VerificationCheck {
     Other([u8; 16]),
 }
 
+/// Indicates how channel data is laid out in memory for multi-channel audio.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ChannelDataLayout {
+    /// Channels are interleaved: [L, R, L, R, ...]
+    Interleaved,
+    /// Channels are stored in separate planar buffers: [L, L, L, ...], [R, R, R, ...]
+    Planar,
+}
+
+/// Indicates the bit order within bytes for bitstream formats.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum BitOrder {
+    /// Least significant bit first. Used by DSF format.
+    LsbFirst,
+    /// Most significant bit first. Used by DFF format.
+    MsbFirst,
+}
+
 /// Codec parameters for audio codecs.
 #[derive(Clone, Debug, Default)]
 pub struct AudioCodecParameters {
@@ -98,6 +116,10 @@ pub struct AudioCodecParameters {
     pub frames_per_block: Option<u64>,
     /// Extra data (defined by the codec).
     pub extra_data: Option<Box<[u8]>>,
+    /// The channel data layout (interleaved or planar).
+    pub channel_data_layout: Option<ChannelDataLayout>,
+    /// The bit order within bytes for bitstream formats.
+    pub bit_order: Option<BitOrder>,
 }
 
 impl AudioCodecParameters {
@@ -114,6 +136,8 @@ impl AudioCodecParameters {
             verification_check: None,
             frames_per_block: None,
             extra_data: None,
+            channel_data_layout: None,
+            bit_order: None,
         }
     }
 
@@ -180,6 +204,18 @@ impl AudioCodecParameters {
     /// Provide a verification code of the final decoded audio.
     pub fn with_verification_code(&mut self, code: VerificationCheck) -> &mut Self {
         self.verification_check = Some(code);
+        self
+    }
+
+    /// Provide the channel data layout.
+    pub fn with_channel_data_layout(&mut self, layout: ChannelDataLayout) -> &mut Self {
+        self.channel_data_layout = Some(layout);
+        self
+    }
+
+    /// Provide the bit order.
+    pub fn with_bit_order(&mut self, bit_order: BitOrder) -> &mut Self {
+        self.bit_order = Some(bit_order);
         self
     }
 }
@@ -453,6 +489,12 @@ pub mod well_known {
     pub const CODEC_ID_RALF: AudioCodecId = AudioCodecId(0x2005);
     /// Dolby TrueHD Lossless codec
     pub const CODEC_ID_TRUEHD: AudioCodecId = AudioCodecId(0x2006);
+
+    // DSD (Direct Stream Digital) audio codecs
+    //------------------------------------------
+
+    /// DSD (Direct Stream Digital)
+    pub const CODEC_ID_DSD: AudioCodecId = AudioCodecId(0x3000);
 
     /// Codec profiles for well-known audio codecs.
     pub mod profiles {

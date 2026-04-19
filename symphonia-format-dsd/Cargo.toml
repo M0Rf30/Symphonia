@@ -1,0 +1,18 @@
+[package]
+name = "symphonia-format-dsd"
+description = "Pure Rust DSD (DSF/DFF) demuxer (a part of project Symphonia)."
+authors = ["M0Rf30 <morf3089@gmail.com>"]
+readme = "README.md"
+categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
+keywords = ["audio", "media", "demuxer", "dsd", "dsf"]
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+log = { workspace = true }
+symphonia-core = { version = "0.6.0-alpha.2", path = "../symphonia-core" }
+symphonia-metadata = { version = "0.6.0-alpha.2", path = "../symphonia-metadata", features = ["dsd-id3"] }

@@ -25,6 +25,7 @@ id3v2 = []
 flac = ["vorbis"]
 riff-info = []
 riff-id3 = ["id3v2"]
+dsd-id3 = ["id3v2"]
 vorbis = ["flac"]
 
 # Meta-feature to enable all embedded RIFF metadata format readers.
