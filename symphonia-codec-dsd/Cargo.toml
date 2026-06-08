@@ -1,0 +1,29 @@
+[package]
+name = "symphonia-codec-dsd"
+description = "Pure Rust DSD decoder (a part of project Symphonia)."
+authors = ["M0Rf30 <morf3089@gmail.com>"]
+readme = "README.md"
+categories = ["multimedia", "multimedia::audio", "multimedia::decoding"]
+keywords = ["audio", "codec", "decoder", "dsd"]
+# Common package metadata located in workspace Cargo.toml.
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+log = { workspace = true }
+symphonia-core = { version = "0.6.0", path = "../symphonia-core" }
+
+[dev-dependencies]
+symphonia-format-dsd = { version = "0.6.0", path = "../symphonia-format-dsd" }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "dsd_benchmarks"
+harness = false
