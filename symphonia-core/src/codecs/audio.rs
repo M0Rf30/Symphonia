@@ -73,6 +73,28 @@ pub enum VerificationCheck {
     Other([u8; 16]),
 }
 
+/// Indicates how channel data is laid out in memory for multi-channel audio.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ChannelDataLayout {
+    /// Channels are interleaved in memory: [L, R, L, R, L, R, ...]
+    /// This is the most common layout for PCM audio.
+    Interleaved,
+    /// Channels are stored in separate planar buffers: [L, L, L, ...], [R, R, R, ...]
+    /// Used by formats like DSF, FLAC, and some video codecs.
+    Planar,
+}
+
+/// Indicates the bit order within bytes for bitstream formats.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum BitOrder {
+    /// Least significant bit first (LSB-first).
+    /// Used by DSF and DFF DSD formats.
+    LsbFirst,
+    /// Most significant bit first (MSB-first).
+    /// The default for most formats.
+    MsbFirst,
+}
+
 /// Codec parameters for audio codecs.
 #[derive(Clone, Debug, Default)]
 pub struct AudioCodecParameters {
@@ -105,6 +127,10 @@ pub struct AudioCodecParameters {
     pub max_frames_per_packet: Option<u64>,
     /// A method and expected value that may be used to perform verification on the decoded audio.
     pub verification_check: Option<VerificationCheck>,
+    /// The channel data layout (interleaved vs planar).
+    pub channel_data_layout: Option<ChannelDataLayout>,
+    /// The bit order within bytes for bitstream formats.
+    pub bit_order: Option<BitOrder>,
     /// The number of frames per block, in case packets are seperated in multiple blocks.
     pub frames_per_block: Option<u64>,
     /// Extra data (defined by the codec).
@@ -123,6 +149,8 @@ impl AudioCodecParameters {
             channels: None,
             max_frames_per_packet: None,
             verification_check: None,
+            channel_data_layout: None,
+            bit_order: None,
             frames_per_block: None,
             extra_data: None,
         }
@@ -191,6 +219,18 @@ impl AudioCodecParameters {
     /// Provide a verification code of the final decoded audio.
     pub fn with_verification_code(&mut self, code: VerificationCheck) -> &mut Self {
         self.verification_check = Some(code);
+        self
+    }
+
+    /// Provide the channel data layout (interleaved vs planar).
+    pub fn with_channel_data_layout(&mut self, layout: ChannelDataLayout) -> &mut Self {
+        self.channel_data_layout = Some(layout);
+        self
+    }
+
+    /// Provide the bit order within bytes.
+    pub fn with_bit_order(&mut self, bit_order: BitOrder) -> &mut Self {
+        self.bit_order = Some(bit_order);
         self
     }
 }
