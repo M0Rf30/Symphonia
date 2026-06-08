@@ -15,7 +15,11 @@ pub struct FirDecimator {
     coefficients: Vec<f32>,
     /// Decimation ratio
     decimation: usize,
-    /// Sample buffer (circular)
+    /// Sample history as a *doubled* linear buffer (length `2 * taps`): each
+    /// incoming sample is written at `pos` and `pos + taps`, so the most recent
+    /// `taps` samples are always available as one contiguous (non-wrapping)
+    /// slice — letting the convolution use straight SIMD loads instead of a
+    /// per-tap gather.
     buffer: Vec<f32>,
     /// Current position in buffer
     buffer_pos: usize,
@@ -44,7 +48,7 @@ impl FirDecimator {
         let fir = FirDecimator {
             coefficients,
             decimation,
-            buffer: vec![0.0; taps],
+            buffer: vec![0.0; taps * 2],
             buffer_pos: 0,
             sample_count: 0,
         };
@@ -116,9 +120,16 @@ impl FirDecimator {
     /// Returns Some(output) when decimation produces an output,
     /// None otherwise.
     pub fn process(&mut self, input: f32) -> Option<f32> {
-        // Add sample to circular buffer
+        let taps = self.coefficients.len();
+
+        // Doubled-buffer push: write the sample twice so the recent-sample
+        // window stays contiguous regardless of position.
         self.buffer[self.buffer_pos] = input;
-        self.buffer_pos = (self.buffer_pos + 1) % self.buffer.len();
+        self.buffer[self.buffer_pos + taps] = input;
+        self.buffer_pos += 1;
+        if self.buffer_pos == taps {
+            self.buffer_pos = 0;
+        }
 
         // Decimation: only compute output every Rth sample
         self.sample_count += 1;
@@ -127,14 +138,13 @@ impl FirDecimator {
         }
         self.sample_count = 0;
 
-        // Compute FIR filter output (convolution)
+        // Contiguous window of the last `taps` samples. The Kaiser LPF is
+        // symmetric, so dotting in oldest→newest order matches the original
+        // reverse-circular convolution.
+        let window = &self.buffer[self.buffer_pos..self.buffer_pos + taps];
         let mut output = 0.0f32;
-        let mut buf_idx = self.buffer_pos;
-
-        for &coeff in &self.coefficients {
-            // Read from circular buffer in reverse order
-            buf_idx = if buf_idx == 0 { self.buffer.len() - 1 } else { buf_idx - 1 };
-            output += coeff * self.buffer[buf_idx];
+        for (coeff, sample) in self.coefficients.iter().zip(window) {
+            output += coeff * sample;
         }
 
         Some(output)
@@ -179,13 +189,17 @@ impl FirDecimator {
     #[target_feature(enable = "avx,fma")]
     unsafe fn process_buffer_simd_avx(&mut self, input: &[f32], output: &mut [f32]) -> usize {
         let mut out_idx = 0;
+        let taps = self.coefficients.len();
 
         for &sample in input {
-            // Add sample to circular buffer
+            // Doubled-buffer push keeps the window contiguous for SIMD.
             self.buffer[self.buffer_pos] = sample;
-            self.buffer_pos = (self.buffer_pos + 1) % self.buffer.len();
+            self.buffer[self.buffer_pos + taps] = sample;
+            self.buffer_pos += 1;
+            if self.buffer_pos == taps {
+                self.buffer_pos = 0;
+            }
 
-            // Decimation: only compute output every Rth sample
             self.sample_count += 1;
             if self.sample_count < self.decimation {
                 continue;
@@ -196,58 +210,41 @@ impl FirDecimator {
                 break;
             }
 
-            // Compute FIR filter output using SIMD
-            let result = self.compute_fir_output_avx();
-            output[out_idx] = result;
+            let window = &self.buffer[self.buffer_pos..self.buffer_pos + taps];
+            output[out_idx] = Self::dot_avx(&self.coefficients, window);
             out_idx += 1;
         }
 
         out_idx
     }
 
-    /// Compute FIR output using AVX (processes 8 samples at a time)
+    /// Dot product of `coeffs` with a contiguous `window` of equal length,
+    /// using AVX + FMA. Both inputs are contiguous, so no gather is needed.
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx,fma")]
-    unsafe fn compute_fir_output_avx(&self) -> f32 {
+    unsafe fn dot_avx(coeffs: &[f32], window: &[f32]) -> f32 {
+        let n = coeffs.len().min(window.len());
         let mut sum = _mm256_setzero_ps();
-        let mut buf_idx = self.buffer_pos;
-        let taps = self.coefficients.len();
 
-        // Process 8 coefficients at a time
         let mut i = 0;
-        while i + 8 <= taps {
-            // Load 8 coefficients
-            let coeffs = _mm256_loadu_ps(self.coefficients.as_ptr().add(i));
-
-            // Gather 8 samples from circular buffer (manual gather)
-            let mut samples = [0.0f32; 8];
-            for j in 0..8 {
-                buf_idx = if buf_idx == 0 { self.buffer.len() - 1 } else { buf_idx - 1 };
-                samples[j] = self.buffer[buf_idx];
-            }
-            let buf_vals = _mm256_loadu_ps(samples.as_ptr());
-
-            // Multiply and accumulate: sum += coeffs * buf_vals
-            sum = _mm256_fmadd_ps(coeffs, buf_vals, sum);
-
+        while i + 8 <= n {
+            let c = _mm256_loadu_ps(coeffs.as_ptr().add(i));
+            let w = _mm256_loadu_ps(window.as_ptr().add(i));
+            sum = _mm256_fmadd_ps(c, w, sum);
             i += 8;
         }
 
-        // Horizontal sum of the 8 accumulated values
+        // Horizontal sum of the 8 accumulated lanes
         let sum_high = _mm256_extractf128_ps(sum, 1);
         let sum_low = _mm256_castps256_ps128(sum);
         let sum128 = _mm_add_ps(sum_low, sum_high);
-
-        // Horizontal sum of 4 values
         let sum64 = _mm_add_ps(sum128, _mm_movehl_ps(sum128, sum128));
         let sum32 = _mm_add_ss(sum64, _mm_shuffle_ps(sum64, sum64, 0x1));
-
         let mut result = _mm_cvtss_f32(sum32);
 
-        // Handle remaining coefficients (scalar)
-        while i < taps {
-            buf_idx = if buf_idx == 0 { self.buffer.len() - 1 } else { buf_idx - 1 };
-            result += self.coefficients[i] * self.buffer[buf_idx];
+        // Scalar tail for the remaining (< 8) coefficients
+        while i < n {
+            result += coeffs[i] * window[i];
             i += 1;
         }
 
