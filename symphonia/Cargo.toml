@@ -25,6 +25,7 @@ default = ["opt-simd", "all-meta", "adpcm", "flac", "mkv", "ogg", "pcm", "vorbis
 aac = ["dep:symphonia-codec-aac"]
 adpcm = ["dep:symphonia-codec-adpcm"]
 alac = ["dep:symphonia-codec-alac"]
+ape-format = ["dep:symphonia-bundle-ape"]
 dsd = ["dep:symphonia-codec-dsd", "dep:symphonia-format-dsd"]
 flac = ["dep:symphonia-bundle-flac"]
 caf = ["dep:symphonia-format-caf"]
@@ -38,6 +39,7 @@ pcm = ["dep:symphonia-codec-pcm"]
 aiff = ["dep:symphonia-format-riff", "symphonia-format-riff/aiff"]
 vorbis = ["dep:symphonia-codec-vorbis"]
 wav = ["dep:symphonia-format-riff", "symphonia-format-riff/wav"]
+wavpack = ["dep:symphonia-codec-wavpack"]
 ape = ["symphonia-metadata/ape"]
 id3v1 = ["symphonia-metadata/id3v1"]
 id3v2 = ["symphonia-metadata/id3v2"]
@@ -57,11 +59,13 @@ all-codecs = [
     "mp3",
     "pcm",
     "vorbis",
+    "wavpack",
 ]
 
 # Enable all supported container formats.
 all-formats = [
     "caf",
+    "ape-format",
     "dsd",
     "isomp4",
     "mkv",
@@ -112,6 +116,16 @@ version = "0.5.9"
 path = "../symphonia-metadata"
 # Standalone crate enables all metadata formats by default.
 default-features = false
+
+[dependencies.symphonia-bundle-ape]
+version = "0.5.9"
+path = "../symphonia-bundle-ape"
+optional = true
+
+[dependencies.symphonia-codec-wavpack]
+version = "0.5.9"
+path = "../symphonia-codec-wavpack"
+optional = true
 
 [dependencies.symphonia-bundle-flac]
 version = "0.5.9"

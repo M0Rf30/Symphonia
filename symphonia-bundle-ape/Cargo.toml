@@ -1,10 +1,10 @@
 [package]
-name = "symphonia-codec-wavpack"
-description = "Pure Rust WavPack demuxer and decoder (a part of project Symphonia)."
-authors = ["Philip Deljanov <philip.deljanov@gmail.com>"]
+name = "symphonia-bundle-ape"
+description = "Pure Rust Monkey's Audio (APE) demuxer and decoder (a part of project Symphonia)."
+authors = ["OMBS.IO Dev Team <dev@ombs.io>"]
 readme = "README.md"
 categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
-keywords = ["audio", "codec", "decoder", "wavpack"]
+keywords = ["audio", "codec", "decoder", "ape", "monkeys-audio"]
 # Common package metadata located in workspace Cargo.toml.
 edition.workspace = true
 homepage.workspace = true
@@ -14,8 +14,8 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
-log = { workspace = true }
 symphonia-core = { version = "0.5.9", path = "../symphonia-core" }
+ape-decoder = "0.3.2"
 
 [lints]
 workspace = true

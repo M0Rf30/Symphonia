@@ -125,6 +125,8 @@ pub mod default {
     pub mod codecs {
         //! The `codecs` module re-exports all enabled Symphonia decoders.
 
+        #[cfg(feature = "ape-format")]
+        pub use symphonia_bundle_ape::ApeDecoder;
         #[cfg(feature = "flac")]
         pub use symphonia_bundle_flac::FlacDecoder;
         #[cfg(any(feature = "mp1", feature = "mp2", feature = "mp3"))]
@@ -141,6 +143,8 @@ pub mod default {
         pub use symphonia_codec_pcm::PcmDecoder;
         #[cfg(feature = "vorbis")]
         pub use symphonia_codec_vorbis::VorbisDecoder;
+        #[cfg(feature = "wavpack")]
+        pub use symphonia_codec_wavpack::WavPackDecoder;
 
         #[deprecated = "use `default::codecs::MpaDecoder` instead"]
         #[cfg(any(feature = "mp1", feature = "mp2", feature = "mp3"))]
@@ -150,6 +154,8 @@ pub mod default {
     pub mod formats {
         //! The `formats` module re-exports all enabled Symphonia format readers.
 
+        #[cfg(feature = "ape-format")]
+        pub use symphonia_bundle_ape::ApeReader;
         #[cfg(feature = "flac")]
         pub use symphonia_bundle_flac::FlacReader;
         #[cfg(any(feature = "mp1", feature = "mp2", feature = "mp3"))]
@@ -170,6 +176,8 @@ pub mod default {
         pub use symphonia_format_riff::AiffReader;
         #[cfg(feature = "wav")]
         pub use symphonia_format_riff::WavReader;
+        #[cfg(feature = "wavpack")]
+        pub use symphonia_codec_wavpack::WavPackReader;
 
         #[deprecated = "use `default::formats::MpaReader` instead"]
         #[cfg(any(feature = "mp1", feature = "mp2", feature = "mp3"))]
@@ -245,6 +253,9 @@ pub mod default {
         #[cfg(feature = "alac")]
         registry.register_audio_decoder::<codecs::AlacDecoder>();
 
+        #[cfg(feature = "ape-format")]
+        registry.register_audio_decoder::<codecs::ApeDecoder>();
+
         #[cfg(feature = "dsd")]
         registry.register_audio_decoder::<codecs::DsdDecoder>();
 
@@ -259,6 +270,9 @@ pub mod default {
 
         #[cfg(feature = "vorbis")]
         registry.register_audio_decoder::<codecs::VorbisDecoder>();
+
+        #[cfg(feature = "wavpack")]
+        registry.register_audio_decoder::<codecs::WavPackDecoder>();
     }
 
     /// Registers all the formats selected by the `feature` flags in the includer's `Cargo.toml` on
@@ -270,6 +284,9 @@ pub mod default {
         // Formats
         #[cfg(feature = "aac")]
         probe.register_format::<formats::AdtsReader<'_>>();
+
+        #[cfg(feature = "ape-format")]
+        probe.register_format::<formats::ApeReader<'_>>();
 
         #[cfg(feature = "caf")]
         probe.register_format::<formats::CafReader<'_>>();
@@ -300,6 +317,9 @@ pub mod default {
 
         #[cfg(feature = "mkv")]
         probe.register_format::<formats::MkvReader<'_>>();
+
+        #[cfg(feature = "wavpack")]
+        probe.register_format::<formats::WavPackReader<'_>>();
 
         // Metadata
         #[cfg(feature = "ape")]
