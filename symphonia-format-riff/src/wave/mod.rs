@@ -59,7 +59,7 @@ pub struct WavReader<'s> {
 }
 
 impl<'s> WavReader<'s> {
-    pub fn try_new(mut mss: MediaSourceStream<'s>, opts: FormatOptions) -> Result<Self> {
+    pub fn try_new(mut mss: MediaSourceStream<'s>, mut opts: FormatOptions) -> Result<Self> {
         // A Wave file is one large RIFF chunk, with the actual meta and audio data contained in
         // nested chunks. Therefore, the file starts with a RIFF chunk header (chunk ID & size).
 
@@ -94,7 +94,9 @@ impl<'s> WavReader<'s> {
             ChunksReader::<RiffWaveChunks>::new(riff_data_len, ByteOrder::LittleEndian);
 
         let mut codec_params = AudioCodecParameters::new();
-        let mut metadata: MetadataLog = Default::default();
+        // Seed the log with externally provided metadata (e.g. a leading ID3 tag) so that
+        // metadata parsed from the RIFF INFO chunk below is appended to it, not dropped.
+        let mut metadata: MetadataLog = opts.external_data.metadata.take().unwrap_or_default();
         let mut packet_info = None;
         let mut fact = None;
 
@@ -170,7 +172,7 @@ impl<'s> WavReader<'s> {
                         media_info: MediaInfo::from_track(&track),
                         tracks: vec![track],
                         chapters: opts.external_data.chapters,
-                        metadata: opts.external_data.metadata.unwrap_or_default(),
+                        metadata,
                         packet_info,
                         data_start_pos,
                         data_end_pos,
