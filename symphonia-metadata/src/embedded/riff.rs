@@ -82,7 +82,10 @@ mod info {
 
         // Safety: Key is always ASCII.
         let key = str::from_utf8(&chunk_id).expect("chunk_id contains only ASCII bytes");
+        // RIFF INFO payloads are NUL-terminated strings, and are NUL- or space-padded to an
+        // even length. Those padding bytes are not part of the value.
         let value = String::from_utf8_lossy(buf);
+        let value = value.trim_end_matches(['\0', ' ']).to_string();
 
         builder.add_mapped_tags(RawTag::new(key, value), &RIFF_INFO_MAP);
 
