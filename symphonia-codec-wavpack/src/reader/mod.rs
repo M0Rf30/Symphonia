@@ -85,15 +85,20 @@ pub struct WavPackReader<'a> {
 // ---------------------------------------------------------------------------
 
 impl<'s> WavPackReader<'s> {
-    pub fn try_new(mut mss: MediaSourceStream<'s>, _opts: FormatOptions) -> Result<Self> {
+    pub fn try_new(mut mss: MediaSourceStream<'s>, mut opts: FormatOptions) -> Result<Self> {
         let original_pos = mss.pos();
         let magic = mss.read_quad_bytes()?;
         mss.seek(std::io::SeekFrom::Start(original_pos))?;
 
+        // Metadata the probe already read (APEv2 and ID3v2 blocks, which is where WavPack
+        // files actually carry their tags) must be carried into the reader's log, otherwise
+        // every tag is silently dropped.
+        let external = opts.external_data.metadata.take().unwrap_or_default();
+
         if magic == RIFF_MARKER {
-            Self::try_new_v3(mss)
+            Self::try_new_v3(mss, external)
         } else {
-            Self::try_new_v4v5(mss, original_pos)
+            Self::try_new_v4v5(mss, original_pos, external)
         }
     }
 
@@ -101,7 +106,7 @@ impl<'s> WavPackReader<'s> {
     // WavPack v1–v3: RIFF/WAVE wrapper
     // ------------------------------------------------------------------
 
-    fn try_new_v3(mut mss: MediaSourceStream<'s>) -> Result<Self> {
+    fn try_new_v3(mut mss: MediaSourceStream<'s>, mut metadata: MetadataLog) -> Result<Self> {
         let riff_id = mss.read_quad_bytes()?;
         if riff_id != RIFF_MARKER {
             return decode_error("wavpack v3: expected RIFF");
@@ -222,7 +227,6 @@ impl<'s> WavPackReader<'s> {
             track.with_duration(Duration::new(total_samples));
         }
 
-        let mut metadata: MetadataLog = Default::default();
         metadata.push(meta_builder.build());
 
         let media_info = MediaInfo::from_track(&track);
@@ -246,7 +250,11 @@ impl<'s> WavPackReader<'s> {
     // WavPack v4/v5: native wvpk block stream
     // ------------------------------------------------------------------
 
-    fn try_new_v4v5(mut mss: MediaSourceStream<'s>, original_pos: u64) -> Result<Self> {
+    fn try_new_v4v5(
+        mut mss: MediaSourceStream<'s>,
+        original_pos: u64,
+        mut metadata: MetadataLog,
+    ) -> Result<Self> {
         let _ = find_next_block(&mut mss, 100);
         let header_pos = mss.pos();
         let header = Header::decode(&mut mss)?;
@@ -310,7 +318,6 @@ impl<'s> WavPackReader<'s> {
             scan_v4v5_riff_meta(&sub_buf, &mut meta_builder)?;
         }
 
-        let mut metadata: MetadataLog = Default::default();
         let revision = meta_builder.build();
         if !revision.media.tags.is_empty() {
             metadata.push(revision);
