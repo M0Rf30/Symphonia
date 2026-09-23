@@ -24,7 +24,7 @@ use std::num::NonZero;
 use std::sync::Arc;
 
 use crate::atoms::{AtomError, AtomIterator, AtomType, ReadAtom};
-use crate::atoms::{FtypAtom, MetaAtom, MoofAtom, MoovAtom, SidxAtom, TrakAtom};
+use crate::atoms::{FtypAtom, GaplessInfo, MetaAtom, MoofAtom, MoovAtom, SidxAtom, TrakAtom};
 use crate::stream::*;
 
 use log::{debug, info, trace, warn};
@@ -49,7 +49,13 @@ pub struct TrackState {
 }
 
 impl TrackState {
-    pub fn make(track_num: usize, trak: &TrakAtom, timespan: &TimeSpan) -> (Self, Track) {
+    pub fn make(
+        track_num: usize,
+        trak: &TrakAtom,
+        timespan: &TimeSpan,
+        movie_timescale: NonZero<u32>,
+        itunes_gapless: Option<GaplessInfo>,
+    ) -> (Self, Track) {
         let mut track = Track::new(trak.tkhd.id);
 
         // Create the codec parameters using the sample description atom.
@@ -66,11 +72,47 @@ impl TrackState {
         // number of frames is equal to the duration. This is the case for almost all audio tracks.
         // If not, there is no generic, low overhead, & precise way to determine the number of
         // frames.
-        if let Some(CodecParameters::Audio(audio)) = &track.codec_params {
-            if let Some(sample_rate) = audio.sample_rate {
-                if sample_rate == timespan.timescale.get() {
-                    track.with_num_frames(timespan.duration.get());
+        let is_audio_frame_accurate = if let Some(CodecParameters::Audio(audio)) =
+            &track.codec_params
+        {
+            audio.sample_rate.is_some_and(|sample_rate| sample_rate == timespan.timescale.get())
+        }
+        else {
+            false
+        };
+
+        if is_audio_frame_accurate {
+            track.with_num_frames(timespan.duration.get());
+
+            // Derive gapless (encoder delay/padding) information for the track. An iTunes
+            // `iTunSMPB` freeform tag, if present, takes precedence over the edit list since it is
+            // the more explicit and widely honoured source (matching common player behaviour).
+            let elst_gapless = trak
+                .edts
+                .as_ref()
+                .and_then(|edts| edts.elst.as_ref())
+                .and_then(|elst| {
+                    derive_gapless_from_elst(
+                        elst,
+                        timespan.duration.get(),
+                        timespan.timescale,
+                        movie_timescale,
+                    )
+                });
+
+            if let Some(gapless) = itunes_gapless.or(elst_gapless) {
+                if gapless.delay > 0 {
+                    track.with_delay(gapless.delay);
                 }
+                if gapless.padding > 0 {
+                    track.with_padding(gapless.padding);
+                }
+
+                // Reduce the reported number of frames to exclude delay/padding, matching the
+                // convention used by other demuxers (e.g., mp3, caf).
+                let discard = u64::from(gapless.delay) + u64::from(gapless.padding);
+                let valid_frames = timespan.duration.get().saturating_sub(discard);
+                track.with_num_frames(valid_frames);
             }
         }
 
@@ -83,6 +125,149 @@ impl TrackState {
         };
 
         (state, track)
+    }
+}
+
+/// Derive gapless delay/padding from a single-entry edit list. Returns `None` for edit lists that
+/// are empty, have more than one entry, or whose single entry is an "empty edit" (`media_time ==
+/// -1`), none of which are handled generically here.
+fn derive_gapless_from_elst(
+    elst: &crate::atoms::ElstAtom,
+    total_media_frames: u64,
+    media_timescale: NonZero<u32>,
+    movie_timescale: NonZero<u32>,
+) -> Option<GaplessInfo> {
+    if elst.entries.len() != 1 {
+        return None;
+    }
+
+    let entry = &elst.entries[0];
+
+    if entry.media_time < 0 {
+        // An empty edit (or otherwise unsupported edit); ignore.
+        return None;
+    }
+
+    let delay = entry.media_time as u64;
+
+    // `segment_duration` is expressed in the *movie* timescale; convert it to the *media*
+    // timescale (sample frames) to compute the padding.
+    let seg_dur_media = (u128::from(entry.segment_duration) * u128::from(media_timescale.get()))
+        / u128::from(movie_timescale.get());
+    let seg_dur_media = u64::try_from(seg_dur_media).ok()?;
+
+    let padding = total_media_frames.saturating_sub(delay).saturating_sub(seg_dur_media);
+
+    let delay = u32::try_from(delay).ok()?;
+    let padding = u32::try_from(padding).ok()?;
+
+    Some(GaplessInfo { delay, padding })
+}
+
+#[cfg(test)]
+mod gapless_tests {
+    use super::derive_gapless_from_elst;
+    use crate::atoms::{ElstAtom, ElstEntry};
+    use std::num::NonZero;
+
+    fn ts(hz: u32) -> NonZero<u32> {
+        NonZero::new(hz).unwrap()
+    }
+
+    #[test]
+    fn single_entry_delay_and_padding() {
+        // media_timescale == movie_timescale (common case): no conversion needed.
+        let elst = ElstAtom {
+            entries: vec![ElstEntry {
+                segment_duration: 100_000,
+                media_time: 1024,
+                media_rate_int: 1,
+                media_rate_frac: 0,
+            }],
+        };
+
+        // Total media frames = delay + segment_duration + padding.
+        let total_media_frames = 1024 + 100_000 + 512;
+
+        let info =
+            derive_gapless_from_elst(&elst, total_media_frames, ts(44_100), ts(44_100)).unwrap();
+
+        assert_eq!(info.delay, 1024);
+        assert_eq!(info.padding, 512);
+    }
+
+    #[test]
+    fn converts_segment_duration_across_timescales() {
+        // Movie timescale of 600, media timescale of 44100 (a common combination).
+        let movie_timescale = 600u32;
+        let media_timescale = 44_100u32;
+
+        let delay = 1024u64;
+        let valid_media_frames = 44_100u64;
+        let padding = 256u64;
+        let total_media_frames = delay + valid_media_frames + padding;
+
+        // segment_duration expressed in the movie timescale.
+        let segment_duration = valid_media_frames * u64::from(movie_timescale) / u64::from(media_timescale);
+
+        let elst = ElstAtom {
+            entries: vec![ElstEntry {
+                segment_duration,
+                media_time: delay as i64,
+                media_rate_int: 1,
+                media_rate_frac: 0,
+            }],
+        };
+
+        let info = derive_gapless_from_elst(
+            &elst,
+            total_media_frames,
+            ts(media_timescale),
+            ts(movie_timescale),
+        )
+        .unwrap();
+
+        assert_eq!(info.delay, 1024);
+        assert_eq!(info.padding, 256);
+    }
+
+    #[test]
+    fn empty_edit_is_ignored() {
+        let elst = ElstAtom {
+            entries: vec![ElstEntry {
+                segment_duration: 100,
+                media_time: -1,
+                media_rate_int: 1,
+                media_rate_frac: 0,
+            }],
+        };
+
+        assert!(derive_gapless_from_elst(&elst, 1000, ts(44_100), ts(44_100)).is_none());
+    }
+
+    #[test]
+    fn multi_entry_edit_list_is_ignored() {
+        let entry = ElstEntry {
+            segment_duration: 100,
+            media_time: 0,
+            media_rate_int: 1,
+            media_rate_frac: 0,
+        };
+
+        let elst = ElstAtom { entries: vec![entry.clone_for_test(), entry] };
+
+        assert!(derive_gapless_from_elst(&elst, 1000, ts(44_100), ts(44_100)).is_none());
+    }
+
+    impl ElstEntry {
+        fn clone_for_test(&self) -> Self {
+            ElstEntry {
+                segment_duration: self.segment_duration,
+                media_time: self.media_time,
+                media_rate_int: self.media_rate_int,
+                media_rate_frac: self.media_rate_frac,
+            }
+        }
     }
 }
 
@@ -292,6 +477,7 @@ impl<'s> IsoMp4Reader<'s> {
         let mut tracks = Vec::with_capacity(moov.traks.len());
         let mut track_states = Vec::with_capacity(moov.traks.len());
 
+        let itunes_gapless = moov.gapless();
         for (t, trak) in moov.traks.iter().enumerate() {
             // Determine the timespan of the track.
             let timespan = if moov.is_fragmented() {
@@ -315,7 +501,13 @@ impl<'s> IsoMp4Reader<'s> {
                 TimeSpan::new(trak.mdia.mdhd.timescale, duration)
             };
 
-            let (track_state, track) = TrackState::make(t, trak, &timespan);
+            let (track_state, track) = TrackState::make(
+                t,
+                trak,
+                &timespan,
+                moov.mvhd.timescale,
+                itunes_gapless,
+            );
 
             tracks.push(track);
             track_states.push(track_state);
@@ -652,12 +844,59 @@ impl FormatReader for IsoMp4Reader<'_> {
         let data =
             self.iter.read_raw_boxed_slice_exact(sample_info.pos, sample_info.len as usize)?;
 
-        Ok(Some(Packet::new(
-            next_sample_info.track_id,
-            next_sample_info.ts,
-            next_sample_info.dur,
-            data,
-        )))
+        let track = self
+            .tracks
+            .iter()
+            .find(|track| track.id == next_sample_info.track_id)
+            .expect("track exists for the returned track_id");
+
+        let delay = u64::from(track.delay.unwrap_or(0));
+
+        if delay == 0 && track.padding.unwrap_or(0) == 0 {
+            return Ok(Some(Packet::new(
+                next_sample_info.track_id,
+                next_sample_info.ts,
+                next_sample_info.dur,
+                data,
+            )));
+        }
+
+        // Determine the "nominal" (undivided) per-sample duration used by the sample table. The
+        // final `stts` entry is often deliberately shortened to encode the true valid tail
+        // duration, but the decoder will still produce a full frame's worth of raw samples; the
+        // difference must be trimmed. Fixed-frame-size codecs (a prerequisite of the
+        // `is_audio_frame_accurate` gate used to populate `delay`/`padding`) always emit
+        // `nominal` samples per packet except for this potentially-shortened final entry.
+        let nominal_dur = self.moov.traks[next_sample_info.track_num]
+            .mdia
+            .minf
+            .stbl
+            .stts
+            .entries
+            .first()
+            .map(|entry| u64::from(entry.sample_delta))
+            .filter(|&nominal| nominal > next_sample_info.dur.get())
+            .map(Duration::new)
+            .unwrap_or(next_sample_info.dur);
+
+        // Shift the presentation timeline so that sample 0 corresponds to the first valid
+        // (non-delay) frame, then let `trimmed_dur` compute trim_start/trim_end from the shifted
+        // PTS and the track's valid frame count.
+        let pts = next_sample_info.ts.saturating_sub(Duration::new(delay));
+
+        let end_pts = track
+            .num_frames
+            .map(Duration::from)
+            .and_then(|dur| dur.timestamp_from(Timestamp::ZERO));
+
+        let packet = PacketBuilder::new()
+            .track_id(next_sample_info.track_id)
+            .pts(pts)
+            .trimmed_dur(nominal_dur, end_pts)
+            .data(data)
+            .build();
+
+        Ok(Some(packet))
     }
 
     fn metadata(&mut self) -> Metadata<'_> {
