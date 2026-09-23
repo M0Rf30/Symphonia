@@ -7,7 +7,7 @@
 
 use symphonia_core::meta::MetadataRevision;
 
-use crate::atoms::{Atom, AtomHeader, AtomIterator, AtomType, MetaAtom, ReadAtom, Result};
+use crate::atoms::{Atom, AtomHeader, AtomIterator, AtomType, GaplessInfo, MetaAtom, ReadAtom, Result};
 
 /// User data atom.
 #[allow(dead_code)]
@@ -21,6 +21,11 @@ impl UdtaAtom {
     /// If metadata was read, consumes the metadata and returns it.
     pub fn take_metadata(&mut self) -> Option<MetadataRevision> {
         self.meta.as_mut().and_then(|meta| meta.take_metadata())
+    }
+
+    /// Get the gapless playback information, if present.
+    pub fn gapless(&self) -> Option<GaplessInfo> {
+        self.meta.as_ref().and_then(|meta| meta.gapless)
     }
 }
 
