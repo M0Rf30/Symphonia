@@ -153,6 +153,11 @@ where
         self.preferred.get(id).or_else(|| self.standard.get(id)).or_else(|| self.fallback.get(id))
     }
 
+    /// Iterate over every registration across all tiers.
+    fn iter(&self) -> impl Iterator<Item = &R> {
+        self.preferred.values().chain(self.standard.values()).chain(self.fallback.values())
+    }
+
     fn get_at_tier(&self, tier: Tier, id: &C) -> Option<&R> {
         match tier {
             Tier::Preferred => self.preferred.get(id),
@@ -197,6 +202,14 @@ impl CodecRegistry {
     /// audio codec.
     pub fn get_audio_decoder(&self, id: AudioCodecId) -> Option<&RegisteredAudioDecoder> {
         self.audio.get(&id)
+    }
+
+    /// Returns an allocation-free iterator over every audio decoder registered with this
+    /// `CodecRegistry`, across all registration tiers.
+    ///
+    /// The same codec may appear more than once if it was registered at more than one tier.
+    pub fn audio_decoders(&self) -> impl Iterator<Item = &RegisteredAudioDecoder> {
+        self.audio.iter()
     }
 
     /// Get the registration information of the audio decoder at the specified tier for the
@@ -456,4 +469,68 @@ macro_rules! support_subtitle_codec {
             },
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio::GenericAudioBufferRef;
+    use crate::codecs::CodecInfo;
+    use crate::codecs::audio::{AudioCodecId, CODEC_ID_NULL_AUDIO, FinalizeResult};
+    use crate::errors::Result as SymResult;
+    use crate::packet::PacketRef;
+
+    struct DummyAudioDecoder(AudioCodecParameters);
+
+    const DUMMY_CODEC_INFO: CodecInfo =
+        CodecInfo { short_name: "dummy", long_name: "Dummy Codec", profiles: &[] };
+    const DUMMY_CODEC_ID: AudioCodecId = CODEC_ID_NULL_AUDIO;
+
+    impl AudioDecoder for DummyAudioDecoder {
+        fn reset(&mut self) {}
+
+        fn codec_info(&self) -> &CodecInfo {
+            &DUMMY_CODEC_INFO
+        }
+
+        fn codec_params(&self) -> &AudioCodecParameters {
+            &self.0
+        }
+
+        fn decode_ref(&mut self, _packet: &PacketRef<'_>) -> SymResult<GenericAudioBufferRef<'_>> {
+            unimplemented!("not exercised by the enumeration test")
+        }
+
+        fn finalize(&mut self) -> FinalizeResult {
+            unimplemented!()
+        }
+
+        fn last_decoded(&self) -> GenericAudioBufferRef<'_> {
+            unimplemented!()
+        }
+    }
+
+    impl RegisterableAudioDecoder for DummyAudioDecoder {
+        fn try_registry_new(
+            params: &AudioCodecParameters,
+            _opts: &AudioDecoderOptions,
+        ) -> SymResult<Box<dyn AudioDecoder>> {
+            Ok(Box::new(DummyAudioDecoder(params.clone())))
+        }
+
+        fn supported_codecs() -> &'static [SupportedAudioCodec] {
+            &[SupportedAudioCodec { id: DUMMY_CODEC_ID, info: DUMMY_CODEC_INFO }]
+        }
+    }
+
+    #[test]
+    fn audio_decoders_enumerates_registered_codecs() {
+        let mut registry = CodecRegistry::new();
+        registry.register_audio_decoder::<DummyAudioDecoder>();
+
+        let found: Vec<_> = registry.audio_decoders().collect();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].codec.info.short_name, "dummy");
+        assert_eq!(found[0].codec.id, DUMMY_CODEC_ID);
+    }
 }
