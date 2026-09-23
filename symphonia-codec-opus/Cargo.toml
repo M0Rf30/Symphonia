@@ -17,5 +17,8 @@ version.workspace = true
 log = { workspace = true }
 symphonia-core = { version = "0.6.1", path = "../symphonia-core" }
 
+[dev-dependencies]
+rand = "0.9"
+
 [lints]
 workspace = true
