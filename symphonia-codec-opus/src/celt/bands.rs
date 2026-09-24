@@ -790,6 +790,10 @@ pub fn quant_all_bands(
     let mut norm = vec![0f32; total_norm_len as usize];
     let mut norm2 = if c_chan == 2 { vec![0f32; total_norm_len as usize] } else { Vec::new() };
     let mut lowband_scratch = vec![0f32; (mode.short_mdct_size << mode.max_lm) as usize];
+    // The folding source `norm[effective_lowband..][..N]` may overlap the current band's output
+    // region (e.g. in hybrid mode, where coding starts at band 17). libopus reads the whole source
+    // before writing the output, so copying it out first is equivalent.
+    let mut lowband_copy = vec![0f32; (mode.short_mdct_size << mode.max_lm) as usize];
 
     let mut lowband_offset = 0i32;
     let mut update_lowband = true;
@@ -890,23 +894,27 @@ pub fn quant_all_bands(
             let x_band = &mut x[band_lo as usize..band_hi as usize];
             let y_band = &mut y_buf[band_lo as usize..band_hi as usize];
 
-            let (norm_lo, norm_hi) = norm.split_at_mut(split_point);
             let lowband_src = if effective_lowband != -1 {
-                Some(&norm_lo[effective_lowband as usize..(effective_lowband + n) as usize])
+                let el = effective_lowband as usize;
+                lowband_copy[..n as usize].copy_from_slice(&norm[el..el + n as usize]);
+                Some(&lowband_copy[..n as usize])
             }
             else {
                 None
             };
+            let (_, norm_hi) = norm.split_at_mut(split_point);
             let lowband_dst = if !last { Some(&mut norm_hi[..n as usize]) } else { None };
             let xc = quant_band(&mut ctx, x_band, n, b / 2, b_blocks, lowband_src, lm, lowband_dst, NORM_SCALING, &mut lowband_scratch, x_cm0 as i32);
 
-            let (norm2_lo, norm2_hi) = norm2.split_at_mut(split_point);
             let lowband_src2 = if effective_lowband != -1 {
-                Some(&norm2_lo[effective_lowband as usize..(effective_lowband + n) as usize])
+                let el = effective_lowband as usize;
+                lowband_copy[..n as usize].copy_from_slice(&norm2[el..el + n as usize]);
+                Some(&lowband_copy[..n as usize])
             }
             else {
                 None
             };
+            let (_, norm2_hi) = norm2.split_at_mut(split_point);
             let lowband_dst2 = if !last { Some(&mut norm2_hi[..n as usize]) } else { None };
             let yc = quant_band(&mut ctx, y_band, n, b / 2, b_blocks, lowband_src2, lm, lowband_dst2, NORM_SCALING, &mut lowband_scratch, y_cm0 as i32);
 
@@ -915,13 +923,15 @@ pub fn quant_all_bands(
         }
         else {
             let x_band = &mut x[band_lo as usize..band_hi as usize];
-            let (norm_lo, norm_hi) = norm.split_at_mut(split_point);
             let lowband_src = if effective_lowband != -1 {
-                Some(&norm_lo[effective_lowband as usize..(effective_lowband + n) as usize])
+                let el = effective_lowband as usize;
+                lowband_copy[..n as usize].copy_from_slice(&norm[el..el + n as usize]);
+                Some(&lowband_copy[..n as usize])
             }
             else {
                 None
             };
+            let (_, norm_hi) = norm.split_at_mut(split_point);
             let lowband_dst = if !last { Some(&mut norm_hi[..n as usize]) } else { None };
 
             if let Some(y_buf) = y_opt.as_deref_mut() {
