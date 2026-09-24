@@ -16,7 +16,7 @@
 
 <p>
     <strong>
-        Symphonia is a pure Rust audio decoding and media demuxing library supporting AAC, ADPCM, AIFF, ALAC, CAF, FLAC, MKV, MP1, MP2, MP3, MP4, OGG, Vorbis, WAV, and WebM.
+        Symphonia is a pure Rust audio decoding and media demuxing library supporting AAC, ADPCM, AIFF, ALAC, CAF, FLAC, MKV, MP1, MP2, MP3, MP4, OGG, Opus, Vorbis, WAV, and WebM.
     </strong>
 </p>
 
@@ -80,7 +80,7 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | AIFF     | Great     | Yes      | `aiff`       | No      | [`symphonia-format-riff`]   |
 | CAF      | Good      | No       | `caf`        | No      | [`symphonia-format-caf`]    |
 | ISO/MP4  | Great     | No       | `isomp4`     | No      | [`symphonia-format-isomp4`] |
-| MKV/WebM | Good      | No       | `mkv`        | Yes     | [`symphonia-format-mkv`]    |
+| MKV/WebM | Good      | Yes      | `mkv`        | Yes     | [`symphonia-format-mkv`]    |
 | OGG      | Great     | Yes      | `ogg`        | Yes     | [`symphonia-format-ogg`]    |
 | Wave     | Excellent | Yes      | `wav`        | Yes     | [`symphonia-format-riff`]   |
 
@@ -108,7 +108,7 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | MP1                          | Great     | No      | `mp1`, `mpa` | No      | [`symphonia-bundle-mp3`]   |
 | MP2                          | Great     | No      | `mp2`, `mpa` | No      | [`symphonia-bundle-mp3`]   |
 | MP3                          | Excellent | Yes     | `mp3`, `mpa` | No      | [`symphonia-bundle-mp3`]   |
-| Opus                         | -         | -       | `opus`       | Yes     | `symphonia-codec-opus`     |
+| Opus                         | Excellent | Yes     | `opus`       | Yes     | [`symphonia-codec-opus`]   |
 | PCM                          | Excellent | Yes     | `pcm`        | Yes     | [`symphonia-codec-pcm`]    |
 | Vorbis                       | Excellent | Yes     | `vorbis`     | Yes     | [`symphonia-codec-vorbis`] |
 | WavPack                      | -         | -       | `wavpack`    | Yes     | `symphonia-codec-wavpack`  |
@@ -122,6 +122,7 @@ A `symphonia-bundle-*` package is a combination of a decoder and a native demuxe
 [`symphonia-bundle-mp3`]: https://crates.io/crates/symphonia-bundle-mp3
 [`symphonia-codec-pcm`]: https://crates.io/crates/symphonia-codec-pcm
 [`symphonia-codec-vorbis`]: https://crates.io/crates/symphonia-codec-vorbis
+[`symphonia-codec-opus`]: https://crates.io/crates/symphonia-codec-opus
 
 > [!TIP]
 > All codecs can be enabled with the `all-codecs` feature flag. Similarly, all MPEG audio codecs can be enabled with the `mpa` feature flag.

@@ -18,8 +18,10 @@ version.workspace = true
 all-features = true
 
 [features]
-# Only royalty-free open standard codecs and formats are enabled by default.
-default = ["opt-simd", "all-meta", "adpcm", "flac", "mkv", "ogg", "pcm", "vorbis", "wav"]
+# Only royalty-free open standard codecs and formats are enabled by default. Opus (RFC 6716) is
+# royalty-free per the IETF IPR disclosures referenced in symphonia-codec-opus's NOTICE, so it
+# belongs here alongside Vorbis/FLAC now that its native decoder is RFC 8251 conformant.
+default = ["opt-simd", "all-meta", "adpcm", "flac", "mkv", "ogg", "opus", "pcm", "vorbis", "wav"]
 
 # Feature flags to enable specific codecs, container, and standalone metadata formats.
 aac = ["dep:symphonia-codec-aac"]
