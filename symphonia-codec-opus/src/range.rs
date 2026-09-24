@@ -273,6 +273,16 @@ impl<'a> RangeDecoder<'a> {
     pub fn range(&self) -> u32 {
         self.rng
     }
+
+    /// C: `dec->storage -= redundancy_bytes` in `opus_decode_frame` (SILK/Hybrid redundancy
+    /// handling): shrinks the decoder's notion of buffer length so later raw-bit reads
+    /// (`dec_bits`, which reads backward from `storage`) don't wander into a trailing redundant
+    /// CELT frame appended after the main frame's `len` bytes. Only valid to call before any
+    /// raw-bit reads have occurred (`end_offs == 0`), which holds at the point
+    /// `opus_decode_frame` calls it (right after SILK decoding, which never touches raw bits).
+    pub fn shrink_storage(&mut self, new_storage: u32) {
+        self.storage = new_storage;
+    }
 }
 
 #[cfg(test)]

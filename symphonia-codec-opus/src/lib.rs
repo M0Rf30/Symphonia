@@ -22,18 +22,9 @@
 //! - [`celt`]: the CELT sub-decoder (`celt/*`), float.
 //! - [`decoder`]: the top-level hybrid decoder (`src/opus_decoder.c`).
 //! - [`multistream`]: the multistream/Ogg-mapping decoder (`src/opus_multistream_decoder.c`).
-//!
-//! # Wave plan
-//!
-//! This crate is being built in waves by separate agents against the cross-file contracts
-//! defined here (wave 0). Wave 1 fills in `silk/**` (owner: "Silk") and `celt/**` per the
-//! ownership split documented in `celt/mod.rs` (owners: "CeltBitstream", "CeltSynthesis"). Wave
-//! 2 implements `decoder.rs`/`multistream.rs` against those APIs and wires up
-//! `AudioDecoder`/`RegisterableAudioDecoder`. Everything not yet implemented is `todo!()` but
-//! the module is kept `cargo check`-clean; dead-code warnings are expected until later waves
-//! land and are suppressed at the crate root.
-#![allow(dead_code)]
+//! - [`audio_decoder`]: the Symphonia `AudioDecoder`/`RegisterableAudioDecoder` integration.
 
+pub mod audio_decoder;
 pub mod celt;
 pub mod decoder;
 pub mod mapping;
@@ -42,4 +33,5 @@ pub mod packet;
 pub mod range;
 pub mod silk;
 
+pub use audio_decoder::OpusAudioDecoder;
 pub use decoder::OpusDecoder;
