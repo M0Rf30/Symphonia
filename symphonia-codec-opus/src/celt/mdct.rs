@@ -594,6 +594,76 @@ mod tests {
         assert!(max_err < 1e-4, "shift={shift} n2={n2}: max reconstruction error {max_err} at i={max_i}");
     }
 
+    /// Multi-block ("transient") round trip, matching `celt_synthesis`'s actual usage: `B`
+    /// independent short-block forward transforms (each `nb`-sample, `shift=maxLM`) interleaved
+    /// into one `N`-length coefficient array with stride `B` (`freq[k*B+b]` holds block `b`'s
+    /// `k`-th coefficient — matches `clt_mdct_backward`'s own stride-`B` read pattern, verified
+    /// by direct index derivation), then `B` backward calls (`&freq[b], stride=B`) reconstruct
+    /// `B` independent `nb`-sample time blocks. This is the *only* path exercised by transient
+    /// CELT frames and was never covered by [`backward_round_trips_with_forward_all_sizes`]
+    /// (which only used `stride=1`, i.e. the non-transient `B=1` case).
+    #[test]
+    fn transient_multiblock_round_trip() {
+        let overlap = 120usize;
+        let window = test_window(overlap);
+        let shift = 3i32;
+        let nb = 120usize; // one short block's sample count == n2 at shift=3.
+        let b_count = 8usize; // M for LM=3.
+        let n = nb * b_count; // 960, one full (transient) CELT frame.
+
+        // 3 consecutive full frames of continuous signal, so the middle frame's blocks are all
+        // fully settled (folded by the following frame's first block).
+        let sig_len = 3 * n + overlap;
+        let mut sig = vec![0f32; sig_len];
+        let mut s = 999u32;
+        for v in sig.iter_mut() {
+            s = s.wrapping_mul(1103515245).wrapping_add(12345);
+            *v = ((s >> 8) as f32 / (1u32 << 24) as f32 - 0.5) * 2.0;
+        }
+
+        let mut buf = vec![0f32; 3 * n + overlap];
+        for frame in 0..3usize {
+            let mut coeffs = vec![0f32; n];
+            for bidx in 0..b_count {
+                // Each short block's own forward window spans [-overlap/2, nb+overlap/2)
+                // relative to its own start, exactly like the non-transient case but hopping by
+                // `nb` (not `n`) per block.
+                let block_start = frame * n + bidx * nb;
+                let mut forward_in = sig[block_start..block_start + nb + overlap].to_vec();
+                let mut block_coeffs = vec![0f32; nb];
+                MDCT_LOOKUP_960.forward(&mut forward_in, &mut block_coeffs, &window, overlap as i32, shift);
+                for k in 0..nb {
+                    coeffs[k * b_count + bidx] = block_coeffs[k];
+                }
+            }
+            for bidx in 0..b_count {
+                MDCT_LOOKUP_960.backward(
+                    &coeffs[bidx..],
+                    &mut buf[frame * n + bidx * nb..],
+                    &window,
+                    overlap as i32,
+                    shift,
+                    b_count as i32,
+                );
+            }
+        }
+
+        // Frame 1 (the middle one) is fully settled: its first block's start is folded by frame
+        // 0's last block, and its own last block's tail is folded by frame 2's first block.
+        let start = n; // frame 1 start
+        let end = 2 * n; // frame 1 end
+        let mut max_err = 0f32;
+        let mut max_i = 0usize;
+        for i in start..end {
+            let e = (buf[i] - sig[i]).abs();
+            if e > max_err {
+                max_err = e;
+                max_i = i;
+            }
+        }
+        assert!(max_err < 1e-3, "multiblock max reconstruction error {max_err} at i={max_i} (rel {})", max_i - start);
+    }
+
     #[test]
     fn backward_round_trips_with_forward_all_sizes() {
         check_round_trip(0, 960);

@@ -30,6 +30,15 @@ fn read_dec_as_f32(path: &std::path::Path, channels: usize) -> Vec<f32> {
     assert_eq!(samples.len() % channels, 0);
     samples
 }
+/// C: `FLOAT2INT16` (`celt/float_cast.h`). The CELT decoder's own `f32` output is in the
+/// `[-1, 1]`-ish float-API range (`deemphasis`'s `SCALEOUT`); `opus_decode()` (the integer API,
+/// which is what produced the `.dec` reference files) converts to `i16` PCM with this exact
+/// scale/round/saturate — the harness must replicate it to compare like-for-like.
+fn float2int16(x: f32) -> f32 {
+    let x = x * 32768.0;
+    let x = x.clamp(-32768.0, 32767.0);
+    (0.5 + x).floor()
+}
 
 /// C: `opus_decoder.c`'s `endband` switch in `opus_decode_frame` (`OPUS_BANDWIDTH_*` ->
 /// `CELT_SET_END_BAND`). `start` is always `0` for CELT-only frames (only Hybrid sets `17`).
@@ -69,7 +78,7 @@ fn decode_celt_vector(bit_path: &std::path::Path, channels: u8) -> DecodeStats {
         if pkt.lost {
             let mut out = vec![0f32; last_frame_size as usize * channels as usize];
             let n = decoder.decode_with_ec(None, &mut out, last_frame_size, None, false).unwrap();
-            pcm.extend_from_slice(&out[..n * channels as usize]);
+            pcm.extend(out[..n * channels as usize].iter().map(|&s| float2int16(s)));
             continue;
         }
 
@@ -93,7 +102,7 @@ fn decode_celt_vector(bit_path: &std::path::Path, channels: u8) -> DecodeStats {
             let frame_data = &pkt.payload[frame.offset..frame.offset + frame.len];
             let mut out = vec![0f32; frame_size as usize * channels as usize];
             let n = decoder.decode_with_ec(Some(frame_data), &mut out, frame_size, None, false).unwrap();
-            pcm.extend_from_slice(&out[..n * channels as usize]);
+            pcm.extend(out[..n * channels as usize].iter().map(|&s| float2int16(s)));
         }
 
         frames_checked += 1;
@@ -135,6 +144,16 @@ macro_rules! celt_conformance_test {
                 stats.range_mismatches, stats.frames_checked
             );
             let reference = read_dec_as_f32(&dir.join(format!("testvector{:02}.dec", $index)), 2);
+            // Diagnostic aid (intentional, not leftover debug cruft): on failure, print the
+            // first sample where decoded PCM diverges from the reference by more than a
+            // rounding-noise threshold, to localize whether a failure is a scale/sign issue
+            // (large, systematic ratio) vs. a narrow shape bug (isolated large errors).
+            if let Some(idx) =
+                reference.iter().zip(stats.pcm.iter()).position(|(a, b)| (a - b).abs() > 50.0)
+            {
+                let s = idx.saturating_sub(5);
+                eprintln!("first diff at sample {idx}: ref={:?} got={:?}", &reference[s..s + 15], &stats.pcm[s..s + 15]);
+            }
             let result = common::opus_compare::compare(&reference, &stats.pcm, 2);
             assert!(result.pass, "opus_compare FAILS (stereo): {result:?}");
 

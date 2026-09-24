@@ -215,8 +215,14 @@ impl CeltDecoder {
     /// C: `deemphasis`. `accum` is always `false` in the float build (`celt_assert(accum==0)`
     /// in `celt_decoder.c` — the accumulating branches are `FIXED_POINT`-only); kept as a
     /// parameter for API symmetry with the C signature/wave-2's call site.
+    ///
+    /// C: `SCALEOUT(a)` is `(a)*(1/CELT_SIG_SCALE)` in the float build (`CELT_SIG_SCALE ==
+    /// 32768.f`), NOT the identity — `celt_sig` internally sits at roughly `i16` magnitude, and
+    /// `deemphasis` converts it to the `[-1, 1]`-ish range the float API (and thus this crate's
+    /// `f32` PCM contract) actually uses. `SIG2WORD16` is the identity in the float build.
     fn deemphasis(&mut self, out: &mut [f32], n: i32, cc: i32, accum: bool) {
         debug_assert!(!accum, "accum is FIXED_POINT-only in libopus; the float build never sets it");
+        const SCALEOUT: f32 = 1.0 / 32768.0;
         let n = n as usize;
         let cc = cc as usize;
         let downsample = self.downsample as usize;
@@ -233,14 +239,14 @@ impl CeltDecoder {
                     scratch[j] = tmp;
                 }
                 for j in 0..nd {
-                    out[c + j * cc] = scratch[j * downsample];
+                    out[c + j * cc] = scratch[j * downsample] * SCALEOUT;
                 }
             }
             else {
                 for j in 0..n {
                     let tmp = self.decode_mem[base + j] + m;
                     m = PREEMPH_COEF0 * tmp;
-                    out[c + j * cc] = tmp;
+                    out[c + j * cc] = tmp * SCALEOUT;
                 }
             }
             self.preemph_mem[c] = m;
