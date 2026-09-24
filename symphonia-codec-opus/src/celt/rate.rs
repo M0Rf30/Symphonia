@@ -248,8 +248,9 @@ fn interp_bits2pulses(
         let n = n0 << lm;
         let bit = bits[ji] + balance;
 
+        let excess;
         if n > 1 {
-            let excess = (bit - cap[ji]).max(0);
+            excess = (bit - cap[ji]).max(0);
             bits[ji] = bit - excess;
 
             let den = channels * n + if channels == 2 && n > 2 && !dual_stereo && j < intensity { 1 } else { 0 };
@@ -276,22 +277,26 @@ fn interp_bits2pulses(
             fine_priority[ji] = (eb * (den << BITRES) >= bits[ji] + offset) as i32;
 
             bits[ji] -= (channels * eb) << BITRES;
-            if excess > 0 {
-                let extra_fine = (excess >> (stereo as i32 + BITRES as i32)).min(MAX_FINE_BITS - ebits[ji]);
-                ebits[ji] += extra_fine;
-                let extra_bits = (extra_fine * channels) << BITRES;
-                fine_priority[ji] = (extra_bits >= excess - balance) as i32;
-                balance = excess - extra_bits;
-            }
-            else {
-                balance = excess;
-            }
         }
         else {
-            let excess = 0.max(bit - (channels << BITRES));
+            // For N=1, all bits go to fine energy except for a single sign bit.
+            excess = 0.max(bit - (channels << BITRES));
             bits[ji] = bit - excess;
             ebits[ji] = 0;
             fine_priority[ji] = 1;
+        }
+
+        // Fine energy can't take advantage of the re-balancing in quant_all_bands(), so do the
+        // re-balancing here. This applies to N=1 bands as well (rate.c, interp_bits2pulses).
+        if excess > 0 {
+            let extra_fine =
+                (excess >> (stereo as i32 + BITRES as i32)).min(MAX_FINE_BITS - ebits[ji]);
+            ebits[ji] += extra_fine;
+            let extra_bits = (extra_fine * channels) << BITRES;
+            fine_priority[ji] = (extra_bits >= excess - balance) as i32;
+            balance = excess - extra_bits;
+        }
+        else {
             balance = excess;
         }
         j += 1;
