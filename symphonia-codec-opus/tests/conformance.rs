@@ -149,7 +149,11 @@ fn decode_vector(bit_path: &std::path::Path, channels: u8) -> VectorResult {
     // every `opus_decode` call regardless of the actual packet duration.
     const MAX_FRAME_SIZE: usize = 96_000;
 
+    let mut pkt_idx = 0usize;
+    let debug = std::env::var("OPUS_DEBUG_MISMATCH").is_ok();
+    let mut prev_mode_dbg = "none";
     for pkt in bitfile.iter() {
+        pkt_idx += 1;
         let mut out = vec![0f32; MAX_FRAME_SIZE * channels as usize];
         if pkt.lost {
             let frame_size = decoder.last_packet_duration().max(48000 / 100);
@@ -160,9 +164,21 @@ fn decode_vector(bit_path: &std::path::Path, channels: u8) -> VectorResult {
             let n = decoder.decode(Some(&pkt.payload), &mut out, MAX_FRAME_SIZE).unwrap();
             push_as_int16_scale(&mut pcm, &out[..n * channels as usize]);
             range_checked += 1;
+            let toc = packet::Toc::new(pkt.payload[0]);
             if decoder.final_range() != pkt.enc_final_range {
                 range_mismatches += 1;
+                if debug {
+                    eprintln!(
+                        "MISMATCH idx={pkt_idx} mode={:?} bw={:?} stereo={} fsz={} prev={prev_mode_dbg}",
+                        toc.mode(), toc.bandwidth(), toc.stereo(), toc.samples_per_frame(48000)
+                    );
+                }
             }
+            prev_mode_dbg = match toc.mode() {
+                OpusMode::SilkOnly => "silk",
+                OpusMode::Hybrid => "hybrid",
+                OpusMode::CeltOnly => "celt",
+            };
         }
     }
 
