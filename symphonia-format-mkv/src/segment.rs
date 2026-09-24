@@ -123,6 +123,17 @@ impl MatroskaTicks {
             / u64::from(track_time_base.denom.get());
         TrackTicks(self.0 / factor)
     }
+
+    /// Convert `self` (true nanoseconds) directly into a sample count at `sample_rate`,
+    /// bypassing the Track tick domain entirely. Used for a codec's mandatory gapless-trim
+    /// delay (e.g. Opus's `CodecDelay`/priming samples), which must be sample-accurate: Track
+    /// ticks are only millisecond-granularity for the common `TimestampScale` of 1,000,000 ns,
+    /// which would otherwise truncate/round a delay like 6.5ms (312 samples @ 48kHz) to a lossy
+    /// whole-millisecond value.
+    #[inline]
+    pub fn into_samples(self, sample_rate: u32) -> u64 {
+        ((u128::from(self.0) * u128::from(sample_rate) + 500_000_000) / 1_000_000_000) as u64
+    }
 }
 
 impl From<u64> for MatroskaTicks {
@@ -253,6 +264,14 @@ impl TrackTicks {
     #[inline]
     pub fn into_dur(self) -> Duration {
         Duration::new(self.0)
+    }
+
+    /// Convert `self` into a sample count at `sample_rate`, given the track's timebase.
+    #[inline]
+    pub fn into_samples(self, track_time_base: TimeBase, sample_rate: u32) -> u64 {
+        let numer = u128::from(track_time_base.numer.get());
+        let denom = u128::from(track_time_base.denom.get());
+        ((u128::from(self.0) * numer * u128::from(sample_rate) + denom / 2) / denom) as u64
     }
 }
 

@@ -27,7 +27,7 @@ use crate::schema::{MkvElement, MkvSchema};
 use crate::segment::{
     AttachmentsElement, BlockGroupElement, ChaptersElement, CuesElement, EbmlHeaderElement,
     InfoElement, MatroskaTicks, NonZeroMatroskaTicks, SeekHeadElement, SegmentTicks,
-    SignedTrackTicks, TagsElement, TargetTagsMap, TracksElement,
+    SignedTrackTicks, TagsElement, TargetTagsMap, TrackTicks, TracksElement,
 };
 
 const MKV_FORMAT_INFO: FormatInfo =
@@ -44,6 +44,15 @@ pub struct TrackState {
     pub(crate) track_time_base: TimeBase,
     /// The track's timestamp scale.
     pub(crate) track_timestamp_scale: f64,
+    /// The track's sample rate, if known (audio tracks only). Used to convert `codec_delay`
+    /// into an exact sample count for gapless trimming, bypassing the (millisecond-granularity)
+    /// Track tick domain.
+    sample_rate: Option<u32>,
+    /// The number of leading decoded samples still to be reported as `trim_start` to account
+    /// for `codec_delay` (mirrors `symphonia-format-ogg`'s Opus `pre_skip` discard tracking).
+    /// Reaches (and stays at) zero once the mandatory start trim has been fully accounted for;
+    /// never reset by a seek -- this only ever applies once, at the true start of the track.
+    remaining_codec_delay_samples: u64,
 }
 
 /// Matroska (MKV) and WebM demultiplexer.
@@ -286,6 +295,13 @@ impl<'s> MkvReader<'s> {
                 .scale(track.track_timestamp_scale)
                 .ok_or(Error::DecodeError("mkv: track timebase is invalid"))?;
 
+            // Extract the sample rate (if this is an audio track) before `track` is consumed by
+            // `make_track_codec_params` below, and use it to convert the mandatory `codec_delay`
+            // gapless-trim into an exact sample count up front.
+            let sample_rate = track.audio.as_ref().map(|audio| audio.sampling_frequency.round() as u32);
+            let remaining_codec_delay_samples =
+                sample_rate.map(|sr| track.codec_delay.into_samples(sr)).unwrap_or(0);
+
             // Create the track state.
             let state = TrackState {
                 // TODO: This should be 64-bit, but track IDs are 32-bit.
@@ -295,6 +311,8 @@ impl<'s> MkvReader<'s> {
                 codec_delay: track.codec_delay,
                 track_time_base,
                 track_timestamp_scale: track.track_timestamp_scale,
+                sample_rate,
+                remaining_codec_delay_samples,
             };
 
             // Create the track.
@@ -634,12 +652,31 @@ impl FormatReader for MkvReader<'_> {
     fn next_packet(&mut self) -> Result<Option<Packet>> {
         loop {
             if let Some(frame) = self.frames.pop_front() {
-                return Ok(Some(Packet::new(
-                    frame.track_num,
-                    frame.pts.into_ts(),
-                    frame.dur.into_dur(),
-                    frame.data,
-                )));
+                let mut packet =
+                    Packet::new(frame.track_num, frame.pts.into_ts(), frame.dur.into_dur(), frame.data);
+
+                // RFC 7845-section-4.2-equivalent gapless trim: `codec_delay` priming samples
+                // are still present in the decoded output and must be discarded, mirroring
+                // `symphonia-format-ogg`'s Opus `pre_skip` handling. `frame.pts` is already
+                // shifted by `codec_delay` (see `calculate_block_pts`), so it's negative exactly
+                // for frames still within the delay region -- guarding on that additionally
+                // prevents ever mis-trimming a packet reached by seeking past the delay region
+                // (`remaining_codec_delay_samples` is only ever consumed by sequential decode
+                // from the true start of the track).
+                if frame.pts.get() < 0 {
+                    if let Some(state) = self.track_states.get_mut(&frame.track_num) {
+                        if state.remaining_codec_delay_samples > 0 {
+                            let sample_rate = state.sample_rate.unwrap_or(0);
+                            let dur_samples =
+                                TrackTicks::from(packet.dur.get()).into_samples(state.track_time_base, sample_rate);
+                            let trim = state.remaining_codec_delay_samples.min(dur_samples);
+                            packet.trim_start = Duration::new(trim);
+                            state.remaining_codec_delay_samples -= trim;
+                        }
+                    }
+                }
+
+                return Ok(Some(packet));
             }
 
             if !self.next_element()? {
