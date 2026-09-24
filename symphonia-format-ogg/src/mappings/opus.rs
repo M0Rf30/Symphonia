@@ -62,12 +62,33 @@ pub fn detect(serial: u32, buf: &[u8]) -> Result<Option<Box<dyn Mapper>>> {
         .with_delay(u32::from(opus_head.pre_skip));
 
     // Instantiate the Opus mapper.
-    let mapper = Box::new(OpusMapper { track, need_comment: true });
+    let mapper = Box::new(OpusMapper {
+        track,
+        need_comment: true,
+        pre_skip: opus_head.pre_skip,
+        parser: OpusPacketParser::new(opus_head.pre_skip),
+    });
 
     Ok(Some(mapper))
 }
 
-pub struct OpusPacketParser {}
+/// C: none (this is Symphonia-specific demuxer-side bookkeeping, not part of libopus). Computes
+/// each packet's nominal duration from its TOC byte (RFC 6716 section 3.1) and, per RFC 7845
+/// section 4.2, reports the stream's mandatory `pre_skip` (from the `OpusHead` identification
+/// header) as start-of-stream discard: the first `pre_skip` decoded samples (spread across
+/// packets if `pre_skip` exceeds a single packet's duration, though in practice it never does at
+/// any realistic encoder configuration) must be trimmed before the first frame of real audio.
+pub struct OpusPacketParser {
+    /// Remaining `pre_skip` samples (at 48 kHz) still to be reported as discard. Reaches (and
+    /// stays at) zero once the stream's mandatory start trim has been fully accounted for.
+    remaining_pre_skip: u64,
+}
+
+impl OpusPacketParser {
+    fn new(pre_skip: u16) -> Self {
+        OpusPacketParser { remaining_pre_skip: u64::from(pre_skip) }
+    }
+}
 
 impl PacketParser for OpusPacketParser {
     fn parse_next_packet_dur(&mut self, packet: &[u8]) -> (Duration, Duration) {
@@ -125,14 +146,26 @@ impl PacketParser for OpusPacketParser {
             },
             _ => unreachable!("masked 2 bits"),
         };
-        // Look up the packet length and return it.
-        (Duration::new(frame_duration * num_frames), Duration::ZERO)
+        // Total nominal duration of this packet, ignoring pre-skip.
+        let total_dur = frame_duration * num_frames;
+
+        // RFC 7845 section 4.2: discard `pre_skip` decoded samples from the very start of the
+        // logical bitstream, one packet's worth at a time until exhausted.
+        let discard = self.remaining_pre_skip.min(total_dur);
+        self.remaining_pre_skip -= discard;
+
+        (Duration::new(total_dur), Duration::new(discard))
     }
 }
 
 struct OpusMapper {
     track: Track,
     need_comment: bool,
+    /// The stream's `pre_skip` (RFC 7845 section 5.1), kept alongside `parser` so
+    /// `make_parser` can hand out a fresh, independent parser (e.g. for seek bisection) that
+    /// still correctly reports the start-of-stream discard from scratch.
+    pre_skip: u16,
+    parser: OpusPacketParser,
 }
 
 impl Mapper for OpusMapper {
@@ -141,7 +174,11 @@ impl Mapper for OpusMapper {
     }
 
     fn reset(&mut self) {
-        // Nothing to do.
+        // Nothing to do: `parser`'s `remaining_pre_skip` must NOT be restored here. A reset
+        // happens on every seek, not just a seek to the very start of the stream; re-arming the
+        // mandatory pre-skip discard would incorrectly trim audio from the middle of the stream.
+        // The RFC 7845 pre-skip only ever applies once, at the true start of the logical
+        // bitstream, which `parser` (constructed once in `detect`) already tracks correctly.
     }
 
     fn track(&self) -> &Track {
@@ -153,12 +190,12 @@ impl Mapper for OpusMapper {
     }
 
     fn make_parser(&self) -> Option<Box<dyn super::PacketParser>> {
-        Some(Box::new(OpusPacketParser {}))
+        Some(Box::new(OpusPacketParser::new(self.pre_skip)))
     }
 
     fn map_packet(&mut self, packet: &[u8]) -> Result<MapResult> {
         if !self.need_comment {
-            let (dur, discard) = OpusPacketParser {}.parse_next_packet_dur(packet);
+            let (dur, discard) = self.parser.parse_next_packet_dur(packet);
             Ok(MapResult::StreamData { dur, discard })
         }
         else {
