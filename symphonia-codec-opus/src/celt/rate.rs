@@ -36,6 +36,14 @@ const ALLOC_STEPS: i32 = 6;
 static LOG2_FRAC_TABLE: [u8; 24] =
     [0, 8, 13, 16, 19, 21, 23, 24, 26, 27, 28, 29, 30, 31, 32, 32, 33, 34, 34, 35, 36, 36, 37, 37];
 
+/// Helper: `m->eBands[i]` (`opus_int16`) widened to `i32` for arithmetic; the reference
+/// stores `eBands` as `opus_int16` (`celt/modes.h`), but every consumer immediately does
+/// 32-bit arithmetic on it.
+#[inline]
+fn eb(m: &CeltMode, i: usize) -> i32 {
+    m.e_bands[i] as i32
+}
+
 /// C: `get_pulses` (`celt/rate.h`).
 pub(crate) fn get_pulses(i: i32) -> i32 {
     if i < 8 {
@@ -173,7 +181,7 @@ fn interp_bits2pulses(
     let mut coded_bands = end;
     let mut total = total;
     let mut intensity_rsv = intensity_rsv_in;
-    let mut skip_start = skip_start;
+    let skip_start = skip_start;
     loop {
         let j = coded_bands - 1;
         if j <= skip_start {
@@ -181,10 +189,10 @@ fn interp_bits2pulses(
             break;
         }
         let left = total - psum;
-        let percoeff = celt_sudiv(left, m.e_bands[coded_bands as usize] - m.e_bands[start as usize]);
-        let left = left - (m.e_bands[coded_bands as usize] - m.e_bands[start as usize]) * percoeff;
-        let rem = (left - (m.e_bands[j as usize] - m.e_bands[start as usize])).max(0);
-        let band_width = m.e_bands[coded_bands as usize] - m.e_bands[j as usize];
+        let percoeff = celt_sudiv(left, eb(m, coded_bands as usize) - eb(m, start as usize));
+        let left = left - (eb(m, coded_bands as usize) - eb(m, start as usize)) * percoeff;
+        let rem = (left - (eb(m, j as usize) - eb(m, start as usize))).max(0);
+        let band_width = eb(m, coded_bands as usize) - eb(m, j as usize);
         let mut band_bits = bits[j as usize] + percoeff * band_width + rem;
         if band_bits >= thresh[j as usize].max(alloc_floor + (1 << BITRES)) {
             if rd.dec_bit_logp(1) {
@@ -211,13 +219,7 @@ fn interp_bits2pulses(
     debug_assert!(coded_bands > start);
 
     // Code the intensity and dual stereo parameters.
-    let mut intensity;
-    if intensity_rsv > 0 {
-        intensity = start + rd.dec_uint((coded_bands + 1 - start) as u32) as i32;
-    }
-    else {
-        intensity = 0;
-    }
+    let intensity = if intensity_rsv > 0 { start + rd.dec_uint((coded_bands + 1 - start) as u32) as i32 } else { 0 };
     let mut dual_stereo_rsv = dual_stereo_rsv_in;
     if intensity <= start {
         total += dual_stereo_rsv;
@@ -227,13 +229,13 @@ fn interp_bits2pulses(
 
     // Allocate the remaining bits.
     let left = total - psum;
-    let percoeff = celt_sudiv(left, m.e_bands[coded_bands as usize] - m.e_bands[start as usize]);
-    let mut left = left - (m.e_bands[coded_bands as usize] - m.e_bands[start as usize]) * percoeff;
+    let percoeff = celt_sudiv(left, eb(m, coded_bands as usize) - eb(m, start as usize));
+    let mut left = left - (eb(m, coded_bands as usize) - eb(m, start as usize)) * percoeff;
     for j in start..coded_bands {
-        bits[j as usize] += percoeff * (m.e_bands[(j + 1) as usize] - m.e_bands[j as usize]);
+        bits[j as usize] += percoeff * (eb(m, (j + 1) as usize) - eb(m, j as usize));
     }
     for j in start..coded_bands {
-        let tmp = left.min(m.e_bands[(j + 1) as usize] - m.e_bands[j as usize]);
+        let tmp = left.min(eb(m, (j + 1) as usize) - eb(m, j as usize));
         bits[j as usize] += tmp;
         left -= tmp;
     }
@@ -242,7 +244,7 @@ fn interp_bits2pulses(
     let mut j = start;
     while j < coded_bands {
         let ji = j as usize;
-        let n0 = m.e_bands[ji + 1] - m.e_bands[ji];
+        let n0 = eb(m, ji + 1) - eb(m, ji);
         let n = n0 << lm;
         let bit = bits[ji] + balance;
 
@@ -275,7 +277,7 @@ fn interp_bits2pulses(
 
             bits[ji] -= (channels * eb) << BITRES;
             if excess > 0 {
-                let extra_fine = (excess >> (stereo as i32 + BITRES)).min(MAX_FINE_BITS - ebits[ji]);
+                let extra_fine = (excess >> (stereo as i32 + BITRES as i32)).min(MAX_FINE_BITS - ebits[ji]);
                 ebits[ji] += extra_fine;
                 let extra_bits = (extra_fine * channels) << BITRES;
                 fine_priority[ji] = (extra_bits >= excess - balance) as i32;
@@ -348,7 +350,7 @@ pub fn clt_compute_allocation(
 
     for j in start..end {
         let ji = j as usize;
-        let width = mode.e_bands[ji + 1] - mode.e_bands[ji];
+        let width = eb(mode, ji + 1) - eb(mode, ji);
         thresh[ji] = (channels << BITRES).max((3 * width << lm << BITRES) >> 4);
         trim_offset[ji] = channels * width * (alloc_trim - 5 - lm) * (end - j - 1) * (1 << (lm + BITRES as i32)) >> 6;
         if width << lm == 1 {
@@ -365,7 +367,7 @@ pub fn clt_compute_allocation(
         let mid = (lo + hi) >> 1;
         for j in (start..end).rev() {
             let ji = j as usize;
-            let n = mode.e_bands[ji + 1] - mode.e_bands[ji];
+            let n = eb(mode, ji + 1) - eb(mode, ji);
             let mut bitsj = (channels * n * mode.alloc_vectors[(mid * len + j) as usize] as i32) << lm >> 2;
             if bitsj > 0 {
                 bitsj = 0.max(bitsj + trim_offset[ji]);
@@ -394,7 +396,7 @@ pub fn clt_compute_allocation(
 
     for j in start..end {
         let ji = j as usize;
-        let n = mode.e_bands[ji + 1] - mode.e_bands[ji];
+        let n = eb(mode, ji + 1) - eb(mode, ji);
         let mut bits1j = (channels * n * mode.alloc_vectors[(lo * len + j) as usize] as i32) << lm >> 2;
         let mut bits2j = if hi >= nb_alloc_vectors {
             caps[ji]
@@ -446,4 +448,108 @@ pub fn clt_compute_allocation(
     );
 
     Allocation { pulses, fine_energy_bits: ebits, fine_priority, intensity, dual_stereo, balance, coded_bands }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::celt::modes::MODE_48000_960;
+    use crate::range::RangeDecoder;
+
+    /// `get_pulses` must be non-decreasing and `get_pulses(0) == 0` (`celt/rate.h`'s pseudo-log
+    /// pulse-count table; `bits2pulses`'s binary search over `cache[]` relies on monotonicity).
+    #[test]
+    fn get_pulses_is_monotonic() {
+        assert_eq!(get_pulses(0), 0);
+        let mut prev = get_pulses(0);
+        for i in 1..=40 {
+            let v = get_pulses(i);
+            assert!(v >= prev, "get_pulses({i})={v} < get_pulses({})={prev}", i - 1);
+            prev = v;
+        }
+    }
+
+    /// `bits2pulses` picks whichever of its two bracketing cache entries is *nearest* to
+    /// `bits` (it can round up over budget — `quant_partition`'s no-split case, `bands.rs`,
+    /// compensates with a decrement-until-it-fits loop). Check that pattern converges to a
+    /// pulse count whose cost fits within budget (or `q == 0`, cost `0`), for every real
+    /// band/LM of the static mode — this is the actual invariant the decoder relies on.
+    #[test]
+    fn bits2pulses_decrement_loop_fits_budget() {
+        let m = &MODE_48000_960;
+        for lm in 0..=m.max_lm {
+            for band in 0..m.nb_ebands {
+                for bits in [0, 1, 8, 16, 64, 128, 512, 2000] {
+                    let mut q = bits2pulses(m, band, lm, bits);
+                    let mut cost = pulses2bits(m, band, lm, q);
+                    while cost > bits && q > 0 {
+                        q -= 1;
+                        cost = pulses2bits(m, band, lm, q);
+                    }
+                    assert!(cost <= bits.max(0), "band={band} lm={lm} bits={bits}: q={q} cost={cost}");
+                    assert!(q >= 0);
+                }
+            }
+        }
+    }
+
+    /// Builds a permissive `caps` array (`init_caps`'s decode-only consumer, owned by
+    /// "CeltSynthesis"'s `celt.rs`, isn't available here) generous enough that `clt_compute_
+    /// allocation`'s cap-clamping never binds, so these tests exercise the core bisection/
+    /// `interp_bits2pulses` logic in isolation.
+    fn loose_caps(m: &CeltMode, lm: i32, channels: i32) -> Vec<i32> {
+        (0..m.nb_ebands)
+            .map(|j| {
+                let width = (m.e_bands[(j + 1) as usize] - m.e_bands[j as usize]) as i32;
+                channels * width * 8 * (1 << lm)
+            })
+            .collect()
+    }
+
+    /// `clt_compute_allocation` must return a self-consistent allocation: `pulses[i] >= 0`,
+    /// `coded_bands` within `(start, end]`, `intensity` within `[start, coded_bands]`, and
+    /// `fine_energy_bits` within `[0, MAX_FINE_BITS]`, for a range of `total_bits` budgets and
+    /// both mono/stereo, decoding the skip/intensity/dual-stereo bits from real (arbitrary, but
+    /// valid-range-coded) packet bytes.
+    #[test]
+    fn clt_compute_allocation_invariants() {
+        let m = &MODE_48000_960;
+        let start = 0;
+        let end = m.nb_ebands;
+        let offsets = vec![0i32; m.nb_ebands as usize];
+        for lm in 0..=m.max_lm {
+            for channels in [1, 2] {
+                let caps = loose_caps(m, lm, channels);
+                for total_bits in [0, 100, 800, 3200, 8000, 20000] {
+                    // Exercise a few different (arbitrary) byte payloads: `clt_compute_
+                    // allocation` only needs *some* valid range-coded stream to pull its
+                    // skip/intensity/dual-stereo bits from.
+                    for seed in [0u8, 0x5A, 0xFF] {
+                        let data = vec![seed; 64];
+                        let mut rd = RangeDecoder::new(&data);
+                        let alloc =
+                            clt_compute_allocation(m, start, end, &offsets, &caps, 5, total_bits, lm, channels, &mut rd);
+
+                        assert!(alloc.coded_bands > start && alloc.coded_bands <= end, "coded_bands={}", alloc.coded_bands);
+                        assert!(
+                            alloc.intensity >= start && alloc.intensity <= alloc.coded_bands,
+                            "intensity={} coded_bands={}",
+                            alloc.intensity,
+                            alloc.coded_bands
+                        );
+                        assert_eq!(alloc.pulses.len(), m.nb_ebands as usize);
+                        for j in 0..m.nb_ebands {
+                            let ji = j as usize;
+                            assert!(alloc.pulses[ji] >= 0, "pulses[{j}]={} < 0", alloc.pulses[ji]);
+                            assert!(
+                                alloc.fine_energy_bits[ji] >= 0 && alloc.fine_energy_bits[ji] <= MAX_FINE_BITS,
+                                "fine_energy_bits[{j}]={}",
+                                alloc.fine_energy_bits[ji]
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
