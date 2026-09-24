@@ -129,10 +129,17 @@ pub fn haar1(x: &mut [f32], n0: i32, stride: i32) {
 const ORDERY_TABLE: [i32; 30] =
     [1, 0, 3, 0, 2, 1, 7, 0, 4, 3, 6, 1, 5, 2, 15, 0, 8, 7, 12, 3, 11, 4, 14, 1, 9, 6, 13, 2, 10, 5];
 
+/// The largest possible `n0*stride` for [`deinterleave_hadamard`]/[`interleave_hadamard`]: a
+/// band's total sample count can never exceed a full frame (`shortMdctSize << maxLM` for the
+/// single built-in 48 kHz mode this crate supports -- see crate docs), so a fixed-size stack
+/// buffer here avoids a per-band heap allocation without any dynamic sizing.
+const MAX_INTERLEAVE_N: usize = 960;
+
 /// C: `deinterleave_hadamard`.
 pub fn deinterleave_hadamard(x: &mut [f32], n0: i32, stride: i32, hadamard: bool) {
     let n = (n0 * stride) as usize;
-    let mut tmp = vec![0.0f32; n];
+    let mut tmp = [0.0f32; MAX_INTERLEAVE_N];
+    let tmp = &mut tmp[..n];
     if hadamard {
         let ordery = &ORDERY_TABLE[(stride - 2) as usize..];
         for i in 0..stride {
@@ -148,13 +155,14 @@ pub fn deinterleave_hadamard(x: &mut [f32], n0: i32, stride: i32, hadamard: bool
             }
         }
     }
-    x[..n].copy_from_slice(&tmp);
+    x[..n].copy_from_slice(tmp);
 }
 
 /// C: `interleave_hadamard`.
 pub fn interleave_hadamard(x: &mut [f32], n0: i32, stride: i32, hadamard: bool) {
     let n = (n0 * stride) as usize;
-    let mut tmp = vec![0.0f32; n];
+    let mut tmp = [0.0f32; MAX_INTERLEAVE_N];
+    let tmp = &mut tmp[..n];
     if hadamard {
         let ordery = &ORDERY_TABLE[(stride - 2) as usize..];
         for i in 0..stride {
@@ -170,7 +178,7 @@ pub fn interleave_hadamard(x: &mut [f32], n0: i32, stride: i32, hadamard: bool) 
             }
         }
     }
-    x[..n].copy_from_slice(&tmp);
+    x[..n].copy_from_slice(tmp);
 }
 
 /// C: `compute_qn`.
@@ -787,13 +795,24 @@ pub fn quant_all_bands(
     let c_chan: i32 = if y.is_some() { 2 } else { 1 };
     let total_norm_len = (mshift * e_bands[(nb_ebands - 1) as usize] as i32 - norm_offset).max(0);
 
-    let mut norm = vec![0f32; total_norm_len as usize];
-    let mut norm2 = if c_chan == 2 { vec![0f32; total_norm_len as usize] } else { Vec::new() };
-    let mut lowband_scratch = vec![0f32; (mode.short_mdct_size << mode.max_lm) as usize];
+    // `total_norm_len`/`lowband_scratch`/`lowband_copy` are all bounded by a single frame's
+    // worth of samples for the one built-in 48 kHz mode this crate supports (`shortMdctSize <<
+    // maxLM == 960`; `total_norm_len <= mshift * eBands[nbEBands-1] <= 8*78 == 624`) -- fixed-size
+    // stack scratch avoids a heap allocation on every `quant_all_bands` call (once per CELT
+    // frame) with no dynamic sizing needed.
+    debug_assert!(total_norm_len as usize <= MAX_INTERLEAVE_N);
+    let mut norm_buf = [0f32; MAX_INTERLEAVE_N];
+    let norm = &mut norm_buf[..total_norm_len as usize];
+    let mut norm2_buf = [0f32; MAX_INTERLEAVE_N];
+    let norm2: &mut [f32] = if c_chan == 2 { &mut norm2_buf[..total_norm_len as usize] } else { &mut [] };
+    let mut lowband_scratch_buf = [0f32; MAX_INTERLEAVE_N];
+    let lowband_scratch_len = (mode.short_mdct_size << mode.max_lm) as usize;
+    let lowband_scratch = &mut lowband_scratch_buf[..lowband_scratch_len];
     // The folding source `norm[effective_lowband..][..N]` may overlap the current band's output
     // region (e.g. in hybrid mode, where coding starts at band 17). libopus reads the whole source
     // before writing the output, so copying it out first is equivalent.
-    let mut lowband_copy = vec![0f32; (mode.short_mdct_size << mode.max_lm) as usize];
+    let mut lowband_copy_buf = [0f32; MAX_INTERLEAVE_N];
+    let lowband_copy = &mut lowband_copy_buf[..lowband_scratch_len];
 
     let mut lowband_offset = 0i32;
     let mut update_lowband = true;
@@ -836,7 +855,7 @@ pub fn quant_all_bands(
         }
         if i == start + 1 {
             let norm2_opt = if c_chan == 2 { Some(&mut norm2[..]) } else { None };
-            special_hybrid_folding(mode, &mut norm, norm2_opt, start, mshift, dual_stereo);
+            special_hybrid_folding(mode, norm, norm2_opt, start, mshift, dual_stereo);
         }
 
         let tf_change = tf_res[i as usize];
@@ -904,7 +923,7 @@ pub fn quant_all_bands(
             };
             let (_, norm_hi) = norm.split_at_mut(split_point);
             let lowband_dst = if !last { Some(&mut norm_hi[..n as usize]) } else { None };
-            let xc = quant_band(&mut ctx, x_band, n, b / 2, b_blocks, lowband_src, lm, lowband_dst, NORM_SCALING, &mut lowband_scratch, x_cm0 as i32);
+            let xc = quant_band(&mut ctx, x_band, n, b / 2, b_blocks, lowband_src, lm, lowband_dst, NORM_SCALING, lowband_scratch, x_cm0 as i32);
 
             let lowband_src2 = if effective_lowband != -1 {
                 let el = effective_lowband as usize;
@@ -916,7 +935,7 @@ pub fn quant_all_bands(
             };
             let (_, norm2_hi) = norm2.split_at_mut(split_point);
             let lowband_dst2 = if !last { Some(&mut norm2_hi[..n as usize]) } else { None };
-            let yc = quant_band(&mut ctx, y_band, n, b / 2, b_blocks, lowband_src2, lm, lowband_dst2, NORM_SCALING, &mut lowband_scratch, y_cm0 as i32);
+            let yc = quant_band(&mut ctx, y_band, n, b / 2, b_blocks, lowband_src2, lm, lowband_dst2, NORM_SCALING, lowband_scratch, y_cm0 as i32);
 
             x_cm = xc;
             y_cm = yc;
@@ -946,13 +965,13 @@ pub fn quant_all_bands(
                     lowband_src,
                     lm,
                     lowband_dst,
-                    &mut lowband_scratch,
+                    lowband_scratch,
                     (x_cm0 | y_cm0) as i32,
                 );
                 x_cm = cm;
             }
             else {
-                x_cm = quant_band(&mut ctx, x_band, n, b, b_blocks, lowband_src, lm, lowband_dst, NORM_SCALING, &mut lowband_scratch, (x_cm0 | y_cm0) as i32);
+                x_cm = quant_band(&mut ctx, x_band, n, b, b_blocks, lowband_src, lm, lowband_dst, NORM_SCALING, lowband_scratch, (x_cm0 | y_cm0) as i32);
             }
             y_cm = x_cm;
         }

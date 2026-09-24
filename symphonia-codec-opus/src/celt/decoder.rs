@@ -283,13 +283,20 @@ impl CeltDecoder {
         let stride = self.decode_mem_stride();
         let downsample = self.downsample;
 
-        let mut freq = vec![0f32; n];
-        let mut freq2 = vec![0f32; n];
+        // `n` is bounded by a full frame's worth of samples for the single built-in 48 kHz mode
+        // this crate supports (see crate docs) -- fixed-size stack scratch avoids 2 heap
+        // allocations on every call (once per CELT frame decode).
+        const MAX_N: usize = 960;
+        debug_assert!(n <= MAX_N);
+        let mut freq_buf = [0f32; MAX_N];
+        let freq = &mut freq_buf[..n];
+        let mut freq2_buf = [0f32; MAX_N];
+        let freq2 = &mut freq2_buf[..n];
 
         if cc == 2 && c == 1 {
             // Copying a mono stream to two channels.
-            bands::denormalise_bands(mode, x, &mut freq, &self.old_e_bands, start, eff_end, m, downsample, silence);
-            freq2.copy_from_slice(&freq);
+            bands::denormalise_bands(mode, x, &mut freq[..], &self.old_e_bands, start, eff_end, m, downsample, silence);
+            freq2.copy_from_slice(&freq[..]);
             let (chan0, chan1) = self.decode_mem.split_at_mut(stride);
             let out0 = &mut chan0[DECODE_BUFFER_SIZE - n..];
             let out1 = &mut chan1[DECODE_BUFFER_SIZE - n..];
@@ -316,11 +323,11 @@ impl CeltDecoder {
         }
         else if cc == 1 && c == 2 {
             // Downmixing a stereo stream to mono.
-            bands::denormalise_bands(mode, x, &mut freq, &self.old_e_bands, start, eff_end, m, downsample, silence);
+            bands::denormalise_bands(mode, x, &mut freq[..], &self.old_e_bands, start, eff_end, m, downsample, silence);
             bands::denormalise_bands(
                 mode,
                 &x[n..],
-                &mut freq2,
+                &mut freq2[..],
                 &self.old_e_bands[nb_ebands..],
                 start,
                 eff_end,
@@ -349,7 +356,7 @@ impl CeltDecoder {
                 bands::denormalise_bands(
                     mode,
                     &x[ch * n..],
-                    &mut freq,
+                    &mut freq[..],
                     &self.old_e_bands[ch * nb_ebands..],
                     start,
                     eff_end,
@@ -794,16 +801,27 @@ impl CeltDecoder {
 
         quant_bands::unquant_coarse_energy(mode, start, end, &mut self.old_e_bands, intra_ener, rd, c, lm, len * 8);
 
-        let mut tf_res = vec![0i32; nb_ebands];
-        Self::tf_decode(start, end, is_transient, &mut tf_res, lm, rd, total_bits);
+        // `nb_ebands` (21), `c*nb_ebands` (<=42), and `c*n`/`n` (<=2*960/960) are all bounded
+        // compile-time constants for the single built-in 48 kHz mode this crate supports (see
+        // crate docs) -- fixed-size stack scratch avoids 7 heap allocations on every CELT frame
+        // decode (this function runs once per frame) with no dynamic sizing needed.
+        const MAX_NB_EBANDS: usize = 21;
+        const MAX_N: usize = 960;
+        debug_assert!(nb_ebands <= MAX_NB_EBANDS);
+        debug_assert!((c * n) as usize <= 2 * MAX_N);
+        let mut tf_res_buf = [0i32; MAX_NB_EBANDS];
+        let tf_res = &mut tf_res_buf[..nb_ebands];
+        Self::tf_decode(start, end, is_transient, tf_res, lm, rd, total_bits);
 
         tell = rd.tell();
         let spread_decision = if tell + 4 <= total_bits { rd.dec_icdf(&SPREAD_ICDF, 5) } else { SPREAD_NORMAL };
 
-        let mut cap = vec![0i32; nb_ebands];
-        celt::init_caps(mode, &mut cap, lm, c);
+        let mut cap_buf = [0i32; MAX_NB_EBANDS];
+        let cap = &mut cap_buf[..nb_ebands];
+        celt::init_caps(mode, cap, lm, c);
 
-        let mut offsets = vec![0i32; nb_ebands];
+        let mut offsets_buf = [0i32; MAX_NB_EBANDS];
+        let offsets = &mut offsets_buf[..nb_ebands];
         let mut dynalloc_logp = 6i32;
         total_bits <<= BITRES;
         let mut tell_frac = rd.tell_frac() as i32;
@@ -835,9 +853,17 @@ impl CeltDecoder {
         let anti_collapse_rsv = if is_transient && lm >= 2 && bits >= ((lm + 2) << BITRES) { 1 << BITRES } else { 0 };
         bits -= anti_collapse_rsv;
 
-        let alloc = rate::clt_compute_allocation(mode, start, end, &offsets, &cap, alloc_trim, bits, lm, c, rd);
+        let mut pulses_buf = [0i32; MAX_NB_EBANDS];
+        let mut fine_energy_bits_buf = [0i32; MAX_NB_EBANDS];
+        let mut fine_priority_buf = [0i32; MAX_NB_EBANDS];
+        let pulses = &mut pulses_buf[..nb_ebands];
+        let fine_energy_bits = &mut fine_energy_bits_buf[..nb_ebands];
+        let fine_priority = &mut fine_priority_buf[..nb_ebands];
+        let alloc = rate::clt_compute_allocation(
+            mode, start, end, offsets, cap, alloc_trim, bits, lm, c, rd, pulses, fine_energy_bits, fine_priority,
+        );
 
-        quant_bands::unquant_fine_energy(mode, start, end, &mut self.old_e_bands, &alloc.fine_energy_bits, rd, c);
+        quant_bands::unquant_fine_energy(mode, start, end, &mut self.old_e_bands, fine_energy_bits, rd, c);
 
         let stride = self.decode_mem_stride();
         for ch in 0..cc as usize {
@@ -845,8 +871,10 @@ impl CeltDecoder {
             self.decode_mem.copy_within(base + n as usize..base + stride, base);
         }
 
-        let mut collapse_masks = vec![0u8; (c * mode.nb_ebands) as usize];
-        let mut x = vec![0f32; (c * n) as usize];
+        let mut collapse_masks_buf = [0u8; 2 * MAX_NB_EBANDS];
+        let collapse_masks = &mut collapse_masks_buf[..(c * mode.nb_ebands) as usize];
+        let mut x_buf = [0f32; 2 * MAX_N];
+        let x = &mut x_buf[..(c * n) as usize];
         {
             let (x0, y) = if c == 2 {
                 let (a, b) = x.split_at_mut(n as usize);
@@ -861,13 +889,13 @@ impl CeltDecoder {
                 end,
                 x0,
                 y,
-                &mut collapse_masks,
-                &alloc.pulses,
+                &mut collapse_masks[..],
+                pulses,
                 is_transient,
                 spread_decision,
                 alloc.dual_stereo,
                 alloc.intensity,
-                &tf_res,
+                tf_res,
                 len * (8 << BITRES) - anti_collapse_rsv,
                 alloc.balance,
                 rd,
@@ -885,8 +913,8 @@ impl CeltDecoder {
             start,
             end,
             &mut self.old_e_bands,
-            &alloc.fine_energy_bits,
-            &alloc.fine_priority,
+            fine_energy_bits,
+            fine_priority,
             len * 8 - rd.tell(),
             rd,
             c,
@@ -895,8 +923,8 @@ impl CeltDecoder {
         if anti_collapse_on {
             bands::anti_collapse(
                 mode,
-                &mut x,
-                &collapse_masks,
+                x,
+                &collapse_masks[..],
                 lm,
                 c,
                 n,
@@ -905,7 +933,7 @@ impl CeltDecoder {
                 &self.old_e_bands,
                 &self.old_log_e,
                 &self.old_log_e2,
-                &alloc.pulses,
+                pulses,
                 self.rng,
             );
         }
@@ -920,7 +948,7 @@ impl CeltDecoder {
             self.prefilter_and_fold(n);
         }
 
-        self.celt_synthesis(&x, start, eff_end, c, cc, is_transient, lm, silence);
+        self.celt_synthesis(x, start, eff_end, c, cc, is_transient, lm, silence);
 
         for ch in 0..cc as usize {
             self.postfilter_period = self.postfilter_period.max(celt::COMBFILTER_MINPERIOD);

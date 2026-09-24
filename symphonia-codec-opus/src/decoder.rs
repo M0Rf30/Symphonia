@@ -402,11 +402,17 @@ impl OpusDecoder {
                 || (mode != Mode::Celt && self.prev_mode == Mode::Celt));
         let mut transition = transition_early;
 
-        let mut pcm_transition: Vec<f32> = Vec::new();
+        // `pcm_transition`/`pcm_silk`/`redundant_audio` below are all bounded by the largest
+        // supported sample rate (48 kHz) and 2 channels, regardless of *this* decoder instance's
+        // configured rate -- fixed-size stack scratch avoids a heap allocation on every
+        // transition/SILK/redundant-frame packet without any per-instance sizing.
+        const MAX_F5_CH: usize = 480; // (48000/200) * 2
+        let pcm_transition_len = f5 * ch;
+        debug_assert!(pcm_transition_len <= MAX_F5_CH);
+        let mut pcm_transition_buf = [0f32; MAX_F5_CH];
         if transition && mode == Mode::Celt {
-            pcm_transition = vec![0f32; f5 * ch];
             let chunk = f5.min(audiosize);
-            let _ = self.decode_frame(None, &mut pcm_transition, chunk, false);
+            let _ = self.decode_frame(None, &mut pcm_transition_buf[..pcm_transition_len], chunk, false);
         }
 
         if audiosize > frame_size {
@@ -417,7 +423,11 @@ impl OpusDecoder {
         // SILK processing: decodes into a separate int16 buffer, mixed into `pcm` *after* CELT
         // (which, for Hybrid, overwrites `pcm` directly via deemphasis -- SILK's contribution
         // must not be clobbered by that).
-        let mut pcm_silk: Vec<i16> = Vec::new();
+        const MAX_PCM_SILK: usize = 11520; // (48000/25*3) * 2
+        let mut pcm_silk_buf = [0i16; MAX_PCM_SILK];
+        let pcm_silk_len = frame_size.max(f10) * ch;
+        debug_assert!(pcm_silk_len <= MAX_PCM_SILK);
+        let pcm_silk = &mut pcm_silk_buf[..pcm_silk_len];
         if mode != Mode::Celt {
             if self.prev_mode == Mode::Celt {
                 self.silk.reset();
@@ -449,7 +459,7 @@ impl OpusDecoder {
                 DecodeFlag::Normal
             };
 
-            pcm_silk = vec![0i16; frame_size.max(f10) * ch];
+            debug_assert!(pcm_silk_len == frame_size.max(f10) * ch);
             let mut decoded_samples = 0usize;
             loop {
                 let first_frame = decoded_samples == 0;
@@ -528,9 +538,8 @@ impl OpusDecoder {
         }
 
         if transition && mode != Mode::Celt {
-            pcm_transition = vec![0f32; f5 * ch];
             let chunk = f5.min(audiosize);
-            let _ = self.decode_frame(None, &mut pcm_transition, chunk, false);
+            let _ = self.decode_frame(None, &mut pcm_transition_buf[..pcm_transition_len], chunk, false);
         }
 
         if let Some(bw) = bandwidth {
@@ -544,7 +553,9 @@ impl OpusDecoder {
         }
         self.celt.set_channels(self.stream_channels as i32);
 
-        let mut redundant_audio: Vec<f32> = if redundancy { vec![0f32; f5 * ch] } else { Vec::new() };
+        let mut redundant_audio_buf = [0f32; MAX_F5_CH];
+        let redundant_audio_len = if redundancy { f5 * ch } else { 0 };
+        let redundant_audio = &mut redundant_audio_buf[..redundant_audio_len];
         let mut redundant_rng: u32 = 0;
 
         // 5 ms redundant frame for CELT->SILK.
@@ -552,7 +563,7 @@ impl OpusDecoder {
             self.celt.set_start_band(0);
             let start = len as usize;
             let redund = &data.unwrap()[start..start + redundancy_bytes as usize];
-            let _ = self.celt.decode_with_ec(Some(redund), &mut redundant_audio, f5 as i32, None, false);
+            let _ = self.celt.decode_with_ec(Some(redund), redundant_audio, f5 as i32, None, false);
             redundant_rng = self.celt.final_range();
         }
 
@@ -598,7 +609,7 @@ impl OpusDecoder {
             self.celt.set_start_band(0);
             let start = len as usize;
             let redund = &data.unwrap()[start..start + redundancy_bytes as usize];
-            let _ = self.celt.decode_with_ec(Some(redund), &mut redundant_audio, f5 as i32, None, false);
+            let _ = self.celt.decode_with_ec(Some(redund), redundant_audio, f5 as i32, None, false);
             redundant_rng = self.celt.final_range();
             let off = ch * (frame_size - f2_5);
             let roff = ch * f2_5;
@@ -616,12 +627,12 @@ impl OpusDecoder {
         }
         if transition {
             if audiosize >= f5 {
-                pcm[..ch * f2_5].copy_from_slice(&pcm_transition[..ch * f2_5]);
+                pcm[..ch * f2_5].copy_from_slice(&pcm_transition_buf[..ch * f2_5]);
                 let off = ch * f2_5;
-                smooth_fade(&mut pcm[off..off + ch * f2_5], &pcm_transition[off..off + ch * f2_5], FadeOther::In1, f2_5, ch, window, fs_u32);
+                smooth_fade(&mut pcm[off..off + ch * f2_5], &pcm_transition_buf[off..off + ch * f2_5], FadeOther::In1, f2_5, ch, window, fs_u32);
             }
             else {
-                smooth_fade(&mut pcm[..ch * f2_5], &pcm_transition[..ch * f2_5], FadeOther::In1, f2_5, ch, window, fs_u32);
+                smooth_fade(&mut pcm[..ch * f2_5], &pcm_transition_buf[..ch * f2_5], FadeOther::In1, f2_5, ch, window, fs_u32);
             }
         }
 
