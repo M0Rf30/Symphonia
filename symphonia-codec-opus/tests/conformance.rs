@@ -1,18 +1,21 @@
-// RFC 8251 conformance harness for the Opus decoder.
+// RFC 8251 conformance harness for the full (SILK + Hybrid + CELT) Opus decoder, mirroring the
+// official protocol in libopus `tests/run_vectors.sh` / `src/opus_demo.c` exactly:
+//   - `opus_demo -d <rate> <channels> testvectorNN.bit tmp.out` decodes with a huge output
+//     capacity per call (`max_frame_size = 2*48000`, i.e. effectively "as much as the packet
+//     produces"); lost packets are decoded with `data = NULL` and `frame_size =
+//     OPUS_GET_LAST_PACKET_DURATION` (mirrored here via `OpusDecoder::last_packet_duration`).
+//   - `opus_compare [-s] testvectorNN[m].dec tmp.out` PASSES if either the `.dec` or `m.dec`
+//     reference matches (both are full-rate stereo references; the mono comparison downmixes
+//     via `.5*(L+R)` per `opus_compare.c`'s `main()`, matching `tests/silk_vectors.rs`).
 //
-// Run with (once the decoder is implemented in a later wave):
+// Run with:
 //   OPUS_TESTVECTORS=/home/gianluca/M0Rf30/wt/ref/opus_newvectors \
-//     cargo test -p symphonia-codec-opus --release -- --ignored
-//
-// Wave 0 leaves the actual decode tests `#[ignore]`d (they call into `todo!()` decoder methods
-// and would panic); they exist so wave 2 has a stable acceptance target. The mode/bandwidth
-// survey test (`survey_test_vectors`) is NOT ignored: it exercises only `crate::packet` (fully
-// implemented in wave 0) and is useful for wave-1 SILK/CELT agents to pick vectors that isolate
-// specific coding modes.
+//     cargo test -p symphonia-codec-opus --release --test conformance -- --ignored --nocapture
 
 mod common;
 
 use common::opus_demo::BitFile;
+use symphonia_codec_opus::decoder::{OpusDecoder, SampleRate};
 use symphonia_codec_opus::packet::{self, OpusMode};
 
 fn testvectors_dir() -> Option<std::path::PathBuf> {
@@ -30,9 +33,24 @@ fn read_dec_as_f32(path: &std::path::Path, channels: usize) -> Vec<f32> {
     samples
 }
 
+/// C: `opus_compare.c` `main()`'s reference downmix (`x[xi]=.5*(x[2*xi]+x[2*xi+1])`), used when
+/// comparing a mono-API decode against a stereo `.dec`/`m.dec` reference.
+fn downmix_to_mono(stereo: &[f32]) -> Vec<f32> {
+    stereo.chunks_exact(2).map(|c| 0.5 * (c[0] + c[1])).collect()
+}
+
+/// C: `FLOAT2INT16` (`opus_decode`'s int16-API wrapper around the float decode path, which is
+/// what `opus_demo -d`/`opus_compare` actually compare against -- `.dec` references are raw
+/// int16 PCM, NOT the ±1.0-range float API this crate's [`OpusDecoder::decode`] returns per the
+/// assignment's float-API contract). Rescales and appends `samples` (±1.0 range) onto `out` in
+/// int16 scale, matching libopus's `(short)FLOAT2INT(SATURATE(x*32768, 32767))`.
+fn push_as_int16_scale(out: &mut Vec<f32>, samples: &[f32]) {
+    out.extend(samples.iter().map(|&x| (x * 32768.0).round().clamp(-32768.0, 32767.0)));
+}
+
 /// Walks a vector's packets and reports, per packet, the TOC-derived mode/bandwidth/frame
 /// count/size and stereo flag — a debugging aid for wave-1 agents choosing vectors that isolate
-/// SILK-only, Hybrid, or CELT-only decoding, or specific bandwidths.
+/// specific coding modes.
 fn survey(bit_path: &std::path::Path) -> String {
     let data = std::fs::read(bit_path).unwrap();
     let bitfile = BitFile::parse(&data);
@@ -103,39 +121,57 @@ fn survey_test_vectors() {
     }
 }
 
-/// Decodes an entire `.bit` vector at the given channel count through the (future) single-stream
-/// decoder API, returning interleaved `i16`-range `f32` PCM plus the count of packets whose
-/// decoder final range mismatched the encoder's recorded final range (`enc_final_range`) — the
-/// standard RFC 8251 bit-exactness cross-check, independent of `opus_compare`'s perceptual
-/// metric.
-fn decode_vector(bit_path: &std::path::Path, channels: u8) -> (Vec<f32>, usize) {
-    use symphonia_codec_opus::decoder::{OpusDecoder, SampleRate};
+/// Per-vector decode result.
+struct VectorResult {
+    /// Interleaved i16-range f32 PCM at 48 kHz, `channels` per frame.
+    pcm: Vec<f32>,
+    /// Count of packets (lost or not) whose decoder final range mismatched the encoder's
+    /// recorded final range. Lost packets trivially match (both sides are 0 by convention: the
+    /// encoder's `enc_final_range` for a genuinely dropped packet isn't meaningful, so those are
+    /// excluded from the denominator entirely, matching `tests/silk_vectors.rs`'s convention).
+    range_mismatches: usize,
+    range_checked: usize,
+}
 
+/// Decodes an entire `.bit` vector at the given channel count through the full `OpusDecoder`,
+/// following the exact `opus_demo -d`/`run_vectors.sh` protocol: a large fixed output capacity
+/// per packet, PLC for lost packets sized from `last_packet_duration()`.
+fn decode_vector(bit_path: &std::path::Path, channels: u8) -> VectorResult {
     let data = std::fs::read(bit_path).unwrap();
     let bitfile = BitFile::parse(&data);
 
     let mut decoder = OpusDecoder::try_new(SampleRate::Hz48000, channels).unwrap();
     let mut pcm = Vec::new();
     let mut range_mismatches = 0usize;
+    let mut range_checked = 0usize;
+
+    // C: `opus_demo.c`'s `max_frame_size = 48000*2` (2 s) -- a generous fixed capacity used for
+    // every `opus_decode` call regardless of the actual packet duration.
+    const MAX_FRAME_SIZE: usize = 96_000;
 
     for pkt in bitfile.iter() {
-        let frame_size = 48000usize / 50; // Worst case; real code sizes from the TOC.
-        let mut out = vec![0f32; frame_size * channels as usize];
-        let data_opt = if pkt.lost { None } else { Some(pkt.payload.as_slice()) };
-        let n = decoder.decode(data_opt, &mut out, frame_size).unwrap();
-        pcm.extend_from_slice(&out[..n * channels as usize]);
-        if !pkt.lost && decoder.final_range() != pkt.enc_final_range {
-            range_mismatches += 1;
+        let mut out = vec![0f32; MAX_FRAME_SIZE * channels as usize];
+        if pkt.lost {
+            let frame_size = decoder.last_packet_duration().max(48000 / 100);
+            let n = decoder.decode(None, &mut out, frame_size).unwrap();
+            push_as_int16_scale(&mut pcm, &out[..n * channels as usize]);
+        }
+        else {
+            let n = decoder.decode(Some(&pkt.payload), &mut out, MAX_FRAME_SIZE).unwrap();
+            push_as_int16_scale(&mut pcm, &out[..n * channels as usize]);
+            range_checked += 1;
+            if decoder.final_range() != pkt.enc_final_range {
+                range_mismatches += 1;
+            }
         }
     }
 
-    (pcm, range_mismatches)
+    VectorResult { pcm, range_mismatches, range_checked }
 }
 
 macro_rules! conformance_test {
     ($name:ident, $index:expr) => {
         #[test]
-        #[ignore = "wave 2: requires OpusDecoder::decode to be implemented"]
         fn $name() {
             let Some(dir) = testvectors_dir()
             else {
@@ -144,19 +180,32 @@ macro_rules! conformance_test {
             };
             let bit_path = dir.join(format!("testvector{:02}.bit", $index));
 
-            // Stereo cross-check.
-            let (pcm, mismatches) = decode_vector(&bit_path, 2);
-            assert_eq!(mismatches, 0, "final range mismatches (stereo)");
+            // Mono: opus_compare (no -s); reference is ALWAYS full-rate stereo and gets
+            // downmixed by opus_compare.c's main() before comparing.
+            let mono = decode_vector(&bit_path, 1);
+            assert_eq!(
+                mono.range_mismatches, 0,
+                "final range mismatches (mono): {}/{}",
+                mono.range_mismatches, mono.range_checked
+            );
             let reference = read_dec_as_f32(&dir.join(format!("testvector{:02}.dec", $index)), 2);
-            let result = common::opus_compare::compare(&reference, &pcm, 2);
-            assert!(result.pass, "opus_compare FAILS (stereo): {result:?}");
+            let reference_m = read_dec_as_f32(&dir.join(format!("testvector{:02}m.dec", $index)), 2);
+            let ref_mono = downmix_to_mono(&reference);
+            let ref_mono_m = downmix_to_mono(&reference_m);
+            let r1 = common::opus_compare::compare(&ref_mono, &mono.pcm, 1);
+            let r2 = common::opus_compare::compare(&ref_mono_m, &mono.pcm, 1);
+            assert!(r1.pass || r2.pass, "opus_compare FAILS (mono) vs both refs: {r1:?} / {r2:?}");
 
-            // Mono cross-check.
-            let (pcm_m, mismatches_m) = decode_vector(&bit_path, 1);
-            assert_eq!(mismatches_m, 0, "final range mismatches (mono)");
-            let reference_m = read_dec_as_f32(&dir.join(format!("testvector{:02}m.dec", $index)), 1);
-            let result_m = common::opus_compare::compare(&reference_m, &pcm_m, 1);
-            assert!(result_m.pass, "opus_compare FAILS (mono): {result_m:?}");
+            // Stereo: opus_compare -s.
+            let stereo = decode_vector(&bit_path, 2);
+            assert_eq!(
+                stereo.range_mismatches, 0,
+                "final range mismatches (stereo): {}/{}",
+                stereo.range_mismatches, stereo.range_checked
+            );
+            let r1 = common::opus_compare::compare(&reference, &stereo.pcm, 2);
+            let r2 = common::opus_compare::compare(&reference_m, &stereo.pcm, 2);
+            assert!(r1.pass || r2.pass, "opus_compare FAILS (stereo) vs both refs: {r1:?} / {r2:?}");
         }
     };
 }
@@ -174,8 +223,8 @@ conformance_test!(vector10, 10);
 conformance_test!(vector11, 11);
 conformance_test!(vector12, 12);
 
-/// Validates the [`common::opus_compare`] port independent of the (unimplemented) decoder: a
-/// `.dec` file must compare equal to itself, and a mildly corrupted copy must fail.
+/// Validates the [`common::opus_compare`] port independent of the decoder: a `.dec` file must
+/// compare equal to itself, and a mildly corrupted copy must fail.
 #[test]
 fn opus_compare_self_test() {
     let Some(dir) = testvectors_dir()
@@ -207,5 +256,33 @@ fn opus_compare_self_test() {
     assert!(
         !corrupted_result.pass || corrupted_result.weighted_error > self_result.weighted_error,
         "corrupted signal must score worse than the self-comparison: {corrupted_result:?} vs {self_result:?}"
+    );
+}
+
+/// Release-mode decode-time measurement for a CELT-heavy stereo vector (step 5 of the
+/// assignment).
+#[test]
+#[ignore = "run explicitly with --release --ignored to measure x-realtime"]
+fn vector11_perf() {
+    let Some(dir) = testvectors_dir()
+    else {
+        eprintln!("OPUS_TESTVECTORS not set; skipping");
+        return;
+    };
+    let bit_path = dir.join("testvector11.bit");
+    let data = std::fs::read(&bit_path).unwrap();
+    let bitfile = BitFile::parse(&data);
+
+    let start = std::time::Instant::now();
+    let result = decode_vector(&bit_path, 2);
+    let elapsed = start.elapsed();
+
+    let audio_seconds = (result.pcm.len() as f64 / 2.0) / 48000.0;
+    println!(
+        "vector11: decoded {} packets ({:.3}s audio) in {:?} => {:.1}x realtime",
+        bitfile.len(),
+        audio_seconds,
+        elapsed,
+        audio_seconds / elapsed.as_secs_f64()
     );
 }
