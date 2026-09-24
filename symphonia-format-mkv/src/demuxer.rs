@@ -437,11 +437,11 @@ impl<'s> MkvReader<'s> {
                 _ => return seek_error(SeekErrorKind::Unseekable),
             };
 
-            // Convert the cue point's timestamp (Matroska ticks) into Segment ticks for the cluster
-            // state.
-            let timestamp = target_cue_point.time.into_segment_ticks(
-                self.media_info.time_base.expect("media info time base always populated"),
-            );
+            // The cue point's timestamp is already in Segment ticks (see `CuePointElement::time`'s
+            // own doc comment), unlike `codec_delay`/`seek_pre_roll` which are true nanoseconds --
+            // wrap it directly rather than running it back through `into_segment_ticks` (which
+            // expects nanoseconds and would massively under-scale an already-Segment-ticks value).
+            let timestamp = SegmentTicks::from(target_cue_point.time.get());
 
             // Update the current cluster metadata.
             self.current_cluster =
