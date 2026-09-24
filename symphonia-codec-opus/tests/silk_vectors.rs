@@ -30,6 +30,12 @@ fn read_dec_as_f32(path: &std::path::Path, channels: usize) -> Vec<f32> {
     samples
 }
 
+/// C: `opus_compare.c` `main()`'s reference downmix (`x[xi]=.5*(x[2*xi]+x[2*xi+1])`), used when
+/// comparing a mono-API decode against a stereo `.dec`/`m.dec` reference.
+fn downmix_to_mono(stereo: &[f32]) -> Vec<f32> {
+    stereo.chunks_exact(2).map(|c| 0.5 * (c[0] + c[1])).collect()
+}
+
 /// Per-vector decode result.
 struct VectorResult {
     /// Interleaved i16-range f32 PCM at 48 kHz, `channels` per frame.
@@ -66,7 +72,10 @@ fn decode_silk_vector(bit_path: &std::path::Path, channels: u8) -> VectorResult 
     let mut total_calls = 0usize;
     let mut zero_n_calls = 0usize;
 
+    let mut pkt_idx = 0usize;
+    let mut prev_was_non_silk = false;
     for pkt in bitfile.iter() {
+        pkt_idx += 1;
         if pkt.lost {
             // Packet Loss Concealment: reuse the last known framing (if any).
             let Some(cfg) = last_config
@@ -112,6 +121,7 @@ fn decode_silk_vector(bit_path: &std::path::Path, channels: u8) -> VectorResult 
             let payload = &pkt.payload[frame.offset..frame.offset + frame.len];
             if parsed.toc.mode() != OpusMode::SilkOnly {
                 non_silk_packets += 1;
+                prev_was_non_silk = true;
                 continue;
             }
 
@@ -156,7 +166,14 @@ fn decode_silk_vector(bit_path: &std::path::Path, channels: u8) -> VectorResult 
             silk_packets_checked += 1;
             if rd.range() != pkt.enc_final_range {
                 silk_range_mismatches += 1;
+                if std::env::var("SILK_DEBUG").is_ok() {
+                    eprintln!(
+                        "MISMATCH pkt_idx={pkt_idx} toc={:#04x} stereo={} bw={:?} ms={} prev_non_silk={}",
+                        parsed.toc.byte, parsed.toc.stereo(), parsed.toc.bandwidth(), payload_size_ms, prev_was_non_silk
+                    );
+                }
             }
+            prev_was_non_silk = false;
         }
     }
 
@@ -187,9 +204,14 @@ macro_rules! silk_vector_test {
                 stereo.silk_range_mismatches, stereo.silk_packets_checked
             );
             let reference = read_dec_as_f32(&dir.join(format!("testvector{:02}.dec", $index)), 2);
+            let reference_m = read_dec_as_f32(&dir.join(format!("testvector{:02}m.dec", $index)), 2);
             if stereo.non_silk_packets == 0 {
-                let result = opus_compare::compare(&reference, &stereo.pcm, 2);
-                assert!(result.pass, "opus_compare FAILS (stereo): {result:?}");
+                // Per libopus `tests/run_vectors.sh`: `opus_compare -s` against EITHER
+                // reference; pass if either succeeds (`m.dec` is an alternate valid reference
+                // decoding, not "mono" -- both `.dec`/`m.dec` are always full 48 kHz stereo).
+                let r1 = opus_compare::compare(&reference, &stereo.pcm, 2);
+                let r2 = opus_compare::compare(&reference_m, &stereo.pcm, 2);
+                assert!(r1.pass || r2.pass, "opus_compare FAILS (stereo) vs both refs: {r1:?} / {r2:?}");
             }
 
             let mono = decode_silk_vector(&bit_path, 1);
@@ -198,17 +220,15 @@ macro_rules! silk_vector_test {
                 "final range mismatches (mono): {}/{} SILK packets",
                 mono.silk_range_mismatches, mono.silk_packets_checked
             );
-            // NOTE: despite the name, `testvectorNNm.dec` is NOT raw mono PCM -- it is always
-            // exactly the same byte size as `testvectorNN.dec` (verified empirically across all
-            // 12 vectors). It stores the channels=1-API decode result with each sample
-            // duplicated to stereo (L=R=mono sample) for the same 48 kHz stereo `.dec` layout,
-            // so we compare it the same way (`channels=2`) against a locally-duplicated version
-            // of our mono decode.
-            let reference_m = read_dec_as_f32(&dir.join(format!("testvector{:02}m.dec", $index)), 2);
+            // Per libopus `opus_compare.c` `main()`: the reference file (`argv[1]`) is ALWAYS
+            // read as stereo; the mono comparison (no `-s`) downmixes it via `.5*(L+R)` before
+            // comparing against the real (half-length) mono-API decode output.
             if mono.non_silk_packets == 0 {
-                let mono_dup: Vec<f32> = mono.pcm.iter().flat_map(|&s| [s, s]).collect();
-                let result_m = opus_compare::compare(&reference_m, &mono_dup, 2);
-                assert!(result_m.pass, "opus_compare FAILS (mono, duplicated to stereo): {result_m:?}");
+                let ref_mono = downmix_to_mono(&reference);
+                let ref_mono_m = downmix_to_mono(&reference_m);
+                let r1 = opus_compare::compare(&ref_mono, &mono.pcm, 1);
+                let r2 = opus_compare::compare(&ref_mono_m, &mono.pcm, 1);
+                assert!(r1.pass || r2.pass, "opus_compare FAILS (mono) vs both refs: {r1:?} / {r2:?}");
             }
         }
     };
