@@ -196,6 +196,56 @@ impl GenericProbeMatch {
     }
 }
 
+/// A short-lived, read-only view of a format or metadata reader registered with a [`Probe`].
+///
+/// Returned by [`Probe::formats`].
+#[derive(Copy, Clone)]
+pub struct RegisteredFormat<'a> {
+    spec: &'a ProbeDataMatchSpec,
+    specific: &'a ProbeMatch,
+    tier: Tier,
+}
+
+/// Basic information about a registered reader, common to both format and metadata readers.
+#[derive(Copy, Clone)]
+pub enum RegisteredFormatInfo<'a> {
+    /// The reader is a container `FormatReader`.
+    Format(&'a FormatInfo),
+    /// The reader is a `MetadataReader`.
+    Metadata(&'a MetadataInfo),
+}
+
+impl<'a> RegisteredFormat<'a> {
+    /// Returns basic information describing the registered reader.
+    pub fn info(&self) -> RegisteredFormatInfo<'a> {
+        match self.specific {
+            ProbeMatch::Format { info, .. } => RegisteredFormatInfo::Format(info),
+            ProbeMatch::Metadata { info, .. } => RegisteredFormatInfo::Metadata(info),
+        }
+    }
+
+    /// Returns `true` if this registration is for a container `FormatReader`.
+    pub fn is_format(&self) -> bool {
+        matches!(self.specific, ProbeMatch::Format { .. })
+    }
+
+    /// Returns the case-insensitive file extensions generally used by this format.
+    pub fn extensions(&self) -> &'static [&'static str] {
+        self.spec.extensions
+    }
+
+    /// Returns the case-insensitive MIME types generally used by this format.
+    pub fn mime_types(&self) -> &'static [&'static str] {
+        self.spec.mime_types
+    }
+
+    /// Returns the registration tier (preferred, standard, or fallback) this reader was
+    /// registered at.
+    pub fn tier(&self) -> Tier {
+        self.tier
+    }
+}
+
 /// The result of a scoring operation.
 pub enum Score {
     /// The format is not supported.
@@ -635,6 +685,22 @@ impl Probe {
 
         Ok(None)
     }
+
+    /// Returns an allocation-free iterator over every format and metadata reader registered with
+    /// this `Probe`, across all registration tiers.
+    ///
+    /// The same reader may appear more than once if it was registered with multiple probe data
+    /// entries (e.g., separate entries for different marker sets), or if it was registered at
+    /// more than one tier. Callers that need a de-duplicated list should key on
+    /// [`RegisteredFormat::info`]'s `short_name`.
+    pub fn formats(&self) -> impl Iterator<Item = RegisteredFormat<'_>> {
+        self.preferred
+            .iter()
+            .map(|m| (Tier::Preferred, m))
+            .chain(self.standard.iter().map(|m| (Tier::Standard, m)))
+            .chain(self.fallback.iter().map(|m| (Tier::Fallback, m)))
+            .map(|(tier, m)| RegisteredFormat { spec: &m.spec, specific: &m.specific, tier })
+    }
 }
 
 fn read_and_append_metadata<'s>(
@@ -795,4 +861,99 @@ macro_rules! support_metadata {
             anchors: $anchors,
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::formats::{FormatId, Metadata, Packet, SeekMode, SeekTo, SeekedTo, Track};
+    use crate::meta::MetadataLog;
+
+    struct DummyFormatReader;
+
+    impl Scoreable for DummyFormatReader {
+        fn score(_src: ScopedStream<&mut MediaSourceStream<'_>>) -> Result<Score> {
+            Ok(Score::Supported(255))
+        }
+    }
+
+    const DUMMY_FORMAT_INFO: FormatInfo =
+        FormatInfo { format: FormatId(0x1234), short_name: "dummy", long_name: "Dummy Format" };
+
+    impl<'s> ProbeableFormat<'s> for DummyFormatReader {
+        fn try_probe_new(
+            _mss: MediaSourceStream<'s>,
+            _opts: FormatOptions,
+        ) -> Result<Box<dyn FormatReader + 's>> {
+            unimplemented!("not exercised by the enumeration test")
+        }
+
+        fn probe_data() -> &'static [ProbeFormatData] {
+            &[ProbeFormatData {
+                spec: ProbeDataMatchSpec {
+                    extensions: &["dmy"],
+                    mime_types: &["application/x-dummy"],
+                    markers: &[b"DMY1"],
+                },
+                info: DUMMY_FORMAT_INFO,
+            }]
+        }
+    }
+
+    impl FormatReader for DummyFormatReader {
+        fn format_info(&self) -> &FormatInfo {
+            &DUMMY_FORMAT_INFO
+        }
+
+        fn media_info(&self) -> &crate::formats::MediaInfo {
+            unimplemented!()
+        }
+
+        fn metadata(&mut self) -> Metadata<'_> {
+            unimplemented!()
+        }
+
+        fn seek(&mut self, _mode: SeekMode, _to: SeekTo) -> Result<SeekedTo> {
+            unimplemented!()
+        }
+
+        fn tracks(&self) -> &[Track] {
+            &[]
+        }
+
+        fn next_packet(&mut self) -> Result<Option<Packet>> {
+            unimplemented!()
+        }
+
+        fn into_inner<'s>(self: Box<Self>) -> MediaSourceStream<'s>
+        where
+            Self: 's,
+        {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn formats_enumerates_registered_readers() {
+        let mut probe = Probe::default();
+        probe.register_format::<DummyFormatReader>();
+
+        let found: Vec<_> = probe.formats().collect();
+        assert_eq!(found.len(), 1);
+
+        let reg = &found[0];
+        assert!(reg.is_format());
+        assert_eq!(reg.extensions(), &["dmy"]);
+        assert_eq!(reg.mime_types(), &["application/x-dummy"]);
+        assert!(matches!(reg.tier(), Tier::Standard));
+
+        match reg.info() {
+            RegisteredFormatInfo::Format(info) => assert_eq!(info.short_name, "dummy"),
+            RegisteredFormatInfo::Metadata(_) => panic!("expected a format registration"),
+        }
+    }
+
+    // Silence unused-import warnings for items only referenced through the dummy impl.
+    #[allow(dead_code)]
+    fn _assert_metadata_log_type(_: &MetadataLog) {}
 }
