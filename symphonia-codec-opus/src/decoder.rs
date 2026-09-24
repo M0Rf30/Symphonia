@@ -544,7 +544,9 @@ impl OpusDecoder {
             if mode != self.prev_mode && self.prev_mode != Mode::None && !self.prev_redundancy {
                 self.celt.reset();
             }
-            let celt_data = if decode_fec { None } else { data };
+            // C passes `len`, which excludes any trailing redundant frame; CELT derives its bit
+            // budget from it (`total_bits = len*8`).
+            let celt_data = if decode_fec { None } else { data.map(|d| &d[..len as usize]) };
             celt_ret = self.celt.decode_with_ec(celt_data, pcm, celt_frame_size as i32, Some(&mut dec), false);
         }
         else {
