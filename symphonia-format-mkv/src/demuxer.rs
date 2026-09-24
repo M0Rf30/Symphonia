@@ -27,7 +27,7 @@ use crate::schema::{MkvElement, MkvSchema};
 use crate::segment::{
     AttachmentsElement, BlockGroupElement, ChaptersElement, CuesElement, EbmlHeaderElement,
     InfoElement, MatroskaTicks, NonZeroMatroskaTicks, SeekHeadElement, SegmentTicks,
-    SignedTrackTicks, TagsElement, TargetTagsMap, TracksElement,
+    SignedTrackTicks, TagsElement, TargetTagsMap, TrackTicks, TracksElement,
 };
 
 const MKV_FORMAT_INFO: FormatInfo =
@@ -44,6 +44,19 @@ pub struct TrackState {
     pub(crate) track_time_base: TimeBase,
     /// The track's timestamp scale.
     pub(crate) track_timestamp_scale: f64,
+    /// The amount of lead-in (in Matroska ticks) a decoder needs to fully re-converge its
+    /// internal state after a random seek before the decoded output is usable (Matroska
+    /// `SeekPreRoll`). Mandatory for Opus per RFC 7845 section 4.6 (>= 80ms/3840 samples).
+    pub(crate) seek_pre_roll: MatroskaTicks,
+    /// The track's sample rate, if known (audio tracks only). Used to convert `codec_delay`
+    /// into an exact sample count for gapless trimming, bypassing the (millisecond-granularity)
+    /// Track tick domain.
+    sample_rate: Option<u32>,
+    /// The number of leading decoded samples still to be reported as `trim_start` to account
+    /// for `codec_delay` (mirrors `symphonia-format-ogg`'s Opus `pre_skip` discard tracking).
+    /// Reaches (and stays at) zero once the mandatory start trim has been fully accounted for;
+    /// never reset by a seek -- this only ever applies once, at the true start of the track.
+    remaining_codec_delay_samples: u64,
 }
 
 /// Matroska (MKV) and WebM demultiplexer.
@@ -286,6 +299,13 @@ impl<'s> MkvReader<'s> {
                 .scale(track.track_timestamp_scale)
                 .ok_or(Error::DecodeError("mkv: track timebase is invalid"))?;
 
+            // Extract the sample rate (if this is an audio track) before `track` is consumed by
+            // `make_track_codec_params` below, and use it to convert the mandatory `codec_delay`
+            // gapless-trim into an exact sample count up front.
+            let sample_rate = track.audio.as_ref().map(|audio| audio.sampling_frequency.round() as u32);
+            let remaining_codec_delay_samples =
+                sample_rate.map(|sr| track.codec_delay.into_samples(sr)).unwrap_or(0);
+
             // Create the track state.
             let state = TrackState {
                 // TODO: This should be 64-bit, but track IDs are 32-bit.
@@ -295,6 +315,9 @@ impl<'s> MkvReader<'s> {
                 codec_delay: track.codec_delay,
                 track_time_base,
                 track_timestamp_scale: track.track_timestamp_scale,
+                seek_pre_roll: track.seek_pre_roll,
+                sample_rate,
+                remaining_codec_delay_samples,
             };
 
             // Create the track.
@@ -342,7 +365,12 @@ impl<'s> MkvReader<'s> {
         })
     }
 
-    fn seek_track_by_ts_forward(&mut self, track_id: u32, ts: Timestamp) -> Result<SeekedTo> {
+    fn seek_track_by_ts_forward(
+        &mut self,
+        track_id: u32,
+        target_ts: Timestamp,
+        required_ts: Timestamp,
+    ) -> Result<SeekedTo> {
         let actual_ts = 'out: loop {
             // Skip frames from the buffer until the given timestamp
             while let Some(frame) = self.frames.front() {
@@ -352,7 +380,7 @@ impl<'s> MkvReader<'s> {
                     .checked_add(frame.dur.into_dur())
                     .ok_or(Error::SeekError(SeekErrorKind::OutOfRange))?;
 
-                if next_frame_pts >= ts && frame.track_num == track_id {
+                if next_frame_pts >= target_ts && frame.track_num == track_id {
                     break 'out frame.pts.into_ts();
                 }
                 else {
@@ -366,7 +394,7 @@ impl<'s> MkvReader<'s> {
             }
         };
 
-        Ok(SeekedTo { track_id, required_ts: ts, actual_ts })
+        Ok(SeekedTo { track_id, required_ts, actual_ts })
     }
 
     fn seek_track_by_ts_atomic(
@@ -393,20 +421,32 @@ impl<'s> MkvReader<'s> {
     fn seek_track_by_ts(&mut self, id: u32, tb: TimeBase, ts: Timestamp) -> Result<SeekedTo> {
         log::debug!("seeking track_id={id} to ts={ts}");
 
+        // Matroska/WebM signals a codec-specific `SeekPreRoll` (in Matroska ticks). RFC 7845
+        // section 4.6 mandates at least 80ms/3840 samples for Opus: after a `reset`, the decoder
+        // must decode (and discard) that much audio before its internal state (SILK LPC/LTP
+        // history, CELT MDCT overlap, post-filter memory) has fully re-converged. Back the seek
+        // target off by this amount so both the cue lookup and the forward frame scan below land
+        // on an earlier packet; `actual_ts` in the returned `SeekedTo` will be <= `required_ts`
+        // and the caller is expected to decode-and-discard the difference — the same contract
+        // `symphonia-format-ogg` uses for Vorbis's/Opus's own pre-roll via `max_rap_period`.
+        let pre_roll = self.track_states.get(&id).map(|s| s.seek_pre_roll).unwrap_or_default();
+        let target_ts = ts.saturating_sub(pre_roll.into_track_ticks(tb).into_dur());
+
         // If cues exist, seek to the nearest cue point.
         if let Some(cues) = &self.cues {
             let mut target_cue_point = None;
 
             // Cue points store timestamps in Matroska ticks while the timestamp being seeked to is
             // in signed Track ticks. Convert to unsigned Matroska ticks for iterating the cue
-            // points. If the timestamp is negative, then this is an error because cue points only
-            // contain unsigned Matroska ticks.
-            let ts = SignedTrackTicks::from(ts)
+            // points, clamping the (possibly pre-roll-negative) target to zero: cue points only
+            // contain unsigned Matroska ticks, and a target before the start of the stream just
+            // means "seek as close to the start as possible".
+            let cue_ts = SignedTrackTicks::from(target_ts.max(Timestamp::ZERO))
                 .try_into_matroska_ticks(tb)
                 .ok_or(Error::SeekError(SeekErrorKind::OutOfRange))?;
 
             for cue_point in &cues.points {
-                if cue_point.time > ts {
+                if cue_point.time > cue_ts {
                     break;
                 }
                 target_cue_point = Some(cue_point);
@@ -437,11 +477,11 @@ impl<'s> MkvReader<'s> {
                 _ => return seek_error(SeekErrorKind::Unseekable),
             };
 
-            // Convert the cue point's timestamp (Matroska ticks) into Segment ticks for the cluster
-            // state.
-            let timestamp = target_cue_point.time.into_segment_ticks(
-                self.media_info.time_base.expect("media info time base always populated"),
-            );
+            // The cue point's timestamp is already in Segment ticks (see `CuePointElement::time`'s
+            // own doc comment), unlike `codec_delay`/`seek_pre_roll` which are true nanoseconds --
+            // wrap it directly rather than running it back through `into_segment_ticks` (which
+            // expects nanoseconds and would massively under-scale an already-Segment-ticks value).
+            let timestamp = SegmentTicks::from(target_cue_point.time.get());
 
             // Update the current cluster metadata.
             self.current_cluster =
@@ -458,7 +498,7 @@ impl<'s> MkvReader<'s> {
         }
 
         // Seek to exact block.
-        self.seek_track_by_ts_forward(id, ts)
+        self.seek_track_by_ts_forward(id, target_ts, ts)
     }
 
     fn next_element(&mut self) -> Result<bool> {
@@ -634,12 +674,31 @@ impl FormatReader for MkvReader<'_> {
     fn next_packet(&mut self) -> Result<Option<Packet>> {
         loop {
             if let Some(frame) = self.frames.pop_front() {
-                return Ok(Some(Packet::new(
-                    frame.track_num,
-                    frame.pts.into_ts(),
-                    frame.dur.into_dur(),
-                    frame.data,
-                )));
+                let mut packet =
+                    Packet::new(frame.track_num, frame.pts.into_ts(), frame.dur.into_dur(), frame.data);
+
+                // RFC 7845-section-4.2-equivalent gapless trim: `codec_delay` priming samples
+                // are still present in the decoded output and must be discarded, mirroring
+                // `symphonia-format-ogg`'s Opus `pre_skip` handling. `frame.pts` is already
+                // shifted by `codec_delay` (see `calculate_block_pts`), so it's negative exactly
+                // for frames still within the delay region -- guarding on that additionally
+                // prevents ever mis-trimming a packet reached by seeking past the delay region
+                // (`remaining_codec_delay_samples` is only ever consumed by sequential decode
+                // from the true start of the track).
+                if frame.pts.get() < 0 {
+                    if let Some(state) = self.track_states.get_mut(&frame.track_num) {
+                        if state.remaining_codec_delay_samples > 0 {
+                            let sample_rate = state.sample_rate.unwrap_or(0);
+                            let dur_samples =
+                                TrackTicks::from(packet.dur.get()).into_samples(state.track_time_base, sample_rate);
+                            let trim = state.remaining_codec_delay_samples.min(dur_samples);
+                            packet.trim_start = Duration::new(trim);
+                            state.remaining_codec_delay_samples -= trim;
+                        }
+                    }
+                }
+
+                return Ok(Some(packet));
             }
 
             if !self.next_element()? {

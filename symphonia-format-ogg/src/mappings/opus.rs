@@ -181,6 +181,19 @@ impl Mapper for OpusMapper {
         // bitstream, which `parser` (constructed once in `detect`) already tracks correctly.
     }
 
+    fn max_rap_period(&self) -> Duration {
+        // RFC 7845 section 4.6: to fully re-converge its internal state (SILK LPC/LTP history,
+        // CELT MDCT overlap, post-filter memory) after a `reset`, an Opus decoder must decode,
+        // and discard, at least 80ms of audio immediately preceding any seek target. Opus's Ogg
+        // mapping always operates at a fixed 48kHz granule-position rate (independent of the
+        // stream's actual encoded sample rate), so 80ms is exactly 3840 samples. `OggReader::
+        // do_seek` (via `LogicalStream::max_rap_period`) already subtracts this from the
+        // requested timestamp before seeking, and returns the resulting earlier `actual_ts` to
+        // the caller (the same mechanism `VorbisMapper` uses for its lapped-transform pre-roll)
+        // so the caller can decode-and-discard the gap up to `required_ts`.
+        Duration::new(3840)
+    }
+
     fn track(&self) -> &Track {
         &self.track
     }

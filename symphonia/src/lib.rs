@@ -29,7 +29,7 @@
 //! | AIFF     | `aiff`       | Yes      | No      |
 //! | CAF      | `caf`        | No       | No      |
 //! | ISO/MP4  | `isomp4`     | No       | No      |
-//! | MKV/WebM | `mkv`        | No       | Yes     |
+//! | MKV/WebM | `mkv`        | Yes      | Yes     |
 //! | OGG      | `ogg`        | Yes      | Yes     |
 //! | Wave     | `wav`        | Yes      | Yes     |
 //!
@@ -50,7 +50,7 @@
 //! | MP1      | `mp1`, `mpa` | No      | No      |
 //! | MP2      | `mp2`, `mpa` | No      | No      |
 //! | MP3      | `mp3`, `mpa` | Yes     | No      |
-//! | Opus     | `opus`       | Yes     | No      |
+//! | Opus     | `opus`       | Yes     | Yes     |
 //! | PCM      | `pcm`        | Yes     | Yes     |
 //! | Vorbis   | `vorbis`     | Yes     | Yes     |
 //!
