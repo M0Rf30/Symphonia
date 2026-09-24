@@ -1,6 +1,6 @@
 [package]
 name = "symphonia-codec-opus"
-description = "Pure Opus decoder (a part of project Symphonia)."
+description = "Pure Rust Opus decoder (a part of project Symphonia)."
 authors = ["Philip Deljanov <philip.deljanov@gmail.com>"]
 readme = "README.md"
 categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
@@ -16,6 +16,9 @@ version.workspace = true
 [dependencies]
 log = { workspace = true }
 symphonia-core = { version = "0.6.1", path = "../symphonia-core" }
+
+[dev-dependencies]
+rand = "0.9"
 
 [lints]
 workspace = true

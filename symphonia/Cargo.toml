@@ -18,8 +18,10 @@ version.workspace = true
 all-features = true
 
 [features]
-# Only royalty-free open standard codecs and formats are enabled by default.
-default = ["opt-simd", "all-meta", "adpcm", "flac", "mkv", "ogg", "pcm", "vorbis", "wav"]
+# Only royalty-free open standard codecs and formats are enabled by default. Opus (RFC 6716) is
+# royalty-free per the IETF IPR disclosures referenced in symphonia-codec-opus's NOTICE, so it
+# belongs here alongside Vorbis/FLAC now that its native decoder is RFC 8251 conformant.
+default = ["opt-simd", "all-meta", "adpcm", "flac", "mkv", "ogg", "opus", "pcm", "vorbis", "wav"]
 
 # Feature flags to enable specific codecs, container, and standalone metadata formats.
 aac = ["dep:symphonia-codec-aac"]
@@ -35,6 +37,7 @@ mp1 = ["dep:symphonia-bundle-mp3", "symphonia-bundle-mp3/mp1"]
 mp2 = ["dep:symphonia-bundle-mp3", "symphonia-bundle-mp3/mp2"]
 mp3 = ["dep:symphonia-bundle-mp3", "symphonia-bundle-mp3/mp3"]
 ogg = ["dep:symphonia-format-ogg"]
+opus = ["dep:symphonia-codec-opus"]
 pcm = ["dep:symphonia-codec-pcm"]
 aiff = ["dep:symphonia-format-riff", "symphonia-format-riff/aiff"]
 vorbis = ["dep:symphonia-codec-vorbis"]
@@ -57,6 +60,7 @@ all-codecs = [
     "mp1",
     "mp2",
     "mp3",
+    "opus",
     "pcm",
     "vorbis",
     "wavpack",
@@ -167,6 +171,11 @@ optional = true
 [dependencies.symphonia-codec-vorbis]
 version = "0.6.1"
 path = "../symphonia-codec-vorbis"
+optional = true
+
+[dependencies.symphonia-codec-opus]
+version = "0.6.1"
+path = "../symphonia-codec-opus"
 optional = true
 
 [dependencies.symphonia-format-riff]
