@@ -995,7 +995,7 @@ pub fn anti_collapse(
             r = thresh.min(r);
             r *= sqrt_1;
 
-            let base = (c * size + (e_bands[i as usize] as i32) << lm) as usize;
+            let base = (c * size + ((e_bands[i as usize] as i32) << lm)) as usize;
             let band_len = (n0 << lm) as usize;
             let band = &mut x[base..base + band_len];
 
