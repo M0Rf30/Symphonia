@@ -44,6 +44,10 @@ pub struct TrackState {
     pub(crate) track_time_base: TimeBase,
     /// The track's timestamp scale.
     pub(crate) track_timestamp_scale: f64,
+    /// The amount of lead-in (in Matroska ticks) a decoder needs to fully re-converge its
+    /// internal state after a random seek before the decoded output is usable (Matroska
+    /// `SeekPreRoll`). Mandatory for Opus per RFC 7845 section 4.6 (>= 80ms/3840 samples).
+    pub(crate) seek_pre_roll: MatroskaTicks,
     /// The track's sample rate, if known (audio tracks only). Used to convert `codec_delay`
     /// into an exact sample count for gapless trimming, bypassing the (millisecond-granularity)
     /// Track tick domain.
@@ -311,6 +315,7 @@ impl<'s> MkvReader<'s> {
                 codec_delay: track.codec_delay,
                 track_time_base,
                 track_timestamp_scale: track.track_timestamp_scale,
+                seek_pre_roll: track.seek_pre_roll,
                 sample_rate,
                 remaining_codec_delay_samples,
             };
@@ -360,7 +365,12 @@ impl<'s> MkvReader<'s> {
         })
     }
 
-    fn seek_track_by_ts_forward(&mut self, track_id: u32, ts: Timestamp) -> Result<SeekedTo> {
+    fn seek_track_by_ts_forward(
+        &mut self,
+        track_id: u32,
+        target_ts: Timestamp,
+        required_ts: Timestamp,
+    ) -> Result<SeekedTo> {
         let actual_ts = 'out: loop {
             // Skip frames from the buffer until the given timestamp
             while let Some(frame) = self.frames.front() {
@@ -370,7 +380,7 @@ impl<'s> MkvReader<'s> {
                     .checked_add(frame.dur.into_dur())
                     .ok_or(Error::SeekError(SeekErrorKind::OutOfRange))?;
 
-                if next_frame_pts >= ts && frame.track_num == track_id {
+                if next_frame_pts >= target_ts && frame.track_num == track_id {
                     break 'out frame.pts.into_ts();
                 }
                 else {
@@ -384,7 +394,7 @@ impl<'s> MkvReader<'s> {
             }
         };
 
-        Ok(SeekedTo { track_id, required_ts: ts, actual_ts })
+        Ok(SeekedTo { track_id, required_ts, actual_ts })
     }
 
     fn seek_track_by_ts_atomic(
@@ -411,20 +421,32 @@ impl<'s> MkvReader<'s> {
     fn seek_track_by_ts(&mut self, id: u32, tb: TimeBase, ts: Timestamp) -> Result<SeekedTo> {
         log::debug!("seeking track_id={id} to ts={ts}");
 
+        // Matroska/WebM signals a codec-specific `SeekPreRoll` (in Matroska ticks). RFC 7845
+        // section 4.6 mandates at least 80ms/3840 samples for Opus: after a `reset`, the decoder
+        // must decode (and discard) that much audio before its internal state (SILK LPC/LTP
+        // history, CELT MDCT overlap, post-filter memory) has fully re-converged. Back the seek
+        // target off by this amount so both the cue lookup and the forward frame scan below land
+        // on an earlier packet; `actual_ts` in the returned `SeekedTo` will be <= `required_ts`
+        // and the caller is expected to decode-and-discard the difference — the same contract
+        // `symphonia-format-ogg` uses for Vorbis's/Opus's own pre-roll via `max_rap_period`.
+        let pre_roll = self.track_states.get(&id).map(|s| s.seek_pre_roll).unwrap_or_default();
+        let target_ts = ts.saturating_sub(pre_roll.into_track_ticks(tb).into_dur());
+
         // If cues exist, seek to the nearest cue point.
         if let Some(cues) = &self.cues {
             let mut target_cue_point = None;
 
             // Cue points store timestamps in Matroska ticks while the timestamp being seeked to is
             // in signed Track ticks. Convert to unsigned Matroska ticks for iterating the cue
-            // points. If the timestamp is negative, then this is an error because cue points only
-            // contain unsigned Matroska ticks.
-            let ts = SignedTrackTicks::from(ts)
+            // points, clamping the (possibly pre-roll-negative) target to zero: cue points only
+            // contain unsigned Matroska ticks, and a target before the start of the stream just
+            // means "seek as close to the start as possible".
+            let cue_ts = SignedTrackTicks::from(target_ts.max(Timestamp::ZERO))
                 .try_into_matroska_ticks(tb)
                 .ok_or(Error::SeekError(SeekErrorKind::OutOfRange))?;
 
             for cue_point in &cues.points {
-                if cue_point.time > ts {
+                if cue_point.time > cue_ts {
                     break;
                 }
                 target_cue_point = Some(cue_point);
@@ -476,7 +498,7 @@ impl<'s> MkvReader<'s> {
         }
 
         // Seek to exact block.
-        self.seek_track_by_ts_forward(id, ts)
+        self.seek_track_by_ts_forward(id, target_ts, ts)
     }
 
     fn next_element(&mut self) -> Result<bool> {
