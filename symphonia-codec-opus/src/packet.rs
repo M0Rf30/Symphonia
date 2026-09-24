@@ -157,12 +157,63 @@ pub struct FrameRange {
     pub len: usize,
 }
 
+/// A fixed-capacity list of up to [`MAX_FRAMES`] [`FrameRange`]s. RFC 6716 bounds the number of
+/// frames in one packet to at most 48 (enforced by [`parse_impl`] before it ever builds one of
+/// these), so a plain array + length avoids a heap allocation on every single packet parse.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrameList {
+    buf: [FrameRange; MAX_FRAMES],
+    len: usize,
+}
+
+impl FrameList {
+    fn new() -> Self {
+        FrameList { buf: [FrameRange { offset: 0, len: 0 }; MAX_FRAMES], len: 0 }
+    }
+
+    /// Panics if already at [`MAX_FRAMES`] capacity; [`parse_impl`] never pushes more than
+    /// `count` (<= `MAX_FRAMES`, checked before any push) entries.
+    fn push(&mut self, fr: FrameRange) {
+        self.buf[self.len] = fr;
+        self.len += 1;
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, FrameRange> {
+        self.buf[..self.len].iter()
+    }
+}
+
+impl std::ops::Index<usize> for FrameList {
+    type Output = FrameRange;
+
+    fn index(&self, i: usize) -> &FrameRange {
+        &self.buf[..self.len][i]
+    }
+}
+
+impl<'a> IntoIterator for &'a FrameList {
+    type Item = &'a FrameRange;
+    type IntoIter = std::slice::Iter<'a, FrameRange>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 /// Result of [`parse_impl`]: the TOC, each sub-frame's location within `data`, the offset of the
 /// first frame (`payload_offset`), and any self-delimited padding.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedPacket {
     pub toc: Toc,
-    pub frames: Vec<FrameRange>,
+    pub frames: FrameList,
     pub payload_offset: usize,
     /// Offset + length of the padding region, if any (multi-frame packets only).
     pub padding: Option<FrameRange>,
@@ -203,7 +254,11 @@ pub fn parse_impl(data: &[u8], self_delimited: bool) -> Result<ParsedPacket> {
     let mut pos = 1usize;
     let mut len = data.len() as i64 - 1;
     let mut last_size: i64 = len;
-    let mut sizes: Vec<i32> = Vec::new();
+    // Fixed-size scratch bounded by `MAX_FRAMES` (RFC 6716 documents 48 as the maximum number of
+    // frames in one packet; the `framesize * count > 5760` check below enforces it before any
+    // frame_code 3 push can exceed it) -- avoids a heap allocation on every single packet parse.
+    let mut sizes_buf = [0i32; MAX_FRAMES];
+    let mut sizes_len = 0usize;
     let mut count: usize;
     let mut pad: i64 = 0;
 
@@ -219,7 +274,8 @@ pub fn parse_impl(data: &[u8], self_delimited: bool) -> Result<ParsedPacket> {
                     return Err(PacketError::InvalidPacket);
                 }
                 last_size = len / 2;
-                sizes.push(last_size as i32);
+                sizes_buf[sizes_len] = last_size as i32;
+                sizes_len += 1;
             }
         }
         2 => {
@@ -231,7 +287,8 @@ pub fn parse_impl(data: &[u8], self_delimited: bool) -> Result<ParsedPacket> {
             }
             pos += bytes;
             last_size = len - size0 as i64;
-            sizes.push(size0);
+            sizes_buf[sizes_len] = size0;
+            sizes_len += 1;
         }
         _ => {
             if len < 1 {
@@ -274,7 +331,8 @@ pub fn parse_impl(data: &[u8], self_delimited: bool) -> Result<ParsedPacket> {
                     }
                     pos += bytes;
                     last_size -= bytes as i64 + size as i64;
-                    sizes.push(size);
+                    sizes_buf[sizes_len] = size;
+                    sizes_len += 1;
                 }
                 if last_size < 0 {
                     return Err(PacketError::InvalidPacket);
@@ -286,7 +344,8 @@ pub fn parse_impl(data: &[u8], self_delimited: bool) -> Result<ParsedPacket> {
                     return Err(PacketError::InvalidPacket);
                 }
                 for _ in 0..count - 1 {
-                    sizes.push(last_size as i32);
+                    sizes_buf[sizes_len] = last_size as i32;
+                    sizes_len += 1;
                 }
             }
         }
@@ -304,29 +363,35 @@ pub fn parse_impl(data: &[u8], self_delimited: bool) -> Result<ParsedPacket> {
             if last as i64 * count as i64 > len {
                 return Err(PacketError::InvalidPacket);
             }
-            sizes = vec![last; count - 1];
+            sizes_len = 0;
+            for _ in 0..count - 1 {
+                sizes_buf[sizes_len] = last;
+                sizes_len += 1;
+            }
         }
         else if bytes as i64 + last as i64 > last_size {
             return Err(PacketError::InvalidPacket);
         }
-        sizes.push(last);
+        sizes_buf[sizes_len] = last;
+        sizes_len += 1;
     }
     else {
         if last_size > 1275 {
             return Err(PacketError::InvalidPacket);
         }
-        sizes.push(last_size as i32);
+        sizes_buf[sizes_len] = last_size as i32;
+        sizes_len += 1;
     }
 
     // `sizes` was built with `count` entries by construction above; guard defensively.
-    if sizes.len() != count {
+    if sizes_len != count {
         return Err(PacketError::InvalidPacket);
     }
-    count = sizes.len();
+    count = sizes_len;
 
     let payload_offset = pos;
-    let mut frames = Vec::with_capacity(count);
-    for &size in &sizes {
+    let mut frames = FrameList::new();
+    for &size in &sizes_buf[..sizes_len] {
         let size = size as usize;
         if pos + size > data.len() {
             return Err(PacketError::InvalidPacket);

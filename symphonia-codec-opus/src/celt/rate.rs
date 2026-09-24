@@ -91,13 +91,16 @@ pub(crate) fn pulses2bits(m: &CeltMode, band: i32, lm: i32, pulses: i32) -> i32 
     }
 }
 
-/// Output of [`clt_compute_allocation`]: per-band bit/pulse allocation. C: out-parameters
-/// `pulses`, `ebits`, `fine_priority` of `clt_compute_allocation`, plus its `intensity`/`dual`
-/// return-adjacent out-params, and the `balance`/total-bits return value.
+/// The single built-in 48 kHz mode's `nb_ebands` (see crate docs: only this one mode is
+/// supported), used to size fixed stack scratch in [`clt_compute_allocation`] instead of
+/// heap-allocating per call (once per CELT frame).
+const MAX_NB_EBANDS: usize = 21;
+
+/// Output of [`clt_compute_allocation`]: the scalar parts (per-band `pulses`/`fine_energy_bits`/
+/// `fine_priority` are written directly into caller-provided scratch slices instead, so this
+/// struct owns no heap allocation). C: `intensity`/`dual`/`balance`/return value of
+/// `clt_compute_allocation`.
 pub struct Allocation {
-    pub pulses: Vec<i32>,
-    pub fine_energy_bits: Vec<i32>,
-    pub fine_priority: Vec<i32>,
     pub intensity: i32,
     pub dual_stereo: bool,
     pub balance: i32,
@@ -314,7 +317,9 @@ fn interp_bits2pulses(
     (coded_bands, balance, dual_stereo, intensity, total)
 }
 
-/// C: `clt_compute_allocation`.
+/// C: `clt_compute_allocation`. `pulses_out`/`fine_energy_bits_out`/`fine_priority_out` must each
+/// be at least `mode.nb_ebands` long (caller-owned scratch, so this function performs no heap
+/// allocation of its own).
 #[allow(clippy::too_many_arguments)]
 pub fn clt_compute_allocation(
     mode: &CeltMode,
@@ -327,8 +332,12 @@ pub fn clt_compute_allocation(
     lm: i32,
     channels: i32,
     rd: &mut RangeDecoder<'_>,
+    pulses_out: &mut [i32],
+    fine_energy_bits_out: &mut [i32],
+    fine_priority_out: &mut [i32],
 ) -> Allocation {
     let len = mode.nb_ebands;
+    debug_assert!(len as usize <= MAX_NB_EBANDS);
     let mut total = total_bits.max(0);
     let mut skip_start = start;
     let skip_rsv = if total >= 1 << BITRES { 1 << BITRES } else { 0 };
@@ -348,10 +357,14 @@ pub fn clt_compute_allocation(
         }
     }
 
-    let mut bits1 = vec![0i32; len as usize];
-    let mut bits2 = vec![0i32; len as usize];
-    let mut thresh = vec![0i32; len as usize];
-    let mut trim_offset = vec![0i32; len as usize];
+    let mut bits1_buf = [0i32; MAX_NB_EBANDS];
+    let mut bits2_buf = [0i32; MAX_NB_EBANDS];
+    let mut thresh_buf = [0i32; MAX_NB_EBANDS];
+    let mut trim_offset_buf = [0i32; MAX_NB_EBANDS];
+    let bits1 = &mut bits1_buf[..len as usize];
+    let bits2 = &mut bits2_buf[..len as usize];
+    let thresh = &mut thresh_buf[..len as usize];
+    let trim_offset = &mut trim_offset_buf[..len as usize];
 
     for j in start..end {
         let ji = j as usize;
@@ -427,32 +440,28 @@ pub fn clt_compute_allocation(
         bits2[ji] = bits2j;
     }
 
-    let mut pulses = vec![0i32; len as usize];
-    let mut ebits = vec![0i32; len as usize];
-    let mut fine_priority = vec![0i32; len as usize];
-
     let (coded_bands, balance, dual_stereo, intensity, _total) = interp_bits2pulses(
         mode,
         start,
         end,
         skip_start,
-        &bits1,
-        &bits2,
-        &thresh,
+        &bits1[..],
+        &bits2[..],
+        &thresh[..],
         caps,
         total,
         skip_rsv,
         intensity_rsv,
         dual_stereo_rsv,
-        &mut pulses,
-        &mut ebits,
-        &mut fine_priority,
+        pulses_out,
+        fine_energy_bits_out,
+        fine_priority_out,
         channels,
         lm,
         rd,
     );
 
-    Allocation { pulses, fine_energy_bits: ebits, fine_priority, intensity, dual_stereo, balance, coded_bands }
+    Allocation { intensity, dual_stereo, balance, coded_bands }
 }
 
 #[cfg(test)]
@@ -532,8 +541,24 @@ mod tests {
                     for seed in [0u8, 0x5A, 0xFF] {
                         let data = vec![seed; 64];
                         let mut rd = RangeDecoder::new(&data);
-                        let alloc =
-                            clt_compute_allocation(m, start, end, &offsets, &caps, 5, total_bits, lm, channels, &mut rd);
+                        let mut pulses = vec![0i32; m.nb_ebands as usize];
+                        let mut fine_energy_bits = vec![0i32; m.nb_ebands as usize];
+                        let mut fine_priority = vec![0i32; m.nb_ebands as usize];
+                        let alloc = clt_compute_allocation(
+                            m,
+                            start,
+                            end,
+                            &offsets,
+                            &caps,
+                            5,
+                            total_bits,
+                            lm,
+                            channels,
+                            &mut rd,
+                            &mut pulses,
+                            &mut fine_energy_bits,
+                            &mut fine_priority,
+                        );
 
                         assert!(alloc.coded_bands > start && alloc.coded_bands <= end, "coded_bands={}", alloc.coded_bands);
                         assert!(
@@ -542,14 +567,14 @@ mod tests {
                             alloc.intensity,
                             alloc.coded_bands
                         );
-                        assert_eq!(alloc.pulses.len(), m.nb_ebands as usize);
+                        assert_eq!(pulses.len(), m.nb_ebands as usize);
                         for j in 0..m.nb_ebands {
                             let ji = j as usize;
-                            assert!(alloc.pulses[ji] >= 0, "pulses[{j}]={} < 0", alloc.pulses[ji]);
+                            assert!(pulses[ji] >= 0, "pulses[{j}]={} < 0", pulses[ji]);
                             assert!(
-                                alloc.fine_energy_bits[ji] >= 0 && alloc.fine_energy_bits[ji] <= MAX_FINE_BITS,
+                                fine_energy_bits[ji] >= 0 && fine_energy_bits[ji] <= MAX_FINE_BITS,
                                 "fine_energy_bits[{j}]={}",
-                                alloc.fine_energy_bits[ji]
+                                fine_energy_bits[ji]
                             );
                         }
                     }

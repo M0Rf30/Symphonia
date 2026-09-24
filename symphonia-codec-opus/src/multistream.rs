@@ -148,6 +148,14 @@ impl MultistreamDecoder {
         }
         let fs = self.sample_rate.as_hz();
         let mut frame_size = frame_size.min((fs as usize / 25) * 3);
+        // Defensive: `scatter` indexes `out` at `chan + i*total_ch` up to `frame_size`; check the
+        // caller-supplied buffer is large enough up front so a caller sizing mistake (or a bogus
+        // `frame_size` echoed back from a malformed packet on the PLC path) turns into a clean
+        // `BufferTooSmall` rather than an out-of-bounds-index panic inside `scatter`.
+        match frame_size.checked_mul(self.layout_channels as usize) {
+            Some(need) if out.len() >= need => {}
+            _ => return Err(DecodeError::BufferTooSmall),
+        }
         let mut buf = vec![0f32; 2 * frame_size];
 
         let do_plc = data.is_none();

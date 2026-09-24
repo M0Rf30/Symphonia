@@ -127,11 +127,18 @@ fn extract_collapse_mask(iy: &[i32], n: i32, b: i32) -> u32 {
 pub fn alg_unquant(x: &mut [f32], n: i32, k: i32, spread: i32, blocks: i32, gain: f32, rd: &mut RangeDecoder<'_>) -> u32 {
     debug_assert!(k > 0);
     debug_assert!(n > 1);
-    let mut iy = vec![0i32; n as usize];
-    let ryy = decode_pulses(&mut iy, n, k, rd);
-    normalise_residual(&iy, x, n, ryy, gain);
+    // `n` is a single (post-split) PVQ band width, always <= a full frame's worth of samples for
+    // the one built-in 48 kHz mode this crate supports (see `bands::MAX_INTERLEAVE_N`) -- a
+    // fixed-size stack array avoids a heap allocation on every band decode (called ~once per
+    // band per CELT frame).
+    const MAX_N: usize = 960;
+    debug_assert!(n as usize <= MAX_N);
+    let mut iy_buf = [0i32; MAX_N];
+    let iy = &mut iy_buf[..n as usize];
+    let ryy = decode_pulses(iy, n, k, rd);
+    normalise_residual(iy, x, n, ryy, gain);
     exp_rotation(x, n, -1, blocks, k, spread);
-    extract_collapse_mask(&iy, n, blocks)
+    extract_collapse_mask(iy, n, blocks)
 }
 
 /// C: `renormalise_vector`. Rescales `x` (length `n`) to unit norm times `gain`.

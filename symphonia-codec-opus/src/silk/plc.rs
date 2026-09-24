@@ -225,9 +225,16 @@ fn plc_conceal(dec: &mut SilkDecoderState, ctrl: &mut SilkDecoderControl, frame:
     let mut s_ltp_buf_idx = ltp_mem_length;
 
     // Rewhiten LTP state.
+    //
+    // `lag` derives from `s_plc.pitch_l_q8`, which is cached from whichever earlier packet last
+    // updated it (`plc_update`) and can therefore reflect a different `nb_subfr`/`subfr_length`
+    // combination than the *current* PLC call requests (SILK's `nb_subfr` depends only on the
+    // requested payload duration, independent of `fs_khz`/PLC-state-reset, so this genuinely can
+    // happen for a crafted lost-packet sequence, not just a hypothetical). `idx` clamped to
+    // `[0, ltp_mem_length]` -- a no-op whenever the normal invariant `idx > 0` holds (every real
+    // encoder/decoder session) -- keeps the slicing below in-bounds regardless.
     let idx = ltp_mem_length as isize - lag as isize - order as isize - (LTP_ORDER / 2) as isize;
-    debug_assert!(idx > 0);
-    let idx = idx as usize;
+    let idx = idx.clamp(0, ltp_mem_length as isize) as usize;
     {
         let in_len = ltp_mem_length - idx;
         let mut in_local = [0i16; MAX_LTP_MEM_LENGTH];
@@ -243,25 +250,31 @@ fn plc_conceal(dec: &mut SilkDecoderState, ctrl: &mut SilkDecoderControl, frame:
         s_ltp_q14[i] = silk_smulwb(inv_gain_q30, s_ltp[i] as i32);
     }
 
-    // LTP synthesis filtering.
+    // LTP synthesis filtering. Same staleness hazard as above: clamp every `s_ltp_q14` index to
+    // stay in-bounds (a no-op for any in-range `lag`/`s_ltp_buf_idx` combination, i.e. every real
+    // session) rather than trust the cross-call-cached `lag` blindly.
+    let ltp_q14_last = s_ltp_q14.len() as isize - 1;
+    let clamp_ltp_idx = |x: isize| -> usize { x.clamp(0, ltp_q14_last) as usize };
     for _k in 0..dec.nb_subfr as usize {
         let pred_lag_base = s_ltp_buf_idx as isize - lag as isize + (LTP_ORDER / 2) as isize;
         for i in 0..dec.subfr_length as usize {
             let p = pred_lag_base + i as isize;
             let mut ltp_pred_q12: i32 = 2;
-            ltp_pred_q12 = silk_smlawb(ltp_pred_q12, s_ltp_q14[p as usize], b_q14[0] as i32);
-            ltp_pred_q12 = silk_smlawb(ltp_pred_q12, s_ltp_q14[(p - 1) as usize], b_q14[1] as i32);
-            ltp_pred_q12 = silk_smlawb(ltp_pred_q12, s_ltp_q14[(p - 2) as usize], b_q14[2] as i32);
-            ltp_pred_q12 = silk_smlawb(ltp_pred_q12, s_ltp_q14[(p - 3) as usize], b_q14[3] as i32);
-            ltp_pred_q12 = silk_smlawb(ltp_pred_q12, s_ltp_q14[(p - 4) as usize], b_q14[4] as i32);
+            ltp_pred_q12 = silk_smlawb(ltp_pred_q12, s_ltp_q14[clamp_ltp_idx(p)], b_q14[0] as i32);
+            ltp_pred_q12 = silk_smlawb(ltp_pred_q12, s_ltp_q14[clamp_ltp_idx(p - 1)], b_q14[1] as i32);
+            ltp_pred_q12 = silk_smlawb(ltp_pred_q12, s_ltp_q14[clamp_ltp_idx(p - 2)], b_q14[2] as i32);
+            ltp_pred_q12 = silk_smlawb(ltp_pred_q12, s_ltp_q14[clamp_ltp_idx(p - 3)], b_q14[3] as i32);
+            ltp_pred_q12 = silk_smlawb(ltp_pred_q12, s_ltp_q14[clamp_ltp_idx(p - 4)], b_q14[4] as i32);
 
             // Generate LPC excitation.
             rand_seed = silk_rand(rand_seed);
             let ridx = (silk_rshift(rand_seed, 25) & RAND_BUF_MASK) as usize;
-            s_ltp_q14[s_ltp_buf_idx] =
+            let widx = clamp_ltp_idx(s_ltp_buf_idx as isize);
+            s_ltp_q14[widx] =
                 silk_lshift(silk_smlawb(ltp_pred_q12, dec.exc_q14[rand_ptr_start + ridx], rand_scale_q14 as i16 as i32), 2);
             s_ltp_buf_idx += 1;
         }
+
 
         // Gradually reduce LTP gain.
         for c in b_q14.iter_mut() {
