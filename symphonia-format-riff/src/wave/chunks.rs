@@ -11,7 +11,7 @@ use symphonia_core::audio::AmbisonicBFormat;
 use symphonia_core::audio::{ChannelLabel, Channels, Position};
 use symphonia_core::codecs::audio::AudioCodecId;
 use symphonia_core::codecs::audio::well_known::{
-    CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_MS, CODEC_ID_PCM_ALAW, CODEC_ID_PCM_F32LE,
+    CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_MS, CODEC_ID_MP3, CODEC_ID_PCM_ALAW, CODEC_ID_PCM_F32LE,
     CODEC_ID_PCM_F64LE, CODEC_ID_PCM_MULAW, CODEC_ID_PCM_S16LE, CODEC_ID_PCM_S24LE,
     CODEC_ID_PCM_S32LE, CODEC_ID_PCM_U8,
 };
@@ -24,7 +24,8 @@ use symphonia_metadata::embedded::riff;
 
 use crate::common::{
     ByteOrder, ChunkParser, ChunksReader, FormatALaw, FormatAdpcm, FormatData, FormatExtensible,
-    FormatIeeeFloat, FormatMuLaw, FormatPcm, NullChunks, PacketInfo, ParseChunk, ParseChunkTag,
+    FormatIeeeFloat, FormatMpeg, FormatMuLaw, FormatPcm, NullChunks, PacketInfo, ParseChunk,
+    ParseChunkTag,
 };
 
 use log::info;
@@ -396,6 +397,24 @@ impl WaveFormatChunk {
         Ok(FormatData::MuLaw(FormatMuLaw { codec: CODEC_ID_PCM_MULAW, channels }))
     }
 
+    fn read_mpeg_fmt<B: ReadBytes>(
+        reader: &mut B,
+        num_channels: u16,
+        len: u32,
+    ) -> Result<FormatData> {
+        // The fmt chunk carries a WAVEFORMATEX header followed by an MPEGLAYER3WAVEFORMAT
+        // extension (cbSize, then wID/fdwFlags/nBlockSize/nFramesPerBlock/nCodecDelay). None of the
+        // extension is needed: MPEG audio frames are self-describing and are framed from the data
+        // chunk (see `wave::mpeg`). Consume any bytes beyond the 16-byte base fmt so the next chunk
+        // reads from the right position.
+        if len > 16 {
+            reader.ignore_bytes(u64::from(len - 16))?;
+        }
+
+        let channels = map_wave_channel_count(num_channels)?;
+        Ok(FormatData::Mpeg(FormatMpeg { codec: CODEC_ID_MP3, channels }))
+    }
+
     pub(crate) fn packet_info(&self) -> Result<PacketInfo> {
         match &self.format_data {
             FormatData::Pcm(pcm) => pcm.make_packet_info(),
@@ -404,6 +423,7 @@ impl WaveFormatChunk {
             FormatData::ALaw(alaw) => alaw.make_packet_info(),
             FormatData::MuLaw(mulaw) => mulaw.make_packet_info(),
             FormatData::Extensible(ext) => ext.make_packet_info(),
+            FormatData::Mpeg(mpeg) => mpeg.make_packet_info(),
         }
     }
 }
@@ -431,6 +451,7 @@ impl ParseChunk for WaveFormatChunk {
         const WAVE_FORMAT_ALAW: u16 = 0x0006;
         const WAVE_FORMAT_MULAW: u16 = 0x0007;
         const WAVE_FORMAT_ADPCM_IMA: u16 = 0x0011;
+        const WAVE_FORMAT_MPEGLAYER3: u16 = 0x0055;
         const WAVE_FORMAT_EXTENSIBLE: u16 = 0xfffe;
 
         let format_data = match format {
@@ -468,6 +489,8 @@ impl ParseChunk for WaveFormatChunk {
                 len,
                 CODEC_ID_ADPCM_IMA_WAV,
             ),
+            // The MPEG-1 Audio Layer III (MP3) Format.
+            WAVE_FORMAT_MPEGLAYER3 => Self::read_mpeg_fmt(reader, num_channels, len),
             // Unsupported format.
             _ => return unsupported_error("wav: unsupported wave format"),
         }?;
@@ -527,6 +550,11 @@ impl fmt::Display for WaveFormatChunk {
                 writeln!(f, "\tformat_data: MuLaw {{")?;
                 writeln!(f, "\t\tchannels: {},", mulaw.channels)?;
                 writeln!(f, "\t\tcodec: {},", mulaw.codec)?;
+            }
+            FormatData::Mpeg(ref mpeg) => {
+                writeln!(f, "\tformat_data: Mpeg {{")?;
+                writeln!(f, "\t\tchannels: {},", mpeg.channels)?;
+                writeln!(f, "\t\tcodec: {},", mpeg.codec)?;
             }
         };
 
@@ -610,9 +638,64 @@ pub struct DataChunk {
 
 impl ParseChunk for DataChunk {
     fn parse<B: ReadBytes>(_: &mut B, _: [u8; 4], len: u32) -> Result<DataChunk> {
-        // If the length us u32::MAX, that usually indicates the file is streaming and the length
-        // is not known.
+        // If the length is u32::MAX, that usually indicates the file is streaming and the length
+        // is not known. For RF64 files, this also indicates the actual size is in the ds64 chunk.
         Ok(DataChunk { len: Some(len).filter(|&len| len != u32::MAX) })
+    }
+}
+
+/// DS64 chunk contains 64-bit sizes for RF64 files.
+/// This chunk must appear before the data chunk in RF64 files.
+/// Reference: EBU Tech 3306 - MBWF / RF64: An extended File Format for Audio.
+pub struct Ds64Chunk {
+    /// 64-bit RIFF chunk size (total file size minus 8).
+    pub riff_size: u64,
+    /// 64-bit data chunk size.
+    pub data_size: u64,
+    /// 64-bit sample/frame count (replaces fact chunk value).
+    pub sample_count: u64,
+}
+
+impl ParseChunk for Ds64Chunk {
+    fn parse<B: ReadBytes>(reader: &mut B, _tag: [u8; 4], len: u32) -> Result<Self> {
+        // ds64 fixed header: riffSize64 (8) + dataSize64 (8) + sampleCount64 (8) + tableLength (4)
+        const DS64_MIN_CHUNK_SIZE: u32 = 28;
+        // Each table entry: chunkId (4) + chunkSize64 (8)
+        const DS64_TABLE_ENTRY_SIZE: u64 = 12;
+
+        if len < DS64_MIN_CHUNK_SIZE {
+            return decode_error("wav: malformed ds64 chunk");
+        }
+
+        let riff_size = reader.read_u64()?;
+        let data_size = reader.read_u64()?;
+        let sample_count = reader.read_u64()?;
+        let table_length = reader.read_u32()?;
+
+        // Validate that the table entries fit within the declared chunk length.
+        let table_bytes = u64::from(table_length) * DS64_TABLE_ENTRY_SIZE;
+        let available_bytes = u64::from(len) - u64::from(DS64_MIN_CHUNK_SIZE);
+
+        if table_bytes > available_bytes {
+            return decode_error("wav: ds64 table exceeds chunk size");
+        }
+
+        // Skip over the table entries if present.
+        if table_length > 0 {
+            reader.ignore_bytes(table_bytes)?;
+        }
+
+        Ok(Ds64Chunk { riff_size, data_size, sample_count })
+    }
+}
+
+impl fmt::Display for Ds64Chunk {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Ds64Chunk {{")?;
+        writeln!(f, "\triff_size: {},", self.riff_size)?;
+        writeln!(f, "\tdata_size: {},", self.data_size)?;
+        writeln!(f, "\tsample_count: {},", self.sample_count)?;
+        writeln!(f, "}}")
     }
 }
 
@@ -621,6 +704,7 @@ pub enum RiffWaveChunks {
     List(ChunkParser<ListChunk>),
     Fact(ChunkParser<FactChunk>),
     Data(ChunkParser<DataChunk>),
+    Ds64(ChunkParser<Ds64Chunk>),
 }
 
 macro_rules! parser {
@@ -636,6 +720,7 @@ impl ParseChunkTag for RiffWaveChunks {
             b"LIST" => parser!(RiffWaveChunks::List, ListChunk, tag, len),
             b"fact" => parser!(RiffWaveChunks::Fact, FactChunk, tag, len),
             b"data" => parser!(RiffWaveChunks::Data, DataChunk, tag, len),
+            b"ds64" => parser!(RiffWaveChunks::Ds64, Ds64Chunk, tag, len),
             _ => None,
         }
     }
@@ -858,4 +943,84 @@ fn map_amb_channel_count(count: u16) -> Result<Channels> {
         .into_boxed_slice();
 
     Ok(Channels::Custom(labels))
+}
+
+#[cfg(test)]
+mod ds64_tests {
+    use super::*;
+    use std::io::Cursor;
+    use symphonia_core::io::ReadOnlySource;
+
+    #[test]
+    fn test_ds64_chunk_parse() {
+        // ds64 chunk: riffSize=0x123456789ABCDEF0, dataSize=0x0FEDCBA987654321,
+        // sampleCount=0x0000000100000000, tableLen=0
+        let data: [u8; 28] = [
+            // riffSize64 (little-endian)
+            0xF0, 0xDE, 0xBC, 0x9A, 0x78, 0x56, 0x34, 0x12, // dataSize64 (little-endian)
+            0x21, 0x43, 0x65, 0x87, 0xA9, 0xCB, 0xED, 0x0F,
+            // sampleCount64 (little-endian)
+            0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // tableLength
+            0x00, 0x00, 0x00, 0x00,
+        ];
+
+        let source = ReadOnlySource::new(Cursor::new(data));
+        let mut reader = MediaSourceStream::new(Box::new(source), Default::default());
+
+        let ds64 = Ds64Chunk::parse(&mut reader, *b"ds64", 28).unwrap();
+
+        assert_eq!(ds64.riff_size, 0x123456789ABCDEF0);
+        assert_eq!(ds64.data_size, 0x0FEDCBA987654321);
+        assert_eq!(ds64.sample_count, 0x0000000100000000);
+    }
+
+    #[test]
+    fn test_ds64_chunk_with_table() {
+        // ds64 chunk with 1 table entry
+        let data: [u8; 40] = [
+            // riffSize64
+            0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, // dataSize64
+            0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, // sampleCount64
+            0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // tableLength = 1
+            0x01, 0x00, 0x00, 0x00, // table entry: "levl" + size
+            b'l', b'e', b'v', b'l', 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00,
+        ];
+
+        let source = ReadOnlySource::new(Cursor::new(data));
+        let mut reader = MediaSourceStream::new(Box::new(source), Default::default());
+
+        let ds64 = Ds64Chunk::parse(&mut reader, *b"ds64", 40).unwrap();
+
+        assert_eq!(ds64.riff_size, 0x0000001000000000);
+        assert_eq!(ds64.data_size, 0x0000000800000000);
+        assert_eq!(ds64.sample_count, 0x1000);
+    }
+
+    #[test]
+    fn test_ds64_chunk_too_short() {
+        let data: [u8; 20] = [0u8; 20];
+
+        let source = ReadOnlySource::new(Cursor::new(data));
+        let mut reader = MediaSourceStream::new(Box::new(source), Default::default());
+
+        let result = Ds64Chunk::parse(&mut reader, *b"ds64", 20);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ds64_table_exceeds_chunk_size() {
+        // ds64 with table_length=100 but chunk len=28 (no room for table entries)
+        let data: [u8; 28] = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // riffSize64
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // dataSize64
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // sampleCount64
+            0x64, 0x00, 0x00, 0x00, // tableLength = 100
+        ];
+
+        let source = ReadOnlySource::new(Cursor::new(data));
+        let mut reader = MediaSourceStream::new(Box::new(source), Default::default());
+
+        let result = Ds64Chunk::parse(&mut reader, *b"ds64", 28);
+        assert!(result.is_err());
+    }
 }
