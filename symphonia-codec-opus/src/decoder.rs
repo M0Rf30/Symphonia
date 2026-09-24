@@ -230,6 +230,15 @@ impl OpusDecoder {
         let ch = self.channels as usize;
         let f2_5 = self.sample_rate.as_hz() as usize / 400;
 
+        // Defensive: unlike libopus's raw-pointer C API (where an under-sized buffer is
+        // undefined behaviour the caller must avoid), a Rust slice lets us check this cheaply and
+        // turn any buffer-size mismatch (a caller bug, not malformed network data) into a clean
+        // `BufferTooSmall` instead of an out-of-bounds-index panic deep inside `decode_frame`.
+        match frame_size.checked_mul(ch) {
+            Some(need) if out.len() >= need => {}
+            _ => return Err(DecodeError::BufferTooSmall),
+        }
+
         if (decode_fec || data.map_or(true, |d| d.is_empty())) && frame_size % f2_5 != 0 {
             return Err(DecodeError::BadArgument);
         }
@@ -489,7 +498,19 @@ impl OpusDecoder {
                         len - (((dec.tell() as i64) + 7) >> 3)
                     };
                     len -= redundancy_bytes;
-                    if len * 8 < dec.tell() as i64 {
+                    // Defensive: `redundancy_bytes`/`len` feed a slice of `data` below
+                    // (`data[len as usize .. len as usize + redundancy_bytes as usize]`).
+                    // `ec_tell()` on a range decoder fed a truncated/malformed packet can (by
+                    // design) run slightly past the buffer's actual bit length, so the
+                    // `len*8 < ec_tell()` check alone isn't sufficient to guarantee
+                    // `0 <= len` and `len + redundancy_bytes <= original_storage`; validate that
+                    // directly and fall back to "no redundancy" (matching the existing fallback
+                    // below) rather than trust the arithmetic to have stayed in-range.
+                    if len * 8 < dec.tell() as i64
+                        || redundancy_bytes < 0
+                        || len < 0
+                        || len + redundancy_bytes > original_storage
+                    {
                         len = 0;
                         redundancy_bytes = 0;
                         redundancy = false;
