@@ -254,6 +254,38 @@ fn parse_tag_value(data_type: DataType, data: &[u8]) -> Option<RawValue> {
         _ => None,
     }
 }
+/// Gapless playback information derived from an iTunes `iTunSMPB` freeform tag.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GaplessInfo {
+    /// The number of encoder delay (priming) frames.
+    pub delay: u32,
+    /// The number of encoder padding (remainder) frames.
+    pub padding: u32,
+}
+
+/// Parse an iTunes `iTunSMPB` freeform tag value.
+///
+/// The value is a string of whitespace-separated hexadecimal fields:
+/// `<reserved> <encoder delay> <encoder padding> <original sample count> ...`.
+fn parse_itunsmpb(value: &str) -> Option<GaplessInfo> {
+    let mut fields = value.split_whitespace();
+
+    // Skip the reserved first field.
+    fields.next()?;
+
+    let delay = u32::from_str_radix(fields.next()?, 16).ok()?;
+    let padding = u32::from_str_radix(fields.next()?, 16).ok()?;
+
+    Some(GaplessInfo { delay, padding })
+}
+
+fn try_parse_itunsmpb(value: &RawValue) -> Option<GaplessInfo> {
+    match value {
+        RawValue::String(s) => parse_itunsmpb(s),
+        RawValue::Binary(b) => parse_itunsmpb(&String::from_utf8_lossy(b)),
+        _ => None,
+    }
+}
 
 /// Reads and parses a `MetaTagAtom` from the provided iterator and adds it to the `MetadataBuilder`
 /// if there are no errors.
@@ -534,15 +566,25 @@ fn add_rating_tag<R: ReadAtom>(
 fn add_freeform_tag<R: ReadAtom>(
     iter: &mut AtomIterator<R>,
     builder: &mut MetadataBuilder,
+    gapless: &mut Option<GaplessInfo>,
 ) -> Result<()> {
     let tag = iter.read_atom::<MetaTagAtom>()?;
+    let full_name = tag.full_name();
+
+    let is_itunsmpb = full_name.eq_ignore_ascii_case("com.apple.iTunes:iTunSMPB");
 
     // A user-defined tag should only have 1 value.
     for value_atom in tag.values.iter() {
         // Parse the value atom data into a raw value, if possible.
         if let Some(value) = parse_tag_value(value_atom.data_type, &value_atom.data) {
+            if is_itunsmpb {
+                if let Some(info) = try_parse_itunsmpb(&value) {
+                    *gapless = Some(info);
+                }
+            }
+
             // Try to map iTunes freeform tags to standard tag keys.
-            let _ = itunes::parse_itunes_tag(tag.full_name(), value, builder);
+            let _ = itunes::parse_itunes_tag(full_name.clone(), value, builder);
         }
         else {
             warn!("unsupported data type {:?} for freeform tag", value_atom.data_type);
@@ -736,11 +778,14 @@ macro_rules! map_std_uint {
 pub struct IlstAtom {
     /// Metadata revision.
     pub metadata: MetadataRevision,
+    /// Gapless playback information from an iTunes `iTunSMPB` freeform tag, if present.
+    pub gapless: Option<GaplessInfo>,
 }
 
 impl Atom for IlstAtom {
     fn read<R: ReadAtom>(it: &mut AtomIterator<R>, _header: &AtomHeader) -> Result<Self> {
         let mut mb = MetadataBuilder::new(ISOMP4_METADATA_INFO);
+        let mut gapless = None;
 
         while let Some(header) = it.next_header()? {
             // Ignore standard atoms, check if other is a metadata atom.
@@ -925,7 +970,7 @@ impl Atom for IlstAtom {
                     add_generic_tag(it, &mut mb, map_std_str!(StandardTag::Writer))?
                 }
                 // Free-form tag atom.
-                AtomType::FreeFormTag => add_freeform_tag(it, &mut mb)?,
+                AtomType::FreeFormTag => add_freeform_tag(it, &mut mb, &mut gapless)?,
                 // Completely unknown tag atom.
                 AtomType::Other(atom_type) => {
                     debug!("unknown metadata sub-atom {atom_type:x?}");
@@ -937,7 +982,7 @@ impl Atom for IlstAtom {
             }
         }
 
-        Ok(IlstAtom { metadata: mb.build() })
+        Ok(IlstAtom { metadata: mb.build(), gapless })
     }
 }
 
@@ -1016,5 +1061,46 @@ fn get_raw_tag_key(atom_type: AtomType) -> &'static str {
         AtomType::WriterTag => "\u{a9}wrt",
         AtomType::XidTag => "xid ",
         _ => "",
+    }
+}
+
+#[cfg(test)]
+mod itunsmpb_tests {
+    use super::{parse_itunsmpb, try_parse_itunsmpb};
+    use symphonia_core::meta::RawValue;
+
+    #[test]
+    fn parses_typical_itunsmpb_value() {
+        let value = " 00000000 00000840 000001CA 00000000003F31F6 00000000 00000000 \
+                      00000000 00000000 00000000 00000000 00000000 00000000";
+
+        let info = parse_itunsmpb(value).expect("should parse");
+
+        assert_eq!(info.delay, 0x840);
+        assert_eq!(info.padding, 0x1CA);
+    }
+
+    #[test]
+    fn parses_from_raw_string_value() {
+        let value = RawValue::from(" 00000000 00000400 00000100 0000000000000000");
+        let info = try_parse_itunsmpb(&value).expect("should parse");
+        assert_eq!(info.delay, 0x400);
+        assert_eq!(info.padding, 0x100);
+    }
+
+    #[test]
+    fn parses_from_raw_binary_value() {
+        let text = " 00000000 00000400 00000100 0000000000000000";
+        let value = RawValue::from(text.as_bytes());
+        let info = try_parse_itunsmpb(&value).expect("should parse");
+        assert_eq!(info.delay, 0x400);
+        assert_eq!(info.padding, 0x100);
+    }
+
+    #[test]
+    fn rejects_malformed_value() {
+        assert!(parse_itunsmpb("").is_none());
+        assert!(parse_itunsmpb("not hex data here").is_none());
+        assert!(parse_itunsmpb(" 00000000").is_none());
     }
 }

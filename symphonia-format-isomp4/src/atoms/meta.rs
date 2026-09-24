@@ -9,13 +9,15 @@ use std::fmt::Debug;
 
 use symphonia_core::meta::MetadataRevision;
 
-use crate::atoms::{Atom, AtomHeader, AtomIterator, AtomType, IlstAtom, ReadAtom, Result};
+use crate::atoms::{Atom, AtomHeader, AtomIterator, AtomType, GaplessInfo, IlstAtom, ReadAtom, Result};
 
 /// User data atom.
 #[allow(dead_code)]
 pub struct MetaAtom {
     /// Metadata revision.
     pub metadata: Option<MetadataRevision>,
+    /// Gapless playback information, if present.
+    pub gapless: Option<GaplessInfo>,
 }
 
 impl Debug for MetaAtom {
@@ -37,17 +39,20 @@ impl Atom for MetaAtom {
         let (_, _) = it.read_extended_header()?;
 
         let mut metadata = None;
+        let mut gapless = None;
 
         while let Some(header) = it.next_header()? {
             match header.atom_type {
                 AtomType::MetaList => {
-                    metadata = Some(it.read_atom::<IlstAtom>()?.metadata);
+                    let ilst = it.read_atom::<IlstAtom>()?;
+                    gapless = ilst.gapless;
+                    metadata = Some(ilst.metadata);
                 }
                 // TODO: Support country and language lists.
                 _ => (),
             }
         }
 
-        Ok(MetaAtom { metadata })
+        Ok(MetaAtom { metadata, gapless })
     }
 }

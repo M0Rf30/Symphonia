@@ -76,12 +76,14 @@ pub use dec3::Dec3Atom;
 pub use dovi::DoviAtom;
 pub use edts::EdtsAtom;
 pub use elst::ElstAtom;
+#[cfg(test)]
+pub(crate) use elst::ElstEntry;
 pub use esds::EsdsAtom;
 pub use flac::FlacAtom;
 pub use ftyp::FtypAtom;
 pub use hdlr::HdlrAtom;
 pub use hvcc::HvcCAtom;
-pub use ilst::IlstAtom;
+pub use ilst::{GaplessInfo, IlstAtom};
 pub use mdhd::MdhdAtom;
 pub use mdia::MdiaAtom;
 pub use mehd::MehdAtom;

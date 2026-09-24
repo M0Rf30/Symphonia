@@ -8,8 +8,8 @@
 use symphonia_core::meta::MetadataRevision;
 
 use crate::atoms::{
-    Atom, AtomHeader, AtomIterator, AtomType, MvexAtom, MvhdAtom, ReadAtom, Result, TrakAtom,
-    UdtaAtom, decode_error,
+    Atom, AtomHeader, AtomIterator, AtomType, GaplessInfo, MvexAtom, MvhdAtom, ReadAtom, Result,
+    TrakAtom, UdtaAtom, decode_error,
 };
 
 use log::warn;
@@ -37,6 +37,11 @@ impl MoovAtom {
     /// Is the movie segmented.
     pub fn is_fragmented(&self) -> bool {
         self.mvex.is_some()
+    }
+
+    /// Get the gapless playback information from the iTunes `iTunSMPB` tag, if present.
+    pub fn gapless(&self) -> Option<GaplessInfo> {
+        self.udta.as_ref().and_then(|udta| udta.gapless())
     }
 }
 
