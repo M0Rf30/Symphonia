@@ -10,6 +10,7 @@
 //! NOTICE. Owner (wave 1): "CeltBitstream".
 
 use crate::celt::modes::CeltMode;
+use crate::range::RangeDecoder;
 
 /// Output of [`clt_compute_allocation`]: per-band bit/pulse allocation. C: out-parameters
 /// `pulses`, `ebits`, `fine_priority` of `clt_compute_allocation`, plus its `intensity`/`dual`
@@ -24,7 +25,12 @@ pub struct Allocation {
     pub coded_bands: i32,
 }
 
-/// C: `clt_compute_allocation`.
+/// C: `clt_compute_allocation` (decode direction, `encode == 0`).
+///
+/// Deviates from the wave-0 stub: gained `rd: &mut RangeDecoder<'_>` because the decode
+/// direction reads range-coded band-skip/intensity/dual-stereo bits inline
+/// (`interp_bits2pulses`'s `ec_dec_bit_logp`/`ec_dec_uint` calls) — matches "CeltBitstream"'s own
+/// `opus-celt-bits` branch (see coordination log).
 #[allow(clippy::too_many_arguments)]
 pub fn clt_compute_allocation(
     mode: &CeltMode,
@@ -36,7 +42,8 @@ pub fn clt_compute_allocation(
     total_bits: i32,
     lm: i32,
     channels: i32,
+    rd: &mut RangeDecoder<'_>,
 ) -> Allocation {
-    let _ = (mode, start, end, offsets, caps, alloc_trim, total_bits, lm, channels);
+    let _ = (mode, start, end, offsets, caps, alloc_trim, total_bits, lm, channels, rd);
     todo!("wave 1 (celt/CeltBitstream): clt_compute_allocation")
 }

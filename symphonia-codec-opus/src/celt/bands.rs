@@ -12,9 +12,17 @@
 use crate::celt::modes::CeltMode;
 use crate::range::RangeDecoder;
 
-/// C: `quant_all_bands` (decoder direction, `encode == 0`). Drives [`crate::celt::cwrs`] /
+/// C: `quant_all_bands` (decoder direction, `encode == 0`, so the encoder-only `bandE`/
+/// `complexity`/`theta_rdo` machinery is dropped). Drives [`crate::celt::cwrs`] /
 /// [`crate::celt::vq`] / [`crate::celt::laplace`] per band and fills `x` (and `y` for stereo)
-/// with normalized MDCT-domain band shapes.
+/// with normalized MDCT-domain band shapes. `seed` is the running anti-collapse LCG seed
+/// (C: `*seed`/`st->rng`), read on entry and written back on return.
+///
+/// Deviates from the wave-0 stub: gained `short_blocks`/`spread`/`dual_stereo`/`intensity`/
+/// `tf_res`/`total_bits`/`balance`/`lm`/`coded_bands`/`seed`/`disable_inv` (the original stub
+/// was missing most of `quant_all_bands`'s real parameters — verified against
+/// `celt_decoder.c`'s call site and `bands.c`; see coordination log). `arch`/`complexity` are
+/// dropped (encode-only); `bandE` is dropped (only read by the encode-only theta-RDO path).
 #[allow(clippy::too_many_arguments)]
 pub fn quant_all_bands(
     mode: &CeltMode,
@@ -23,17 +31,51 @@ pub fn quant_all_bands(
     x: &mut [f32],
     y: Option<&mut [f32]>,
     collapse_masks: &mut [u8],
-    band_e: &[f32],
     pulses: &[i32],
-    lm: i32,
-    codec_channels: i32,
+    short_blocks: bool,
+    spread: i32,
+    dual_stereo: bool,
+    intensity: i32,
+    tf_res: &[i32],
+    total_bits: i32,
+    balance: i32,
     rd: &mut RangeDecoder<'_>,
+    lm: i32,
+    coded_bands: i32,
+    seed: &mut u32,
+    disable_inv: bool,
 ) {
-    let _ = (mode, start, end, x, y, collapse_masks, band_e, pulses, lm, codec_channels, rd);
+    let _ = (
+        mode,
+        start,
+        end,
+        x,
+        y,
+        collapse_masks,
+        pulses,
+        short_blocks,
+        spread,
+        dual_stereo,
+        intensity,
+        tf_res,
+        total_bits,
+        balance,
+        rd,
+        lm,
+        coded_bands,
+        seed,
+        disable_inv,
+    );
     todo!("wave 1 (celt/CeltBitstream): quant_all_bands (decode direction)")
 }
 
 /// C: `anti_collapse`.
+///
+/// Deviates from the wave-0 stub: gained `pulses` (used by the per-band collapse-depth
+/// estimate, `bands.c` line ~286 `celt_udiv(1+pulses[i], ...)`; the original stub omitted it).
+/// `channels` (C: `C`) matches the stub name; `old_band_e` here is C's `logE` (the just-decoded
+/// current-frame log-energy, i.e. the caller's `old_e_bands` after `unquant_energy_finalise`,
+/// not a stale value despite the name).
 #[allow(clippy::too_many_arguments)]
 pub fn anti_collapse(
     mode: &CeltMode,
@@ -47,12 +89,27 @@ pub fn anti_collapse(
     old_band_e: &[f32],
     old_log_e: &[f32],
     old_log_e2: &[f32],
-    seed: &mut u32,
+    pulses: &[i32],
+    seed: u32,
 ) {
-    let _ =
-        (mode, x, collapse_masks, lm, channels, size, start, end, old_band_e, old_log_e, old_log_e2, seed);
+    let _ = (
+        mode,
+        x,
+        collapse_masks,
+        lm,
+        channels,
+        size,
+        start,
+        end,
+        old_band_e,
+        old_log_e,
+        old_log_e2,
+        pulses,
+        seed,
+    );
     todo!("wave 1 (celt/CeltBitstream): anti_collapse")
 }
+
 
 /// C: `denormalise_bands`. Converts normalized band shapes `x` back into MDCT-domain
 /// coefficients `freq`, scaled by decoded band energy `band_log_e`.
