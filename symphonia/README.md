@@ -105,6 +105,7 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | MP1                          | Great     | No      | `mp1`, `mpa` | No      | [`symphonia-bundle-mp3`]   |
 | MP2                          | Great     | No      | `mp2`, `mpa` | No      | [`symphonia-bundle-mp3`]   |
 | MP3                          | Excellent | Yes     | `mp3`, `mpa` | No      | [`symphonia-bundle-mp3`]   |
+| Opus                         | Good      | Yes     | `opus`       | No      | [`symphonia-codec-opus`]   |
 | PCM                          | Excellent | Yes     | `pcm`        | Yes     | [`symphonia-codec-pcm`]    |
 | Vorbis                       | Excellent | Yes     | `vorbis`     | Yes     | [`symphonia-codec-vorbis`] |
 
@@ -115,6 +116,7 @@ A `symphonia-bundle-*` package is a combination of a decoder and a native demuxe
 [`symphonia-codec-alac`]: https://crates.io/crates/symphonia-codec-alac
 [`symphonia-bundle-flac`]: https://crates.io/crates/symphonia-bundle-flac
 [`symphonia-bundle-mp3`]: https://crates.io/crates/symphonia-bundle-mp3
+[`symphonia-codec-opus`]: https://crates.io/crates/symphonia-codec-opus
 [`symphonia-codec-pcm`]: https://crates.io/crates/symphonia-codec-pcm
 [`symphonia-codec-vorbis`]: https://crates.io/crates/symphonia-codec-vorbis
 
