@@ -160,6 +160,7 @@ pub struct SilkPlcState {
     pub fs_khz: i32,
     pub nb_subfr: i32,
     pub subfr_length: i32,
+    pub last_frame_lost: bool,
 }
 
 impl Default for SilkPlcState {
@@ -177,6 +178,7 @@ impl Default for SilkPlcState {
             fs_khz: 0,
             nb_subfr: 0,
             subfr_length: 0,
+            last_frame_lost: false,
         }
     }
 }
@@ -276,8 +278,8 @@ impl SilkDecoderState {
             lpc_order: 0,
             prev_nlsf_q15: [0; MAX_LPC_ORDER],
             first_frame_after_reset: false,
-            pitch_lag_low_bits_icdf: tables::UNIFORM8_ICDF,
-            pitch_contour_icdf: tables::PITCH_CONTOUR_NB_ICDF,
+            pitch_lag_low_bits_icdf: &tables::UNIFORM8_ICDF,
+            pitch_contour_icdf: &tables::PITCH_CONTOUR_NB_ICDF,
             n_frames_decoded: 0,
             n_frames_per_packet: 0,
             ec_prev_signal_type: 0,
@@ -328,6 +330,66 @@ impl SilkDecoderState {
         self.prev_signal_type = TYPE_NO_VOICE_ACTIVITY;
         crate::silk::cng::reset(self);
         crate::silk::plc::reset(self);
+    }
+
+    /// C: `silk_decoder_set_fs`. `fs_khz` must be 8, 12, or 16; `nb_subfr` (2 or 4) must
+    /// already be set by the caller.
+    pub fn decoder_set_fs(&mut self, fs_khz: i32, fs_api_hz: i32) {
+        debug_assert!(fs_khz == 8 || fs_khz == 12 || fs_khz == 16);
+        debug_assert!(self.nb_subfr as usize == MAX_NB_SUBFR || self.nb_subfr as usize == MAX_NB_SUBFR / 2);
+
+        // New (sub)frame length.
+        self.subfr_length = SUB_FRAME_LENGTH_MS * fs_khz;
+        let frame_length = self.nb_subfr * self.subfr_length;
+
+        // Initialize resampler when switching internal or external sampling frequency.
+        if self.fs_khz != fs_khz || self.fs_api_hz != fs_api_hz {
+            crate::silk::resampler::silk_resampler_init(&mut self.resampler_state, fs_khz * 1000, fs_api_hz, false);
+            self.fs_api_hz = fs_api_hz;
+        }
+
+        if self.fs_khz != fs_khz || frame_length != self.frame_length {
+            if fs_khz == 8 {
+                self.pitch_contour_icdf = if self.nb_subfr as usize == MAX_NB_SUBFR {
+                    &tables::PITCH_CONTOUR_NB_ICDF
+                } else {
+                    &tables::PITCH_CONTOUR_10_MS_NB_ICDF
+                };
+            } else {
+                self.pitch_contour_icdf = if self.nb_subfr as usize == MAX_NB_SUBFR {
+                    &tables::PITCH_CONTOUR_ICDF
+                } else {
+                    &tables::PITCH_CONTOUR_10_MS_ICDF
+                };
+            }
+            if self.fs_khz != fs_khz {
+                self.ltp_mem_length = LTP_MEM_LENGTH_MS * fs_khz;
+                if fs_khz == 8 || fs_khz == 12 {
+                    self.lpc_order = MIN_LPC_ORDER as i32;
+                    self.ps_nlsf_cb = &tables::SILK_NLSF_CB_NB_MB;
+                } else {
+                    self.lpc_order = MAX_LPC_ORDER as i32;
+                    self.ps_nlsf_cb = &tables::SILK_NLSF_CB_WB;
+                }
+                self.pitch_lag_low_bits_icdf = match fs_khz {
+                    16 => &tables::UNIFORM8_ICDF,
+                    12 => &tables::UNIFORM6_ICDF,
+                    8 => &tables::UNIFORM4_ICDF,
+                    _ => unreachable!(),
+                };
+                self.first_frame_after_reset = true;
+                self.lag_prev = 100;
+                self.last_gain_index = 10;
+                self.prev_signal_type = TYPE_NO_VOICE_ACTIVITY;
+                self.out_buf = [0; MAX_FRAME_LENGTH + 2 * MAX_SUB_FRAME_LENGTH];
+                self.s_lpc_q14_buf = [0; MAX_LPC_ORDER];
+            }
+
+            self.fs_khz = fs_khz;
+            self.frame_length = frame_length;
+        }
+
+        debug_assert!(self.frame_length > 0 && self.frame_length as usize <= MAX_FRAME_LENGTH);
     }
 }
 

@@ -26,12 +26,12 @@ pub fn silk_stereo_decode_pred(rd: &mut RangeDecoder<'_>, pred_q13: &mut [i32; 2
     let mut ix = [[0i32; 3]; 2];
 
     // Entropy decoding
-    let n = rd.dec_icdf(STEREO_PRED_JOINT_ICDF, 8);
+    let n = rd.dec_icdf(&STEREO_PRED_JOINT_ICDF, 8);
     ix[0][2] = silk_div32_16(n, 5);
     ix[1][2] = n - 5 * ix[0][2];
     for item in ix.iter_mut() {
-        item[0] = rd.dec_icdf(UNIFORM3_ICDF, 8);
-        item[1] = rd.dec_icdf(UNIFORM5_ICDF, 8);
+        item[0] = rd.dec_icdf(&UNIFORM3_ICDF, 8);
+        item[1] = rd.dec_icdf(&UNIFORM5_ICDF, 8);
     }
 
     // Dequantize
@@ -53,5 +53,5 @@ pub fn silk_stereo_decode_pred(rd: &mut RangeDecoder<'_>, pred_q13: &mut [i32; 2
 /// flag that only the mid channel has been coded (the C out-param `opus_int *decode_only_mid`
 /// is always 0/1, so a `bool` return is equivalent).
 pub fn silk_stereo_decode_mid_only(rd: &mut RangeDecoder<'_>) -> bool {
-    rd.dec_icdf(STEREO_ONLY_CODE_MID_ICDF, 8) != 0
+    rd.dec_icdf(&STEREO_ONLY_CODE_MID_ICDF, 8) != 0
 }

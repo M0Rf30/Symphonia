@@ -490,6 +490,47 @@ pub fn silk_log2lin(in_log_q7: i32) -> i32 {
     out
 }
 
+/// C: `silk_ADD_SAT16`.
+#[inline]
+pub fn silk_add_sat16(a: i16, b: i16) -> i16 {
+    silk_sat16(a as i32 + b as i32) as i16
+}
+/// C: `silk_SUB_SAT16`.
+#[inline]
+pub fn silk_sub_sat16(a: i16, b: i16) -> i16 {
+    silk_sat16(a as i32 - b as i32) as i16
+}
+/// C: `silk_min_32`.
+#[inline]
+pub fn silk_min_32(a: i32, b: i32) -> i32 {
+    silk_min(a, b)
+}
+/// C: `silk_max_32`.
+#[inline]
+pub fn silk_max_32(a: i32, b: i32) -> i32 {
+    silk_max(a, b)
+}
+/// C: `silk_min_int`.
+#[inline]
+pub fn silk_min_int(a: i32, b: i32) -> i32 {
+    silk_min(a, b)
+}
+/// C: `silk_max_int`.
+#[inline]
+pub fn silk_max_int(a: i32, b: i32) -> i32 {
+    silk_max(a, b)
+}
+/// C: `silk_min_16`.
+#[inline]
+pub fn silk_min_16(a: i16, b: i16) -> i16 {
+    silk_min(a, b)
+}
+/// C: `silk_max_16`.
+#[inline]
+pub fn silk_max_16(a: i16, b: i16) -> i16 {
+    silk_max(a, b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
