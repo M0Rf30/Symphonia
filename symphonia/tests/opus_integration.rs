@@ -320,3 +320,95 @@ fn surround_5_1() {
         None,
     );
 }
+
+/// Release-mode x-realtime measurement (assignment step 5): a 60s/160kbit/s stereo CELT file
+/// and a 60s hybrid file. Only times the decode (via `symphonia_decode`, which already excludes
+/// fixture generation/ffmpeg reference decode); correctness of the CELT output is irrelevant
+/// here (known upstream bugs, see CeltOracleDebug) -- this measures the code path's actual cost
+/// regardless of numerical correctness.
+///
+/// Run with:
+///   cargo test -p symphonia --release --features opus --test opus_integration \
+///     -- --ignored perf --nocapture
+#[test]
+#[ignore = "run explicitly with --release --ignored to measure x-realtime"]
+fn perf_celt_60s_160k() {
+    if !ffmpeg_available() {
+        eprintln!("ffmpeg not available; skipping");
+        return;
+    }
+    let path = make_fixture(
+        "perf_celt_60s_160k",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=60:sample_rate=48000",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=660:duration=60:sample_rate=48000",
+            "-filter_complex",
+            "[0:a][1:a]amerge=inputs=2[a]",
+            "-map",
+            "[a]",
+            "-c:a",
+            "libopus",
+            "-b:a",
+            "160k",
+            "-vbr",
+            "on",
+            "-application",
+            "audio",
+        ],
+    );
+    let iters: u32 = std::env::var("OPUS_PERF_ITERS").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
+    let start = std::time::Instant::now();
+    let mut last = (Vec::new(), 0usize);
+    for _ in 0..iters {
+        last = symphonia_decode(&path);
+    }
+    let (pcm, channels) = last;
+    let elapsed = start.elapsed() / iters.max(1);
+    let audio_seconds = (pcm.len() / channels.max(1)) as f64 / 48000.0;
+    println!(
+        "perf_celt_60s_160k: decoded {audio_seconds:.3}s audio in {elapsed:?} => {:.1}x realtime",
+        audio_seconds / elapsed.as_secs_f64()
+    );
+}
+
+#[test]
+#[ignore = "run explicitly with --release --ignored to measure x-realtime"]
+fn perf_hybrid_60s_32k() {
+    if !ffmpeg_available() {
+        eprintln!("ffmpeg not available; skipping");
+        return;
+    }
+    let path = make_fixture(
+        "perf_hybrid_60s_32k",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:duration=60:sample_rate=48000",
+            "-ac",
+            "2",
+            "-c:a",
+            "libopus",
+            "-b:a",
+            "32k",
+            "-vbr",
+            "on",
+            "-application",
+            "audio",
+        ],
+    );
+    let start = std::time::Instant::now();
+    let (pcm, channels) = symphonia_decode(&path);
+    let elapsed = start.elapsed();
+    let audio_seconds = (pcm.len() / channels.max(1)) as f64 / 48000.0;
+    println!(
+        "perf_hybrid_60s_32k: decoded {audio_seconds:.3}s audio in {elapsed:?} => {:.1}x realtime",
+        audio_seconds / elapsed.as_secs_f64()
+    );
+}
