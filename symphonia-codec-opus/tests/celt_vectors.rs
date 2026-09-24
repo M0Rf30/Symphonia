@@ -98,6 +98,13 @@ fn decode_celt_vector(bit_path: &std::path::Path, channels: u8) -> DecodeStats {
 
         frames_checked += 1;
         if decoder.final_range() != pkt.enc_final_range {
+            if range_mismatches == 0 {
+                eprintln!(
+                    "first mismatch: packet {frames_checked} frame_size={frame_size} got={} want={}",
+                    decoder.final_range(),
+                    pkt.enc_final_range
+                );
+            }
             range_mismatches += 1;
         }
     }

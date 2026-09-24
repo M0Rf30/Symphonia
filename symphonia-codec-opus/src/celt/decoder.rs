@@ -786,7 +786,7 @@ impl CeltDecoder {
             }
         }
 
-        quant_bands::unquant_coarse_energy(mode, start, end, &mut self.old_e_bands, intra_ener, rd, c, lm);
+        quant_bands::unquant_coarse_energy(mode, start, end, &mut self.old_e_bands, intra_ener, rd, c, lm, len * 8);
 
         let mut tf_res = vec![0i32; nb_ebands];
         Self::tf_decode(start, end, is_transient, &mut tf_res, lm, rd, total_bits);
