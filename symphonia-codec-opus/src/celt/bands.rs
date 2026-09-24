@@ -717,7 +717,14 @@ fn stereo_merge(x: &mut [f32], y: &mut [f32], mid: f32, n: i32) {
         (xp, side)
     };
     let xp = mid * xp;
-    let mid2 = mid * 0.5;
+    // C: `mid2 = SHR16(mid, 1)`. `SHR16` is a Q-format bit-shift in the fixed-point build but a
+    // *no-op identity* in the float build (`celt/arch.h`: `#define SHR16(a,shift) (a)`) — the
+    // shift only compensates fixed-point's Q-format scale, not a real mathematical halving.
+    // Multiplying by `0.5` here (as if replicating the fixed-point shift literally) was wrong
+    // and inflated every stereo band's denormalised energy by up to ~6x (found via a libopus
+    // oracle trace: `mid` and the pre-merge `X`/`Y` matched bit-for-bit, but `stereo_merge`'s
+    // output norm did not, isolating the bug to this line).
+    let mid2 = mid;
     let el = mid2 * mid2 + side - 2.0 * xp;
     let er = mid2 * mid2 + side + 2.0 * xp;
     if er < 6e-4 || el < 6e-4 {
