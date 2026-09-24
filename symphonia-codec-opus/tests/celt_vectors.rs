@@ -20,13 +20,24 @@ fn testvectors_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("OPUS_TESTVECTORS").map(std::path::PathBuf::from)
 }
 
+/// C: `read_pcm16` + `opus_compare.c`'s `main` (the `nchannels==1` downmix). The reference
+/// `.dec`/`m.dec` files are *always* stereo PCM on disk (`read_pcm16(&x, fin1, 2)` is
+/// hardcoded to `2` regardless of the `-s` flag) — `opus_compare` downmixes to mono itself
+/// (`x[xi] = .5*(x[2*xi]+x[2*xi+1])`) when comparing against a mono decode. Reading the file
+/// "as mono" directly (reinterpreting the interleaved stereo bytes 1:1) is wrong and produces
+/// 2x too many samples with garbled channel-swapped content.
 fn read_dec_as_f32(path: &std::path::Path, channels: usize) -> Vec<f32> {
     let raw = std::fs::read(path).unwrap_or_else(|e| panic!("reading {path:?}: {e}"));
     assert_eq!(raw.len() % 2, 0);
-    let samples: Vec<f32> = raw
-        .chunks_exact(2)
-        .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32)
-        .collect();
+    let stereo: Vec<f32> =
+        raw.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32).collect();
+    assert_eq!(stereo.len() % 2, 0);
+    let samples = if channels == 1 {
+        stereo.chunks_exact(2).map(|p| 0.5 * (p[0] + p[1])).collect()
+    }
+    else {
+        stereo
+    };
     assert_eq!(samples.len() % channels, 0);
     samples
 }
