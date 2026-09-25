@@ -416,15 +416,32 @@ impl AacDecoder {
         // `upsample_frame()` (§4.6.18.5 pure upsampling) otherwise, so the QMF state and
         // output rate stay continuous even across headerless / SBR-silent frames.
         if self.sbr.is_some() {
-            // Gather the core PCM (as f64 — the ported SBR tool's native sample type) for
-            // each element first, before taking a mutable borrow of `self.sbr`.
+            // Gather the core PCM for each element first, before taking a mutable borrow of
+            // `self.sbr`. Symphonia's `AudioBuffer<f32>` samples are normalized to `[-1.0,
+            // 1.0]`, but the ported SBR tool's envelope-energy formulas (`EOrig = 64 *
+            // 2^(E/a)`, `QOrig`, and every energy comparison the envelope adjuster/limiter
+            // performs against them) are unchanged from oxideav-aac, whose own core decoder
+            // keeps samples in the full-scale 16-bit PCM domain (`[-32768, 32768]`) right up
+            // to the final `pcm::interleave_s16` rounding step -- that is the domain those
+            // formulas are calibrated against (ISO/IEC 14496-3 §4.6.18.3.5's constants assume
+            // it implicitly, as the "PCM" the whole tool was specified around). Rescale by
+            // `32768` going in so the analysis QMF / HF generation / envelope adjustment see
+            // energies on the scale the transmitted envelope/noise values target; the
+            // symmetric `/ 32768` on the way out (below) restores Symphonia's normalized
+            // range. Without this, the low band (a raw, ungained `XLow` passthrough) stays at
+            // Symphonia's `~1.0` scale while the high band is forced to the transmitted
+            // envelope's absolute `~32768` scale by the adjuster's gain match -- a 2^30
+            // energy-scale mismatch between the two halves of the same reconstructed signal.
+            const PCM_SCALE: f64 = 32768.0;
             let mut core_pcm: Vec<Vec<Vec<f64>>> = Vec::with_capacity(cur_pair);
             for (is_pair, indices) in self.elem_targets.iter().take(cur_pair) {
                 let n_ch = if *is_pair { 2 } else { 1 };
                 let mut chans = Vec::with_capacity(n_ch);
                 for &ch_idx in indices.iter().take(n_ch) {
                     let plane = self.buf.plane(ch_idx).expect("core channel plane exists");
-                    chans.push(plane.iter().map(|&s| f64::from(s)).collect::<Vec<f64>>());
+                    chans.push(
+                        plane.iter().map(|&s| f64::from(s) * PCM_SCALE).collect::<Vec<f64>>(),
+                    );
                 }
                 core_pcm.push(chans);
             }
@@ -444,7 +461,7 @@ impl AacDecoder {
                     let dst = sbr.buf.plane_mut(ch_idx).expect("sbr channel plane exists");
                     let n = dst.len().min(out[c].len());
                     for (i, dst_i) in dst.iter_mut().enumerate().take(n) {
-                        *dst_i = out[c][i] as f32;
+                        *dst_i = (out[c][i] / PCM_SCALE) as f32;
                     }
                 }
             }
