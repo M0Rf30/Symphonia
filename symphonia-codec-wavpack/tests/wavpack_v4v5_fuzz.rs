@@ -131,22 +131,32 @@ fn fuzz_fixture(name: &str, iterations: u64, seed: u64) {
 
 #[test]
 fn fuzz_float_lossless_no_panics() {
-    fuzz_fixture("float_lossless.wv", 400, 0x5EED_F10A);
+    fuzz_fixture("float_lossless.wv", 1500, 0x5EED_F10A);
 }
 
 #[test]
 fn fuzz_float_hybrid_lossy_no_panics() {
-    fuzz_fixture("float_hybrid_lossy.wv", 400, 0x5EED_F10B);
+    fuzz_fixture("float_hybrid_lossy.wv", 1500, 0x5EED_F10B);
 }
 
 #[test]
 fn fuzz_int_hybrid_lossy_no_panics() {
-    fuzz_fixture("int_hybrid_lossy.wv", 400, 0x5EED_F10C);
+    fuzz_fixture("int_hybrid_lossy.wv", 1500, 0x5EED_F10C);
 }
 
 #[test]
 fn fuzz_float_mono_lossless_no_panics() {
-    fuzz_fixture("float_mono_lossless.wv", 400, 0x5EED_F10D);
+    fuzz_fixture("float_mono_lossless.wv", 1500, 0x5EED_F10D);
+}
+
+#[test]
+fn fuzz_multichannel_5p1_no_panics() {
+    fuzz_fixture("multi6ch_51_int16_lossless.wv", 1500, 0x5EED_F10F);
+}
+
+#[test]
+fn fuzz_multichannel_mixed_3ch_no_panics() {
+    fuzz_fixture("multi3ch_mixed_int16_lossless.wv", 1500, 0x5EED_F110);
 }
 
 #[test]
