@@ -11,6 +11,7 @@
 //! (BSD-3-Clause), see `NOTICE`. The `FormatReader` glue (probing, `Track`/`Packet`
 //! construction, tag mapping) is Symphonia-specific and not ported from any external source.
 
+mod seek_table;
 mod sv7;
 mod sv8;
 
