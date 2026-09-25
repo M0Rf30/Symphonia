@@ -64,6 +64,7 @@ mod lp;
 mod reconstruct;
 mod time_grid;
 
+pub(crate) mod decoder;
 pub(crate) mod extension;
 
 /// Minimal local mirror of `oxideav_aac::raw_data_block::IdSynEle` — the
