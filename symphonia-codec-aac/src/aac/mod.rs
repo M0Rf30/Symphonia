@@ -12,7 +12,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use symphonia_core::audio::{
-    AsGenericAudioBufferRef, AudioBuffer, AudioSpec, GenericAudioBufferRef,
+    AsGenericAudioBufferRef, AudioBuffer, AudioSpec, Channels, GenericAudioBufferRef,
 };
 use symphonia_core::codecs::CodecInfo;
 use symphonia_core::codecs::audio::well_known::CODEC_ID_AAC;
@@ -24,7 +24,9 @@ use symphonia_core::io::{BitReaderLtr, FiniteBitStream, ReadBitsLtr};
 use symphonia_core::packet::PacketRef;
 use symphonia_core::{codec_profile, support_audio_codec};
 
-use symphonia_common::mpeg::audio::{AudioObjectType, AudioSpecificConfig};
+use symphonia_common::mpeg::audio::{
+    AudioObjectType, AudioSpecificConfig, ChannelElement, channel_elements_for_config,
+};
 
 mod codebooks;
 mod common;
@@ -43,11 +45,42 @@ pub struct AacDecoder {
     // info: NACodecInfoRef,
     asc: AudioSpecificConfig,
     pairs: Vec<cpe::ChannelPair>,
+    /// For each syntactic element (`SCE`/`CPE`/`LFE`) expected, in bitstream order, whether it is
+    /// a channel pair, and the target output buffer channel index/indices. Built once from
+    /// [`AudioSpecificConfig::channel_elements`] so that e.g. a 5.1 stream's `SCE(center)`,
+    /// `CPE(front L/R)`, `CPE(rear L/R)`, `LFE` element order is placed into the buffer's
+    /// ascending-channel-position order (FL, FR, FC, LFE, RL, RR).
+    elem_targets: Vec<(bool, [usize; 2])>,
     dsp: dsp::Dsp,
     sbinfo: GASubbandInfo,
     params: AudioCodecParameters,
     buf: AudioBuffer<f32>,
     opts: AudioDecoderOptions,
+}
+
+/// Resolve each expected syntactic element (in bitstream order) into an output buffer channel
+/// index/indices, using the canonical (ascending channel-position) buffer ordering that
+/// [`Channels::Positioned`] implies.
+fn build_elem_targets(
+    elements: &[ChannelElement],
+    channels: &Channels,
+) -> Result<Vec<(bool, [usize; 2])>> {
+    elements
+        .iter()
+        .map(|elem| {
+            let index_of = |pos| {
+                channels.get_canonical_index_for_positioned_channel(pos).ok_or(
+                    symphonia_core::errors::Error::DecodeError(
+                        "aac: channel position is not present in the channel set",
+                    ),
+                )
+            };
+            match *elem {
+                ChannelElement::Single(pos) => Ok((false, [index_of(pos)?, 0])),
+                ChannelElement::Pair(l, r) => Ok((true, [index_of(l)?, index_of(r)?])),
+            }
+        })
+        .collect()
 }
 
 impl AacDecoder {
@@ -75,27 +108,35 @@ impl AacDecoder {
             };
 
             asc.channels = params.channels.clone();
+            asc.channel_elements = asc.channels.as_ref().and_then(channel_elements_for_config);
 
             asc
         };
 
-        // The channel configuration must be known.
-        //
-        // TODO: Support getting this from program configuration element (PCE). However, this would
-        // require deferring the rest of the initialization until the PCE has been read.
+        // The channel configuration must be known, either via the predefined
+        // `channelConfiguration` values 1-7, or an explicit `program_config_element()`
+        // (`channelConfiguration == 0`), both of which are resolved into `asc.channels` /
+        // `asc.channel_elements` by [`AudioSpecificConfig::read`].
         let channels = match &asc.channels {
             Some(channels) => channels.clone(),
             _ => return unsupported_error("aac: channels or channel layout is required"),
         };
 
         // Check complexity.
-        if asc.object_type != AudioObjectType::Lc
-            || asc.sbr_present
-            || channels.count() > 2
-            || asc.samples != 1024
-        {
+        if asc.object_type != AudioObjectType::Lc || asc.sbr_present || asc.samples != 1024 {
             return unsupported_error("aac: aac too complex");
         }
+
+        // Map each expected syntactic element (`SCE`/`CPE`/`LFE`), in bitstream order, onto its
+        // output buffer channel index/indices (see the `elem_targets` field documentation).
+        let elem_targets = match &asc.channel_elements {
+            Some(elements) => build_elem_targets(elements, &channels)?,
+            None => {
+                return unsupported_error(
+                    "aac: channel layout requires a channelConfiguration or program_config_element",
+                );
+            }
+        };
 
         // Clone and amend the codec parameters with information from the extra data.
         let mut params = params.clone();
@@ -106,7 +147,16 @@ impl AacDecoder {
 
         let buf = AudioBuffer::new(AudioSpec::new(asc.sample_rate, channels), asc.samples);
 
-        Ok(AacDecoder { asc, pairs: Vec::new(), dsp: dsp::Dsp::new(), sbinfo, params, buf, opts: *opts })
+        Ok(AacDecoder {
+            asc,
+            pairs: Vec::new(),
+            elem_targets,
+            dsp: dsp::Dsp::new(),
+            sbinfo,
+            params,
+            buf,
+            opts: *opts,
+        })
     }
 
     fn set_pair(&mut self, pair_no: usize, channel: usize, pair: bool) -> Result<()> {
@@ -126,38 +176,39 @@ impl AacDecoder {
 
     fn decode_ga<B: ReadBitsLtr + FiniteBitStream>(&mut self, bs: &mut B) -> Result<()> {
         let mut cur_pair = 0;
-        let mut cur_ch = 0;
         while bs.bits_left() > 3 {
             let id = bs.read_bits_leq32(3)?;
 
             match id {
-                0 => {
-                    // ID_SCE
+                0 | 3 => {
+                    // ID_SCE / ID_LFE: both are single-channel elements; the target output
+                    // channel (e.g. LFE1 vs. front-center) was already resolved into
+                    // `elem_targets` from the channel configuration / PCE.
                     let _tag = bs.read_bits_leq32(4)?;
-                    self.set_pair(cur_pair, cur_ch, false)?;
+                    validate!(cur_pair < self.elem_targets.len());
+                    let (is_pair, indices) = self.elem_targets[cur_pair];
+                    validate!(!is_pair);
+                    self.set_pair(cur_pair, indices[0], false)?;
                     self.pairs[cur_pair].decode_ga_sce(bs, self.asc.object_type)?;
                     cur_pair += 1;
-                    cur_ch += 1;
                 }
                 1 => {
                     // ID_CPE
                     let _tag = bs.read_bits_leq32(4)?;
-                    self.set_pair(cur_pair, cur_ch, true)?;
+                    validate!(cur_pair < self.elem_targets.len());
+                    let (is_pair, indices) = self.elem_targets[cur_pair];
+                    validate!(is_pair);
+                    self.set_pair(cur_pair, indices[0], true)?;
                     self.pairs[cur_pair].decode_ga_cpe(bs, self.asc.object_type)?;
                     cur_pair += 1;
-                    cur_ch += 2;
                 }
                 2 => {
-                    // ID_CCE
+                    // ID_CCE (coupling channel element): used for encoder-side downmix/dialogue
+                    // normalization hints. Vanishingly rare outside broadcast encoders; no
+                    // bitstream in the validation corpus (ffmpeg output, Fraunhofer conformance
+                    // samples) produces one, so it is left unsupported rather than applying an
+                    // unverified gain.
                     return unsupported_error("aac: coupling channel element");
-                }
-                3 => {
-                    // ID_LFE
-                    let _tag = bs.read_bits_leq32(4)?;
-                    self.set_pair(cur_pair, cur_ch, false)?;
-                    self.pairs[cur_pair].decode_ga_sce(bs, self.asc.object_type)?;
-                    cur_pair += 1;
-                    cur_ch += 1;
                 }
                 4 => {
                     // ID_DSE
@@ -173,8 +224,17 @@ impl AacDecoder {
                     bs.ignore_bits(count * 8)?; // no SBR payload or such
                 }
                 5 => {
-                    // ID_PCE
-                    return unsupported_error("aac: program config");
+                    // ID_PCE appearing inside raw_data_block(), as opposed to inside the
+                    // AudioSpecificConfig's GASpecificConfig() (which IS parsed and honoured; see
+                    // `AudioSpecificConfig::read` / `channel_elements`). This in-band form is used
+                    // when the transport carries no out-of-band channel configuration: MP4/ESDS
+                    // always carries an ASC (so this is unreachable there), but ADTS's own
+                    // `channel_configuration` field can itself be 0, in which case a `raw_data_
+                    // block()` is required to open with exactly this element. Supporting it would
+                    // mean deferring the decoder's channel count / output buffer sizing (currently
+                    // fixed at construction from `AudioSpecificConfig`/ADTS header) until the
+                    // first packet has been parsed; a real (if rare) case, but out of scope here.
+                    return unsupported_error("aac: program config element in raw_data_block");
                 }
                 6 => {
                     // ID_FIL
