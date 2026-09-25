@@ -20,6 +20,7 @@ use symphonia_core::meta::{
     Metadata, MetadataBuilder, MetadataInfo, MetadataLog, Tag, well_known,
 };
 use symphonia_core::audio::layouts;
+use symphonia_core::audio::{Channels, Position};
 use symphonia_core::codecs::CodecParameters;
 use symphonia_core::codecs::audio::AudioCodecParameters;
 use symphonia_core::audio::sample::SampleFormat;
@@ -261,10 +262,43 @@ impl<'s> WavPackReader<'s> {
         if header.get_block_index() != 0 {
             debug!("First block is not first block after all.");
         }
-        let channel_layout = if header.is_stereo() {
-            layouts::CHANNEL_LAYOUT_STEREO
-        } else {
-            layouts::CHANNEL_LAYOUT_MONO
+
+        // Read the rest of the first block's sub-blocks once, up front: used both to
+        // find `ID_CHANNEL_INFO` (multichannel layout, below) and to scan for RIFF/WAVE
+        // sampler metadata (`smpl`/`cue` chunks) further down. `ck_size` counts
+        // everything after the `ck_size` field itself; the remaining 24 bytes of the
+        // 32-byte header have already been consumed by `Header::decode`.
+        let sub_blocks_len = (header.ck_size as u64).saturating_sub(24);
+        let mut sub_buf = vec![0u8; sub_blocks_len as usize];
+        let have_sub_buf = mss.read_buf_exact(&mut sub_buf).is_ok();
+
+        // `ID_CHANNEL_INFO` (present whenever the file has more than 2 channels, or
+        // channels that don't map to the default WAVEFORMATEXTENSIBLE speaker mask)
+        // gives the true total channel count and speaker mask for the whole file. A
+        // plain mono/stereo file (a single stream) carries none of these and falls back
+        // to this first (and only) block's own header flags, as before.
+        let channel_info = if have_sub_buf { find_channel_info(&sub_buf) } else { None };
+        let channel_layout = match channel_info {
+            Some((n, mask)) if n > 0 => {
+                let positioned = Position::from_bits_truncate(mask as u64);
+                if positioned.bits().count_ones() as u16 == n {
+                    Channels::Positioned(positioned)
+                }
+                else {
+                    // Mask doesn't match the channel count (malformed, or a file with
+                    // "unassigned" channels) -- fall back to discrete channels rather
+                    // than risk a plane-count mismatch during decode.
+                    Channels::Discrete(n)
+                }
+            }
+            _ => {
+                if header.is_stereo() {
+                    layouts::CHANNEL_LAYOUT_STEREO
+                }
+                else {
+                    layouts::CHANNEL_LAYOUT_MONO
+                }
+            }
         };
 
         let mut codec_params = AudioCodecParameters::new();
@@ -301,21 +335,16 @@ impl<'s> WavPackReader<'s> {
             track.with_duration(Duration::new(total_samples));
         }
 
-        // Scan the rest of block 0 for a RiffHeader sub-block. GrandOrgue /
-        // Hauptwerk store loop points (`smpl`) and the release marker (`cue `)
-        // inside the WAV chunks that WavPack preserves there. Routing them
-        // through the same parsers used by the v3 path keeps the tag layout
-        // identical between the two flavors.
+        // Scan block 0's sub-blocks for a RiffHeader sub-block. GrandOrgue / Hauptwerk
+        // store loop points (`smpl`) and the release marker (`cue `) inside the WAV
+        // chunks that WavPack preserves there. Routing them through the same parsers
+        // used by the v3 path keeps the tag layout identical between the two flavors.
         let mut meta_builder = MetadataBuilder::new(MetadataInfo {
             metadata: well_known::METADATA_ID_WAVE,
             short_name: "riff",
             long_name: "RIFF/WAVE Sampler Metadata",
         });
-        // ck_size counts everything after the ck_size field itself; the
-        // remaining 24 bytes of the 32-byte header have already been consumed.
-        let sub_blocks_len = (header.ck_size as u64).saturating_sub(24);
-        let mut sub_buf = vec![0u8; sub_blocks_len as usize];
-        if mss.read_buf_exact(&mut sub_buf).is_ok() {
+        if have_sub_buf {
             scan_v4v5_riff_meta(&sub_buf, &mut meta_builder)?;
         }
 
@@ -504,96 +533,148 @@ impl WavPackReader<'_> {
     }
 
     fn next_packet_v4v5(&mut self) -> Result<Option<Packet>> {
-        // Skip non-block bytes and locate the next wvpk marker.
-        if find_next_block(&mut self.reader, 10000).is_err() {
-            return Ok(None);
-        }
-        let header = Header::decode(&mut self.reader)?;
+        // A "block group" is one or more consecutive wvpk blocks sharing the same
+        // starting sample index: one block per audio stream (a mono or stereo pair),
+        // covering all of the file's channels between them (INITIAL_BLOCK on the first,
+        // FINAL_BLOCK on the last). For an ordinary mono/stereo file (a single stream)
+        // every block has both flags set, so this loop runs exactly once per packet,
+        // identical to the previous single-block behaviour.
+        let mut streams: Vec<Vec<u8>> = Vec::new();
+        let mut block_samples: u32 = 0;
 
-        // ck_size counts everything after the ck_size field itself; the remaining 24
-        // bytes of the 32-byte header have already been consumed by `Header::decode`.
-        // Bounding the sub-block loop by this (rather than stopping at the first
-        // `WvBitStream`) is required to also pick up sub-blocks that follow the audio
-        // bitstream, such as `ID_WVX_BITSTREAM` (float/int32 extension bits) or a
-        // trailing `ID_BLOCK_CHECKSUM`.
-        let sub_blocks_len = (header.ck_size as u64).saturating_sub(24);
-        let end_pos = self.reader.pos().saturating_add(sub_blocks_len);
-
-        let mut terms_data:    Vec<u8> = Vec::new();
-        let mut weights_data:  Vec<u8> = Vec::new();
-        let mut samples_data:  Vec<u8> = Vec::new();
-        let mut entropy_data:  Vec<u8> = Vec::new();
-        let mut hybrid_data:   Vec<u8> = Vec::new();
-        let mut float_data:    Vec<u8> = Vec::new();
-        let mut int32_data:    Vec<u8> = Vec::new();
-        let mut wvx_data:      Vec<u8> = Vec::new();
-        let mut audio_data:    Vec<u8> = Vec::new();
-
-        while self.reader.pos() < end_pos {
-            let sb = decode_sub_block(&mut self.reader)?;
-            match sb {
-                SubBlock::DecorrelationTerms(d)   => terms_data   = d,
-                SubBlock::DecorrelationWeights(d) => weights_data = d,
-                SubBlock::DecorrelationSamples(d) => samples_data = d,
-                SubBlock::EntropyVariables(d)     => entropy_data = d,
-                SubBlock::HybridProfile(d)        => hybrid_data  = d,
-                SubBlock::FloatInfo(d)            => float_data   = d,
-                SubBlock::Int32Info(d)            => int32_data   = d,
-                SubBlock::WvBitStream(d)          => audio_data   = d,
-                SubBlock::WvxBitStream(d)         => wvx_data     = d,
-                SubBlock::DsdBlock(_) => {
-                    return symphonia_core::errors::unsupported_error("wavpack: DSD not supported");
-                }
-                // Skip everything else: ShapingWeights (only meaningful with a .wvc
-                // correction file, unsupported by this fork — see README),
-                // WvcBitStream (belongs to the sibling .wvc file), metadata,
-                // checksums, RIFF headers, etc.
-                _ => debug!("v4v5: skipping non-audio sub-block"),
+        loop {
+            let (header, mini) = match read_v4v5_stream_block(&mut self.reader)? {
+                Some(v) => v,
+                None => break,
+            };
+            if streams.is_empty() {
+                block_samples = header.block_samples;
+            }
+            let is_final = header.is_final_block();
+            streams.push(mini);
+            if is_final || streams.len() >= MAX_STREAMS_PER_PACKET {
+                break;
             }
         }
 
-        // Serialise into a packet understood by the decoder:
-        //   magic(4) + flags(4) + block_samples(4) + crc(4)
-        //   + terms_len(4) + weights_len(4) + samples_len(4) + entropy_len(4)
-        //   + hybrid_profile_len(4) + float_info_len(4) + int32_len(4) + wvx_len(4)
-        //   followed by the raw sub-block bytes (in that order) then the audio bitstream.
-        let lens: [u32; 8] = [
-            terms_data.len()   as u32,
-            weights_data.len() as u32,
-            samples_data.len() as u32,
-            entropy_data.len() as u32,
-            hybrid_data.len()  as u32,
-            float_data.len()   as u32,
-            int32_data.len()   as u32,
-            wvx_data.len()     as u32,
-        ];
-
-        let payload_len: usize = lens.iter().map(|&l| l as usize).sum::<usize>() + audio_data.len();
-        let mut pkt: Vec<u8> = Vec::with_capacity(48 + payload_len);
-        pkt.extend_from_slice(b"WV45");
-        pkt.extend_from_slice(&header.flags.to_le_bytes());
-        pkt.extend_from_slice(&header.block_samples.to_le_bytes());
-        pkt.extend_from_slice(&header.crc.to_le_bytes());
-        for l in lens {
-            pkt.extend_from_slice(&l.to_le_bytes());
+        if streams.is_empty() {
+            return Ok(None);
         }
-        pkt.extend_from_slice(&terms_data);
-        pkt.extend_from_slice(&weights_data);
-        pkt.extend_from_slice(&samples_data);
-        pkt.extend_from_slice(&entropy_data);
-        pkt.extend_from_slice(&hybrid_data);
-        pkt.extend_from_slice(&float_data);
-        pkt.extend_from_slice(&int32_data);
-        pkt.extend_from_slice(&wvx_data);
-        pkt.extend_from_slice(&audio_data);
 
-        // block_samples is the per-channel frame count
-        let n  = header.block_samples as i64;
+        // Each stream's mini-block is prefixed with its own byte length so the decoder
+        // can slice out exactly its bytes (needed because the mini-block's audio
+        // bitstream is otherwise unbounded -- it runs to "the end of this stream's
+        // data", which is only unambiguous once we know where this stream ends and
+        // the next one's header begins).
+        let payload_len: usize = streams.iter().map(|s| 4 + s.len()).sum();
+        let mut pkt: Vec<u8> = Vec::with_capacity(8 + payload_len);
+        pkt.extend_from_slice(b"WV45");
+        pkt.extend_from_slice(&(streams.len() as u32).to_le_bytes());
+        for s in &streams {
+            pkt.extend_from_slice(&(s.len() as u32).to_le_bytes());
+            pkt.extend_from_slice(s);
+        }
+
+        // block_samples is the per-channel frame count, shared by every stream in the
+        // group (they all cover the same span of the timeline).
+        let n  = block_samples as i64;
         let ts = self.next_packet_ts;
         self.next_packet_ts += n;
 
         Ok(Some(Packet::new(0, Timestamp::new(ts), Duration::new(n as u64), pkt)))
     }
+}
+
+/// Maximum number of per-stream blocks merged into a single packet (one multichannel
+/// "block group"). A generous safety cap (well above any real WavPack file, which tops
+/// out at 256 channels / ~128 stereo-pair streams in practice) so a stream that never
+/// sets `FINAL_BLOCK` -- malformed input -- can't grow a packet unboundedly.
+const MAX_STREAMS_PER_PACKET: usize = 512;
+
+/// Read one physical wvpk block (one stream of a possibly-multichannel "block group")
+/// and serialise it into the per-stream mini-packet the decoder expects:
+///   flags(4) + block_samples(4) + crc(4)
+///   + terms_len(4) + weights_len(4) + samples_len(4) + entropy_len(4)
+///   + hybrid_profile_len(4) + float_info_len(4) + int32_len(4) + wvx_len(4)
+///   followed by the raw sub-block bytes (in that order) then the audio bitstream.
+/// Returns `Ok(None)` at a clean end of stream (no more `wvpk` markers found).
+fn read_v4v5_stream_block(reader: &mut MediaSourceStream<'_>) -> Result<Option<(Header, Vec<u8>)>> {
+    if find_next_block(reader, 10000).is_err() {
+        return Ok(None);
+    }
+    let header = Header::decode(reader)?;
+
+    // ck_size counts everything after the ck_size field itself; the remaining 24 bytes
+    // of the 32-byte header have already been consumed by `Header::decode`. Bounding the
+    // sub-block loop by this (rather than stopping at the first `WvBitStream`) is
+    // required to also pick up sub-blocks that follow the audio bitstream, such as
+    // `ID_WVX_BITSTREAM` (float/int32 extension bits) or a trailing `ID_BLOCK_CHECKSUM`.
+    let sub_blocks_len = (header.ck_size as u64).saturating_sub(24);
+    let end_pos = reader.pos().saturating_add(sub_blocks_len);
+
+    let mut terms_data:    Vec<u8> = Vec::new();
+    let mut weights_data:  Vec<u8> = Vec::new();
+    let mut samples_data:  Vec<u8> = Vec::new();
+    let mut entropy_data:  Vec<u8> = Vec::new();
+    let mut hybrid_data:   Vec<u8> = Vec::new();
+    let mut float_data:    Vec<u8> = Vec::new();
+    let mut int32_data:    Vec<u8> = Vec::new();
+    let mut wvx_data:      Vec<u8> = Vec::new();
+    let mut audio_data:    Vec<u8> = Vec::new();
+
+    while reader.pos() < end_pos {
+        let sb = decode_sub_block(reader)?;
+        match sb {
+            SubBlock::DecorrelationTerms(d)   => terms_data   = d,
+            SubBlock::DecorrelationWeights(d) => weights_data = d,
+            SubBlock::DecorrelationSamples(d) => samples_data = d,
+            SubBlock::EntropyVariables(d)     => entropy_data = d,
+            SubBlock::HybridProfile(d)        => hybrid_data  = d,
+            SubBlock::FloatInfo(d)            => float_data   = d,
+            SubBlock::Int32Info(d)            => int32_data   = d,
+            SubBlock::WvBitStream(d)          => audio_data   = d,
+            SubBlock::WvxBitStream(d)         => wvx_data     = d,
+            SubBlock::DsdBlock(_) => {
+                return symphonia_core::errors::unsupported_error("wavpack: DSD not supported");
+            }
+            // Skip everything else: ShapingWeights (only meaningful with a .wvc
+            // correction file, unsupported by this fork — see README), ChannelInfo
+            // (already scanned separately, once, in `try_new_v4v5`), WvcBitStream
+            // (belongs to the sibling .wvc file), metadata, checksums, RIFF headers.
+            _ => debug!("v4v5: skipping non-audio sub-block"),
+        }
+    }
+
+    let lens: [u32; 8] = [
+        terms_data.len()   as u32,
+        weights_data.len() as u32,
+        samples_data.len() as u32,
+        entropy_data.len() as u32,
+        hybrid_data.len()  as u32,
+        float_data.len()   as u32,
+        int32_data.len()   as u32,
+        wvx_data.len()     as u32,
+    ];
+
+    let payload_len: usize = lens.iter().map(|&l| l as usize).sum::<usize>() + audio_data.len();
+    let mut mini: Vec<u8> = Vec::with_capacity(44 + payload_len);
+    mini.extend_from_slice(&header.flags.to_le_bytes());
+    mini.extend_from_slice(&header.block_samples.to_le_bytes());
+    mini.extend_from_slice(&header.crc.to_le_bytes());
+    for l in lens {
+        mini.extend_from_slice(&l.to_le_bytes());
+    }
+    mini.extend_from_slice(&terms_data);
+    mini.extend_from_slice(&weights_data);
+    mini.extend_from_slice(&samples_data);
+    mini.extend_from_slice(&entropy_data);
+    mini.extend_from_slice(&hybrid_data);
+    mini.extend_from_slice(&float_data);
+    mini.extend_from_slice(&int32_data);
+    mini.extend_from_slice(&wvx_data);
+    mini.extend_from_slice(&audio_data);
+
+    Ok(Some((header, mini)))
 }
 
 // ---------------------------------------------------------------------------
@@ -757,6 +838,67 @@ fn mss_skip(source: &mut MediaSourceStream<'_>, n: u64) -> Result<()> {
 // Sub-block IDs we care about for metadata extraction.
 const SBID_RIFF_HEADER:  u8 = 0x21;
 const SBID_RIFF_TRAILER: u8 = 0x22;
+
+/// `ID_CHANNEL_INFO` (wavpack.h `0x0D`): total channel count + WAVEFORMATEXTENSIBLE-style
+/// speaker mask for a multichannel file, present once (in the first block) whenever a
+/// file has more than 2 channels or channels that don't map to the plain mono/stereo
+/// default. Port of `read_channel_info()` in open_utils.c (both the legacy 1-5 byte and
+/// the "new" (WavPack 5.0+, `>= 6` byte) unlimited-channel-count encodings).
+fn find_channel_info(body: &[u8]) -> Option<(u16, u32)> {
+    let mut p = 0usize;
+    while p + 2 <= body.len() {
+        let id = body[p];
+        let (hdr_len, words) = if id & 0x80 != 0 {
+            if p + 4 > body.len() { break; }
+            let w = (body[p + 1] as u32) | ((body[p + 2] as u32) << 8) | ((body[p + 3] as u32) << 16);
+            (4usize, w)
+        }
+        else {
+            (2usize, body[p + 1] as u32)
+        };
+
+        let data_len = (words as usize) * 2;
+        let pad      = if id & 0x40 != 0 { 1 } else { 0 };
+        let start    = p + hdr_len;
+        let end_full = start + data_len;
+        if end_full > body.len() { break; }
+        let end_used = end_full - pad;
+
+        if id & 0x3F == 0x0D {
+            let data = &body[start..end_used];
+            let bytecnt = data.len();
+            if bytecnt == 0 || bytecnt > 7 {
+                return None;
+            }
+
+            if bytecnt >= 6 {
+                // "New" (2016+) format: 3-byte channel-count/max-streams pair (each
+                // extended with the low/high nibble of the 3rd byte for >255 channels)
+                // followed by a 3 or 4-byte little-endian channel mask.
+                let num_channels = (data[0] as u32 | (((data[2] & 0xf) as u32) << 8)) + 1;
+                let mut mask = data[3] as u32 | ((data[4] as u32) << 8) | ((data[5] as u32) << 16);
+                if bytecnt == 7 {
+                    mask |= (data[6] as u32) << 24;
+                }
+                return Some((num_channels.min(u16::MAX as u32) as u16, mask));
+            }
+            else {
+                // Legacy format: 1-byte channel count followed by up to 4 mask bytes.
+                let num_channels = data[0] as u32;
+                let mut mask = 0u32;
+                let mut shift = 0u32;
+                for &b in &data[1..] {
+                    mask |= (b as u32) << shift;
+                    shift += 8;
+                }
+                return Some((num_channels.min(u16::MAX as u32) as u16, mask));
+            }
+        }
+
+        p = end_full;
+    }
+    None
+}
 
 /// Walk the sub-blocks contained in the first wvpk block body, locate any
 /// RIFF header bytes WavPack stashed there (sub-block IDs 0x21 / 0x22), and
@@ -979,6 +1121,14 @@ impl Header {
     /// (shifted-mantissa integers here) rather than plain PCM integers.
     fn is_float(&self) -> bool {
         (self.flags & 0x0000_0080) != 0
+    }
+
+    /// `FINAL_BLOCK` (wavpack.h `0x1000`): this is the last block of a multichannel
+    /// "block group" sharing the same starting sample index. For ordinary mono/stereo
+    /// files (a single stream) every block has this flag set, since each block is both
+    /// the first and last block of its own (single-stream) group.
+    fn is_final_block(&self) -> bool {
+        (self.flags & 0x0000_1000) != 0
     }
 
     fn is_stereo(&self) -> bool {

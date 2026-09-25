@@ -35,11 +35,14 @@ pub const MONO_DATA:      u32 = MONO_FLAG | FALSE_STEREO;
 
 pub const PACKET_MAGIC: &[u8; 4] = b"WV45";
 
-// Fixed header size in the packet data
-//   magic(4) + flags(4) + block_samples(4) + crc(4)
+// Header size of one stream's mini-block within a (possibly multi-stream) packet, not
+// counting the packet-level magic/stream-count or this stream's own length prefix
+// (both added by the reader when assembling the packet; see
+// `WavPackReader::read_v4v5_stream_block`):
+//   flags(4) + block_samples(4) + crc(4)
 //   + terms_len(4) + weights_len(4) + samples_len(4) + entropy_len(4)
-//   + hybrid_profile_len(4) + float_info_len(4) + int32_len(4) + wvx_len(4) = 48 bytes
-pub const PKT_HDR: usize = 48;
+//   + hybrid_profile_len(4) + float_info_len(4) + int32_len(4) + wvx_len(4) = 44 bytes
+pub const STREAM_HDR: usize = 44;
 
 // ---------------------------------------------------------------------------
 // Sub-block size limits to guard against malformed streams
@@ -48,6 +51,11 @@ pub const PKT_HDR: usize = 48;
 const MAX_NTERMS: usize = 16;
 const MAX_TERM:   usize = 8;
 const LIMIT_ONES: u32   = 16;
+
+/// WavPack's own encoder caps block size at 131072 samples (`--blocksize`); this is a
+/// generous multiple of that used to reject a malformed/mutated `block_samples` field
+/// before it can cause an arithmetic overflow or an unbounded allocation.
+const MAX_BLOCK_SAMPLES: u32 = 1 << 20;
 
 // INC/DEC median divisors
 const DIV0: u32 = 128;
@@ -647,7 +655,7 @@ fn get_words_lossless(
 ) -> Option<Vec<i32>> {
     let is_mono  = (flags & MONO_DATA) != 0;
     // The C reference doubles nsamples for stereo and iterates one sample at a time.
-    let nsamples = if is_mono { block_samples } else { block_samples * 2 };
+    let nsamples = if is_mono { block_samples } else { block_samples.saturating_mul(2) };
     let mut buffer = vec![0i32; nsamples as usize];
     let mut csamples: u32 = 0;
 
@@ -800,7 +808,7 @@ fn get_words_hybrid(
     block_samples: u32,
 ) -> Option<Vec<i32>> {
     let is_mono  = (flags & MONO_DATA) != 0;
-    let nsamples = if is_mono { block_samples } else { block_samples * 2 };
+    let nsamples = if is_mono { block_samples } else { block_samples.saturating_mul(2) };
     let mut buffer = vec![0i32; nsamples as usize];
     let mut csamples: u32 = 0;
 
@@ -1197,6 +1205,14 @@ pub fn unpack_samples_v4v5(
     wvx:           &[u8],
     audio:         &[u8],
 ) -> Option<Vec<i32>> {
+    // WavPack's own encoder caps block size at 131072 samples (`--blocksize`); reject
+    // anything wildly larger up front rather than risk an unbounded allocation or an
+    // arithmetic overflow further down from a malformed/mutated `block_samples` field
+    // (this decoder must never panic on untrusted network-stream input).
+    if block_samples > MAX_BLOCK_SAMPLES {
+        return None;
+    }
+
     let is_mono = (flags & MONO_DATA) != 0;
     let mut bs  = Bits::new(audio);
 
