@@ -33,6 +33,7 @@ mod common;
 mod cpe;
 mod dsp;
 mod ics;
+mod sbr;
 mod window;
 
 use common::*;

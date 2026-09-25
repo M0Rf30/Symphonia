@@ -1,0 +1,55 @@
+This crate is licensed under the Mozilla Public License v2.0 (see
+LICENSE), except for the SBR (Spectral Band Replication) decoder in
+`src/aac/sbr/`, which is ported from:
+
+    oxideav-aac 0.1.7
+    https://github.com/OxideAV/oxideav-aac
+    https://crates.io/crates/oxideav-aac
+    Copyright (c) 2026 Karpelès Lab Inc.
+
+licensed under the MIT License, reproduced below. `oxideav-aac` states
+that it is a clean-room implementation of ISO/IEC 14496-3; per-item
+section citations are carried over into the ported files' doc comments.
+
+The port covers the *decode-side* SBR tool only (bitstream parsing,
+frequency-band derivation, HF generation/adjustment, and the 32/64-band
+QMF analysis/synthesis filterbanks): `oxideav-aac`'s SBR *encoder* and
+bitstream *writer* modules were not ported and are not part of this
+crate. Parametric Stereo (HE-AAC v2, Annex 8.A) was also not ported;
+see `src/aac/sbr/mod.rs` for the integration hook left for that wave.
+
+Every file under `src/aac/sbr/` other than `bits.rs`, `crc.rs`,
+`error.rs`, and `mod.rs` (which are small local adapters written for
+this port — see their own header comments) is a mechanical adaptation
+of the correspondingly-named `oxideav-aac` 0.1.7 source file (e.g.
+`src/aac/sbr/header.rs` from `oxideav-aac`'s `src/sbr_header.rs`):
+`oxideav_core::bits::BitReader`/`BitWriter` calls were retargeted at
+this crate's local `bits` adapter, `crate::{Error, Result}` was
+retargeted at a local `error` module reusing the same enum variant
+names, and `crate::sbr_<name>::` paths were rewritten to `super::
+<name>::`, but the ported logic, structure, item names, and doc
+comments (including their spec citations) are otherwise unchanged.
+
+----------------------------------------------------------------------
+
+MIT License
+
+Copyright (c) 2026 Karpelès Lab Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
