@@ -5,8 +5,45 @@
 WavPack demuxer and lossless decoder for Project Symphonia.
 
 Supports the WavPack v1-v3 RIFF/WAVE-wrapped stream and the native WavPack v4/v5 block
-stream, including lossless mono and stereo audio at 8/16/24/32-bit depths. Lossy/hybrid and
-floating-point WavPack streams are not decoded.
+stream: lossless PCM (8/16/24/32-bit), lossless and hybrid-lossy IEEE 32-bit float,
+hybrid-lossy PCM, and multichannel files (mono/stereo/quad/5.1/7.1/... — anything
+expressible as a WAVEFORMATEXTENSIBLE speaker mask, or discrete channels otherwise). The
+`.wvc` correction-file mechanism (needed for exact lossless reconstruction of a hybrid
+stream) is not supported; see below.
+
+### Multichannel (>2 channel) files
+
+A WavPack file with more than 2 channels stores its audio as several interleaved
+mono/stereo "streams" (e.g. 5.1 is 3 streams: a stereo front pair, a mono center+LFE...
+depending on the encoder's channel grouping), all sharing the same starting sample
+index. The reader merges each such group of blocks (`INITIAL_BLOCK` .. `FINAL_BLOCK`)
+into one packet, and the decoder interleaves every stream's samples into the final
+N-channel output — the same approach WavPack's own `unpack_samples_interleave()` uses.
+The channel count and WAVEFORMATEXTENSIBLE speaker mask come from the file's
+`ID_CHANNEL_INFO` metadata; a mask that doesn't cleanly match the channel count (e.g. a
+file with "unassigned" channels) falls back to `Channels::Discrete`.
+
+### Hybrid (`-b<n>`) streams and `.wvc`
+
+WavPack's hybrid mode splits a stream into a "lossy" main bitstream plus an optional
+`.wvc` correction file that refines it back to bit-exact lossless. This decoder always
+decodes the lossy approximation from the main bitstream alone (bit-exact vs. `wvunpack
+-i`, which forces the same "ignore .wvc" behaviour), even when a sibling `.wvc` file
+exists next to the `.wv` file being played.
+
+This is a hard limitation of the current Symphonia API rather than a decoding gap:
+`symphonia_core::formats::FormatOptions::external_data` (`ExternalFormatData`) only
+carries pre-parsed metadata/chapters, not an extra `MediaSourceStream`, so a
+`FormatReader::try_new` has no side channel through which a caller could hand it the
+correction file. Supporting `.wvc` would need a new `ExternalFormatData` field (e.g. an
+optional boxed `MediaSourceStream`/reader for the correction file) plumbed through the
+probe/format-registration API; that is out of scope for this crate alone. A caller (e.g.
+rmpd) that wants lossless hybrid playback today has no way to supply the `.wvc` stream to
+this reader.
+
+IEEE float and hybrid-lossy int/float decoding were ported from the reference WavPack
+library (BSD-3-Clause, see `LICENSE`/`NOTICE`); the ported functions are documented at
+each call site with the corresponding upstream C source file.
 
 > [!NOTE]
 > This crate is part of Symphonia. Please use the [`symphonia`](https://crates.io/crates/symphonia) crate instead of this one directly.
