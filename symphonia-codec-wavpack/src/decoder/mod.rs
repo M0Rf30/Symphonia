@@ -9,6 +9,7 @@ mod bits;
 mod words;
 mod v3;
 mod v4v5;
+mod floats;
 
 use symphonia_core::audio::{AsGenericAudioBufferRef, AudioSpec, GenericAudioBuffer, GenericAudioBufferRef};
 use symphonia_core::audio::sample::SampleFormat;
@@ -251,21 +252,28 @@ impl WavPackDecoder {
         let flags         = u32::from_le_bytes([data[4],  data[5],  data[6],  data[7]]);
         let block_samples = u32::from_le_bytes([data[8],  data[9],  data[10], data[11]]);
         let _crc          = u32::from_le_bytes([data[12], data[13], data[14], data[15]]);
-        let tl            = u16::from_le_bytes([data[16], data[17]]) as usize;
-        let wl            = u16::from_le_bytes([data[18], data[19]]) as usize;
-        let sl            = u16::from_le_bytes([data[20], data[21]]) as usize;
-        let el            = u16::from_le_bytes([data[22], data[23]]) as usize;
-        let il            = data[24] as usize;
+        let read_u32 = |off: usize| u32::from_le_bytes([data[off], data[off+1], data[off+2], data[off+3]]) as usize;
+        let tl  = read_u32(16);
+        let wl  = read_u32(20);
+        let sl  = read_u32(24);
+        let el  = read_u32(28);
+        let hpl = read_u32(32); // hybrid profile
+        let fil = read_u32(36); // float info
+        let il  = read_u32(40); // int32 info
+        let wxl = read_u32(44); // wvx (float/int32 extension) bitstream
 
         let mut pos = PKT_HDR;
         let end     = data.len();
 
-        let terms_raw   = &data[pos..pos.saturating_add(tl).min(end)]; pos += tl;
-        let weights_raw = &data[pos..pos.saturating_add(wl).min(end)]; pos += wl;
-        let samples_raw = &data[pos..pos.saturating_add(sl).min(end)]; pos += sl;
-        let entropy_raw = &data[pos..pos.saturating_add(el).min(end)]; pos += el;
-        let int32_raw   = &data[pos..pos.saturating_add(il).min(end)]; pos += il;
-        let audio       = &data[pos.min(end)..];
+        let terms_raw    = &data[pos..pos.saturating_add(tl).min(end)];  pos += tl;
+        let weights_raw  = &data[pos..pos.saturating_add(wl).min(end)];  pos += wl;
+        let samples_raw  = &data[pos..pos.saturating_add(sl).min(end)];  pos += sl;
+        let entropy_raw  = &data[pos..pos.saturating_add(el).min(end)];  pos += el;
+        let hybrid_raw   = &data[pos..pos.saturating_add(hpl).min(end)]; pos += hpl;
+        let float_raw    = &data[pos..pos.saturating_add(fil).min(end)]; pos += fil;
+        let int32_raw    = &data[pos..pos.saturating_add(il).min(end)];  pos += il;
+        let wvx_raw      = &data[pos..pos.saturating_add(wxl).min(end)]; pos += wxl;
+        let audio        = &data[pos.min(end)..];
 
         if block_samples == 0 {
             self.buf.clear();
@@ -279,6 +287,7 @@ impl WavPackDecoder {
         // planes so silence isn't produced on the second channel.
         let is_true_mono = (flags & v4v5::MONO_FLAG) != 0;
         let is_false_stereo = is_mono && !is_true_mono;
+        let is_float = (flags & v4v5::FLOAT_DATA) != 0;
 
         // v4/v5 entropy state is freshly initialized from sub-blocks each block
         self.words45 = WordsState45::default();
@@ -288,16 +297,22 @@ impl WavPackDecoder {
         parse_decorr_weights(weights_raw, &mut self.decorr45, is_mono);
         parse_decorr_samples(samples_raw, &mut self.decorr45, is_mono);
         parse_entropy_vars(entropy_raw, &mut self.words45, is_mono);
+        if (flags & v4v5::HYBRID_FLAG) != 0 {
+            v4v5::parse_hybrid_profile(hybrid_raw, &mut self.words45, is_mono, flags);
+        }
         let i32info = parse_int32_info(int32_raw);
+        let float_info = if is_float { floats::parse_float_info(float_raw) } else { None };
 
         let samples = unpack_samples_v4v5(
             flags, block_samples,
             &mut self.decorr45,
             &mut self.words45,
             &i32info,
+            float_info.as_ref(),
+            wvx_raw,
             audio,
         ).ok_or(symphonia_core::errors::Error::DecodeError(
-            "wavpack v4/v5: unsupported encoding (hybrid or float)"
+            "wavpack v4/v5: unsupported encoding"
         ))?;
 
         if samples.is_empty() && block_samples > 0 {
@@ -370,6 +385,22 @@ impl WavPackDecoder {
                     } else {
                         planes[0][idx] = samples[idx * 2    ].clamp(-128, 127) as i8;
                         planes[1][idx] = samples[idx * 2 + 1].clamp(-128, 127) as i8;
+                    }
+                    Ok(())
+                })?;
+            }
+            GenericAudioBuffer::F32(b) => {
+                b.grow_capacity(decoded_frames);
+                b.render_with(Some(decoded_frames), |idx, planes| {
+                    if is_mono {
+                        let v = f32::from_bits(samples[idx] as u32);
+                        planes[0][idx] = v;
+                        if is_false_stereo {
+                            planes[1][idx] = v;
+                        }
+                    } else {
+                        planes[0][idx] = f32::from_bits(samples[idx * 2] as u32);
+                        planes[1][idx] = f32::from_bits(samples[idx * 2 + 1] as u32);
                     }
                     Ok(())
                 })?;

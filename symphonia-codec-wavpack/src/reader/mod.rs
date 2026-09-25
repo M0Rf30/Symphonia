@@ -275,6 +275,7 @@ impl<'s> WavPackReader<'s> {
             .with_channels(channel_layout);
 
         let sample_format = match header.get_encoding() {
+            Encoding::Pcm if header.is_float() => SampleFormat::F32,
             Encoding::Pcm => match header.get_bytes_per_sample() {
                 1 => SampleFormat::S8,
                 2 => SampleFormat::S16,
@@ -509,69 +510,81 @@ impl WavPackReader<'_> {
         }
         let header = Header::decode(&mut self.reader)?;
 
-        // Collect sub-blocks until we see the audio bitstream.
-        let mut terms_data:   Vec<u8> = Vec::new();
-        let mut weights_data: Vec<u8> = Vec::new();
-        let mut samples_data: Vec<u8> = Vec::new();
-        let mut entropy_data: Vec<u8> = Vec::new();
-        let mut int32_data:   Vec<u8> = Vec::new();
-        let audio_data: Vec<u8>;
+        // ck_size counts everything after the ck_size field itself; the remaining 24
+        // bytes of the 32-byte header have already been consumed by `Header::decode`.
+        // Bounding the sub-block loop by this (rather than stopping at the first
+        // `WvBitStream`) is required to also pick up sub-blocks that follow the audio
+        // bitstream, such as `ID_WVX_BITSTREAM` (float/int32 extension bits) or a
+        // trailing `ID_BLOCK_CHECKSUM`.
+        let sub_blocks_len = (header.ck_size as u64).saturating_sub(24);
+        let end_pos = self.reader.pos().saturating_add(sub_blocks_len);
 
-        loop {
-            // Check for end-of-block: the block covers ck_size bytes after the
-            // first 4 (the ck_size field itself is not counted by WavPack).
-            // We detect end-of-block by trying to peek; if the next bytes form
-            // a new block header we stop.  The simplest approach: just process
-            // all sub-blocks until we get the audio bitstream, then break.
+        let mut terms_data:    Vec<u8> = Vec::new();
+        let mut weights_data:  Vec<u8> = Vec::new();
+        let mut samples_data:  Vec<u8> = Vec::new();
+        let mut entropy_data:  Vec<u8> = Vec::new();
+        let mut hybrid_data:   Vec<u8> = Vec::new();
+        let mut float_data:    Vec<u8> = Vec::new();
+        let mut int32_data:    Vec<u8> = Vec::new();
+        let mut wvx_data:      Vec<u8> = Vec::new();
+        let mut audio_data:    Vec<u8> = Vec::new();
+
+        while self.reader.pos() < end_pos {
             let sb = decode_sub_block(&mut self.reader)?;
             match sb {
                 SubBlock::DecorrelationTerms(d)   => terms_data   = d,
                 SubBlock::DecorrelationWeights(d) => weights_data = d,
                 SubBlock::DecorrelationSamples(d) => samples_data = d,
                 SubBlock::EntropyVariables(d)     => entropy_data = d,
-                SubBlock::Int32Info(d)             => int32_data   = d,
-                SubBlock::WvBitStream(d) => {
-                    audio_data = d;
-                    break;
-                }
+                SubBlock::HybridProfile(d)        => hybrid_data  = d,
+                SubBlock::FloatInfo(d)            => float_data   = d,
+                SubBlock::Int32Info(d)            => int32_data   = d,
+                SubBlock::WvBitStream(d)          => audio_data   = d,
+                SubBlock::WvxBitStream(d)         => wvx_data     = d,
                 SubBlock::DsdBlock(_) => {
                     return symphonia_core::errors::unsupported_error("wavpack: DSD not supported");
                 }
-                // Skip everything else (metadata, checksums, RIFF headers, wvc/wvx)
+                // Skip everything else: ShapingWeights (only meaningful with a .wvc
+                // correction file, unsupported by this fork — see README),
+                // WvcBitStream (belongs to the sibling .wvc file), metadata,
+                // checksums, RIFF headers, etc.
                 _ => debug!("v4v5: skipping non-audio sub-block"),
             }
         }
 
         // Serialise into a packet understood by the decoder:
         //   magic(4) + flags(4) + block_samples(4) + crc(4)
-        //   + terms_len(2) + weights_len(2) + samples_len(2) + entropy_len(2)
-        //   + int32_len(1) + pad(3)
-        //   followed by the raw sub-block bytes then the audio bitstream.
-        let tl = terms_data.len()   as u16;
-        let wl = weights_data.len() as u16;
-        let sl = samples_data.len() as u16;
-        let el = entropy_data.len() as u16;
-        let il = int32_data.len()   as u8;
+        //   + terms_len(4) + weights_len(4) + samples_len(4) + entropy_len(4)
+        //   + hybrid_profile_len(4) + float_info_len(4) + int32_len(4) + wvx_len(4)
+        //   followed by the raw sub-block bytes (in that order) then the audio bitstream.
+        let lens: [u32; 8] = [
+            terms_data.len()   as u32,
+            weights_data.len() as u32,
+            samples_data.len() as u32,
+            entropy_data.len() as u32,
+            hybrid_data.len()  as u32,
+            float_data.len()   as u32,
+            int32_data.len()   as u32,
+            wvx_data.len()     as u32,
+        ];
 
-        let mut pkt: Vec<u8> = Vec::with_capacity(
-            28 + terms_data.len() + weights_data.len() + samples_data.len()
-               + entropy_data.len() + int32_data.len() + audio_data.len()
-        );
+        let payload_len: usize = lens.iter().map(|&l| l as usize).sum::<usize>() + audio_data.len();
+        let mut pkt: Vec<u8> = Vec::with_capacity(48 + payload_len);
         pkt.extend_from_slice(b"WV45");
         pkt.extend_from_slice(&header.flags.to_le_bytes());
         pkt.extend_from_slice(&header.block_samples.to_le_bytes());
         pkt.extend_from_slice(&header.crc.to_le_bytes());
-        pkt.extend_from_slice(&tl.to_le_bytes());
-        pkt.extend_from_slice(&wl.to_le_bytes());
-        pkt.extend_from_slice(&sl.to_le_bytes());
-        pkt.extend_from_slice(&el.to_le_bytes());
-        pkt.push(il);
-        pkt.extend_from_slice(&[0u8; 3]); // pad to 28 bytes
+        for l in lens {
+            pkt.extend_from_slice(&l.to_le_bytes());
+        }
         pkt.extend_from_slice(&terms_data);
         pkt.extend_from_slice(&weights_data);
         pkt.extend_from_slice(&samples_data);
         pkt.extend_from_slice(&entropy_data);
+        pkt.extend_from_slice(&hybrid_data);
+        pkt.extend_from_slice(&float_data);
         pkt.extend_from_slice(&int32_data);
+        pkt.extend_from_slice(&wvx_data);
         pkt.extend_from_slice(&audio_data);
 
         // block_samples is the per-channel frame count
@@ -960,6 +973,12 @@ impl Header {
 
     fn get_encoding(&self) -> Encoding {
         if (self.flags >> 31) & 1 == 0 { Encoding::Pcm } else { Encoding::Dsd }
+    }
+
+    /// `FLOAT_DATA` (wavpack.h `0x80`): the block carries IEEE-754 32-bit float samples
+    /// (shifted-mantissa integers here) rather than plain PCM integers.
+    fn is_float(&self) -> bool {
+        (self.flags & 0x0000_0080) != 0
     }
 
     fn is_stereo(&self) -> bool {
