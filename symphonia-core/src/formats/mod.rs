@@ -725,4 +725,6 @@ pub mod well_known {
     pub const FORMAT_ID_MKV: FormatId = FormatId(0x10c);
     /// Flash Video
     pub const FORMAT_ID_FLV: FormatId = FormatId(0x10d);
+    /// Musepack
+    pub const FORMAT_ID_MUSEPACK: FormatId = FormatId(0x10e);
 }

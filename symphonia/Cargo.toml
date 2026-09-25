@@ -33,6 +33,7 @@ flac = ["dep:symphonia-bundle-flac"]
 caf = ["dep:symphonia-format-caf"]
 isomp4 = ["dep:symphonia-format-isomp4"]
 mkv = ["dep:symphonia-format-mkv"]
+musepack = ["dep:symphonia-bundle-musepack"]
 mp1 = ["dep:symphonia-bundle-mp3", "symphonia-bundle-mp3/mp1"]
 mp2 = ["dep:symphonia-bundle-mp3", "symphonia-bundle-mp3/mp2"]
 mp3 = ["dep:symphonia-bundle-mp3", "symphonia-bundle-mp3/mp3"]
@@ -60,6 +61,7 @@ all-codecs = [
     "mp1",
     "mp2",
     "mp3",
+    "musepack",
     "opus",
     "pcm",
     "vorbis",
@@ -73,6 +75,7 @@ all-formats = [
     "dsd",
     "isomp4",
     "mkv",
+    "musepack",
     "ogg",
     "aiff",
     "wav",
@@ -136,6 +139,10 @@ version = "0.6.1"
 path = "../symphonia-bundle-flac"
 optional = true
 
+[dependencies.symphonia-bundle-musepack]
+version = "0.6.1"
+path = "../symphonia-bundle-musepack"
+optional = true
 [dependencies.symphonia-bundle-mp3]
 version = "0.6.1"
 path = "../symphonia-bundle-mp3"

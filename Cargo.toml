@@ -6,6 +6,7 @@ members = [
     "symphonia-bundle-ape",
     "symphonia-bundle-flac",
     "symphonia-bundle-mp3",
+    "symphonia-bundle-musepack",
     "symphonia-codec-aac",
     "symphonia-codec-adpcm",
     "symphonia-codec-alac",
