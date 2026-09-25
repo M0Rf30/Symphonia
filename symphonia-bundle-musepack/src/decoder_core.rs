@@ -554,8 +554,15 @@ impl Decoder {
 
         self.decoded_samples += FRAME_LENGTH as u64;
 
-        if self.decoded_samples.saturating_sub(self.samples) < FRAME_LENGTH as u64
-            && self.stream_version == 7
+        // Ported from `mpc_decoder.c`: the C condition `d->decoded_samples - d->samples <
+        // MPC_FRAME_LENGTH` is an *unsigned* subtraction that wraps to a huge value (and is
+        // therefore false) whenever `decoded_samples < samples`, i.e. this only ever fires once
+        // `decoded_samples` has reached (or is within one frame of) `samples`. `saturating_sub`
+        // is NOT equivalent (it clamps to `0`, which is always `< FRAME_LENGTH`, making this
+        // fire on *every* frame) -- reproduce the wraparound explicitly instead.
+        if self.stream_version == 7
+            && self.decoded_samples >= self.samples
+            && self.decoded_samples - self.samples < FRAME_LENGTH as u64
         {
             let mut last_frame_samples = r.read_bits(11);
             if self.decoded_samples == self.samples {
