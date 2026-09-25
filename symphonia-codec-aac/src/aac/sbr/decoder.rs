@@ -56,6 +56,8 @@ use super::qmf::{
     AnalysisQmf, Complex, DownsampledSynthesisQmf, RealAnalysisQmf, RealDownsampledSynthesisQmf,
     RealSynthesisQmf, SynthesisQmf,
 };
+use super::ps::decoder::PsDecoder;
+use super::ps::hybrid::LOOKAHEAD;
 use super::reconstruct::{EnvelopeScalefactors, NoiseScalefactors};
 use super::time_grid::derive_time_grid;
 use super::error::{SbrError as Error, SbrResult as Result};
@@ -248,6 +250,18 @@ pub struct SbrDecoder {
     /// rejected — the QMF synthesis state is rate-specific).
     started: bool,
     channels: Vec<ChannelState>,
+    /// Annex 8.A parametric stereo state, created when a
+    /// single-channel element first carries a PS extension. Holds the
+    /// PS decoder plus the second (right-channel) synthesis bank; the
+    /// channel's own bank renders the left channel.
+    ps: Option<PsState>,
+}
+
+/// PS decoder + right-channel synthesis bank (Annex 8.A).
+#[derive(Debug)]
+struct PsState {
+    dec: PsDecoder,
+    synthesis_r: SynthesisBank,
 }
 
 impl SbrDecoder {
@@ -270,6 +284,7 @@ impl SbrDecoder {
             channels: (0..num_channels)
                 .map(|_| ChannelState::new(false, false))
                 .collect(),
+            ps: None,
         })
     }
 
@@ -336,6 +351,9 @@ impl SbrDecoder {
             ch.analysis = AnalysisBank::new(self.low_power);
             ch.synthesis = SynthesisBank::new(self.downsampled, self.low_power);
         }
+        if let Some(ps) = &mut self.ps {
+            ps.synthesis_r = SynthesisBank::new(self.downsampled, self.low_power);
+        }
     }
 
     /// §4.6.18.5 pure upsampling: no SBR data for this frame — run the
@@ -351,20 +369,42 @@ impl SbrDecoder {
         }
         self.started = true;
         let mut out = Vec::with_capacity(core.len());
+        let n_ch = self.channels.len();
         for (ch, core_ch) in self.channels.iter_mut().zip(core.iter()) {
             let x_low = ch.analyze(core_ch)?;
-            let mut x_cols: Vec<[Complex; 64]> = Vec::with_capacity(LF);
-            for l in 0..LF {
-                let mut x = [Complex::default(); 64];
+            let mut x_cols: [[Complex; 64]; LF] = [[Complex::default(); 64]; LF];
+            for (l, x) in x_cols.iter_mut().enumerate() {
                 x[..32].copy_from_slice(&x_low[l + T_HF_ADJ]);
-                x_cols.push(x);
             }
             let sps = ch.synthesis.samples_per_slot();
-            let mut pcm = Vec::with_capacity(LF * sps);
-            for x in &x_cols {
-                ch.synthesis.push_slot(x, &mut pcm)?;
+            // A PS-active stream holds its stereo parameters over a
+            // frame without SBR/PS payload (Annex 8.A.3); the whole
+            // 32-band spectrum counts as SBR-covered for the partial
+            // reset.
+            let mut emitted = false;
+            if n_ch == 1 {
+                if let Some(ps) = self.ps.as_mut() {
+                    let x_input = build_x_input(&x_cols, &x_low);
+                    if let Some((lq, rq)) = ps.dec.process(None, &x_input, 32)? {
+                        let mut pcm_l = Vec::with_capacity(LF * sps);
+                        let mut pcm_r = Vec::with_capacity(LF * sps);
+                        for l in 0..LF {
+                            ch.synthesis.push_slot(&lq[l], &mut pcm_l)?;
+                            ps.synthesis_r.push_slot(&rq[l], &mut pcm_r)?;
+                        }
+                        out.push(pcm_l);
+                        out.push(pcm_r);
+                        emitted = true;
+                    }
+                }
             }
-            out.push(pcm);
+            if !emitted {
+                let mut pcm = Vec::with_capacity(LF * sps);
+                for x in &x_cols {
+                    ch.synthesis.push_slot(x, &mut pcm)?;
+                }
+                out.push(pcm);
+            }
             // No Y for this frame; the next frame's lTemp splice sees
             // an empty previous envelope span.
             ch.y_prev
@@ -528,9 +568,9 @@ impl SbrDecoder {
 
             // §4.6.18.5 X assembly.
             let l_temp = (RATE * ch.t_e_last_prev - NUM_TIME_SLOTS * RATE).max(0) as usize;
-            let mut x_cols: Vec<[Complex; 64]> = Vec::with_capacity(LF);
-            for l in 0..LF {
-                let mut x = [Complex::default(); 64];
+            let mut x_cols: [[Complex; 64]; LF] = [[Complex::default(); 64]; LF];
+            for (l, x) in x_cols.iter_mut().enumerate() {
+                *x = [Complex::default(); 64];
                 let (kx_cur, m_cur, y_col) = if l < l_temp {
                     (ch.k_x_prev, ch.m_prev, &ch.y_prev[l + T_HF_ADJ + LF])
                 } else {
@@ -556,15 +596,13 @@ impl SbrDecoder {
                 if self.low_power && (1..=32).contains(&kx_u) {
                     x[kx_u - 1] += y_col[kx_u - 1];
                 }
-                x_cols.push(x);
             }
 
             // Annex 8.A: a single-channel element carrying an
-            // EXTENSION_ID_PS payload would render stereo through the PS
-            // tool. PS (HE-AAC v2) is a later wave over this same QMF
-            // domain — see `symphonia-codec-aac/NOTICE` — so a detected
-            // PS payload is rejected here rather than silently decoded
-            // as mono SBR (which would be audibly wrong).
+            // EXTENSION_ID_PS payload renders stereo through the PS
+            // tool (the element's own bank = left, the PS state's =
+            // right). Until the first decodable ps_data() the mono
+            // path below stays in effect.
             let ps_payload = if n_ch == 1 {
                 ext.element
                     .extension
@@ -579,15 +617,38 @@ impl SbrDecoder {
                 // complex-domain PS processing.
                 return Err(Error::SbrLowPowerPs);
             }
-            if ps_payload.is_some() {
-                return Err(Error::SbrPsUnsupported);
+            if ps_payload.is_some() && self.ps.is_none() {
+                self.ps = Some(PsState {
+                    dec: PsDecoder::new(),
+                    synthesis_r: SynthesisBank::new(self.downsampled, self.low_power),
+                });
             }
             let sps = ch.synthesis.samples_per_slot();
-            let mut pcm = Vec::with_capacity(LF * sps);
-            for x in &x_cols {
-                ch.synthesis.push_slot(x, &mut pcm)?;
+            let mut emitted = false;
+            if n_ch == 1 {
+                if let Some(ps) = self.ps.as_mut() {
+                    let x_input = build_x_input(&x_cols, &x_low);
+                    let kx_plus_m = (bands.k_x + bands.m).max(0) as usize;
+                    if let Some((lq, rq)) = ps.dec.process(ps_payload, &x_input, kx_plus_m)? {
+                        let mut pcm_l = Vec::with_capacity(LF * sps);
+                        let mut pcm_r = Vec::with_capacity(LF * sps);
+                        for l in 0..LF {
+                            ch.synthesis.push_slot(&lq[l], &mut pcm_l)?;
+                            ps.synthesis_r.push_slot(&rq[l], &mut pcm_r)?;
+                        }
+                        out.push(pcm_l);
+                        out.push(pcm_r);
+                        emitted = true;
+                    }
+                }
             }
-            out.push(pcm);
+            if !emitted {
+                let mut pcm = Vec::with_capacity(LF * sps);
+                for x in &x_cols {
+                    ch.synthesis.push_slot(x, &mut pcm)?;
+                }
+                out.push(pcm);
+            }
 
             // Thread cross-frame state.
             ch.y_prev = y;
@@ -602,6 +663,22 @@ impl SbrDecoder {
         }
         Ok(out)
     }
+}
+
+/// Assemble the Annex 8.A.3 `Xinput` matrix: the 32 assembled `X`
+/// columns followed by `LOOKAHEAD` slots taken from `XLow` beyond the
+/// frame (`XLow(k, l + tHFAdj)`, `k < 5` — the split bands the hybrid
+/// filterbank consumes ahead of time).
+fn build_x_input(
+    x_cols: &[[Complex; 64]; LF],
+    x_low: &[[Complex; 32]],
+) -> [[Complex; 64]; LF + LOOKAHEAD] {
+    let mut v = [[Complex::default(); 64]; LF + LOOKAHEAD];
+    v[..LF].copy_from_slice(x_cols);
+    for (l, col) in v.iter_mut().enumerate().skip(LF) {
+        col[..5].copy_from_slice(&x_low[l + T_HF_ADJ][..5]);
+    }
+    v
 }
 
 

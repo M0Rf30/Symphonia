@@ -24,18 +24,17 @@
 //! [`extension::SbrExtensionData::parse`]) plus the core decoder's
 //! time-domain PCM for each frame.
 //!
-//! ## Parametric Stereo (HE-AAC v2) — not implemented
+//! ## Parametric Stereo (HE-AAC v2)
 //!
 //! Annex 8.A Parametric Stereo (PS) reuses this same QMF/hybrid-filter
-//! domain to add a second (right) channel to a single mono SBR element,
-//! but decoding it is out of scope for this port. [`decoder::SbrDecoder`]
-//! detects a `bs_extension_id == EXTENSION_ID_PS` payload
-//! ([`element::EXTENSION_ID_PS`]) and returns
-//! [`error::SbrError::SbrPsUnsupported`] instead of silently decoding
-//! mono-only output. A later wave can reintroduce upstream's `ps:
-//! Option<PsState>` decoder field (holding a `PsDecoder` plus a second
-//! synthesis filterbank for the right channel) at the same call sites in
-//! [`decoder`] — search that module for `EXTENSION_ID_PS`.
+//! domain to add a second (right) channel to a single mono SBR element.
+//! [`decoder::SbrDecoder`] detects a `bs_extension_id == EXTENSION_ID_PS`
+//! payload ([`element::EXTENSION_ID_PS`]) and, on a complex-QMF (not
+//! low-power) decoder, feeds it to the [`ps`] submodule's
+//! [`ps::decoder::PsDecoder`] (created lazily on the first such
+//! payload); see `decoder`'s `PsState` for the exact reconnection.
+//! [`error::SbrError::SbrLowPowerPs`] still rejects PS on a low-power
+//! decoder (Annex 8.A needs the complex QMF domain).
 //!
 //! ## Low-power (real-valued) SBR mode
 //!
@@ -63,9 +62,9 @@ mod noise_table;
 mod lp;
 mod reconstruct;
 mod time_grid;
-
 pub(crate) mod decoder;
 pub(crate) mod extension;
+mod ps;
 
 /// Minimal local mirror of `oxideav_aac::raw_data_block::IdSynEle` — the
 /// AAC core `id_syn_ele` kind an SBR payload attaches to

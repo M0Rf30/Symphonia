@@ -479,7 +479,14 @@ impl AudioSpecificConfig {
             _ => {}
         };
 
-        if asc.sbr_ps_info.is_some() && (bs.bits_left() >= 16) {
+        // §1.6.6: this trailing `syncExtensionType` check is unconditional on `bits_left()
+        // >= 16` -- it is how "explicit backwards compatible" HE-AAC v1/v2 signals SBR/PS on
+        // top of a plain (non-hierarchical) outer `audioObjectType` (e.g. `Lc`), so it must
+        // not be gated on `asc.sbr_ps_info.is_some()` (which is only set by the *hierarchical*
+        // `audioObjectType == 5/29` branch above). A real Fraunhofer HE-AAC v2 fixture
+        // (`SBRtestStereoAot29Sig1.mp4`) has outer `object_type == Lc`, `channels == 1`, and
+        // conveys both SBR and PS only through this trailing extension.
+        if bs.bits_left() >= 16 {
             let sync = bs.read_bits_leq32(11)?;
 
             if sync == 0x2B7 {

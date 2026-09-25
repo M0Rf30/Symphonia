@@ -43,7 +43,7 @@
 //!
 //! | Codec    | Feature Flag | Gapless | Default |
 //! |----------|--------------|---------|---------|
-//! | AAC-LC   | `aac`        | No      | No      |
+//! | AAC-LC, HE-AAC v1/v2, multichannel | `aac` | No | No |
 //! | ADPCM    | `adpcm`      | Yes     | Yes     |
 //! | ALAC     | `alac`       | Yes     | No      |
 //! | FLAC     | `flac`       | Yes     | Yes     |

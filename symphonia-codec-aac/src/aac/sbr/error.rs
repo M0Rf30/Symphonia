@@ -5,16 +5,19 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Local error type for the ported SBR tool.
+//! Local error type for the ported SBR + Parametric Stereo tools.
 //!
 //! The upstream `oxideav-aac` 0.1.7 sources (see `symphonia-codec-aac/
 //! NOTICE`) return a crate-wide `Error` enum with one variant per failure
-//! kind; only six of its variants are reachable from the decode-side SBR
-//! modules (`Error::Sbr*`, see the grep in the port notes). This module
-//! defines exactly those six variants, under the **same names**, so every
-//! ported `Error::SbrXxx` call site is source-identical to upstream — only
-//! the `use crate::{Error, Result}` line at the top of each file changed
-//! (to `use super::error::{SbrError as Error, SbrResult as Result}`).
+//! kind; only seven of its variants are reachable from the decode-side
+//! SBR/PS modules (`Error::Sbr*` plus PS's single `Error::PsDataInvalid`,
+//! see the grep in the port notes). This module defines exactly those
+//! seven variants, under the **same names**, so every ported
+//! `Error::SbrXxx` / `Error::PsDataInvalid` call site is source-identical
+//! to upstream — only the `use crate::{Error, Result}` line at the top of
+//! each file changed (to `use super::error::{SbrError as Error,
+//! SbrResult as Result}`, or `use super::super::error::{...}` from the
+//! nested `ps` submodule).
 
 use symphonia_core::errors::Error as CoreError;
 
@@ -38,14 +41,11 @@ pub(crate) enum SbrError {
     /// A Parametric Stereo payload was found on a low-power SBR decoder
     /// (Annex 8.A needs the complex QMF domain).
     SbrLowPowerPs,
-    /// A Parametric Stereo (`EXTENSION_ID_PS`) payload was found, but
-    /// HE-AAC v2 / Annex 8.A Parametric Stereo decoding is not
-    /// implemented in this port (a later wave over the same QMF
-    /// domain this SBR tool already assembles — see
-    /// `symphonia-codec-aac/NOTICE`). Distinct from
-    /// [`SbrError::SbrLowPowerPs`], which is the spec-mandated
-    /// rejection of PS on a low-power SBR decoder.
-    SbrPsUnsupported,
+    /// A Parametric Stereo `ps_data()` element (§8.4.2 Table 8.9) failed
+    /// to parse: an unmatched Annex 8.B Huffman codeword, a truncated
+    /// payload, a reserved `iid_mode`/`icc_mode`, or a resolved IID/ICC
+    /// index outside its Table 8.24/8.27 range.
+    PsDataInvalid,
     /// The recomputed `bs_sbr_crc_bits` (`G10`, zero-init) disagreed
     /// with the transmitted value.
     SbrCrcMismatch,
@@ -63,9 +63,7 @@ impl SbrError {
             SbrError::SbrGridInvalid => "aac (sbr): invalid time/frequency grid",
             SbrError::SbrQmfInvalid => "aac (sbr): invalid qmf filterbank input or mode switch",
             SbrError::SbrLowPowerPs => "aac (sbr): parametric stereo on a low-power sbr decoder",
-            SbrError::SbrPsUnsupported => {
-                "aac (sbr): parametric stereo (HE-AAC v2) is not yet supported"
-            }
+            SbrError::PsDataInvalid => "aac (sbr): parametric stereo ps_data() parse failed",
             SbrError::SbrCrcMismatch => "aac (sbr): bs_sbr_crc_bits mismatch",
         }
     }

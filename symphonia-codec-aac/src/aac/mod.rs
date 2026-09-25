@@ -11,6 +11,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+use symphonia_core::audio::layouts;
 use symphonia_core::audio::{
     Audio, AsGenericAudioBufferRef, AudioBuffer, AudioMut, AudioSpec, Channels,
     GenericAudioBufferRef,
@@ -176,9 +177,20 @@ impl AacDecoder {
         // Check complexity. HE-AAC v1 (SBR) is supported: `asc.sbr_present` is set, with
         // `asc.object_type` already rewound to the inner base AOT (checked below) by the
         // hierarchical explicit-signalling branch of `AudioSpecificConfig::read`. HE-AAC v2
-        // (Parametric Stereo, `asc.ps_present`) is not — see NOTICE.
+        // (Parametric Stereo, `asc.ps_present`) is supported too, but only in its
+        // near-universal real-world shape: a single mono `SCE` core element whose Annex 8.A
+        // tool renders a true stereo pair (every Fraunhofer/ffmpeg HE-AAC v2 fixture this was
+        // validated against is exactly this shape; PS combined with any other channel
+        // configuration is not defined by the spec and rejected here rather than guessed at).
         if asc.ps_present {
-            return unsupported_error("aac: parametric stereo (HE-AAC v2) is not yet supported");
+            if !asc.sbr_present {
+                return unsupported_error("aac: parametric stereo requires sbr");
+            }
+            if !matches!(asc.channel_elements.as_deref(), Some([ChannelElement::Single(_)])) {
+                return unsupported_error(
+                    "aac: parametric stereo is only supported on a single mono channel element",
+                );
+            }
         }
         if asc.object_type != AudioObjectType::Lc || asc.samples != 1024 {
             return unsupported_error("aac: aac too complex");
@@ -186,17 +198,40 @@ impl AacDecoder {
 
         // Map each expected syntactic element (`SCE`/`CPE`/`LFE`), in bitstream order, onto its
         // output buffer channel index/indices (see the `elem_targets` field documentation).
-        let elem_targets = match &asc.channel_elements {
-            Some(elements) => build_elem_targets(elements, &channels)?,
-            None => {
-                return unsupported_error(
-                    "aac: channel layout requires a channelConfiguration or program_config_element",
-                );
+        // A PS stream is the one exception: its single `SCE` targets *both* output channels
+        // (Annex 8.A expands the mono core to stereo), so `elem_targets` is hand-built against
+        // the widened `out_channels` below instead of the core `channels`.
+        let elem_targets = if asc.ps_present {
+            vec![(false, [0usize, 1usize])]
+        }
+        else {
+            match &asc.channel_elements {
+                Some(elements) => build_elem_targets(elements, &channels)?,
+                None => {
+                    return unsupported_error(
+                        "aac: channel layout requires a channelConfiguration or program_config_element",
+                    );
+                }
             }
         };
 
         // Clone and amend the codec parameters with information from the extra data.
         let mut params = params.clone();
+
+        // The *output* channel layout: identical to the core `channels` unless PS widens a
+        // mono core to stereo. See the [`SbrRuntime`]-adjacent contract note below for the
+        // explicit-vs-implicit split (mirrors the SBR output-*rate* contract already
+        // documented here): explicit PS (this branch) is known at `try_new`, so `out_channels`
+        // — and therefore `params`/`sbr.buf`'s `AudioSpec` — already reflect it. Implicit PS
+        // (a mono ADTS/ASC stream whose `fil_element()`s are only found at decode time to carry
+        // an `EXTENSION_ID_PS` payload) cannot be known here: `self.sbr` (if present at all)
+        // starts mono, and `decode_ga` grows it to stereo — with a corresponding `elem_targets`
+        // fix-up — the first time a frame's `SbrDecoder::process_frame` actually renders a
+        // stereo pair. A caller that only reads `codec_params()`/the channel count once at open
+        // time will not see that transition and needs a follow-up fix to also consult the
+        // first decoded buffer's spec, exactly as for the SBR sample-rate case.
+        let out_channels =
+            if asc.ps_present { layouts::CHANNEL_LAYOUT_STEREO } else { channels.clone() };
 
         // Explicit SBR signalling (ASC hierarchical `audioObjectType == 5`/`29` wrapper) gives
         // the SBR/output sample rate up front (ISO/IEC 14496-3 §1.6.3.8:
@@ -217,16 +252,21 @@ impl AacDecoder {
                 .as_ref()
                 .map(|(rate, _)| *rate)
                 .unwrap_or_else(|| asc.sample_rate.saturating_mul(2));
-            Some(SbrRuntime::new(fs_sbr, channels.clone(), asc.samples, &elem_targets)?)
+            Some(SbrRuntime::new(fs_sbr, out_channels.clone(), asc.samples, &elem_targets)?)
         }
         else {
             None
         };
 
-        params.with_channels(channels.clone()).with_sample_rate(sbr.as_ref().map_or(asc.sample_rate, |s| s.fs_sbr));
+        params
+            .with_channels(out_channels)
+            .with_sample_rate(sbr.as_ref().map_or(asc.sample_rate, |s| s.fs_sbr));
 
         let sbinfo = GASubbandInfo::find(asc.sample_rate);
 
+        // The pre-SBR/PS "core" buffer stays at the core channel count (mono for a PS
+        // stream) — only `sbr.buf` (the tool's own output buffer) is ever widened to stereo;
+        // see the `n_ch`-gated core-PCM gather in `decode_ga`.
         let buf = AudioBuffer::new(AudioSpec::new(asc.sample_rate, channels), asc.samples);
 
         Ok(AacDecoder {
@@ -447,16 +487,44 @@ impl AacDecoder {
             }
 
             let sbr = self.sbr.as_mut().expect("checked is_some above");
-            sbr.buf.clear();
-            sbr.buf.render_uninit(None);
 
-            for (idx, (_, indices)) in self.elem_targets.iter().take(cur_pair).enumerate() {
+            // Decode every element first; only afterwards commit to `sbr.buf`, since implicit
+            // PS (a mono stream whose first decodable `ps_data()` arrives here rather than at
+            // `try_new`) can only be discovered by the shape of an element's own decoded
+            // output — see the growth branch below.
+            let mut outs: Vec<Vec<Vec<f64>>> = Vec::with_capacity(cur_pair);
+            for idx in 0..cur_pair {
                 let core_refs: Vec<&[f64]> = core_pcm[idx].iter().map(Vec::as_slice).collect();
                 let elem = &mut sbr.elems[idx];
                 let out = match &sbr_ext[idx] {
                     Some(ext) => elem.decoder.process_frame(ext, &core_refs)?,
                     None => elem.decoder.upsample_frame(&core_refs)?,
                 };
+                outs.push(out);
+            }
+
+            // Implicit Parametric Stereo: a mono ADTS/ASC stream (`elem_targets` built for 1
+            // core channel) whose lone SBR element just rendered a stereo pair for the first
+            // time — Annex 8.A's PS tool activated mid-stream. Grow `sbr.buf` (and that
+            // element's target indices) from mono to stereo before writing this frame's
+            // output; see the `out_channels` contract note in `try_new` for what a caller
+            // that only reads the channel count once at open time must do instead.
+            if self.elem_targets.len() == 1
+                && !self.elem_targets[0].0
+                && outs[0].len() == 2
+                && sbr.buf.spec().channels().count() == 1
+            {
+                self.elem_targets[0].1[1] = 1;
+                let spec = AudioSpec::new(sbr.buf.spec().rate(), layouts::CHANNEL_LAYOUT_STEREO);
+                sbr.buf = AudioBuffer::new(spec, sbr.buf.capacity());
+                self.params.with_channels(layouts::CHANNEL_LAYOUT_STEREO);
+            }
+
+            sbr.buf.clear();
+            sbr.buf.render_uninit(None);
+
+            for (idx, (_, indices)) in self.elem_targets.iter().take(cur_pair).enumerate() {
+                let out = &outs[idx];
                 for (c, &ch_idx) in indices.iter().take(out.len()).enumerate() {
                     let dst = sbr.buf.plane_mut(ch_idx).expect("sbr channel plane exists");
                     let n = dst.len().min(out[c].len());
