@@ -7,7 +7,6 @@
 
 use std::collections::HashMap;
 use std::num::NonZeroU64;
-use std::rc::Rc;
 use std::sync::Arc;
 
 use symphonia_core::codecs::video::VideoExtraData;
@@ -25,9 +24,9 @@ use symphonia_core::units::{Duration, Time, TimeBase, Timestamp};
 use crate::ebml::{EbmlElement, EbmlElementHeader, EbmlError, EbmlIterator, ReadEbml, Result};
 use crate::schema::{MkvElement, MkvSchema};
 use crate::sub_fields::*;
-use crate::tags::{TagContext, Target, make_raw_tags, map_std_tag};
+use crate::tags::{TagContext, Target, make_raw_tags, map_std_tag, resolve_target};
 
-const MKV_METADATA_INFO: MetadataInfo = MetadataInfo {
+pub(crate) const MKV_METADATA_INFO: MetadataInfo = MetadataInfo {
     metadata: METADATA_ID_MATROSKA,
     short_name: "mkv",
     long_name: "Matroska / WebM",
@@ -975,7 +974,7 @@ impl EbmlElement<MkvSchema> for EbmlHeaderElement {
 pub(crate) struct InfoElement {
     pub(crate) timestamp_scale: NonZeroU64,
     pub(crate) duration: Option<FloatingPointSegmentTicks>,
-    title: Option<Box<str>>,
+    pub(crate) title: Option<Box<str>>,
     muxing_app: Box<str>,
     writing_app: Box<str>,
 }
@@ -1328,18 +1327,14 @@ impl TagsElement {
         // or target level should be last. This sort is stable so tag elements at the same target
         // level will be in the same relative position as they were read.
         self.tags.sort_by_key(|tag| {
-            tag.targets.as_ref().map(|targets| targets.target_type_value).unwrap_or(u64::MAX)
+            resolve_target(tag.targets.as_ref()).map(|target| target.value).unwrap_or(u64::MAX)
         });
 
         for tag in self.tags {
-            // Tag context for the current tag element.
-            let ctx = TagContext {
-                is_video,
-                target: tag.targets.as_ref().map(|t| Target {
-                    value: t.target_type_value,
-                    name: t.target_type.clone().map(Rc::new),
-                }),
-            };
+            // Tag context for the current tag element. Note: `resolve_target` treats a `Targets`
+            // element with neither an explicit `TargetTypeValue` nor any UID as fully untargeted
+            // (`None`), rather than defaulting to ALBUM (level 50), matching real-world encoders.
+            let ctx = TagContext { is_video, target: resolve_target(tag.targets.as_ref()) };
 
             // Generate a vector of raw tags from simple tag elements. This vector will be appended
             // to the appropriate targets or media.
@@ -1474,7 +1469,7 @@ pub(crate) enum TargetUid {
 
 #[derive(Debug)]
 pub(crate) struct TargetsElement {
-    pub(crate) target_type_value: u64,
+    pub(crate) target_type_value: Option<u64>,
     pub(crate) target_type: Option<Box<str>>,
     pub(crate) uids: Vec<TargetUid>,
     pub(crate) all_tracks: bool,
@@ -1548,8 +1543,11 @@ impl EbmlElement<MkvSchema> for TargetsElement {
             }
         }
 
-        // Populate missing or empty mandatory elements with defaults.
-        let target_type_value = target_type_value.unwrap_or(50);
+        // Note: unlike other mandatory elements with a schema-defined default, `target_type_value`
+        // is intentionally left as `None` when absent from the bitstream so that callers can
+        // distinguish "no `TargetTypeValue` written" (a completely untargeted tag, per real-world
+        // encoder convention) from an explicit `<TargetTypeValue>50</TargetTypeValue>`. See
+        // `crate::tags::resolve_target`.
 
         Ok(Self {
             target_type_value,

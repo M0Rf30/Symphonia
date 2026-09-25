@@ -8,13 +8,14 @@
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryFrom;
 use std::num::NonZero;
+use std::sync::Arc;
 
 use symphonia_core::errors::{Error, Result, SeekErrorKind, seek_error, unsupported_error};
 use symphonia_core::formats::prelude::*;
 use symphonia_core::formats::probe::{ProbeFormatData, ProbeableFormat, Score, Scoreable};
 use symphonia_core::formats::well_known::FORMAT_ID_MKV;
 use symphonia_core::io::*;
-use symphonia_core::meta::{Metadata, MetadataLog};
+use symphonia_core::meta::{Metadata, MetadataBuilder, MetadataLog, StandardTag, Tag};
 use symphonia_core::support_format;
 use symphonia_core::units::TimeBase;
 
@@ -26,8 +27,8 @@ use crate::lacing::{Frame, extract_frames};
 use crate::schema::{MkvElement, MkvSchema};
 use crate::segment::{
     AttachmentsElement, BlockGroupElement, ChaptersElement, CuesElement, EbmlHeaderElement,
-    InfoElement, MatroskaTicks, NonZeroMatroskaTicks, SeekHeadElement, SegmentTicks,
-    SignedTrackTicks, TagsElement, TargetTagsMap, TrackTicks, TracksElement,
+    InfoElement, MKV_METADATA_INFO, MatroskaTicks, NonZeroMatroskaTicks, SeekHeadElement,
+    SegmentTicks, SignedTrackTicks, TagsElement, TargetTagsMap, TrackTicks, TracksElement,
 };
 
 const MKV_FORMAT_INFO: FormatInfo =
@@ -266,8 +267,42 @@ impl<'s> MkvReader<'s> {
         // Post-process all tag elements into metadata revisions, while also collecting per-target
         // tags.
         let is_video = segment_tracks.tracks.as_ref().iter().any(|t| t.video.is_some());
-        for tag in tags {
-            metadata.push(tag.into_metadata(&mut per_target_tags, is_video));
+
+        let mut revisions = tags
+            .into_iter()
+            .map(|tag| tag.into_metadata(&mut per_target_tags, is_video))
+            .collect::<Vec<_>>();
+
+        // ffmpeg (and other encoders) commonly write a file's title into the Segment's `Info.Title`
+        // element rather than as a `TITLE` `SimpleTag`, especially for simple, single-track,
+        // album-less files. Surface it as the track title, merged into the first tags-derived
+        // metadata revision so it lands alongside the rest of the tags in the same (current)
+        // revision, unless a `Tags`-sourced title standard tag is already present.
+        if let Some(title) = info.title.as_deref() {
+            let has_track_title = revisions.first().is_some_and(|rev| {
+                rev.media.tags.iter().any(|t| matches!(t.std, Some(StandardTag::TrackTitle(_))))
+            });
+
+            if !has_track_title {
+                let tag = Tag::new_from_parts(
+                    "TITLE",
+                    title,
+                    Some(StandardTag::TrackTitle(Arc::new(title.to_string()))),
+                );
+
+                match revisions.first_mut() {
+                    Some(rev) => rev.media.tags.push(tag),
+                    None => {
+                        let mut builder = MetadataBuilder::new(MKV_METADATA_INFO);
+                        builder.add_tag(tag);
+                        revisions.push(builder.build());
+                    }
+                }
+            }
+        }
+
+        for rev in revisions {
+            metadata.push(rev);
         }
 
         // Post-process chapters element.
