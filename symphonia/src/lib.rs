@@ -29,6 +29,7 @@
 //! | AIFF     | `aiff`       | Yes      | No      |
 //! | CAF      | `caf`        | No       | No      |
 //! | ISO/MP4  | `isomp4`     | No       | No      |
+//! | Musepack | `musepack`   | Yes      | No      |
 //! | MKV/WebM | `mkv`        | Yes      | Yes     |
 //! | OGG      | `ogg`        | Yes      | Yes     |
 //! | Wave     | `wav`        | Yes      | Yes     |
@@ -50,6 +51,7 @@
 //! | MP1      | `mp1`, `mpa` | No      | No      |
 //! | MP2      | `mp2`, `mpa` | No      | No      |
 //! | MP3      | `mp3`, `mpa` | Yes     | No      |
+//! | Musepack | `musepack`   | Yes     | No      |
 //! | Opus     | `opus`       | Yes     | Yes     |
 //! | PCM      | `pcm`        | Yes     | Yes     |
 //! | Vorbis   | `vorbis`     | Yes     | Yes     |
@@ -140,6 +142,8 @@ pub mod default {
         pub use symphonia_codec_alac::AlacDecoder;
         #[cfg(feature = "dsd")]
         pub use symphonia_codec_dsd::DsdDecoder;
+        #[cfg(feature = "musepack")]
+        pub use symphonia_bundle_musepack::MpcDecoder;
         #[cfg(feature = "pcm")]
         pub use symphonia_codec_pcm::PcmDecoder;
         #[cfg(feature = "opus")]
@@ -169,6 +173,8 @@ pub mod default {
         pub use symphonia_format_caf::CafReader;
         #[cfg(feature = "dsd")]
         pub use symphonia_format_dsd::{DffReader, DsfReader, CODEC_TYPE_DSD};
+        #[cfg(feature = "musepack")]
+        pub use symphonia_bundle_musepack::MpcReader;
         #[cfg(feature = "isomp4")]
         pub use symphonia_format_isomp4::IsoMp4Reader;
         #[cfg(feature = "mkv")]
@@ -265,6 +271,9 @@ pub mod default {
         #[cfg(feature = "flac")]
         registry.register_audio_decoder::<codecs::FlacDecoder>();
 
+        #[cfg(feature = "musepack")]
+        registry.register_audio_decoder::<codecs::MpcDecoder>();
+
         #[cfg(any(feature = "mp1", feature = "mp2", feature = "mp3"))]
         registry.register_audio_decoder::<codecs::MpaDecoder>();
 
@@ -308,6 +317,9 @@ pub mod default {
 
         #[cfg(feature = "isomp4")]
         probe.register_format::<formats::IsoMp4Reader<'_>>();
+
+        #[cfg(feature = "musepack")]
+        probe.register_format::<formats::MpcReader<'_>>();
 
         #[cfg(any(feature = "mp1", feature = "mp2", feature = "mp3"))]
         probe.register_format::<formats::MpaReader<'_>>();
