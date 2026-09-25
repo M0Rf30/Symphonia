@@ -12,7 +12,8 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use symphonia_core::audio::{
-    AsGenericAudioBufferRef, AudioBuffer, AudioSpec, Channels, GenericAudioBufferRef,
+    Audio, AsGenericAudioBufferRef, AudioBuffer, AudioMut, AudioSpec, Channels,
+    GenericAudioBufferRef,
 };
 use symphonia_core::codecs::CodecInfo;
 use symphonia_core::codecs::audio::well_known::CODEC_ID_AAC;
@@ -57,6 +58,55 @@ pub struct AacDecoder {
     params: AudioCodecParameters,
     buf: AudioBuffer<f32>,
     opts: AudioDecoderOptions,
+    /// HE-AAC v1 (SBR) runtime state, present once SBR is known active for this stream. See
+    /// [`SbrRuntime`].
+    sbr: Option<SbrRuntime>,
+}
+
+/// Per-stream SBR (HE-AAC v1) runtime state, present once SBR is known active: eagerly at
+/// [`AacDecoder::try_new`] for explicit ASC signalling (`asc.sbr_present`), or lazily from
+/// [`AacDecoder::decode_ga`] the first time a `fil_element()` carries an `EXT_SBR_DATA` /
+/// `EXT_SBR_DATA_CRC` payload for implicit signalling (an ASC/ADTS header that declares plain
+/// LC at the core rate). See `sbr::mod` for the ported SBR tool itself.
+struct SbrRuntime {
+    /// The SBR internal / output sample rate: `2 ×` the AAC core rate for the standard
+    /// dual-rate mode. (`sbr::decoder::SbrDecoder`'s §4.6.18.4.3 downsampled-output mode is
+    /// ported but not selected here — see `sbr::mod`'s doc comment.)
+    fs_sbr: u32,
+    /// One SBR decoder + header-reuse state per [`AacDecoder::elem_targets`] entry (SCE/CPE),
+    /// in bitstream order.
+    elems: Vec<SbrElemState>,
+    /// Output buffer at `fs_sbr`, `2 ×` the core `AudioBuffer`'s capacity.
+    buf: AudioBuffer<f32>,
+}
+
+struct SbrElemState {
+    decoder: sbr::decoder::SbrDecoder,
+    /// The most recently parsed `sbr_header()` for this element, threaded into
+    /// [`sbr::extension::SbrExtensionData::parse`]'s `prev_header` parameter so a
+    /// `bs_header_flag == 0` payload (header reuse) parses correctly.
+    prev_header: Option<sbr::header::SbrHeader>,
+}
+
+impl SbrRuntime {
+    fn new(
+        fs_sbr: u32,
+        channels: Channels,
+        core_samples: usize,
+        elem_targets: &[(bool, [usize; 2])],
+    ) -> Result<Self> {
+        let elems = elem_targets
+            .iter()
+            .map(|(is_pair, _)| {
+                let decoder = sbr::decoder::SbrDecoder::new(fs_sbr, if *is_pair { 2 } else { 1 })?;
+                Ok(SbrElemState { decoder, prev_header: None })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let buf = AudioBuffer::new(AudioSpec::new(fs_sbr, channels), core_samples * 2);
+
+        Ok(SbrRuntime { fs_sbr, elems, buf })
+    }
 }
 
 /// Resolve each expected syntactic element (in bitstream order) into an output buffer channel
@@ -123,8 +173,14 @@ impl AacDecoder {
             _ => return unsupported_error("aac: channels or channel layout is required"),
         };
 
-        // Check complexity.
-        if asc.object_type != AudioObjectType::Lc || asc.sbr_present || asc.samples != 1024 {
+        // Check complexity. HE-AAC v1 (SBR) is supported: `asc.sbr_present` is set, with
+        // `asc.object_type` already rewound to the inner base AOT (checked below) by the
+        // hierarchical explicit-signalling branch of `AudioSpecificConfig::read`. HE-AAC v2
+        // (Parametric Stereo, `asc.ps_present`) is not — see NOTICE.
+        if asc.ps_present {
+            return unsupported_error("aac: parametric stereo (HE-AAC v2) is not yet supported");
+        }
+        if asc.object_type != AudioObjectType::Lc || asc.samples != 1024 {
             return unsupported_error("aac: aac too complex");
         }
 
@@ -142,7 +198,32 @@ impl AacDecoder {
         // Clone and amend the codec parameters with information from the extra data.
         let mut params = params.clone();
 
-        params.with_channels(channels.clone()).with_sample_rate(asc.sample_rate);
+        // Explicit SBR signalling (ASC hierarchical `audioObjectType == 5`/`29` wrapper) gives
+        // the SBR/output sample rate up front (ISO/IEC 14496-3 §1.6.3.8:
+        // `extensionSamplingFrequencyIndex` is "the output sampling frequency"), so the
+        // decoder can advertise the doubled rate immediately and callers that resolve the
+        // output sample rate once at open time (e.g. rmpd-player's `AudioDecoderState`) see
+        // the correct value without special-casing SBR. *Implicit* signalling (an ASC/ADTS
+        // header that declares plain LC at the core rate, with SBR only discovered once
+        // `fil_element()`s start arriving — see `decode_ga`) cannot do this: `self.sbr` stays
+        // `None` here and the doubled rate only becomes visible via the first SBR-bearing
+        // `AudioBuffer`'s own `AudioSpec` (`decode_ref`/`last_decoded`) — callers that only
+        // read `codec_params().sample_rate` once at open time need a follow-up fix to also
+        // consult the first decoded buffer's spec, mirroring how they already do for channel
+        // count.
+        let sbr = if asc.sbr_present {
+            let fs_sbr = asc
+                .sbr_ps_info
+                .as_ref()
+                .map(|(rate, _)| *rate)
+                .unwrap_or_else(|| asc.sample_rate.saturating_mul(2));
+            Some(SbrRuntime::new(fs_sbr, channels.clone(), asc.samples, &elem_targets)?)
+        }
+        else {
+            None
+        };
+
+        params.with_channels(channels.clone()).with_sample_rate(sbr.as_ref().map_or(asc.sample_rate, |s| s.fs_sbr));
 
         let sbinfo = GASubbandInfo::find(asc.sample_rate);
 
@@ -157,6 +238,7 @@ impl AacDecoder {
             params,
             buf,
             opts: *opts,
+            sbr,
         })
     }
 
@@ -175,8 +257,10 @@ impl AacDecoder {
         Ok(())
     }
 
-    fn decode_ga<B: ReadBitsLtr + FiniteBitStream>(&mut self, bs: &mut B) -> Result<()> {
+    fn decode_ga<B: ReadBitsLtr + FiniteBitStream>(&mut self, bs: &mut B, data: &[u8]) -> Result<()> {
         let mut cur_pair = 0;
+        let mut sbr_ext: Vec<Option<sbr::extension::SbrExtensionData>> =
+            vec![None; self.elem_targets.len()];
         while bs.bits_left() > 3 {
             let id = bs.read_bits_leq32(3)?;
 
@@ -250,22 +334,68 @@ impl AacDecoder {
                     if count > 0 {
                         let ext_type = bs.read_bits_leq32(4)?;
 
-                        match ext_type {
-                            // EXT_SBR_DATA (0xd)
-                            // EXT_SBR_DATA_CRC (0xe)
-                            0xd | 0xe => self.asc.sbr_present = true,
-                            // EXT_FILL (0x0)
-                            // EXT_FILL_DATA (0x1)
-                            // EXT_DATA_ELEMENT (0x2)
-                            // EXT_DYNAMIC_RANGE (0xb)
-                            // EXT_SAC_DATA (0xc)
-                            _ => (),
-                        }
+                        if matches!(ext_type, 0xd | 0xe) && cur_pair > 0 {
+                            // EXT_SBR_DATA (0xd) / EXT_SBR_DATA_CRC (0xe). `sbr_extension_data()`
+                            // starts immediately after this 4-bit `extension_type` field (no
+                            // byte alignment) and runs to the end of this `count`-byte
+                            // `extension_payload()`, extending the most recently decoded
+                            // SCE/CPE (`cur_pair - 1`). The ported SBR parser
+                            // (`sbr::extension`) needs its own `sbr::bits::BitReader` over
+                            // `data`; splice it in at the outer reader's current bit position,
+                            // then fast-forward the outer reader by however many bits the SBR
+                            // parse consumed so the rest of this loop (fill/TERM detection)
+                            // stays in sync.
+                            let elem_idx = cur_pair - 1;
+                            let (is_pair, _) = self.elem_targets[elem_idx];
+                            let crc_flag = ext_type == 0xe;
+                            let id_aac =
+                                if is_pair { sbr::IdSynEle::Cpe } else { sbr::IdSynEle::Sce };
 
-                        // Ignore extension payload(s).
-                        bs.ignore_bits(4)?;
-                        for _ in 0..count - 1 {
-                            bs.ignore_bits(8)?;
+                            let payload_start = (data.len() as u64) * 8 - bs.bits_left();
+
+                            if self.sbr.is_none() {
+                                // Implicit signalling: the ASC/ADTS header declared plain LC at
+                                // the core rate, and this is the first EXT_SBR_DATA payload
+                                // seen. Assume the standard 2× dual-rate ratio (no
+                                // `extensionSamplingFrequencyIndex` is available outside the
+                                // ASC); `self.params.sample_rate` is corrected below so any
+                                // caller that re-reads `codec_params()` after this point sees
+                                // the doubled rate — but see the crate README for callers that
+                                // only read it once at open time.
+                                let fs_sbr = self.asc.sample_rate.saturating_mul(2);
+                                self.sbr = Some(SbrRuntime::new(
+                                    fs_sbr,
+                                    self.buf.spec().channels().clone(),
+                                    self.asc.samples,
+                                    &self.elem_targets,
+                                )?);
+                                self.params.with_sample_rate(fs_sbr);
+                            }
+                            let sbr = self.sbr.as_mut().expect("just constructed above");
+                            let prev_header = sbr.elems[elem_idx].prev_header;
+
+                            let mut sbr_bs = sbr::bits::BitReader::new(data);
+                            sbr_bs.ignore_bits(u32::try_from(payload_start).unwrap_or(u32::MAX))?;
+                            let ext = sbr::extension::SbrExtensionData::parse(
+                                &mut sbr_bs,
+                                id_aac,
+                                crc_flag,
+                                sbr.fs_sbr,
+                                Some(count as u32),
+                                prev_header,
+                            )?;
+                            let consumed = sbr_bs.bit_position() - payload_start;
+                            bs.ignore_bits(u32::try_from(consumed).unwrap_or(0))?;
+
+                            sbr.elems[elem_idx].prev_header = Some(ext.header);
+                            sbr_ext[elem_idx] = Some(ext);
+                        }
+                        else {
+                            // Ignore extension payload(s).
+                            bs.ignore_bits(4)?;
+                            for _ in 0..count - 1 {
+                                bs.ignore_bits(8)?;
+                            }
                         }
                     }
                 }
@@ -280,6 +410,46 @@ impl AacDecoder {
         for pair in 0..cur_pair {
             self.pairs[pair].synth_audio(&mut self.dsp, &mut self.buf, rate_idx);
         }
+
+        // SBR reconstruction: once active for the stream, every element gets 2×-rate output
+        // every frame — `process_frame()` when this frame carried a payload,
+        // `upsample_frame()` (§4.6.18.5 pure upsampling) otherwise, so the QMF state and
+        // output rate stay continuous even across headerless / SBR-silent frames.
+        if self.sbr.is_some() {
+            // Gather the core PCM (as f64 — the ported SBR tool's native sample type) for
+            // each element first, before taking a mutable borrow of `self.sbr`.
+            let mut core_pcm: Vec<Vec<Vec<f64>>> = Vec::with_capacity(cur_pair);
+            for (is_pair, indices) in self.elem_targets.iter().take(cur_pair) {
+                let n_ch = if *is_pair { 2 } else { 1 };
+                let mut chans = Vec::with_capacity(n_ch);
+                for &ch_idx in indices.iter().take(n_ch) {
+                    let plane = self.buf.plane(ch_idx).expect("core channel plane exists");
+                    chans.push(plane.iter().map(|&s| f64::from(s)).collect::<Vec<f64>>());
+                }
+                core_pcm.push(chans);
+            }
+
+            let sbr = self.sbr.as_mut().expect("checked is_some above");
+            sbr.buf.clear();
+            sbr.buf.render_uninit(None);
+
+            for (idx, (_, indices)) in self.elem_targets.iter().take(cur_pair).enumerate() {
+                let core_refs: Vec<&[f64]> = core_pcm[idx].iter().map(Vec::as_slice).collect();
+                let elem = &mut sbr.elems[idx];
+                let out = match &sbr_ext[idx] {
+                    Some(ext) => elem.decoder.process_frame(ext, &core_refs)?,
+                    None => elem.decoder.upsample_frame(&core_refs)?,
+                };
+                for (c, &ch_idx) in indices.iter().take(out.len()).enumerate() {
+                    let dst = sbr.buf.plane_mut(ch_idx).expect("sbr channel plane exists");
+                    let n = dst.len().min(out[c].len());
+                    for (i, dst_i) in dst.iter_mut().enumerate().take(n) {
+                        *dst_i = out[c][i] as f32;
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -299,13 +469,26 @@ impl AacDecoder {
 
         // Choose decode step based on the object type.
         match self.asc.object_type {
-            AudioObjectType::Lc => self.decode_ga(&mut bs)?,
+            AudioObjectType::Lc => self.decode_ga(&mut bs, packet.data)?,
             _ => return unsupported_error("aac: object type"),
         }
 
-        // Trim gaps.
+        // Trim gaps. `packet.trim_start`/`trim_end` are computed by the format reader
+        // against the container's own declared sample rate (e.g. an MP4 track's `mdhd`/
+        // `stsd` rate), which for an explicitly-signalled HE-AAC file is already the SBR
+        // *output* rate (verified against a real Fraunhofer HE-AAC v1 fixture: `trim_start`
+        // summed across the leading packets matches the MP4 edit-list encoder delay exactly
+        // at the 44.1 kHz *output* rate, not the 22.05 kHz core rate) — so no rescaling is
+        // needed for `sbr.buf`. This has only been validated against explicit ASC signalling
+        // in MP4; ADTS (no container-level trim) and implicit signalling are unverified —
+        // see the crate README.
         if self.opts.gapless {
-            self.buf.trim(packet.trim_start.get() as usize, packet.trim_end.get() as usize);
+            if let Some(sbr) = self.sbr.as_mut() {
+                sbr.buf.trim(packet.trim_start.get() as usize, packet.trim_end.get() as usize);
+            }
+            else {
+                self.buf.trim(packet.trim_start.get() as usize, packet.trim_end.get() as usize);
+            }
         }
 
         Ok(())
@@ -331,7 +514,13 @@ impl AudioDecoder for AacDecoder {
     fn decode_ref(&mut self, packet: &PacketRef<'_>) -> Result<GenericAudioBufferRef<'_>> {
         if let Err(e) = self.decode_inner(packet) {
             self.buf.clear();
+            if let Some(sbr) = self.sbr.as_mut() {
+                sbr.buf.clear();
+            }
             Err(e)
+        }
+        else if let Some(sbr) = &self.sbr {
+            Ok(sbr.buf.as_generic_audio_buffer_ref())
         }
         else {
             Ok(self.buf.as_generic_audio_buffer_ref())
@@ -343,7 +532,10 @@ impl AudioDecoder for AacDecoder {
     }
 
     fn last_decoded(&self) -> GenericAudioBufferRef<'_> {
-        self.buf.as_generic_audio_buffer_ref()
+        match &self.sbr {
+            Some(sbr) => sbr.buf.as_generic_audio_buffer_ref(),
+            None => self.buf.as_generic_audio_buffer_ref(),
+        }
     }
 }
 

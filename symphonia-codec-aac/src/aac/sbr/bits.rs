@@ -59,6 +59,16 @@ impl<'a> BitReader<'a> {
     pub fn bits_left(&self) -> u64 {
         self.inner.bits_left()
     }
+
+    /// Discard `n` bits (used by `aac::mod` to fast-forward a fresh
+    /// reader over `packet.data` up to the position the outer
+    /// `raw_data_block()` walker has already reached before handing
+    /// off to [`super::extension::SbrExtensionData::parse`]).
+    pub fn ignore_bits(&mut self, n: u32) -> Result<()> {
+        self.inner
+            .ignore_bits(n)
+            .map_err(|_| Error::DecodeError("aac (sbr): bitreader: out of bits"))
+    }
 }
 
 /// MSB-first bit writer adapter, used only by ported unit tests to build

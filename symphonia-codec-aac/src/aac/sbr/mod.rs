@@ -45,7 +45,7 @@
 //! `set_low_power(true)` yet — every real-world HE-AAC v1 stream this
 //! port has been validated against uses the standard complex-QMF path.
 
-mod bits;
+pub(crate) mod bits;
 mod crc;
 mod dequant;
 mod element;
@@ -54,7 +54,7 @@ mod envelope;
 mod error;
 mod freq_bands;
 mod grid;
-mod header;
+pub(crate) mod header;
 mod huffman;
 mod hf_gen;
 mod limiter;
