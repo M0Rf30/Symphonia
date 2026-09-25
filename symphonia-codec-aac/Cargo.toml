@@ -19,5 +19,8 @@ lazy_static = { workspace = true }
 symphonia-core = { version = "0.6.1", path = "../symphonia-core" }
 symphonia-common = { version = "0.6.1", path = "../symphonia-common" }
 
+[dev-dependencies]
+symphonia-format-isomp4 = { version = "0.6.1", path = "../symphonia-format-isomp4" }
+
 [lints]
 workspace = true
