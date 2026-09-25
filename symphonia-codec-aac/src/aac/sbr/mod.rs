@@ -56,6 +56,7 @@ mod grid;
 mod header;
 mod huffman;
 mod limiter;
+mod qmf;
 mod noise_table;
 mod reconstruct;
 mod time_grid;
