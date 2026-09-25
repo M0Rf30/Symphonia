@@ -20,7 +20,7 @@
 use symphonia_core::codecs::audio::AudioCodecId;
 use symphonia_core::codecs::audio::well_known::{CODEC_ID_MP1, CODEC_ID_MP2, CODEC_ID_MP3};
 use symphonia_core::errors::Result;
-use symphonia_core::io::{MediaSourceStream, ReadBytes};
+use symphonia_core::io::{MediaSourceStream, ReadBytes, SeekBuffered};
 use symphonia_core::packet::Packet;
 use symphonia_core::units::{Duration, Timestamp};
 
@@ -52,6 +52,8 @@ pub struct MpegFrameFormat {
     pub codec: AudioCodecId,
     /// Sampling rate in Hz.
     pub sample_rate: u32,
+    /// Bit-rate in bits/second, as encoded in the frame header.
+    pub bitrate: u32,
     /// Number of PCM samples the frame decodes to.
     pub samples_per_frame: u64,
 }
@@ -116,7 +118,7 @@ fn parse_header(word: u32) -> Option<(MpegFrameFormat, usize)> {
         return None;
     }
 
-    Some((MpegFrameFormat { codec, sample_rate, samples_per_frame }, frame_len))
+    Some((MpegFrameFormat { codec, sample_rate, bitrate, samples_per_frame }, frame_len))
 }
 
 /// Synchronises to and reads the next whole MPEG audio frame (header and body) from the `data`
@@ -165,6 +167,51 @@ pub fn read_frame(
     }
 }
 
+/// Like [`read_frame`], but for use when resynchronising from an arbitrary byte offset (e.g.
+/// after a coarse seek). Compressed frame bodies can occasionally contain a byte sequence that
+/// happens to look like a sync word, so before accepting a candidate frame this also verifies
+/// that a plausible follow-up frame (same codec and sample rate) immediately follows it. This
+/// mirrors the "similar header" check `symphonia-bundle-mp3` performs when acquiring initial sync
+/// from an unknown position. Unlike `read_frame`, false syncs are retried one byte at a time
+/// rather than by the candidate's (possibly bogus) frame length.
+pub fn seek_sync_frame(
+    reader: &mut MediaSourceStream<'_>,
+    end_pos: u64,
+) -> Result<Option<(MpegFrameFormat, Vec<u8>)>> {
+    loop {
+        let start_pos = reader.pos();
+
+        let Some((format, frame)) = read_frame(reader, end_pos)? else {
+            return Ok(None);
+        };
+
+        // If the stream ends right after this candidate frame, there is nothing to cross-check
+        // against; accept it as-is.
+        if reader.pos() >= end_pos {
+            return Ok(Some((format, frame)));
+        }
+
+        match read_frame(reader, end_pos)? {
+            Some((next_format, next_frame)) => {
+                if next_format.sample_rate == format.sample_rate
+                    && next_format.codec == format.codec
+                {
+                    // Confirmed: rewind past the follow-up frame, keeping only the candidate.
+                    reader.seek_buffered_rev(next_frame.len());
+                    return Ok(Some((format, frame)));
+                }
+            }
+            None => {
+                // Could not read a follow-up frame (e.g. truncated); accept the candidate as-is.
+                return Ok(Some((format, frame)));
+            }
+        }
+
+        // False sync: retry scanning for a sync word starting one byte past the candidate.
+        reader.seek_buffered(start_pos + 1);
+    }
+}
+
 /// Reads the next MPEG audio frame from the `data` chunk and wraps it in a [`Packet`], advancing
 /// `next_ts` by the frame's sample count. Returns `None` at the end of the data chunk.
 pub fn next_packet(
@@ -185,6 +232,50 @@ pub fn next_packet(
     *next_ts = next_ts.saturating_add(format.samples_per_frame);
 
     Ok(Some(Packet::new(0, pts, dur, frame)))
+}
+
+/// Estimates the total number of decoded PCM samples (`num_frames`) for a constant (or roughly
+/// constant) bit-rate MPEG audio elementary stream spanning `[start_pos, end_pos)`, by sampling a
+/// handful of frames from the start and extrapolating from their average length. Mirrors
+/// `symphonia-bundle-mp3`'s CBR duration estimate. Restores the reader's position before
+/// returning. Returns `None` if not even one frame could be read.
+pub fn estimate_num_frames(
+    reader: &mut MediaSourceStream<'_>,
+    start_pos: u64,
+    end_pos: u64,
+) -> Result<Option<u64>> {
+    const MAX_FRAMES: u64 = 16;
+    const MAX_LEN: u64 = 16 * 1024;
+
+    let data_len = end_pos.saturating_sub(start_pos);
+
+    let mut total_frame_len = 0u64;
+    let mut total_frames = 0u64;
+    let mut samples_per_frame = 0u64;
+
+    let estimate = loop {
+        match read_frame(reader, end_pos)? {
+            Some((format, frame)) => {
+                samples_per_frame = format.samples_per_frame;
+                total_frame_len += frame.len() as u64;
+                total_frames += 1;
+
+                if total_frames >= MAX_FRAMES || total_frame_len >= MAX_LEN {
+                    let avg_frame_len = total_frame_len as f64 / total_frames as f64;
+                    let num_mpeg_frames = (data_len as f64 / avg_frame_len).round() as u64;
+                    break Some(num_mpeg_frames.saturating_mul(samples_per_frame));
+                }
+            }
+            // Reached the end of the data chunk while sampling; the frame count is exact.
+            None => {
+                break (total_frames > 0).then(|| total_frames.saturating_mul(samples_per_frame));
+            }
+        }
+    };
+
+    reader.seek_buffered(start_pos);
+
+    Ok(estimate)
 }
 
 #[cfg(test)]

@@ -75,6 +75,17 @@ pub struct WavReader<'s> {
     is_mpeg: bool,
     /// Running presentation timestamp (in samples) for the next MPEG packet.
     mpeg_ts: u64,
+    /// Sampling rate of the MPEG elementary stream (0 if `is_mpeg` is false or unknown).
+    mpeg_sample_rate: u32,
+    /// Average bytes/second of the MPEG elementary stream, used for coarse seeking and duration
+    /// estimation when neither a `fact` chunk nor ds64 sample count is available (0 if `is_mpeg`
+    /// is false or unknown).
+    mpeg_bytes_per_sec: u64,
+    /// Number of PCM samples per MPEG frame (0 if `is_mpeg` is false or unknown). Used to convert
+    /// a seek target directly into a frame index, so coarse seeking lands on (or very near) an
+    /// actual frame boundary instead of an arbitrary byte offset that may fall in the middle of a
+    /// frame's body.
+    mpeg_samples_per_frame: u64,
 }
 
 impl<'s> WavReader<'s> {
@@ -123,6 +134,7 @@ impl<'s> WavReader<'s> {
         let mut packet_info = None;
         let mut fact = None;
         let mut is_mpeg = false;
+        let mut mpeg_avg_bytes_per_sec = 0u32;
         let mut rf64_sizes = Rf64Sizes::default();
 
         loop {
@@ -160,6 +172,10 @@ impl<'s> WavReader<'s> {
 
                     // MPEG audio in WAV is framed from the elementary stream, not by fixed blocks.
                     is_mpeg = matches!(format.format_data, FormatData::Mpeg(_));
+
+                    if is_mpeg {
+                        mpeg_avg_bytes_per_sec = format.avg_bytes_per_sec;
+                    }
 
                     // The Format chunk contains the block_align field and possible additional
                     // information to handle packetization and seeking.
@@ -204,12 +220,26 @@ impl<'s> WavReader<'s> {
 
                     // For MPEG audio the elementary stream is authoritative for the exact codec
                     // (Layer I/II/III) and sample rate, so refine the codec parameters from the
-                    // first frame, then rewind so the first packet is read in full.
+                    // first frame, then rewind so the first packet is read in full. Also derive
+                    // the average bytes/second used for duration estimation and coarse seeking:
+                    // prefer the format chunk's stated average, falling back to the first frame's
+                    // own bit-rate if that field is absent or zero.
+                    let mut mpeg_sample_rate = 0u32;
+                    let mut mpeg_bytes_per_sec = 0u64;
+                    let mut mpeg_samples_per_frame = 0u64;
+
                     if is_mpeg {
                         if let Some((first, _)) =
                             mpeg::read_frame(&mut mss, data_end_pos.unwrap_or(u64::MAX))?
                         {
                             codec_params.for_codec(first.codec).with_sample_rate(first.sample_rate);
+                            mpeg_sample_rate = first.sample_rate;
+                            mpeg_samples_per_frame = first.samples_per_frame;
+                            mpeg_bytes_per_sec = if mpeg_avg_bytes_per_sec > 0 {
+                                u64::from(mpeg_avg_bytes_per_sec)
+                            } else {
+                                u64::from(first.bitrate) / 8
+                            };
                         }
                         mss.seek_buffered(data_start_pos);
                     }
@@ -223,24 +253,47 @@ impl<'s> WavReader<'s> {
                         return decode_error("wav: missing format chunk");
                     };
 
-                    // Append Data chunk fields to track (sets num_frames from data length). For
-                    // MPEG audio the block-based frame count would be meaningless (frames are
-                    // variable-length), so leave the frame count unset rather than derive a bogus
-                    // duration from the byte length.
+                    // Append Data chunk fields to track (sets num_frames from data length). MPEG
+                    // audio frames are variable-length, so the block-based byte-length formula
+                    // does not apply; instead prefer, in order: the ds64 sample count (RF64), the
+                    // `fact` chunk sample count (ffmpeg always writes one for non-PCM formats and
+                    // it accounts for encoder delay/padding), or an estimate derived from the data
+                    // length and the average byte rate (falling back to sampling actual frame
+                    // sizes if the average byte rate is unknown).
                     if let Some(data_len) = data_len {
-                        if !is_mpeg {
-                            append_data_params(&mut track, data_len, &packet_info);
-                        }
-                    }
+                        if is_mpeg {
+                            let num_frames = if let Some(sample_count) = rf64_sizes.sample_count {
+                                Some(sample_count)
+                            } else if let Some(fact) = &fact {
+                                Some(u64::from(fact.num_frames))
+                            } else if mpeg_bytes_per_sec > 0 && mpeg_sample_rate > 0 {
+                                Some(
+                                    data_len.saturating_mul(u64::from(mpeg_sample_rate))
+                                        / mpeg_bytes_per_sec,
+                                )
+                            } else {
+                                mpeg::estimate_num_frames(
+                                    &mut mss,
+                                    data_start_pos,
+                                    data_end_pos.unwrap_or(u64::MAX),
+                                )?
+                            };
 
-                    // For RF64 files, prefer the sample count from ds64 over the computed
-                    // value. For standard WAV, prefer fact chunk over computed value.
-                    // Applied after append_data_params so the authoritative value wins.
-                    if !is_mpeg {
-                        if let Some(sample_count) = rf64_sizes.sample_count {
-                            track.with_num_frames(sample_count);
-                        } else if let Some(fact) = &fact {
-                            append_fact_params(&mut track, fact);
+                            if let Some(num_frames) = num_frames {
+                                track.with_num_frames(num_frames);
+                                track.with_duration(Duration::from(num_frames));
+                            }
+                        } else {
+                            append_data_params(&mut track, data_len, &packet_info);
+
+                            // For RF64 files, prefer the sample count from ds64 over the computed
+                            // value. For standard WAV, prefer fact chunk over computed value.
+                            // Applied after append_data_params so the authoritative value wins.
+                            if let Some(sample_count) = rf64_sizes.sample_count {
+                                track.with_num_frames(sample_count);
+                            } else if let Some(fact) = &fact {
+                                append_fact_params(&mut track, fact);
+                            }
                         }
                     }
 
@@ -256,10 +309,82 @@ impl<'s> WavReader<'s> {
                         data_end_pos,
                         is_mpeg,
                         mpeg_ts: 0,
+                        mpeg_sample_rate,
+                        mpeg_bytes_per_sec,
+                        mpeg_samples_per_frame,
                     });
                 }
             }
         }
+    }
+
+    /// Seeks an MPEG-in-WAVE track to the MPEG frame closest to `required_ts`. A coarse byte
+    /// offset is estimated from the average byte rate, then the reader resynchronises to the
+    /// next valid MPEG frame header from there and reports that frame's (aligned) timestamp.
+    fn seek_mpeg(&mut self, required_ts: Timestamp) -> Result<SeekedTo> {
+        if self.mpeg_bytes_per_sec == 0 || self.mpeg_sample_rate == 0 || self.mpeg_samples_per_frame == 0
+        {
+            return seek_error(SeekErrorKind::Unseekable);
+        }
+
+        if !self.reader.is_seekable() {
+            return seek_error(SeekErrorKind::Unseekable);
+        }
+
+        let data_end_pos = self.data_end_pos.unwrap_or(u64::MAX);
+
+        debug!("seeking mpeg-in-wave to ts={required_ts}");
+
+        // Assume a constant frame size (in both samples and bytes) and convert the desired
+        // timestamp directly into a frame index. Landing on a presumed frame boundary (rather
+        // than an arbitrary interpolated byte offset) avoids scanning through the middle of a
+        // frame's body, where a run of high-entropy bytes can occasionally look like a false
+        // sync.
+        let per_frame = self.mpeg_samples_per_frame;
+        let frame_len =
+            (self.mpeg_bytes_per_sec * per_frame / u64::from(self.mpeg_sample_rate)).max(1);
+        let frame_index = (required_ts.get() as u64) / per_frame;
+
+        let seek_pos = self
+            .data_start_pos
+            .saturating_add(frame_index.saturating_mul(frame_len))
+            .min(data_end_pos);
+
+        self.reader.seek(SeekFrom::Start(seek_pos))?;
+
+        // Resynchronise to the next valid MPEG frame header from the estimated position. Use the
+        // stricter, verified resync (not the plain frame reader used by `next_packet`) since we
+        // may be landing in the middle of a frame body, where a false sync is possible.
+        let Some((format, frame)) = mpeg::seek_sync_frame(&mut self.reader, data_end_pos)? else {
+            return seek_error(SeekErrorKind::OutOfRange);
+        };
+
+        // The byte offset of the frame's header (the frame has just been fully consumed).
+        let frame_start_pos = self.reader.pos() - frame.len() as u64;
+
+        // Rewind so the resynced frame is read again, in full, as the first post-seek packet.
+        self.reader.seek_buffered_rev(frame.len());
+
+        // Recover the landed frame's index from its byte offset using the *same* assumed frame
+        // length used above (rather than re-deriving it via sample-rate/byte-rate arithmetic),
+        // so that a frame found exactly where expected reports back exactly the timestamp that
+        // was targeted, without compounding additional rounding error.
+        let landed_offset = frame_start_pos.saturating_sub(self.data_start_pos);
+        let landed_frame_index = landed_offset / frame_len;
+        let aligned_ts = landed_frame_index.saturating_mul(format.samples_per_frame.max(1));
+
+        let actual_ts = Timestamp::try_from(aligned_ts)
+            .map_err(|_| Error::SeekError(SeekErrorKind::OutOfRange))?;
+
+        self.mpeg_ts = aligned_ts;
+
+        debug!(
+            "seeked mpeg-in-wave to ts={} (delta={})",
+            actual_ts,
+            actual_ts.saturating_delta(required_ts)
+        );
+
+        Ok(SeekedTo { track_id: 0, actual_ts, required_ts })
     }
 }
 
@@ -382,6 +507,12 @@ impl FormatReader for WavReader<'_> {
             }
         }
 
+        // MPEG-in-WAVE uses a variable-length elementary stream and is seeked by resynchronising
+        // to a frame header, rather than the fixed block-size arithmetic used below for PCM/ADPCM.
+        if self.is_mpeg {
+            return self.seek_mpeg(required_ts);
+        }
+
         debug!("seeking to frame_ts={required_ts}");
 
         // WAVE is not internally packetized for PCM codecs. Packetization is simulated by trying to
@@ -437,6 +568,7 @@ mod tests {
     use symphonia_core::codecs::audio::well_known::CODEC_ID_MP3;
     use symphonia_core::formats::FormatReader;
     use symphonia_core::io::ReadOnlySource;
+    use symphonia_core::units::Time;
 
     use super::*;
 
@@ -639,8 +771,13 @@ mod tests {
     }
 
     /// Wrap concatenated MPEG audio frames in a minimal RIFF/WAVE container whose `fmt ` chunk
-    /// declares `WAVE_FORMAT_MPEGLAYER3` (0x0055).
-    fn riff_mpeglayer3(frames: &[Vec<u8>]) -> Vec<u8> {
+    /// declares `WAVE_FORMAT_MPEGLAYER3` (0x0055), with a configurable `nAvgBytesPerSec` and an
+    /// optional `fact` chunk sample count.
+    fn riff_mpeglayer3_ex(
+        frames: &[Vec<u8>],
+        avg_bytes_per_sec: u32,
+        fact_num_frames: Option<u32>,
+    ) -> Vec<u8> {
         let data: Vec<u8> = frames.iter().flatten().copied().collect();
 
         // MPEGLAYER3WAVEFORMAT: 16-byte WAVEFORMATEX base + 2-byte cbSize + 12-byte extension.
@@ -648,7 +785,7 @@ mod tests {
         fmt.extend_from_slice(&0x0055u16.to_le_bytes()); // wFormatTag
         fmt.extend_from_slice(&2u16.to_le_bytes()); // nChannels
         fmt.extend_from_slice(&44_100u32.to_le_bytes()); // nSamplesPerSec
-        fmt.extend_from_slice(&16_000u32.to_le_bytes()); // nAvgBytesPerSec
+        fmt.extend_from_slice(&avg_bytes_per_sec.to_le_bytes()); // nAvgBytesPerSec
         fmt.extend_from_slice(&1u16.to_le_bytes()); // nBlockAlign
         fmt.extend_from_slice(&0u16.to_le_bytes()); // wBitsPerSample
         fmt.extend_from_slice(&12u16.to_le_bytes()); // cbSize
@@ -663,6 +800,13 @@ mod tests {
         body.extend_from_slice(b"fmt ");
         body.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
         body.extend_from_slice(&fmt);
+
+        if let Some(num_frames) = fact_num_frames {
+            body.extend_from_slice(b"fact");
+            body.extend_from_slice(&4u32.to_le_bytes());
+            body.extend_from_slice(&num_frames.to_le_bytes());
+        }
+
         body.extend_from_slice(b"data");
         body.extend_from_slice(&(data.len() as u32).to_le_bytes());
         body.extend_from_slice(&data);
@@ -672,6 +816,12 @@ mod tests {
         out.extend_from_slice(&(body.len() as u32).to_le_bytes());
         out.extend_from_slice(&body);
         out
+    }
+
+    /// Wrap concatenated MPEG audio frames in a minimal RIFF/WAVE container whose `fmt ` chunk
+    /// declares `WAVE_FORMAT_MPEGLAYER3` (0x0055).
+    fn riff_mpeglayer3(frames: &[Vec<u8>]) -> Vec<u8> {
+        riff_mpeglayer3_ex(frames, 16_000, None)
     }
 
     #[test]
@@ -692,5 +842,174 @@ mod tests {
         let packet = reader.next_packet().unwrap().unwrap();
         assert_eq!(&packet.data[..], &frames[1][..]);
         assert!(reader.next_packet().unwrap().is_none());
+    }
+
+    #[test]
+    fn mpeg_in_wave_duration_estimated_from_avg_bytes_per_sec() {
+        // 100 identical CBR frames: 128 kbps, 44.1 kHz, stereo, 417 bytes/frame, 1152
+        // samples/frame. No `fact` chunk, so duration must be estimated from `nAvgBytesPerSec`.
+        let frames: Vec<Vec<u8>> = (0..100).map(|_| mp3_frame()).collect();
+        let data_len = (frames.len() * 417) as u64;
+        let avg_bytes_per_sec = 16_000u32; // 128 kbps / 8
+
+        let bytes = riff_mpeglayer3_ex(&frames, avg_bytes_per_sec, None);
+        let mss = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
+        let reader = WavReader::try_new(mss, FormatOptions::default()).unwrap();
+
+        let expected = data_len * 44_100 / u64::from(avg_bytes_per_sec);
+        assert_eq!(reader.tracks[0].num_frames, Some(expected));
+        assert_eq!(reader.tracks[0].duration, Some(Duration::from(expected)));
+    }
+
+    #[test]
+    fn mpeg_in_wave_duration_prefers_fact_chunk() {
+        let frames: Vec<Vec<u8>> = (0..10).map(|_| mp3_frame()).collect();
+        // A `fact` chunk sample count that deliberately differs from the bitrate-based estimate
+        // (as it would for a file with encoder delay/padding) must take priority.
+        let bytes = riff_mpeglayer3_ex(&frames, 16_000, Some(11_000));
+        let mss = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
+        let reader = WavReader::try_new(mss, FormatOptions::default()).unwrap();
+
+        assert_eq!(reader.tracks[0].num_frames, Some(11_000));
+    }
+
+    #[test]
+    fn mpeg_in_wave_seek_lands_within_one_frame() {
+        // 200 identical CBR frames spanning ~5.2 s at 44.1 kHz.
+        const NUM_FRAMES: usize = 200;
+        const SAMPLES_PER_FRAME: u64 = 1152;
+
+        let frames: Vec<Vec<u8>> = (0..NUM_FRAMES).map(|_| mp3_frame()).collect();
+        let bytes = riff_mpeglayer3_ex(&frames, 16_000, None);
+        let mss = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
+        let mut reader = WavReader::try_new(mss, FormatOptions::default()).unwrap();
+
+        let time_base = reader.tracks[0].time_base.expect("time base");
+        let total_samples = NUM_FRAMES as u64 * SAMPLES_PER_FRAME;
+
+        for &target_ts in &[0u64, total_samples / 4, total_samples / 2, total_samples * 3 / 4] {
+            let time = time_base.calc_time(Timestamp::new(target_ts as i64)).unwrap();
+
+            let seeked = reader
+                .seek(SeekMode::Coarse, SeekTo::Time { time, track_id: None })
+                .unwrap_or_else(|e| panic!("seek to ts={target_ts} failed: {e:?}"));
+
+            let delta = seeked.actual_ts.abs_delta(Timestamp::new(target_ts as i64)).get();
+            assert!(
+                delta <= SAMPLES_PER_FRAME,
+                "seek to ts={target_ts} landed {delta} samples away (actual={})",
+                seeked.actual_ts
+            );
+
+            // A packet must be readable right after the seek, and its timestamp must not precede
+            // the reported seek position.
+            let packet = reader.next_packet().unwrap().expect("packet after seek");
+            assert!(packet.pts.get() as u64 >= seeked.actual_ts.get() as u64);
+        }
+    }
+
+    #[test]
+    fn mpeg_in_wave_seek_past_end_errors_without_panic() {
+        let frames: Vec<Vec<u8>> = (0..10).map(|_| mp3_frame()).collect();
+        let bytes = riff_mpeglayer3_ex(&frames, 16_000, None);
+        let mss = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
+        let mut reader = WavReader::try_new(mss, FormatOptions::default()).unwrap();
+
+        let far_future = Timestamp::new(1_000_000_000);
+        let result =
+            reader.seek(SeekMode::Coarse, SeekTo::Timestamp { ts: far_future, track_id: 0 });
+        assert!(result.is_err());
+    }
+
+    /// Encodes a CBR MP3-in-WAV file with `ffmpeg`, returning its bytes, or `None` if `ffmpeg` is
+    /// not available or the encode failed (the caller should skip the test in that case).
+    fn make_ffmpeg_mp3_in_wav(duration_secs: u32, sample_rate: u32, bitrate_kbps: u32) -> Option<Vec<u8>> {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "symphonia-riff-mpeg-test-{}-{}-{}-{}.wav",
+            std::process::id(),
+            duration_secs,
+            sample_rate,
+            bitrate_kbps
+        ));
+
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi"])
+            .arg("-i")
+            .arg(format!("sine=frequency=440:duration={duration_secs}:sample_rate={sample_rate}"))
+            .args(["-c:a", "libmp3lame", "-b:a"])
+            .arg(format!("{bitrate_kbps}k"))
+            .args(["-f", "wav"])
+            .arg(&path)
+            .status();
+
+        if !matches!(status, Ok(status) if status.success()) {
+            return None;
+        }
+
+        let data = std::fs::read(&path).ok();
+        let _ = std::fs::remove_file(&path);
+        data
+    }
+
+    #[test]
+    fn mpeg_in_wave_ffmpeg_duration_and_seek() {
+        const DURATION_SECS: u32 = 8;
+        const SAMPLE_RATE: u32 = 44_100;
+        const BITRATE_KBPS: u32 = 128;
+
+        let Some(wav_bytes) = make_ffmpeg_mp3_in_wav(DURATION_SECS, SAMPLE_RATE, BITRATE_KBPS)
+        else {
+            eprintln!("skipping mpeg_in_wave_ffmpeg_duration_and_seek: ffmpeg not available");
+            return;
+        };
+
+        let mss = MediaSourceStream::new(Box::new(Cursor::new(wav_bytes)), Default::default());
+        let mut reader = WavReader::try_new(mss, FormatOptions::default()).unwrap();
+
+        assert!(reader.is_mpeg);
+
+        let params = reader.tracks[0].codec_params.as_ref().unwrap().audio().unwrap();
+        assert_eq!(params.codec, CODEC_ID_MP3);
+        assert_eq!(params.sample_rate, Some(SAMPLE_RATE));
+
+        let num_frames =
+            reader.tracks[0].num_frames.expect("mpeg-in-wave track should report num_frames");
+
+        // The `fact` chunk's sample count includes the LAME encoder delay (typically ~1105-2400
+        // samples for MPEG-1 Layer III), so allow generous slack above the raw source sample
+        // count when comparing against `duration * sample_rate`.
+        let expected_samples = u64::from(DURATION_SECS) * u64::from(SAMPLE_RATE);
+        let delta = num_frames.abs_diff(expected_samples);
+        assert!(
+            delta <= 3 * 1152,
+            "num_frames={num_frames} too far from expected={expected_samples} (delta={delta})"
+        );
+
+        let time_base = reader.tracks[0].time_base.expect("time base");
+
+        for target_secs in [1u32, 3, 5, 7] {
+            let time = Time::try_new(i64::from(target_secs), 0).unwrap();
+            let required_ts = time_base.calc_timestamp(time).unwrap();
+
+            let seeked = reader
+                .seek(SeekMode::Coarse, SeekTo::Time { time, track_id: None })
+                .unwrap_or_else(|e| panic!("seek to {target_secs}s failed: {e:?}"));
+
+            let delta = seeked.actual_ts.abs_delta(required_ts).get();
+            assert!(
+                delta <= 1152,
+                "seek to {target_secs}s landed {delta} samples away (target={required_ts}, actual={})",
+                seeked.actual_ts
+            );
+
+            let packet = reader.next_packet().unwrap().expect("packet after seek");
+            assert!(packet.pts.get() as u64 >= seeked.actual_ts.get() as u64);
+        }
+
+        // Seeking past the end of the track must fail cleanly, without panicking.
+        let past_end = Time::try_new(i64::from(DURATION_SECS) + 10, 0).unwrap();
+        let result = reader.seek(SeekMode::Coarse, SeekTo::Time { time: past_end, track_id: None });
+        assert!(result.is_err(), "seeking past the end of the track should return an error");
     }
 }
