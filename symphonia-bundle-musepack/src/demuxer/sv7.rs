@@ -98,6 +98,15 @@ pub(crate) fn read_header(
     let is_true_gapless = r.read_bit() != 0;
     let mut last_frame_samples = r.read_bits(11);
     let _fast_seek = r.read_bit();
+    let _unused = r.read_bits(19);
+    let _encoder_version = r.read_bits(8);
+    // `r.bit_pos()` is now 168 (byte-aligned: 21 of the header's 24 bytes), matching
+    // `streaminfo_read_header_sv7`'s exact bit consumption. The remaining 3 bytes are *not*
+    // padding: libmpcdec's demuxer shares one continuous bit reader across the header and the
+    // audio data, so the first frame's 20-bit length prefix begins right here, not at a fresh
+    // byte-24 boundary. Carry them forward as the start of the audio bitstream (see
+    // `Sv7State`'s docs above).
+    debug_assert_eq!(r.bit_pos(), 168);
 
     if frames == 0 {
         return decode_error("musepack: zero-length SV7 stream");
@@ -158,10 +167,26 @@ pub(crate) fn read_header(
         .map(|len| len.saturating_sub(mss.pos()))
         .unwrap_or(MAX_BUFFERED_BYTES);
     let to_read = remaining.min(MAX_BUFFERED_BYTES) as usize;
-    let mut data = vec![0u8; to_read];
-    let n = mss.read_buf(&mut data).map_err(Error::IoError)?;
-    data.truncate(n);
-    byte_swap_words(&mut data);
+    // The header's last 3 bytes (bits 168..192) are the start of the continuous audio
+    // bitstream, not unused padding -- see the comment above `debug_assert_eq!(r.bit_pos(), 168)`.
+    let mut data = header[21..24].to_vec();
+    data.resize(3 + to_read, 0);
+    // `MediaSourceStream::read_buf` performs a single underlying read and may return fewer
+    // bytes than requested even before EOF (e.g. limited by its internal ring buffer); loop
+    // until the buffer is full or a `0`-byte read signals end-of-stream.
+    let mut filled = 3usize;
+    while filled < data.len() {
+        let n = mss.read_buf(&mut data[filled..]).map_err(Error::IoError)?;
+        if n == 0 {
+            break;
+        }
+        filled += n;
+    }
+    data.truncate(filled);
+    // Byte-swap only the freshly-read audio bytes (the 3 carried-over header bytes are already
+    // in the correct swapped order, having been swapped as part of the header's own 4-byte
+    // words).
+    byte_swap_words(&mut data[3..]);
 
     Ok((info, Sv7State { data, bit_pos: 0, frames_total: frames, frames_emitted: 0 }))
 }
@@ -203,7 +228,15 @@ impl Sv7State {
             return decode_error("musepack: implausible SV7 frame length");
         }
 
-        let packet = extract_bits(&self.data, frame_start, bit_len);
+        // Ported from `mpc_demux_decode_inner`'s SV7 branch: the *last* frame in the stream is
+        // immediately followed by an extra 11-bit "true last-frame sample count" field (read by
+        // `decoder_core::Decoder::decode_frame`'s trailing-adjustment code), which is not
+        // included in the 20-bit length prefix itself. Include those 11 bits only for the final
+        // packet so that read lands on real bitstream content instead of zero-padding.
+        let is_last_frame = self.frames_emitted + 1 == self.frames_total;
+        let extract_len = if is_last_frame { bit_len + 11 } else { bit_len };
+
+        let packet = extract_bits(&self.data, frame_start, extract_len);
         self.bit_pos = frame_start + bit_len;
         self.frames_emitted += 1;
 
