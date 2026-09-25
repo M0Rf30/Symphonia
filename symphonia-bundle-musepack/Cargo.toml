@@ -1,0 +1,24 @@
+[package]
+name = "symphonia-bundle-musepack"
+description = "Pure Rust Musepack (SV7/SV8) demuxer and decoder (a part of project Symphonia)."
+authors = ["OMBS.IO Dev Team <dev@ombs.io>"]
+readme = "README.md"
+categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
+keywords = ["audio", "codec", "decoder", "musepack", "mpc"]
+# Common package metadata located in workspace Cargo.toml.
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+symphonia-core = { version = "0.6.1", path = "../symphonia-core" }
+symphonia-metadata = { version = "0.6.1", path = "../symphonia-metadata", default-features = false, features = ["ape"] }
+log = { workspace = true }
+
+[dev-dependencies]
+
+[lints]
+workspace = true
