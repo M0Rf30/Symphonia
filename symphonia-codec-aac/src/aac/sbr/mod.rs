@@ -49,15 +49,18 @@ mod bits;
 mod crc;
 mod dequant;
 mod element;
+mod env_adjust;
 mod envelope;
 mod error;
 mod freq_bands;
 mod grid;
 mod header;
 mod huffman;
+mod hf_gen;
 mod limiter;
 mod qmf;
 mod noise_table;
+mod lp;
 mod reconstruct;
 mod time_grid;
 
