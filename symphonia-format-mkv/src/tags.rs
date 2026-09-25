@@ -9,7 +9,10 @@ use std::{ops::Deref, rc::Rc, sync::Arc};
 
 use symphonia_core::meta::{RawTag, RawTagSubField, RawValue, StandardTag};
 
-use crate::{segment::SimpleTagElement, sub_fields::*};
+use crate::{
+    segment::{SimpleTagElement, TargetUid, TargetsElement},
+    sub_fields::*,
+};
 
 #[derive(Clone, Debug)]
 /// Target type information.
@@ -27,6 +30,30 @@ pub struct TagContext {
     pub is_video: bool,
     /// The current target for the tag, if a target is specified.
     pub target: Option<Target>,
+}
+
+/// Resolve the effective target for a `Tag` element's `Targets` child.
+///
+/// A `Targets` element that specifies neither an explicit `TargetTypeValue` nor any UID is
+/// treated as completely untargeted (`None`) rather than defaulting to the Matroska schema's
+/// nominal ALBUM/MOVIE (level 50). This matches how real-world encoders such as ffmpeg use an
+/// empty `Targets` element to mean "applies to the whole file", not "applies to the album".
+///
+/// When a `Targets` element has UID(s) but no explicit `TargetTypeValue`, the level is inferred
+/// from the kind of UID present: track UIDs imply level 30 (TRACK), everything else falls back
+/// to the schema default of level 50.
+pub fn resolve_target(targets: Option<&TargetsElement>) -> Option<Target> {
+    let targets = targets?;
+
+    if targets.uids.is_empty() && targets.target_type_value.is_none() {
+        return None;
+    }
+
+    let has_track_uid = targets.uids.iter().any(|uid| matches!(uid, TargetUid::Track(_)));
+
+    let value = targets.target_type_value.unwrap_or(if has_track_uid { 30 } else { 50 });
+
+    Some(Target { value, name: targets.target_type.clone().map(Rc::new) })
 }
 
 pub fn make_raw_tags(tag: SimpleTagElement, ctx: &TagContext, out: &mut Vec<RawTag>) {
@@ -131,6 +158,19 @@ pub fn map_std_tag(raw: &RawTag, lower_ctx: &TagContext) -> Option<StandardTag> 
         let raw_key = raw.key.as_str();
 
         let (target_name, tag) = raw_key.split_once('@').unwrap_or(("", raw_key));
+
+        // A tag with no target at all (i.e., a completely untargeted `SimpleTag`, or one whose
+        // `Targets` element specifies neither a `TargetTypeValue` nor a UID) is assumed to
+        // describe the file's primary content: the sole track for audio, or the sole chapter for
+        // video. This matches how tools such as ffmpeg write (and expect to read back) generic
+        // tags like `TITLE` and `PART_NUMBER` for simple, single-track files, rather than the
+        // Matroska spec's nominal ALBUM/MOVIE (level 50) default.
+        let target_name_or_track = if target_name.is_empty() {
+            default_target_name(30, lower_ctx.is_video).unwrap_or(target_name)
+        }
+        else {
+            target_name
+        };
 
         let value = value.clone();
 
@@ -283,22 +323,28 @@ pub fn map_std_tag(raw: &RawTag, lower_ctx: &TagContext) -> Option<StandardTag> 
 
                 // Organizational
                 "TOTAL_PARTS" => map_total_parts(&value, lower_ctx)?,
-                "PART_NUMBER" => map_part_number(&value, target_name)?,
+                "PART_NUMBER" => map_part_number(&value, target_name_or_track)?,
 
                 // Titles
-                "TITLE" => map_title(value, target_name, Variant::Normal)?,
-                "SUBTITLE" => map_subtitle(value, target_name)?,
+                "TITLE" => map_title(value, target_name_or_track, Variant::Normal)?,
+                "SUBTITLE" => map_subtitle(value, target_name_or_track)?,
+                // ffmpeg's Matroska muxer writes a literal `ALBUM`/`ALBUM_ARTIST` `TagName`
+                // (mirroring Vorbis comment field names) rather than the spec-defined `TITLE`
+                // tag at the ALBUM (level 50) target. Recognize this common, non-standard
+                // convention for compatibility with such files.
+                "ALBUM" => StandardTag::Album(value),
+                "ALBUM_ARTIST" => StandardTag::AlbumArtist(value),
 
                 // Original
                 "ORIGINAL/ARTIST" => StandardTag::OriginalArtist(value),
                 "ORIGINAL/LYRICIST" => StandardTag::OriginalLyricist(value),
-                "ORIGINAL/TITLE" => map_title(value, target_name, Variant::Original)?,
+                "ORIGINAL/TITLE" => map_title(value, target_name_or_track, Variant::Original)?,
                 "ORIGINAL/WRITTEN_BY" => StandardTag::OriginalWriter(value),
 
                 // Sort order
                 "ARTIST/SORT_WITH" => StandardTag::SortArtist(value),
                 "COMPOSER/SORT_WITH" => StandardTag::SortComposer(value),
-                "TITLE/SORT_WITH" => map_title(value, target_name, Variant::SortOrder)?,
+                "TITLE/SORT_WITH" => map_title(value, target_name_or_track, Variant::SortOrder)?,
 
                 // Unknown tag.
                 _ => return None,
@@ -605,4 +651,103 @@ fn parse_tmdb(value: &Arc<String>) -> Option<StandardTag> {
 
 fn parse_number(value: &Arc<String>) -> Option<u64> {
     value.parse::<u64>().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::segment::TargetsElement;
+
+    fn empty_targets() -> TargetsElement {
+        TargetsElement {
+            target_type_value: None,
+            target_type: None,
+            uids: Vec::new(),
+            all_tracks: false,
+            all_editions: false,
+            all_chapters: false,
+            all_attachments: false,
+        }
+    }
+
+    #[test]
+    fn resolve_target_none_for_no_targets_element() {
+        assert!(resolve_target(None).is_none());
+    }
+
+    #[test]
+    fn resolve_target_none_for_fully_empty_targets() {
+        // ffmpeg writes an empty `<Targets></Targets>` for generic, file-wide tags. This must not
+        // be treated as an explicit ALBUM (level 50) target.
+        let targets = empty_targets();
+        assert!(resolve_target(Some(&targets)).is_none());
+    }
+
+    #[test]
+    fn resolve_target_explicit_value_is_preserved() {
+        let mut targets = empty_targets();
+        targets.target_type_value = Some(50);
+        let target = resolve_target(Some(&targets)).expect("target");
+        assert_eq!(target.value, 50);
+    }
+
+    #[test]
+    fn resolve_target_infers_track_level_from_track_uid() {
+        let mut targets = empty_targets();
+        targets.uids.push(TargetUid::Track(42));
+        let target = resolve_target(Some(&targets)).expect("target");
+        assert_eq!(target.value, 30);
+    }
+
+    fn raw_string(key: &str, value: &str) -> RawTag {
+        RawTag::new(key, value)
+    }
+
+    #[test]
+    fn untargeted_title_maps_to_track_title() {
+        // Reproduces ffmpeg's ffmpeg-generated Matroska/WebM files: an untargeted `TITLE` tag (no
+        // `Targets` element at all) on a single-track audio file must be treated as the track's
+        // own title, not dropped or treated as an album title.
+        let ctx = TagContext { is_video: false, target: None };
+        let raw = raw_string("TITLE", "Opus in MKA");
+        assert_eq!(map_std_tag(&raw, &ctx), Some(StandardTag::TrackTitle(Arc::new("Opus in MKA".into()))));
+    }
+
+    #[test]
+    fn untargeted_part_number_maps_to_track_number() {
+        // ffmpeg writes the "track" tag as `PART_NUMBER` under a completely empty `Targets`
+        // element rather than an explicit TRACK (level 30) target.
+        let ctx = TagContext { is_video: false, target: None };
+        let raw = raw_string("PART_NUMBER", "6");
+        assert_eq!(map_std_tag(&raw, &ctx), Some(StandardTag::TrackNumber(6)));
+    }
+
+    #[test]
+    fn explicit_album_title_still_maps_to_album() {
+        let ctx = TagContext {
+            is_video: false,
+            target: Some(Target { value: 50, name: Some(Rc::new("ALBUM".to_string().into())) }),
+        };
+        let raw = raw_string("ALBUM@TITLE", "My Album");
+        assert_eq!(map_std_tag(&raw, &ctx), Some(StandardTag::Album(Arc::new("My Album".into()))));
+    }
+
+    #[test]
+    fn ffmpeg_literal_album_tag_name_maps_to_album() {
+        // ffmpeg writes a literal `ALBUM` `TagName` (Vorbis-comment style) under a completely
+        // empty `Targets` element, rather than a `TITLE` tag at the ALBUM (level 50) target.
+        let ctx = TagContext { is_video: false, target: None };
+        let raw = raw_string("ALBUM", "Opus");
+        assert_eq!(map_std_tag(&raw, &ctx), Some(StandardTag::Album(Arc::new("Opus".into()))));
+    }
+
+    #[test]
+    fn explicit_track_title_maps_to_track_title() {
+        let ctx = TagContext {
+            is_video: false,
+            target: Some(Target { value: 30, name: Some(Rc::new("TRACK".to_string().into())) }),
+        };
+        let raw = raw_string("TRACK@TITLE", "My Track");
+        assert_eq!(map_std_tag(&raw, &ctx), Some(StandardTag::TrackTitle(Arc::new("My Track".into()))));
+    }
 }

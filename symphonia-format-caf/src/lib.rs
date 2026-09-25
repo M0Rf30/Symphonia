@@ -16,5 +16,6 @@
 
 mod chunks;
 mod demuxer;
+mod tags;
 
 pub use demuxer::CafReader;

@@ -65,6 +65,9 @@ pub enum Chunk {
     ChannelLayout(ChannelLayout),
     PacketTable(PacketTable),
     MagicCookie(Box<[u8]>),
+    /// The `info` chunk: an ordered list of key/value string pairs of free-form metadata (e.g.
+    /// `artist`, `album`, `title`, `track`). See Apple's CAF specification, "Information Chunk".
+    Info(Vec<(String, String)>),
     Free,
 }
 
@@ -101,6 +104,7 @@ impl Chunk {
                     return invalid_chunk_size_error("Magic Cookie", chunk_size);
                 }
             }
+            b"info" => Chunk::Info(read_info_chunk(reader, chunk_size)?),
             b"free" => {
                 if chunk_size < 0 {
                     return invalid_chunk_size_error("Free", chunk_size);
@@ -594,6 +598,57 @@ pub struct CafPacket {
 fn invalid_chunk_size_error<T>(chunk_type: &str, chunk_size: i64) -> Result<T> {
     error!("invalid {chunk_type} chunk size ({chunk_size})");
     decode_error("caf: invalid chunk size")
+}
+
+/// Reads the `info` chunk: a `UInt32` count of entries followed by that many key/value pairs of
+/// NUL-terminated UTF-8 strings. See Apple's CAF specification, "Information Chunk".
+fn read_info_chunk(
+    reader: &mut MediaSourceStream<'_>,
+    chunk_size: i64,
+) -> Result<Vec<(String, String)>> {
+    let Ok(chunk_size) = usize::try_from(chunk_size)
+    else {
+        return invalid_chunk_size_error("Information", chunk_size);
+    };
+
+    if chunk_size < 4 {
+        return invalid_chunk_size_error("Information", chunk_size as i64);
+    }
+
+    let data = reader.read_boxed_slice_exact(chunk_size)?;
+
+    let num_entries = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+
+    let mut pos = 4;
+    let mut entries = Vec::with_capacity(num_entries as usize);
+
+    for _ in 0..num_entries {
+        let key = read_c_string(&data, &mut pos)?;
+        let value = read_c_string(&data, &mut pos)?;
+        entries.push((key, value));
+    }
+
+    Ok(entries)
+}
+
+/// Reads a single NUL-terminated UTF-8 string from `data`, starting at `*pos`, advancing `*pos`
+/// past the terminating NUL. Invalid UTF-8 is replaced lossily rather than failing the whole
+/// chunk, since a single malformed entry shouldn't prevent reading the rest of the tags.
+fn read_c_string(data: &[u8], pos: &mut usize) -> Result<String> {
+    let start = *pos;
+
+    while *pos < data.len() && data[*pos] != 0 {
+        *pos += 1;
+    }
+
+    if *pos >= data.len() {
+        return decode_error("caf: info chunk entry missing NUL terminator");
+    }
+
+    let s = String::from_utf8_lossy(&data[start..*pos]).into_owned();
+    *pos += 1;
+
+    Ok(s)
 }
 
 fn read_variable_length_integer(reader: &mut MediaSourceStream<'_>) -> Result<u64> {

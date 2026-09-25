@@ -24,17 +24,21 @@ use symphonia_core::{
         well_known::FORMAT_ID_CAF,
     },
     io::*,
-    meta::{Metadata, MetadataLog},
+    meta::{Metadata, MetadataBuilder, MetadataInfo, MetadataLog, well_known::METADATA_ID_CAF},
     support_format,
     units::{TimeBase, Timestamp},
 };
 
+use crate::tags::push_tags;
 use symphonia_common::mpeg::formats::*;
 
 const MAX_FRAMES_PER_PACKET: u64 = 1152;
 
 const CAF_FORMAT_INFO: FormatInfo =
     FormatInfo { format: FORMAT_ID_CAF, short_name: "caf", long_name: "Core Audio Format" };
+
+const CAF_METADATA_INFO: MetadataInfo =
+    MetadataInfo { metadata: METADATA_ID_CAF, short_name: "caf", long_name: "Core Audio Format" };
 
 /// Core Audio Format (CAF) format reader.
 ///
@@ -546,6 +550,19 @@ impl<'s> CafReader<'s> {
                             codec_params.with_extra_data(data);
                         }
                     }
+                }
+                Some(Info(entries)) => {
+                    let mut builder = MetadataBuilder::new(CAF_METADATA_INFO);
+                    let mut tags = Vec::with_capacity(entries.len());
+
+                    for (key, value) in entries {
+                        push_tags(&key, &value, &mut tags);
+                    }
+                    for tag in tags {
+                        builder.add_tag(tag);
+                    }
+
+                    self.metadata.push(builder.build());
                 }
                 Some(Free) | None => {}
             }

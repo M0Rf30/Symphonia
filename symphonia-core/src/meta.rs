@@ -945,4 +945,6 @@ pub mod well_known {
     pub const METADATA_ID_MATROSKA: MetadataId = MetadataId(0x403);
     /// ISOMP4 tags
     pub const METADATA_ID_ISOMP4: MetadataId = MetadataId(0x404);
+    /// CAF `info` chunk tags
+    pub const METADATA_ID_CAF: MetadataId = MetadataId(0x405);
 }
