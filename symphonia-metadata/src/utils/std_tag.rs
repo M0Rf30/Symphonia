@@ -345,42 +345,97 @@ pub fn parse_itunes_content_advisory(v: Arc<String>) -> StandardTagPair {
     [content_advisory, None]
 }
 
-pub fn parse_id3v2_genre(v: Arc<String>) -> StandardTagPair {
-    use regex_lite::Regex;
-
+/// Resolve an ID3v2 genre reference to a genre name. A reference is either an ID3v1 genre number,
+/// "RX" (remix), or "CR" (cover).
+fn resolve_id3v2_genre_ref(reference: &str) -> Option<String> {
     use crate::utils::id3v1::get_genre_name;
 
-    // Regex that will match the following strings:
-    //
-    // "<NUMBER>"
-    // "<NAME>"
-    // "(<NUMBER>)"
-    // "(<NUMBER)<NAME>"
-    let re = Regex::new(r"^(?P<num0>[0-9]+)$|(?:\((?P<num1>[0-9]+)\))?(?P<name>.+)?$")
-        .expect("valid regex");
-
-    // The regex always matches (even an empty string).
-    let caps = re.captures(v.as_str()).expect("regex always matches");
-
-    let name = if let Some(name) = caps.name("name") {
-        // A user-defined genre name provided.
-        Some(name.as_str().to_owned())
+    match reference {
+        "RX" => Some("Remix".to_string()),
+        "CR" => Some("Cover".to_string()),
+        _ if !reference.is_empty() && reference.bytes().all(|b| b.is_ascii_digit()) => {
+            reference.parse::<u8>().ok().and_then(get_genre_name)
+        }
+        _ => None,
     }
-    else if let Some(num) = caps.name("num0").or_else(|| caps.name("num1")) {
-        // Only genre number provided. Parse to u8, then lookup the genre name.
-        num.as_str().parse::<u8>().ok().and_then(get_genre_name)
+}
+
+/// Parse the value of an ID3v2 genre (`TCON`) frame.
+///
+/// The following forms are understood:
+///
+///  * ID3v2.4: a genre name, or a bare reference (`"13"`, `"RX"`, `"CR"`). Multiple genres are
+///    separate values of the frame, and are the caller's responsibility to split.
+///  * ID3v2.3: any number of references in parentheses (`"(13)"`, `"(13)(17)"`, `"(RX)"`)
+///    optionally followed by a free-text refinement (`"(17)Rock"`). A literal `(` at the start
+///    of the refinement is escaped as `((`.
+///
+/// If the value contains a refinement, it is the genre. Otherwise, the (up to 2) referenced
+/// genres are yielded. A value that cannot be resolved is returned as-is.
+pub fn parse_id3v2_genre(v: Arc<String>) -> StandardTagPair {
+    let mut rest = v.as_str();
+    let mut refs: [Option<String>; 2] = [None, None];
+    let mut num_refs = 0;
+
+    // Consume leading parenthesised references.
+    while let Some(after_open) = rest.strip_prefix('(') {
+        // "((" is an escaped "(" that begins the refinement.
+        if after_open.starts_with('(') {
+            break;
+        }
+
+        let Some((reference, after_close)) = after_open.split_once(')')
+        else {
+            break;
+        };
+
+        let Some(name) = resolve_id3v2_genre_ref(reference)
+        else {
+            break;
+        };
+
+        if num_refs < refs.len() {
+            refs[num_refs] = Some(name);
+        }
+
+        num_refs += 1;
+        rest = after_close;
+    }
+
+    // Unescape a leading "((".
+    let text = rest.strip_prefix('(').filter(|r| r.starts_with('(')).unwrap_or(rest);
+
+    let genre = if num_refs == 0 {
+        // No parenthesised references. The value is either a name, or a bare reference.
+        resolve_id3v2_genre_ref(text)
+    }
+    else if text.is_empty() {
+        // Only references. Yielded below.
+        None
     }
     else {
-        // Empty string.
-        None
+        // A refinement.
+        Some(text.to_string())
     };
 
-    // Fallback to the original value for the genre if one could not be parsed.
-    let genre = name
-        .map(|name| StandardTag::Genre(Arc::new(name)))
-        .unwrap_or_else(|| StandardTag::Genre(v));
+    if let Some(genre) = genre {
+        return [Some(StandardTag::Genre(Arc::new(genre))), None];
+    }
 
-    [Some(genre), None]
+    if num_refs > 0 && text.is_empty() {
+        let [first, second] = refs;
+        return [
+            first.map(|name| StandardTag::Genre(Arc::new(name))),
+            second.map(|name| StandardTag::Genre(Arc::new(name))),
+        ];
+    }
+
+    // A plain genre name. Fallback to the original value if the text was altered by the above.
+    if num_refs == 0 && !text.is_empty() && text != v.as_str() {
+        return [Some(StandardTag::Genre(Arc::new(text.to_string()))), None];
+    }
+
+    [Some(StandardTag::Genre(v)), None]
 }
 
 fn parse_bool(v: Arc<String>) -> Option<bool> {
@@ -475,5 +530,23 @@ mod tests {
             parse_id3v2_genre(arc_string("(abc)Hello"))[0],
             Some(StandardTag::Genre(arc_string("(abc)Hello")))
         );
+    }
+
+    #[test]
+    fn verify_parse_id3v2_genre_references() {
+        let genre = |s: &str| Some(StandardTag::Genre(arc_string(s)));
+
+        assert_eq!(parse_id3v2_genre(arc_string("13")), [genre("Pop"), None]);
+        assert_eq!(parse_id3v2_genre(arc_string("(13)")), [genre("Pop"), None]);
+        assert_eq!(parse_id3v2_genre(arc_string("(17)Rock")), [genre("Rock"), None]);
+        assert_eq!(parse_id3v2_genre(arc_string("(13)(17)")), [genre("Pop"), genre("Rock")]);
+        assert_eq!(parse_id3v2_genre(arc_string("(51)(39)Noise")), [genre("Noise"), None]);
+        assert_eq!(parse_id3v2_genre(arc_string("RX")), [genre("Remix"), None]);
+        assert_eq!(parse_id3v2_genre(arc_string("CR")), [genre("Cover"), None]);
+        assert_eq!(parse_id3v2_genre(arc_string("(RX)")), [genre("Remix"), None]);
+        assert_eq!(parse_id3v2_genre(arc_string("(CR)")), [genre("Cover"), None]);
+        assert_eq!(parse_id3v2_genre(arc_string("(RX)(CR)")), [genre("Remix"), genre("Cover")]);
+        assert_eq!(parse_id3v2_genre(arc_string("((Rock)")), [genre("(Rock)"), None]);
+        assert_eq!(parse_id3v2_genre(arc_string("Rxx")), [genre("Rxx"), None]);
     }
 }

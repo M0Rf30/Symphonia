@@ -60,12 +60,18 @@ fn read_id3v1<B: ReadBytes>(reader: &mut B, builder: &mut MetadataBuilder) -> Re
     }
 
     // If the second-last byte of the comment field is 0 (indicating the remaining characters are
-    // also 0), then the last byte of the comment field is the track number.
+    // also 0), then the last byte of the comment field is the track number (ID3v1.1). A track
+    // number of 0 means the track number is unset, and must not be reported.
     let comment = if buf[122] == 0 {
-        // The last byte of the comment field is the track number.
         let track = u64::from(buf[123]);
 
-        builder.add_tag(Tag::new_from_parts("TRACK", track, Some(StandardTag::TrackNumber(track))));
+        if track != 0 {
+            builder.add_tag(Tag::new_from_parts(
+                "TRACK",
+                track,
+                Some(StandardTag::TrackNumber(track)),
+            ));
+        }
 
         decode_iso8859_buf(&buf[94..122])
     }
@@ -150,5 +156,59 @@ impl MetadataReader for Id3v1Reader<'_> {
         Self: 's,
     {
         self.reader
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use symphonia_core::io::BufReader;
+
+    fn read_tags(comment_tail: [u8; 2]) -> Vec<Tag> {
+        let mut buf = [0u8; 128];
+        buf[..3].copy_from_slice(b"TAG");
+        buf[3..8].copy_from_slice(b"Title");
+        buf[97..101].copy_from_slice(b"Note");
+        // The last 2 bytes of the comment field.
+        buf[125..127].copy_from_slice(&comment_tail);
+        buf[127] = 13;
+
+        let mut builder = MetadataBuilder::new(ID3V1_METADATA_INFO);
+        read_id3v1(&mut BufReader::new(&buf), &mut builder).unwrap();
+        builder.build().media.tags
+    }
+
+    fn track_numbers(tags: &[Tag]) -> Vec<u64> {
+        tags.iter()
+            .filter_map(|t| match t.std {
+                Some(StandardTag::TrackNumber(n)) => Some(n),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn verify_id3v11_track_number() {
+        assert_eq!(track_numbers(&read_tags([0, 7])), [7]);
+    }
+
+    /// An ID3v1.1 track number of 0 means no track number.
+    #[test]
+    fn verify_id3v11_zero_track_number_is_unset() {
+        let tags = read_tags([0, 0]);
+        assert!(track_numbers(&tags).is_empty());
+        assert!(tags.iter().all(|t| t.raw.key != "TRACK"));
+        // The comment is still read.
+        assert!(
+            tags.iter()
+                .any(|t| matches!(&t.std, Some(StandardTag::Comment(c)) if c.as_str() == "Note"))
+        );
+    }
+
+    /// An ID3v1.0 tag has no track number.
+    #[test]
+    fn verify_id3v10_has_no_track_number() {
+        assert!(track_numbers(&read_tags([b'x', 5])).is_empty());
     }
 }

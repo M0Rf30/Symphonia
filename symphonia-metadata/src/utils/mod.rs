@@ -13,4 +13,6 @@ pub mod images;
 pub mod itunes;
 
 pub(crate) mod base64;
+#[cfg(feature = "id3v2")]
+pub(crate) mod inflate;
 pub(crate) mod std_tag;
