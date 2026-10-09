@@ -727,4 +727,6 @@ pub mod well_known {
     pub const FORMAT_ID_FLV: FormatId = FormatId(0x10d);
     /// Musepack
     pub const FORMAT_ID_MUSEPACK: FormatId = FormatId(0x10e);
+    /// Low Overhead Audio Stream (AAC in LATM)
+    pub const FORMAT_ID_LOAS: FormatId = FormatId(0x10f);
 }

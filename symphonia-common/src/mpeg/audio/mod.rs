@@ -354,11 +354,30 @@ impl AudioSpecificConfig {
 
     /// Read the audio specific configuration from the provided buffer. ISO14496-3-2009
     pub fn read(buf: &[u8]) -> Result<AudioSpecificConfig> {
-        let mut bs = BitReaderLtr::new(buf);
+        Self::read_from(&mut BitReaderLtr::new(buf))
+    }
 
+    /// Read the audio specific configuration from the current position of a bit stream, leaving
+    /// the bit stream positioned after it. ISO14496-3-2009
+    ///
+    /// If the audio specific configuration is not the last element of the bit stream, as in a
+    /// LATM stream mux config, the bits following it must not be mistaken for the trailing
+    /// `syncExtensionType` of an explicitly signalled extension (which, however, requires at
+    /// least 16 bits and an 11-bit sync word to match).
+    pub fn read_from<B: ReadBitsLtr + FiniteBitStream>(bs: &mut B) -> Result<AudioSpecificConfig> {
+        let mut asc = Self::read_core_from(bs)?;
+        let _ = asc.read_sync_extension(bs)?;
+        Ok(asc)
+    }
+
+    /// Read the audio specific configuration from the current position of a bit stream, except
+    /// for the optional trailing `syncExtensionType` extension (see [`Self::read_sync_extension`]).
+    pub fn read_core_from<B: ReadBitsLtr + FiniteBitStream>(
+        bs: &mut B,
+    ) -> Result<AudioSpecificConfig> {
         let mut asc = AudioSpecificConfig {
-            object_type: Self::read_audio_object_type(&mut bs)?,
-            sample_rate: Self::read_sampling_frequency(&mut bs)?,
+            object_type: Self::read_audio_object_type(bs)?,
+            sample_rate: Self::read_sampling_frequency(bs)?,
             ..Default::default()
         };
 
@@ -366,7 +385,7 @@ impl AudioSpecificConfig {
             return decode_error("common (mp4a): a sample rate of 0 is invalid");
         }
 
-        let (channels, channel_elements) = Self::read_channel_config(&mut bs)?;
+        let (channels, channel_elements) = Self::read_channel_config(bs)?;
         asc.channels = channels;
         asc.channel_elements = channel_elements;
 
@@ -375,11 +394,11 @@ impl AudioSpecificConfig {
             if asc.object_type == AudioObjectType::Ps {
                 asc.ps_present = true;
             }
-            let ext_srate = Self::read_sampling_frequency(&mut bs)?;
-            asc.object_type = Self::read_audio_object_type(&mut bs)?;
+            let ext_srate = Self::read_sampling_frequency(bs)?;
+            asc.object_type = Self::read_audio_object_type(bs)?;
 
             let ext_chans = if asc.object_type == AudioObjectType::ErBsac {
-                Self::read_channel_config(&mut bs)?.0
+                Self::read_channel_config(bs)?.0
             }
             else {
                 None
@@ -417,7 +436,7 @@ impl AudioSpecificConfig {
                     // `channelConfiguration == 0`: the channel layout is given explicitly by a
                     // `program_config_element()` at this exact point in `GASpecificConfig()`
                     // (ISO/IEC 14496-3 §1.6.2.1, Table 1.15).
-                    let (channels, elements) = Self::read_program_config_element(&mut bs)?;
+                    let (channels, elements) = Self::read_program_config_element(bs)?;
                     asc.channels = Some(channels);
                     asc.channel_elements = Some(elements);
                 }
@@ -529,6 +548,25 @@ impl AudioSpecificConfig {
             _ => {}
         };
 
+        Ok(asc)
+    }
+
+    /// Read the optional trailing `syncExtensionType` extension of an audio specific config, which
+    /// is how "explicit backwards compatible" HE-AAC v1/v2 signals SBR/PS on top of a plain
+    /// (non-hierarchical) outer `audioObjectType`, from the bit stream.
+    ///
+    /// The bit stream is read past the extension by up to 11 bits (the sync word that is not
+    /// there). Returns the number of bits that were part of the extension (0 if there was none),
+    /// so that a caller that reads an audio specific config that is not the last element of a
+    /// bit stream can skip only those.
+    pub fn read_sync_extension<B: ReadBitsLtr + FiniteBitStream>(
+        &mut self,
+        bs: &mut B,
+    ) -> Result<u64> {
+        let asc = self;
+        let start_left = bs.bits_left();
+        let mut unmatched = 0;
+
         // §1.6.6: this trailing `syncExtensionType` check is unconditional on `bits_left()
         // >= 16` -- it is how "explicit backwards compatible" HE-AAC v1/v2 signals SBR/PS on
         // top of a plain (non-hierarchical) outer `audioObjectType` (e.g. `Lc`), so it must
@@ -539,12 +577,15 @@ impl AudioSpecificConfig {
         if bs.bits_left() >= 16 {
             let sync = bs.read_bits_leq32(11)?;
 
-            if sync == 0x2B7 {
-                let ext_otype = Self::read_audio_object_type(&mut bs)?;
+            if sync != 0x2B7 {
+                unmatched = 11;
+            }
+            else {
+                let ext_otype = Self::read_audio_object_type(bs)?;
                 if ext_otype == AudioObjectType::Sbr {
                     asc.sbr_present = bs.read_bool()?;
                     if asc.sbr_present {
-                        let ext_srate = Self::read_sampling_frequency(&mut bs)?;
+                        let ext_srate = Self::read_sampling_frequency(bs)?;
                         // Backwards-compatible explicit signalling also conveys the SBR output
                         // sampling frequency.
                         if asc.sbr_ps_info.is_none() {
@@ -555,20 +596,23 @@ impl AudioSpecificConfig {
                             if sync == 0x548 {
                                 asc.ps_present = bs.read_bool()?;
                             }
+                            else {
+                                unmatched = 11;
+                            }
                         }
                     }
                 }
                 if ext_otype == AudioObjectType::Ps {
                     asc.sbr_present = bs.read_bool()?;
                     if asc.sbr_present {
-                        let _ext_srate = Self::read_sampling_frequency(&mut bs)?;
+                        let _ext_srate = Self::read_sampling_frequency(bs)?;
                     }
                     let _ext_channels = bs.read_bits_leq32(4)?;
                 }
             }
         }
 
-        Ok(asc)
+        Ok(start_left - bs.bits_left() - unmatched)
     }
 
     fn read_audio_object_type<B: ReadBitsLtr>(bs: &mut B) -> Result<AudioObjectType> {

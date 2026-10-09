@@ -1,4 +1,4 @@
-use symphonia_codec_aac::{AacDecoder, AdtsReader};
+use symphonia_codec_aac::{AacDecoder, AdtsReader, LoasReader};
 use symphonia_core::codecs::audio::{
     AudioCodecParameters, AudioDecoder, AudioDecoderOptions, well_known::CODEC_ID_AAC,
 };
@@ -327,7 +327,12 @@ fn open_sample(name: &str) -> Option<Box<dyn symphonia_core::formats::FormatRead
     let path = std::path::Path::new(&dir).join("aac").join(name);
     let file = std::fs::File::open(path).ok()?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    Some(IsoMp4Reader::try_probe_new(mss, Default::default()).expect("sample probes"))
+    if name.contains("latm") {
+        Some(LoasReader::try_probe_new(mss, Default::default()).expect("sample probes"))
+    }
+    else {
+        Some(IsoMp4Reader::try_probe_new(mss, Default::default()).expect("sample probes"))
+    }
 }
 
 fn sample_params(
@@ -500,6 +505,31 @@ fn check_accurate_seek_converges(name: &str, tolerance: f32) {
 #[test]
 fn sample_accurate_seek_converges_aac_lc() {
     check_accurate_seek_converges("aac_lc_fdk_m4a.m4a", 1e-6);
+}
+
+#[test]
+fn sample_loas_stream_decodes_and_seeks() {
+    // The stream mux config is not in the first frames of this stream.
+    let Some(mut reader) = open_sample("aac_lc_fdk_latm.aac")
+    else {
+        return;
+    };
+    let (id, params) = sample_params(reader.as_ref());
+    assert_eq!(params.sample_rate, Some(44_100));
+    assert_eq!(params.channels.as_ref().map(|c| c.count()), Some(2));
+
+    let mut opts = AudioDecoderOptions::default();
+    opts.gapless = false;
+    let mut decoder = AacDecoder::try_new(&params, &opts).unwrap();
+
+    let mut total = 0;
+    while let Some(packet) = reader.next_packet().unwrap() {
+        assert_eq!(packet.track_id, id);
+        total += decoder.decode(&packet).unwrap().frames();
+    }
+    assert_eq!(total, 1_325_056);
+
+    check_accurate_seek_converges("aac_lc_fdk_latm.aac", 1e-6);
 }
 
 #[test]

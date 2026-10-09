@@ -169,6 +169,8 @@ pub mod default {
         pub use symphonia_bundle_mp3::MpaReader;
         #[cfg(feature = "aac")]
         pub use symphonia_codec_aac::AdtsReader;
+        #[cfg(feature = "aac")]
+        pub use symphonia_codec_aac::LoasReader;
         #[cfg(feature = "caf")]
         pub use symphonia_format_caf::CafReader;
         #[cfg(feature = "dsd")]
@@ -299,6 +301,8 @@ pub mod default {
         // Formats
         #[cfg(feature = "aac")]
         probe.register_format::<formats::AdtsReader<'_>>();
+        #[cfg(feature = "aac")]
+        probe.register_format::<formats::LoasReader<'_>>();
 
         #[cfg(feature = "ape-format")]
         probe.register_format::<formats::ApeReader<'_>>();

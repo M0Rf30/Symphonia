@@ -18,6 +18,8 @@
 
 mod aac;
 mod adts;
+mod loas;
 
 pub use aac::AacDecoder;
 pub use adts::AdtsReader;
+pub use loas::LoasReader;
