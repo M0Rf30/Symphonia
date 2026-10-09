@@ -71,7 +71,8 @@ fn music(frames: usize, channels: usize, seed: u32) -> Vec<f32> {
             let env = (-3.0 * t).exp() as f32 * (1.0 - (-200.0 * t).exp()) as f32;
             let mut s = 0.0f32;
             for h in 1..=8 {
-                s += (2.0 * std::f64::consts::PI * f * h as f64 * t).sin() as f32 / (h as f32).powf(1.3);
+                s += (2.0 * std::f64::consts::PI * f * h as f64 * t).sin() as f32
+                    / (h as f32).powf(1.3);
             }
             s *= 0.2 * env;
             let idx = (start + i) * channels;
@@ -98,7 +99,9 @@ fn decode_all(packets: &[Vec<u8>], channels: u8) -> Vec<f32> {
     let mut out = Vec::new();
     let mut buf = vec![0.0f32; 5760 * channels as usize];
     for (i, p) in packets.iter().enumerate() {
-        let n = dec.decode(Some(p), &mut buf, 5760).unwrap_or_else(|e| panic!("packet {i} failed to decode: {e:?}"));
+        let n = dec
+            .decode(Some(p), &mut buf, 5760)
+            .unwrap_or_else(|e| panic!("packet {i} failed to decode: {e:?}"));
         assert_eq!(n, FRAME, "packet {i} decodes to one 20 ms frame");
         out.extend_from_slice(&buf[..n * channels as usize]);
     }
@@ -153,7 +156,10 @@ fn sine_sweep_round_trip_snr() {
         let packets = encode_all(cfg, &pcm);
         let decoded = decode_all(&packets, ch as u8);
         let snr = snr_db(&pcm, &decoded, ch, PRE_SKIP as usize, 4 * FRAME);
-        eprintln!("sweep ch={ch} br={br} {mode:?}: SNR {snr:.1} dB, mean {:.1} B", mean_packet_size(&packets));
+        eprintln!(
+            "sweep ch={ch} br={br} {mode:?}: SNR {snr:.1} dB, mean {:.1} B",
+            mean_packet_size(&packets)
+        );
         assert!(snr >= min_snr, "sweep ch={ch} br={br} {mode:?}: SNR {snr:.1} dB < {min_snr}");
     }
 }
@@ -178,7 +184,10 @@ fn music_snr_improves_with_bitrate() {
         let packets = encode_all(EncoderConfig::new(2, br), &pcm);
         let decoded = decode_all(&packets, 2);
         let snr = snr_db(&pcm, &decoded, 2, PRE_SKIP as usize, 4 * FRAME);
-        eprintln!("music stereo br={br}: SNR {snr:.1} dB, mean {:.1} B", mean_packet_size(&packets));
+        eprintln!(
+            "music stereo br={br}: SNR {snr:.1} dB, mean {:.1} B",
+            mean_packet_size(&packets)
+        );
         assert!(snr > prev + 1.0, "SNR must grow with bitrate: {prev:.1} -> {snr:.1} at {br}");
         prev = snr;
     }
@@ -289,7 +298,10 @@ fn every_complexity_level_produces_decodable_streams() {
         let packets = encode_all(cfg, &pcm);
         let decoded = decode_all(&packets, 2);
         let snr = snr_db(&pcm, &decoded, 2, PRE_SKIP as usize, 3 * FRAME);
-        eprintln!("complexity {complexity}: SNR {snr:.1} dB, mean {:.1} B", mean_packet_size(&packets));
+        eprintln!(
+            "complexity {complexity}: SNR {snr:.1} dB, mean {:.1} B",
+            mean_packet_size(&packets)
+        );
         assert!(snr > 10.0, "complexity {complexity}: SNR {snr:.1}");
         snrs.push(snr);
     }
@@ -345,7 +357,10 @@ fn transients_use_short_blocks_and_decode() {
         })
         .count();
     eprintln!("transient frames: {transient_frames}/{}", packets.len());
-    assert!(transient_frames >= 3, "clicks should be coded as transient frames, got {transient_frames}");
+    assert!(
+        transient_frames >= 3,
+        "clicks should be coded as transient frames, got {transient_frames}"
+    );
     let decoded = decode_all(&packets, 2);
     let snr = snr_db(&pcm, &decoded, 2, PRE_SKIP as usize, FRAME);
     // Noise bursts are intrinsically hard to match sample by sample; libopus reaches the same
@@ -368,13 +383,15 @@ fn digital_silence_is_cheap_and_does_not_disturb_neighbours() {
     assert!(silent_frames >= 40, "a second of silence should use tiny packets ({silent_frames})");
     let decoded = decode_all(&packets, 2);
     // The silent region (frames 24000..72000) decodes to (almost) exact zero, away from the edges.
-    let mid = &decoded[(PRE_SKIP as usize + 24000 + 2 * FRAME) * 2..(PRE_SKIP as usize + 72000 - 2 * FRAME) * 2];
+    let mid = &decoded
+        [(PRE_SKIP as usize + 24000 + 2 * FRAME) * 2..(PRE_SKIP as usize + 72000 - 2 * FRAME) * 2];
     let peak = mid.iter().fold(0.0f32, |a, &v| a.max(v.abs()));
     assert!(peak < 1e-3, "silence decoded with peak {peak}");
     // Audio after the silence is still intact.
     let tail_start = 72000 + 4 * FRAME;
     let r = &pcm[tail_start * 2..(tail_start + 16000) * 2];
-    let d = &decoded[(tail_start + PRE_SKIP as usize) * 2..(tail_start + PRE_SKIP as usize + 16000) * 2];
+    let d = &decoded
+        [(tail_start + PRE_SKIP as usize) * 2..(tail_start + PRE_SKIP as usize + 16000) * 2];
     let snr = snr_db(r, d, 2, 0, 0);
     assert!(snr > 12.0, "audio after silence: SNR {snr:.1}");
 }
@@ -385,16 +402,33 @@ fn hostile_input_never_breaks_the_stream() {
     let n = 48000;
     let mut cases: Vec<(&str, Vec<f32>)> = Vec::new();
     cases.push(("full-scale noise", (0..n * 2).map(|_| rng.next()).collect()));
-    cases.push(("clipping square", (0..n * 2).map(|i| if (i / 200) % 2 == 0 { 1.0 } else { -1.0 }).collect()));
+    cases.push((
+        "clipping square",
+        (0..n * 2).map(|i| if (i / 200) % 2 == 0 { 1.0 } else { -1.0 }).collect(),
+    ));
     cases.push(("over-range", (0..n * 2).map(|_| rng.next() * 40.0).collect()));
     cases.push(("DC", vec![0.9f32; n * 2]));
-    cases.push(("NaN/inf", (0..n * 2).map(|i| match i % 97 { 0 => f32::NAN, 1 => f32::INFINITY, 2 => f32::NEG_INFINITY, _ => rng.next() * 0.1 }).collect()));
+    cases.push((
+        "NaN/inf",
+        (0..n * 2)
+            .map(|i| match i % 97 {
+                0 => f32::NAN,
+                1 => f32::INFINITY,
+                2 => f32::NEG_INFINITY,
+                _ => rng.next() * 0.1,
+            })
+            .collect(),
+    ));
     cases.push(("tiny noise", (0..n * 2).map(|_| rng.next() * 1e-7).collect()));
-    cases.push(("impulse train", (0..n * 2).map(|i| if i % 1920 == 0 { 1.0 } else { 0.0 }).collect()));
+    cases.push((
+        "impulse train",
+        (0..n * 2).map(|i| if i % 1920 == 0 { 1.0 } else { 0.0 }).collect(),
+    ));
     for (name, pcm) in cases {
         for ch in [1usize, 2] {
             // Mono view of the same material.
-            let input: Vec<f32> = if ch == 2 { pcm.clone() } else { pcm.chunks(2).map(|c| c[0]).collect() };
+            let input: Vec<f32> =
+                if ch == 2 { pcm.clone() } else { pcm.chunks(2).map(|c| c[0]).collect() };
             for (br, mode) in [
                 (6_000u32, BitrateMode::Cbr),
                 (6_000, BitrateMode::Vbr),
@@ -444,7 +478,9 @@ fn runtime_reconfiguration() {
 fn explicit_bandwidths_limit_the_spectrum() {
     // A 15 kHz tone must disappear when only narrowband (4 kHz) is coded, and survive in
     // fullband.
-    let tone: Vec<f32> = (0..48000).map(|i| 0.5 * (2.0 * std::f32::consts::PI * 15000.0 * i as f32 / 48000.0).sin()).collect();
+    let tone: Vec<f32> = (0..48000)
+        .map(|i| 0.5 * (2.0 * std::f32::consts::PI * 15000.0 * i as f32 / 48000.0).sin())
+        .collect();
     let energy = |bw: Bandwidth| {
         let mut cfg = EncoderConfig::new(1, 96_000);
         cfg.bandwidth = Some(bw);
@@ -491,7 +527,12 @@ fn ogg_stream_is_well_formed_and_trimmed() {
             let body: usize = rest[27..27 + nseg].iter().map(|&l| l as usize).sum();
             let total = 27 + nseg + body;
             let granule = i64::from_le_bytes(rest[6..14].try_into().unwrap());
-            pages.push((rest[5], granule, rest[27..27 + nseg].to_vec(), rest[27 + nseg..total].to_vec()));
+            pages.push((
+                rest[5],
+                granule,
+                rest[27..27 + nseg].to_vec(),
+                rest[27 + nseg..total].to_vec(),
+            ));
             rest = &rest[total..];
         }
         assert_eq!(pages[0].0, 0x02, "BOS on the first page");
@@ -504,7 +545,11 @@ fn ogg_stream_is_well_formed_and_trimmed() {
         assert_eq!(pages[1].1, 0);
         let last = pages.last().unwrap();
         assert_eq!(last.0 & 0x04, 0x04, "EOS on the last page");
-        assert_eq!(last.1, PRE_SKIP as i64 + frames as i64, "final granule position trims the tail");
+        assert_eq!(
+            last.1,
+            PRE_SKIP as i64 + frames as i64,
+            "final granule position trims the tail"
+        );
         let mut prev = 0;
         for p in &pages[2..] {
             if p.1 >= 0 {
@@ -514,7 +559,10 @@ fn ogg_stream_is_well_formed_and_trimmed() {
         }
 
         // Read back through the demuxer and decode.
-        let mss = MediaSourceStream::new(Box::new(Cursor::new(bytes.clone())), MediaSourceStreamOptions::default());
+        let mss = MediaSourceStream::new(
+            Box::new(Cursor::new(bytes.clone())),
+            MediaSourceStreamOptions::default(),
+        );
         let mut reader = OggReader::try_new(mss, FormatOptions::default()).unwrap();
         assert!(reader.first_track(TrackType::Audio).is_some());
         let mut packets = Vec::new();
@@ -634,7 +682,11 @@ fn real_music_round_trip() {
             );
             assert!(snr >= min_snr, "{track:?} @ {br}: SNR {snr:.1} < {min_snr}");
             assert!(snr > last, "SNR must grow with bitrate");
-            assert!((mean * 400.0 - br as f64).abs() < br as f64 * 0.08, "rate {:.0} vs {br}", mean * 400.0);
+            assert!(
+                (mean * 400.0 - br as f64).abs() < br as f64 * 0.08,
+                "rate {:.0} vs {br}",
+                mean * 400.0
+            );
             last = snr;
         }
     }

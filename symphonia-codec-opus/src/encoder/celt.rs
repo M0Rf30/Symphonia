@@ -384,7 +384,14 @@ impl CeltEncoder {
         if enc.tell() + 3 <= total_bits
             && !is_transient
             && cfg.complexity >= 5
-            && patch_transient_decision(&band_log_e, &self.old_band_e, nb, start as usize, end as usize, cc)
+            && patch_transient_decision(
+                &band_log_e,
+                &self.old_band_e,
+                nb,
+                start as usize,
+                end as usize,
+                cc,
+            )
         {
             is_transient = true;
             short_blocks = true;

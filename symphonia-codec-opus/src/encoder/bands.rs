@@ -741,9 +741,17 @@ mod tests {
 
     #[test]
     fn pvq_search_places_exactly_k_pulses_and_round_trips() {
-        for &(n, k) in
-            &[(2usize, 1i32), (4, 3), (8, 5), (16, 2), (16, 12), (44, 6), (176, 4), (8, 36), (2, 128)]
-        {
+        for &(n, k) in &[
+            (2usize, 1i32),
+            (4, 3),
+            (8, 5),
+            (16, 2),
+            (16, 12),
+            (44, 6),
+            (176, 4),
+            (8, 36),
+            (2, 128),
+        ] {
             let mut x: Vec<f32> = (0..n).map(|i| ((i * 29 + 7) % 13) as f32 - 6.0 + 0.1).collect();
             let norm = x.iter().map(|v| v * v).sum::<f32>().sqrt();
             for v in x.iter_mut() {
