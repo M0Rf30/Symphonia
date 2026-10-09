@@ -38,6 +38,44 @@ use crate::segment::{
 const MKV_FORMAT_INFO: FormatInfo =
     FormatInfo { format: FORMAT_ID_MKV, short_name: "matroska", long_name: "Matroska / WebM" };
 
+/// Get the constant number of frames per block of a lossless codec (all but the last block of a
+/// stream have this many frames) from the codec's private data.
+///
+/// This allows the exact timestamps of blocks to be recovered when the muxer did not write a
+/// default duration, since the timestamps in a Matroska file are only as precise as the
+/// timestamp scale (usually 1ms).
+fn fixed_block_samples(codec_id: &str, codec_private: Option<&[u8]>) -> Option<u64> {
+    let data = codec_private?;
+
+    let samples = match codec_id {
+        "A_FLAC" => {
+            // "fLaC", followed by the STREAMINFO block: a 4 byte block header, then the minimum
+            // and maximum block sizes (16-bit, big-endian). Only a fixed block size is constant.
+            let streaminfo = data.strip_prefix(b"fLaC")?.get(4..8)?;
+            let min = u16::from_be_bytes([streaminfo[0], streaminfo[1]]);
+            let max = u16::from_be_bytes([streaminfo[2], streaminfo[3]]);
+            if min != max {
+                return None;
+            }
+            u64::from(min)
+        }
+        "A_ALAC" => {
+            // The magic cookie, optionally wrapped in an "alac" atom (size, "alac", version and
+            // flags). The first field of the ALAC configuration is the frame length (32-bit,
+            // big-endian).
+            let config = match data.get(4..8) {
+                Some(b"alac") => data.get(12..)?,
+                _ => data,
+            };
+            u64::from(u32::from_be_bytes(config.get(0..4)?.try_into().ok()?))
+        }
+        _ => return None,
+    };
+
+    // Sanity check.
+    (samples > 0 && samples <= 1 << 20).then_some(samples)
+}
+
 /// Get the default seek pre-roll of a codec.
 ///
 /// Decoders of codecs with overlapping transforms and/or inter-frame dependencies (the bit
@@ -126,6 +164,9 @@ pub struct TrackState {
     codec_delay_samples: u64,
     /// The number of bytes in a frame of audio, if the track is PCM audio.
     pcm_frame_bytes: Option<NonZero<u32>>,
+    /// The constant number of frames in all but the last block of the track, if the codec
+    /// signals it (e.g., FLAC with a fixed block size, ALAC).
+    fixed_block_samples: Option<u64>,
     /// The maximum difference, in Track ticks, between the timestamp of a block and its expected
     /// timestamp for the timestamps to be considered equal. This is the precision of the
     /// timestamp of a block.
@@ -194,6 +235,21 @@ impl TrackState {
                 }
             }
             None => pts,
+        }
+    }
+
+    /// Snap the duration of a frame to the duration of the frames of the track's timestamp grid,
+    /// if the track has one, and the duration is close to it. Durations written by muxers are
+    /// rounded like timestamps. The durations of PCM blocks are exact, and are not snapped.
+    pub(crate) fn snap_dur(&self, dur: TrackTicks) -> TrackTicks {
+        match &self.grid {
+            Some(grid)
+                if self.pcm_frame_bytes.is_none()
+                    && dur.get().abs_diff(grid.step) <= self.pts_tolerance =>
+            {
+                TrackTicks::from(grid.step)
+            }
+            _ => dur,
         }
     }
 }
@@ -529,6 +585,11 @@ impl<'s> MkvReader<'s> {
                 _ => None,
             };
 
+            // The constant number of frames in a block of a lossless codec that is not
+            // otherwise described by the container.
+            let fixed_block_samples =
+                fixed_block_samples(&track.codec_id, track.codec_private.as_deref());
+
             // Create the track state.
             let state = TrackState {
                 // TODO: This should be 64-bit, but track IDs are 32-bit.
@@ -555,6 +616,7 @@ impl<'s> MkvReader<'s> {
                 sample_rate,
                 codec_delay_samples,
                 pcm_frame_bytes,
+                fixed_block_samples,
             };
 
             // Create the track.
@@ -681,7 +743,7 @@ impl<'s> MkvReader<'s> {
                         .map(i64::unsigned_abs)
                 }
                 None if state.pcm_frame_bytes.is_some() => Some(dur),
-                None => None,
+                None => state.fixed_block_samples,
             };
 
             if let Some(step) = step.filter(|&step| step > 0) {
@@ -858,6 +920,11 @@ impl<'s> MkvReader<'s> {
 
         // Find the candidate cue points (in descending order of preference): all cue points of the
         // track that are at, or before, the target.
+        //
+        // A cue point also carries the position of a block within its cluster. That position is
+        // only meaningful for the track the cue point is for: a muxer may write cue points for
+        // another track only (e.g., the keyframes of a video track in a file with audio), and such
+        // a position can point past the first block of the track being seeked.
         let mut candidates = Vec::new();
 
         if let Some(cues) = &self.cues {
@@ -870,7 +937,13 @@ impl<'s> MkvReader<'s> {
                     .iter()
                     .take_while(|point| point.time.get() <= cue_ts)
                     .filter(|point| !track_has_cues || point.positions.track.get() == u64::from(id))
-                    .map(|point| (point.positions.cluster_pos, point.positions.cluster_rel_pos)),
+                    .map(|point| {
+                        let rel_pos = point
+                            .positions
+                            .cluster_rel_pos
+                            .filter(|_| point.positions.track.get() == u64::from(id));
+                        (point.positions.cluster_pos, rel_pos)
+                    }),
             );
         }
 
@@ -881,26 +954,38 @@ impl<'s> MkvReader<'s> {
         // points in such a case.
         const MAX_CUE_ATTEMPTS: usize = 4;
 
-        let mut seeked = None;
+        let mut seeked: Option<SeekedTo> = None;
 
-        for &(cluster_pos, cluster_rel_pos) in candidates.iter().rev().take(MAX_CUE_ATTEMPTS) {
-            self.seek_to_cue(cluster_pos, cluster_rel_pos)?;
+        'cues: for &(cluster_pos, cluster_rel_pos) in candidates.iter().rev().take(MAX_CUE_ATTEMPTS)
+        {
+            // If the position of the block within the cluster led to a frame after the target
+            // (the position is wrong), retry from the start of the cluster.
+            let positions: &[Option<u64>] =
+                if cluster_rel_pos.is_some() { &[cluster_rel_pos, None] } else { &[None] };
 
-            let attempt = self.seek_track_by_ts_forward(id, target_ts, ts)?;
-            let is_early = attempt.actual_ts <= target_ts;
-            seeked = Some(attempt);
+            for &rel_pos in positions {
+                self.seek_to_cue(cluster_pos, rel_pos)?;
 
-            if is_early {
-                break;
+                let attempt = self.seek_track_by_ts_forward(id, target_ts, ts)?;
+                let is_early = attempt.actual_ts <= target_ts;
+                seeked = Some(attempt);
+
+                if is_early {
+                    break 'cues;
+                }
             }
         }
 
         if let Some(seeked) = seeked {
-            return Ok(seeked);
+            if seeked.actual_ts <= target_ts || !self.is_seekable {
+                return Ok(seeked);
+            }
+            // None of the cue points led to a frame at or before the target (the cue points are
+            // not usable). Scan from the start of the stream instead.
         }
 
-        // There were no usable cue points. If the stream is seekable, scan from the first cluster.
-        // Otherwise, it is only possible to scan forward from the current position.
+        // If the stream is seekable, scan from the first cluster. Otherwise, it is only possible to
+        // scan forward from the current position.
         if self.is_seekable {
             self.rewind_to_first_cluster()?;
         }

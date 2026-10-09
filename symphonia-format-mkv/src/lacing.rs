@@ -288,6 +288,11 @@ pub(crate) fn extract_frames(
         }
     }
 
+    // Recover the exact durations of frames of tracks with a constant frame duration.
+    for frame in frames.iter_mut().skip(first_frame) {
+        frame.dur = track.snap_dur(frame.dur);
+    }
+
     // Apply the block's `DiscardPadding` to the first (negative padding) or last (positive
     // padding) frame of the block. The padding is part of the decoded frames, but not of the
     // frames to be presented, so the duration of the frame (the duration of the presented frames)
