@@ -28,7 +28,10 @@
 //! |----------|--------------|----------|---------|
 //! | AIFF     | `aiff`       | Yes      | No      |
 //! | CAF      | `caf`        | No       | No      |
+//! | FLV (audio) | `flv`     | No       | No      |
 //! | ISO/MP4  | `isomp4`     | No       | No      |
+//! | MPEG-PS (audio) | `mpegps` | No    | No      |
+//! | MPEG-TS (audio) | `mpegts` | No    | No      |
 //! | Musepack | `musepack`   | Yes      | No      |
 //! | MKV/WebM | `mkv`        | Yes      | Yes     |
 //! | OGG      | `ogg`        | Yes      | Yes     |
@@ -175,6 +178,12 @@ pub mod default {
         pub use symphonia_format_caf::CafReader;
         #[cfg(feature = "dsd")]
         pub use symphonia_format_dsd::{DffReader, DsfReader, CODEC_TYPE_DSD};
+        #[cfg(feature = "flv")]
+        pub use symphonia_format_flv::FlvReader;
+        #[cfg(feature = "mpegps")]
+        pub use symphonia_format_mpegps::MpegPsReader;
+        #[cfg(feature = "mpegts")]
+        pub use symphonia_format_mpegts::MpegTsReader;
         #[cfg(feature = "musepack")]
         pub use symphonia_bundle_musepack::MpcReader;
         #[cfg(feature = "isomp4")]
@@ -318,6 +327,15 @@ pub mod default {
 
         #[cfg(feature = "flac")]
         probe.register_format::<formats::FlacReader<'_>>();
+
+        #[cfg(feature = "flv")]
+        probe.register_format::<formats::FlvReader<'_>>();
+
+        #[cfg(feature = "mpegps")]
+        probe.register_format::<formats::MpegPsReader<'_>>();
+
+        #[cfg(feature = "mpegts")]
+        probe.register_format::<formats::MpegTsReader<'_>>();
 
         #[cfg(feature = "isomp4")]
         probe.register_format::<formats::IsoMp4Reader<'_>>();

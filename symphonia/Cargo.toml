@@ -31,8 +31,11 @@ ape-format = ["dep:symphonia-bundle-ape"]
 dsd = ["dep:symphonia-codec-dsd", "dep:symphonia-format-dsd"]
 flac = ["dep:symphonia-bundle-flac"]
 caf = ["dep:symphonia-format-caf"]
+flv = ["dep:symphonia-format-flv"]
 isomp4 = ["dep:symphonia-format-isomp4"]
 mkv = ["dep:symphonia-format-mkv"]
+mpegps = ["dep:symphonia-format-mpegps"]
+mpegts = ["dep:symphonia-format-mpegts"]
 musepack = ["dep:symphonia-bundle-musepack"]
 mp1 = ["dep:symphonia-bundle-mp3", "symphonia-bundle-mp3/mp1"]
 mp2 = ["dep:symphonia-bundle-mp3", "symphonia-bundle-mp3/mp2"]
@@ -73,8 +76,11 @@ all-formats = [
     "caf",
     "ape-format",
     "dsd",
+    "flv",
     "isomp4",
     "mkv",
+    "mpegps",
+    "mpegts",
     "musepack",
     "ogg",
     "aiff",
@@ -215,6 +221,21 @@ optional = true
 [dependencies.symphonia-format-dsd]
 version = "0.6.0"
 path = "../symphonia-format-dsd"
+optional = true
+
+[dependencies.symphonia-format-flv]
+version = "0.6.1"
+path = "../symphonia-format-flv"
+optional = true
+
+[dependencies.symphonia-format-mpegps]
+version = "0.6.1"
+path = "../symphonia-format-mpegps"
+optional = true
+
+[dependencies.symphonia-format-mpegts]
+version = "0.6.1"
+path = "../symphonia-format-mpegts"
 optional = true
 
 [lints]
