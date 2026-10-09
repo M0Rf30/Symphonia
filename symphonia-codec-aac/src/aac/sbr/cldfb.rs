@@ -57,7 +57,6 @@ const SYNTHESIS_GAIN: f64 = 1.0 / 32.0;
 /// accumulates into all the outputs at once (every output still sums over `n` in order).
 #[derive(Debug)]
 struct TransformTables {
-    l: usize,
     cos: Vec<f64>,
     sin: Vec<f64>,
 }
@@ -73,7 +72,7 @@ impl TransformTables {
                 sin[n * l + k] = arg.sin();
             }
         }
-        TransformTables { l, cos, sin }
+        TransformTables { cos, sin }
     }
 }
 

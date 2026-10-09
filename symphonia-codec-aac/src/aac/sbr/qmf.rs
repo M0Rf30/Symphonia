@@ -52,6 +52,8 @@
 //! and the Figure 4.42 / 4.43 / 4.44 flowcharts of the staged spec.
 //! No part of this implementation is derived from any external decoder.
 
+#![cfg_attr(feature = "sbr-fft-qmf", allow(dead_code))]
+
 use std::sync::LazyLock;
 
 use super::error::{SbrError as Error, SbrResult as Result};
@@ -78,10 +80,7 @@ impl Complex {
     #[inline]
     #[must_use]
     pub fn conj(self) -> Self {
-        Complex {
-            re: self.re,
-            im: -self.im,
-        }
+        Complex { re: self.re, im: -self.im }
     }
 
     /// Squared magnitude `re² + im²`.
@@ -112,10 +111,7 @@ impl core::ops::Mul for Complex {
     type Output = Complex;
     #[inline]
     fn mul(self, rhs: Complex) -> Complex {
-        Complex::new(
-            self.re * rhs.re - self.im * rhs.im,
-            self.re * rhs.im + self.im * rhs.re,
-        )
+        Complex::new(self.re * rhs.re - self.im * rhs.im, self.re * rhs.im + self.im * rhs.re)
     }
 }
 
@@ -455,6 +451,175 @@ fn synthesis_window<const B: usize>(v: &[f64], win: &[f64]) -> [f64; B] {
     out
 }
 
+/// A radix-2 complex FFT with a positive exponent, `A[n] = Σ_k a[k]·exp(+2πi·kn/N)`, on separate
+/// real and imaginary arrays. It computes the SBR filter banks in O(N·log N) with a different
+/// order of summation than the matrix products, so that the output differs from them by
+/// rounding errors of the double precision arithmetic (see the `sbr-fft-qmf` feature).
+#[cfg(feature = "sbr-fft-qmf")]
+struct Fft<const N: usize> {
+    /// `exp(2πi·j/(2h))` for `j` in `0..h` of the stage with the butterflies of span `h`
+    /// (`h` = 1, 2, 4, ...), at the offset `h - 1`.
+    cos: Vec<f64>,
+    sin: Vec<f64>,
+    bit_reverse: Vec<usize>,
+}
+
+#[cfg(feature = "sbr-fft-qmf")]
+impl<const N: usize> Fft<N> {
+    fn new() -> Self {
+        let bits = N.trailing_zeros();
+        let (mut cos, mut sin) = (Vec::with_capacity(N), Vec::with_capacity(N));
+        let mut half = 1;
+        while half < N {
+            for j in 0..half {
+                let arg = core::f64::consts::PI * j as f64 / half as f64;
+                cos.push(arg.cos());
+                sin.push(arg.sin());
+            }
+            half *= 2;
+        }
+        Fft {
+            cos,
+            sin,
+            bit_reverse: (0..N).map(|i| i.reverse_bits() >> (usize::BITS - bits)).collect(),
+        }
+    }
+
+    /// Transform `re + i·im` in place; the input is in natural order.
+    fn run(&self, re: &mut [f64; N], im: &mut [f64; N]) {
+        for i in 0..N {
+            let j = self.bit_reverse[i];
+            if i < j {
+                re.swap(i, j);
+                im.swap(i, j);
+            }
+        }
+        let mut half = 1;
+        while half < N {
+            let wr = &self.cos[half - 1..2 * half - 1];
+            let wi = &self.sin[half - 1..2 * half - 1];
+            for (re, im) in re.chunks_exact_mut(2 * half).zip(im.chunks_exact_mut(2 * half)) {
+                let (ra, rb) = re.split_at_mut(half);
+                let (ia, ib) = im.split_at_mut(half);
+                for j in 0..half {
+                    let tr = rb[j] * wr[j] - ib[j] * wi[j];
+                    let ti = rb[j] * wi[j] + ib[j] * wr[j];
+                    rb[j] = ra[j] - tr;
+                    ib[j] = ia[j] - ti;
+                    ra[j] += tr;
+                    ia[j] += ti;
+                }
+            }
+            half *= 2;
+        }
+    }
+}
+
+/// The tables of a synthesis bank computed with an FFT of `N = 2·bands` points: the matrix
+/// `Re(X[k]·exp(i·π/(2N)·(k + 1/2)·(2n + c)))` is `exp(iπk/N)` times an inverse DFT of the bands
+/// (padded with zeros to `N`), then the real part of the product with `post[n]`.
+#[cfg(feature = "sbr-fft-qmf")]
+struct SynthesisFft<const N: usize> {
+    fft: Fft<N>,
+    pre_re: Vec<f64>,
+    pre_im: Vec<f64>,
+    post_re: Vec<f64>,
+    post_im: Vec<f64>,
+}
+
+#[cfg(feature = "sbr-fft-qmf")]
+impl<const N: usize> SynthesisFft<N> {
+    /// `post_phase(n)` is the phase of `post[n]`, whose magnitude is `1/64`, with the sign of the
+    /// bank (`exp(iθ) = -exp(iπ(2k + 1)(2n + c)/256)`).
+    fn new(post_phase: impl Fn(f64) -> f64) -> Self {
+        let pi = core::f64::consts::PI;
+        let bands = N / 2;
+        SynthesisFft {
+            fft: Fft::new(),
+            pre_re: (0..bands).map(|k| (pi * k as f64 / 128.0).cos()).collect(),
+            pre_im: (0..bands).map(|k| (pi * k as f64 / 128.0).sin()).collect(),
+            post_re: (0..N).map(|n| -(post_phase(n as f64)).cos() / 64.0).collect(),
+            post_im: (0..N).map(|n| -(post_phase(n as f64)).sin() / 64.0).collect(),
+        }
+    }
+
+    /// `v[n] = Re(post[n]·Σ_k pre[k]·X[k]·exp(2πi·kn/N))`.
+    fn run(&self, bands: &[Complex], v: &mut [f64]) {
+        let mut re = [0.0f64; N];
+        let mut im = [0.0f64; N];
+        for (k, x) in bands.iter().enumerate() {
+            re[k] = x.re * self.pre_re[k] - x.im * self.pre_im[k];
+            im[k] = x.re * self.pre_im[k] + x.im * self.pre_re[k];
+        }
+        self.fft.run(&mut re, &mut im);
+        for n in 0..N {
+            v[n] = re[n] * self.post_re[n] - im[n] * self.post_im[n];
+        }
+    }
+}
+
+/// The 128 point synthesis bank: `exp(iπ/128·(k + 1/2)·(2n − 255))`.
+#[cfg(feature = "sbr-fft-qmf")]
+fn synthesis_fft_128() -> &'static SynthesisFft<128> {
+    static T: LazyLock<SynthesisFft<128>> =
+        LazyLock::new(|| SynthesisFft::new(|n| core::f64::consts::PI * (2.0 * n + 1.0) / 256.0));
+    &T
+}
+
+/// The 64 point downsampled synthesis bank: `exp(iπ/64·(k + 1/2)·(2n − 127.5))`.
+#[cfg(feature = "sbr-fft-qmf")]
+fn synthesis_fft_64() -> &'static SynthesisFft<64> {
+    static T: LazyLock<SynthesisFft<64>> =
+        LazyLock::new(|| SynthesisFft::new(|n| core::f64::consts::PI * (4.0 * n + 1.0) / 256.0));
+    &T
+}
+
+/// The tables of the 32 band analysis bank computed with a 64 point FFT:
+/// `W[k] = 2·exp(-iπk/128)·Σ_n u[n]·exp(iπ(4n - 1)/256)·exp(2πi·kn/64)`.
+#[cfg(feature = "sbr-fft-qmf")]
+struct AnalysisFft {
+    fft: Fft<64>,
+    pre_re: Vec<f64>,
+    pre_im: Vec<f64>,
+    post_re: Vec<f64>,
+    post_im: Vec<f64>,
+}
+
+#[cfg(feature = "sbr-fft-qmf")]
+fn analysis_fft() -> &'static AnalysisFft {
+    static T: LazyLock<AnalysisFft> = LazyLock::new(|| {
+        let pi = core::f64::consts::PI;
+        AnalysisFft {
+            fft: Fft::new(),
+            pre_re: (0..64).map(|n| 2.0 * (pi * (4.0 * n as f64 - 1.0) / 256.0).cos()).collect(),
+            pre_im: (0..64).map(|n| 2.0 * (pi * (4.0 * n as f64 - 1.0) / 256.0).sin()).collect(),
+            post_re: (0..32).map(|k| (pi * k as f64 / 128.0).cos()).collect(),
+            post_im: (0..32).map(|k| -(pi * k as f64 / 128.0).sin()).collect(),
+        }
+    });
+    &T
+}
+
+#[cfg(feature = "sbr-fft-qmf")]
+fn analyse_fft(u: &[f64; 64]) -> [Complex; 32] {
+    let t = analysis_fft();
+    let mut re = [0.0f64; 64];
+    let mut im = [0.0f64; 64];
+    for n in 0..64 {
+        re[n] = u[n] * t.pre_re[n];
+        im[n] = u[n] * t.pre_im[n];
+    }
+    t.fft.run(&mut re, &mut im);
+    let mut w = [Complex::default(); 32];
+    for k in 0..32 {
+        w[k] = Complex::new(
+            re[k] * t.post_re[k] - im[k] * t.post_im[k],
+            re[k] * t.post_im[k] + im[k] * t.post_re[k],
+        );
+    }
+    w
+}
+
 /// The history of a synthesis bank: the newest `len` values, newest first. A slot is shifted in
 /// by moving the start of the view back by `shift`; the view is moved to the end of the buffer
 /// once per `SLOTS` slots.
@@ -539,7 +704,10 @@ impl AnalysisQmf {
         // z[n] = x[n] · c[2n]; u[n] = Σ_{j=0..=4} z[n + 64j].
         let u = analysis_window::<64>(&self.x, decimated_window());
         // W[k] = Σ_n u[n] · 2·exp(i·π/64·(k + 0.5)(2n − 0.5)).
-        Ok(analyse_complex::<32>(self.m, &u))
+        #[cfg(not(feature = "sbr-fft-qmf"))]
+        return Ok(analyse_complex::<32>(self.m, &u));
+        #[cfg(feature = "sbr-fft-qmf")]
+        Ok(analyse_fft(&u))
     }
 }
 
@@ -643,7 +811,10 @@ impl SynthesisQmf {
         // Shift v by 128 (discard the oldest 128 samples).
         let v = self.v.advance();
         // v[n] = Σ_k Real(X[k]/64 · exp(i·π/128·(k + 0.5)(2n − 255))).
+        #[cfg(not(feature = "sbr-fft-qmf"))]
         synthesise_complex::<128>(self.m, bands, v);
+        #[cfg(feature = "sbr-fft-qmf")]
+        synthesis_fft_128().run(bands, v);
         // Extract g from v, window by c, and sum the ten taps.
         Ok(synthesis_window::<64>(v, &QMF_WINDOW))
     }
@@ -688,7 +859,10 @@ impl DownsampledSynthesisQmf {
         // Shift v by 64 (discard the oldest 64 samples).
         let v = self.v.advance();
         // v[n] = Σ_k Real(X[k]/64 · exp(i·π/64·(k + 0.5)(2n − 127.5))).
+        #[cfg(not(feature = "sbr-fft-qmf"))]
         synthesise_complex::<64>(self.m, bands, v);
+        #[cfg(feature = "sbr-fft-qmf")]
+        synthesis_fft_64().run(bands, v);
         // g extraction, every-other-coefficient windowing, ten-tap sum.
         Ok(synthesis_window::<32>(v, decimated_window()))
     }
@@ -885,10 +1059,7 @@ mod tests {
             assert!(w.iter().all(|c| c.re == 0.0 && c.im == 0.0));
         }
         let mut s = SynthesisQmf::new();
-        assert!(matches!(
-            s.push_slot(&[Complex::default(); 32]),
-            Err(Error::SbrQmfInvalid)
-        ));
+        assert!(matches!(s.push_slot(&[Complex::default(); 32]), Err(Error::SbrQmfInvalid)));
         let out = s.push_slot(&[Complex::default(); 64]).unwrap();
         assert!(out.iter().all(|&x| x == 0.0));
     }
@@ -933,12 +1104,7 @@ mod tests {
                 best = (ratio, delay);
             }
         }
-        assert!(
-            best.0 < 1e-4,
-            "reconstruction error ratio {} at delay {}",
-            best.0,
-            best.1
-        );
+        assert!(best.0 < 1e-4, "reconstruction error ratio {} at delay {}", best.0, best.1);
     }
 
     /// The downsampled synthesis bank reconstructs the input at the
@@ -979,12 +1145,7 @@ mod tests {
                 best = (ratio, delay);
             }
         }
-        assert!(
-            best.0 < 1e-4,
-            "identity error ratio {} at delay {}",
-            best.0,
-            best.1
-        );
+        assert!(best.0 < 1e-4, "identity error ratio {} at delay {}", best.0, best.1);
     }
 
     /// The analysis bank is linear: analysis(a + b) == analysis(a) +
@@ -1053,12 +1214,7 @@ mod tests {
                 best = (ratio, delay);
             }
         }
-        assert!(
-            best.0 < 1e-4,
-            "identity error ratio {} at delay {}",
-            best.0,
-            best.1
-        );
+        assert!(best.0 < 1e-4, "identity error ratio {} at delay {}", best.0, best.1);
     }
 
     /// Real analysis → 64-band real synthesis (top half zero)
@@ -1097,12 +1253,7 @@ mod tests {
                 best = (ratio, delay);
             }
         }
-        assert!(
-            best.0 < 1e-4,
-            "reconstruction error ratio {} at delay {}",
-            best.0,
-            best.1
-        );
+        assert!(best.0 < 1e-4, "reconstruction error ratio {} at delay {}", best.0, best.1);
     }
 
     /// The real analysis output is the real part structure of the
@@ -1192,10 +1343,7 @@ mod encoder_analysis_tests {
         }
         assert!(e_mag > 0.0 && d_mag > 0.0);
         let ratio = e_mag / d_mag;
-        assert!(
-            (ratio - 1.0).abs() < 0.02,
-            "energy scale mismatch between the banks: {ratio}"
-        );
+        assert!((ratio - 1.0).abs() < 0.02, "energy scale mismatch between the banks: {ratio}");
         // Out-of-band leakage far below the tone.
         assert!(e_other < e_mag * 1e-3, "leakage {e_other} vs {e_mag}");
     }
@@ -1228,9 +1376,44 @@ mod encoder_analysis_tests {
             }
         }
         assert_eq!(peak_band, 45);
-        assert!(matches!(
-            enc.push_slot(&[0.0; 32]),
-            Err(Error::SbrQmfInvalid)
-        ));
+        assert!(matches!(enc.push_slot(&[0.0; 32]), Err(Error::SbrQmfInvalid)));
+    }
+
+    /// The FFT forms of the banks agree with the matrix products to rounding errors.
+    #[cfg(feature = "sbr-fft-qmf")]
+    #[test]
+    fn fft_banks_match_the_matrix_products() {
+        let mut state = 0x2545_f491u32;
+        let mut rnd = move || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            f64::from(state >> 8) / f64::from(1u32 << 24) - 0.5
+        };
+
+        // 64 band synthesis (128 values of v) and the 32 band downsampled one (64 values).
+        let m128 = SynthesisQmf::new().m;
+        let m64 = DownsampledSynthesisQmf::new().m;
+        for _ in 0..50 {
+            let x: Vec<Complex> = (0..64).map(|_| Complex::new(rnd(), rnd())).collect();
+            let (mut a, mut b) = ([0.0f64; 128], [0.0f64; 128]);
+            synthesise_complex::<128>(m128, &x, &mut a);
+            synthesis_fft_128().run(&x, &mut b);
+            for n in 0..128 {
+                assert!((a[n] - b[n]).abs() < 1e-14, "{n}: {} vs {}", a[n], b[n]);
+            }
+
+            let (mut a, mut b) = ([0.0f64; 64], [0.0f64; 64]);
+            synthesise_complex::<64>(m64, &x[..32], &mut a);
+            synthesis_fft_64().run(&x[..32], &mut b);
+            for n in 0..64 {
+                assert!((a[n] - b[n]).abs() < 1e-14, "{n}: {} vs {}", a[n], b[n]);
+            }
+
+            let u: [f64; 64] = core::array::from_fn(|_| rnd());
+            let a = analyse_complex::<32>(AnalysisQmf::new().m, &u);
+            let b = analyse_fft(&u);
+            for k in 0..32 {
+                assert!((a[k].re - b[k].re).abs() < 1e-13 && (a[k].im - b[k].im).abs() < 1e-13);
+            }
+        }
     }
 }

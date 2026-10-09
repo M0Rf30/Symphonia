@@ -8,7 +8,6 @@ use std::fs::File;
 use std::time::Instant;
 
 use symphonia_codec_aac::{AacDecoder, AdtsReader, LoasReader};
-use symphonia_core::audio::Audio;
 use symphonia_core::codecs::CodecParameters;
 use symphonia_core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia_core::formats::probe::ProbeableFormat;

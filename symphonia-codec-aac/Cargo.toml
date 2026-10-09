@@ -19,6 +19,12 @@ lazy_static = { workspace = true }
 symphonia-core = { version = "0.6.1", path = "../symphonia-core" }
 symphonia-common = { version = "0.6.1", path = "../symphonia-common" }
 
+[features]
+# Compute the complex QMF banks of SBR with an FFT instead of matrix products: much faster, and the
+# output differs from that of the matrix products by rounding errors of the double precision
+# arithmetic (far below the precision of the 32-bit output, but not bit for bit).
+sbr-fft-qmf = []
+
 [dev-dependencies]
 symphonia-format-isomp4 = { version = "0.6.1", path = "../symphonia-format-isomp4" }
 
