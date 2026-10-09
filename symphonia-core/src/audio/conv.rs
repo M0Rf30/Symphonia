@@ -528,7 +528,9 @@ impl_convert!(i32, i16, s, (s >> 16) as i16); // i16
 impl_convert!(i32, i24, s, i24::from(s >> 8)); // i24
 impl_convert!(i32, i32, s, s); // i32
 
-impl_convert!(i32, f32, s, (s as f64 / 2_147_483_648.0) as f32); // f32
+// `s as f32` rounds once (to nearest even) and scaling by a power of two is exact, so this is
+// bit-identical to rounding the exact quotient (computed in f64) to f32.
+impl_convert!(i32, f32, s, s as f32 / 2_147_483_648.0); // f32
 impl_convert!(i32, f64, s, s as f64 / 2_147_483_648.0); // f64
 
 // u8 to ...
@@ -588,7 +590,8 @@ impl_convert!(u32, i16, s, (s.wrapping_sub(0x8000_0000) >> 16) as i16); // i16
 impl_convert!(u32, i24, s, i24::from((s.wrapping_sub(0x8000_0000) as i32) >> 8)); // i24
 impl_convert!(u32, i32, s, s.wrapping_sub(0x8000_0000) as i32); // i32
 
-impl_convert!(u32, f32, s, (((s as f64) / 2_147_483_648.0) - 1.0) as f32); // f32
+// Subtracting the midpoint in the integer domain is exact, as is the final scale.
+impl_convert!(u32, f32, s, (s.wrapping_sub(0x8000_0000) as i32) as f32 / 2_147_483_648.0); // f32
 impl_convert!(u32, f64, s, ((s as f64) / 2_147_483_648.0) - 1.0); // f64
 
 // f32 to ...
@@ -596,12 +599,12 @@ impl_convert!(u32, f64, s, ((s as f64) / 2_147_483_648.0) - 1.0); // f64
 impl_convert!(f32, u8, s, ((s.clamped() + 1.0) * 128.0) as u8); // u8
 impl_convert!(f32, u16, s, ((s.clamped() + 1.0) * 32_768.0) as u16); // u16
 impl_convert!(f32, u24, s, u24::from(((s.clamped() + 1.0) * 8_388_608.0) as u32)); // u24
-impl_convert!(f32, u32, s, ((s.clamped() + 1.0) as f64 * 2_147_483_648.0) as u32); // u32
+impl_convert!(f32, u32, s, ((s.clamped() + 1.0) * 2_147_483_648.0) as u32); // u32
 
 impl_convert!(f32, i8, s, (s.clamped() * 128.0) as i8); // i8
 impl_convert!(f32, i16, s, (s.clamped() * 32_768.0) as i16); // i16
 impl_convert!(f32, i24, s, i24::from((s.clamped() * 8_388_608.0) as i32)); // i24
-impl_convert!(f32, i32, s, (s.clamped() as f64 * 2_147_483_648.0) as i32); // i32
+impl_convert!(f32, i32, s, (s.clamped() * 2_147_483_648.0) as i32); // i32
 
 impl_convert!(f32, f32, s, s); // f32
 impl_convert!(f32, f64, s, s as f64); // f64
@@ -675,6 +678,61 @@ impl<S> ConvertibleSample for S where
 mod tests {
     use super::FromSample;
     use crate::audio::sample::{Sample, i24, u24};
+
+    // The 32-bit <-> f32 conversions are computed in f32. Check they are bit-identical to the
+    // reference formulation that detours via f64.
+    #[test]
+    fn verify_32bit_f32_conversions_match_f64_reference() {
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+
+        let mut ints = vec![0u32, 1, 2, 0x7fff_ffff, 0x8000_0000, 0x8000_0001, u32::MAX];
+        ints.extend((0..32).flat_map(|b| [1u32 << b, (1u32 << b).wrapping_neg()]));
+        ints.extend((0..2_000_000).map(|_| next() as u32));
+
+        for &u in &ints {
+            let i = u as i32;
+            assert_eq!(
+                f32::from_sample(i).to_bits(),
+                ((i as f64 / 2_147_483_648.0) as f32).to_bits()
+            );
+            assert_eq!(
+                f32::from_sample(u).to_bits(),
+                ((((u as f64) / 2_147_483_648.0) - 1.0) as f32).to_bits()
+            );
+        }
+
+        let mut floats = vec![0.0f32, -0.0, 1.0, -1.0, 2.0, -2.0, f32::NAN, f32::INFINITY];
+        floats.extend([
+            f32::NEG_INFINITY,
+            f32::MIN_POSITIVE,
+            f32::from_bits(1),
+            -f32::from_bits(1),
+        ]);
+        floats.extend((0..4_000_000).map(|_| f32::from_bits(next() as u32)));
+        // Dense coverage of the interesting range.
+        floats.extend((0..2_000_000).map(|_| (next() >> 40) as f32 / (1u64 << 23) as f32 - 1.0));
+
+        for &f in &floats {
+            assert_eq!(
+                i32::from_sample(f),
+                (f.clamped() as f64 * 2_147_483_648.0) as i32,
+                "{:#x}",
+                f.to_bits()
+            );
+            assert_eq!(
+                u32::from_sample(f),
+                ((f.clamped() + 1.0) as f64 * 2_147_483_648.0) as u32,
+                "{:#x}",
+                f.to_bits()
+            );
+        }
+    }
 
     #[test]
     fn verify_u8_from_sample() {
