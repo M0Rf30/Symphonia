@@ -101,6 +101,17 @@ pub(crate) fn silk_decode_frame(
     // Ensure smooth connection of extrapolated and good frames.
     silk_plc_glue_frames(dec, &mut p_out[..l], l);
 
+    // libopus' SILK decoder output never contains -32768: samples that saturate at the negative
+    // rail are delivered as -32767 (observed with libopus 1.6.1; the internal state, e.g. the LTP
+    // `outBuf` updated above, still holds the saturated -32768). The difference is only
+    // visible for a signal that clips (the IIR resampler then rings from a different rail), but
+    // must be reproduced for bit-exact output.
+    for v in p_out[..l].iter_mut() {
+        if *v == i16::MIN {
+            *v = -i16::MAX;
+        }
+    }
+
     // Update some decoder state variables.
     dec.lag_prev = ctrl.pitch_l[dec.nb_subfr as usize - 1];
 

@@ -24,6 +24,13 @@
 //! at the `p`-th set `Position` bit, exactly as the Vorbis decoder does. Families 2 and 255 are
 //! exposed as `Discrete(n)` channels in mapping-table order.
 //!
+//! # Output level
+//!
+//! The decoded samples are libopus' unclipped float decode (`opus_decode_float`), so they may
+//! exceed +/-1.0. libopus applies its soft clipper (`opus_pcm_soft_clip`) only on its 16-bit
+//! output path (what e.g. ffmpeg's `libopus` decoder uses by default); a comparison with such
+//! output differs in every packet that overshoots full-scale. Compare against a float decode.
+//!
 //! # Pre-roll
 //!
 //! Per RFC 7845 section 4.3, an Opus decoder needs audio *before* a seek target to "warm up"
@@ -34,7 +41,10 @@
 //! bit-exact with, a continuous decode: the decoder state is identical to libopus' (decoding a
 //! stream from a cold start matches libopus exactly), and the CELT energy predictor converges
 //! geometrically (about 6 dB of SNR per 20 ms frame), reaching bit-exactness after a few hundred
-//! milliseconds.
+//! milliseconds. SILK is different: its gains and pitch/LTP state are coded relative to the
+//! previous frame, so a decoder that starts cold never fully converges to a continuous decode
+//! (libopus itself differs by only ~45-50 dB SNR from a continuous decode, measured on a speech
+//! stream, however long the pre-roll).
 
 use symphonia_core::audio::{AsGenericAudioBufferRef, AudioBuffer, AudioSpec, Channels, GenericAudioBufferRef, Position};
 use symphonia_core::codecs::CodecInfo;
