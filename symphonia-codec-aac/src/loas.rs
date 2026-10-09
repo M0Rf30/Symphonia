@@ -451,10 +451,15 @@ impl Scoreable for LoasReader<'_> {
             return Ok(Score::Unsupported);
         }
 
+        // The 11-bit sync word has little structure, and the first frame of a stream may also be a
+        // continuation of a stream mux config that was not seen. A single valid-looking frame is
+        // therefore not enough to claim a stream: a stray sync word in a tag or in other data that
+        // precedes the audio of another format would otherwise be selected before that format is
+        // found. The frame must be followed by another sync word.
         let len = usize::from(sync & 0x1f) << 8 | usize::from(src.read_u8()?);
 
         if len == 0 || len > LOAS_MAX_FRAME_LEN || src.bytes_available() < len as u64 {
-            return Ok(Score::Supported(32));
+            return Ok(Score::Unsupported);
         }
 
         let data = src.read_boxed_slice_exact(len)?;
@@ -463,13 +468,13 @@ impl Scoreable for LoasReader<'_> {
         let mut config = None;
         let _ = read_audio_mux_element(&data, &mut config)?;
 
-        // A following sync word increases the confidence.
         match src.read_be_u16() {
-            Ok(sync) if sync & LOAS_SYNC_MASK == LOAS_SYNC && config.is_some() => {
-                Ok(Score::Supported(255))
+            Ok(sync) if sync & LOAS_SYNC_MASK == LOAS_SYNC => {
+                Ok(Score::Supported(if config.is_some() { 255 } else { 96 }))
             }
-            Ok(_) => Ok(Score::Supported(96)),
-            Err(_) => Ok(Score::Supported(127)),
+            // A single frame at the end of the stream.
+            Err(_) if config.is_some() => Ok(Score::Supported(127)),
+            _ => Ok(Score::Unsupported),
         }
     }
 }
@@ -794,6 +799,43 @@ mod tests {
         let payloads =
             read_audio_mux_element(&mux_element(false, 0, &[&block_b]), &mut config).unwrap();
         assert_eq!(payloads, vec![block_b.into_boxed_slice()]);
+    }
+
+    /// Scores the data. Scoring errors (e.g. a frame running past the end of the data) are
+    /// treated as unsupported by the probe.
+    fn score_of(data: Vec<u8>) -> Score {
+        let mut mss =
+            MediaSourceStream::new(Box::new(std::io::Cursor::new(data)), Default::default());
+        LoasReader::score(ScopedStream::new(&mut mss, 16 * 1024)).unwrap_or(Score::Unsupported)
+    }
+
+    #[test]
+    fn scores_a_stream_of_frames() {
+        let element = mux_element(true, 0, &[&[1, 2, 3, 4]]);
+        let mut data = loas_frame(&element);
+        data.extend(loas_frame(&mux_element(false, 0, &[&[5, 6, 7]])));
+        assert!(matches!(score_of(data), Score::Supported(255)));
+    }
+
+    #[test]
+    fn scores_a_single_frame_at_the_end_of_the_stream() {
+        let data = loas_frame(&mux_element(true, 0, &[&[1, 2, 3, 4]]));
+        assert!(matches!(score_of(data), Score::Supported(127)));
+    }
+
+    #[test]
+    fn stray_sync_word_is_not_a_stream() {
+        // A sync word that is followed by a plausible continuation frame, but no other sync word,
+        // as found in the data of a tag preceding the audio of another format.
+        let mut data = loas_frame(&mux_element(false, 0, &[&[1, 2, 3, 4]]));
+        data.extend_from_slice(&[0u8; 64]);
+        assert!(matches!(score_of(data), Score::Unsupported));
+
+        // A zero length frame.
+        assert!(matches!(score_of(vec![0x56, 0xe0, 0x00, 0x01, 0x02, 0x03]), Score::Unsupported));
+
+        // A frame that is longer than the available data.
+        assert!(matches!(score_of(vec![0x56, 0xe1, 0xff, 0x01, 0x02, 0x03]), Score::Unsupported));
     }
 
     #[test]
