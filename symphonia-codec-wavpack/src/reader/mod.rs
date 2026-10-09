@@ -269,8 +269,16 @@ impl<'s> WavPackReader<'s> {
         // everything after the `ck_size` field itself; the remaining 24 bytes of the
         // 32-byte header have already been consumed by `Header::decode`.
         let sub_blocks_len = (header.ck_size as u64).saturating_sub(24);
-        let mut sub_buf = vec![0u8; sub_blocks_len as usize];
-        let have_sub_buf = mss.read_buf_exact(&mut sub_buf).is_ok();
+        // `ck_size` is untrusted: read incrementally (the allocation is bounded by the bytes
+        // actually present in the stream) rather than pre-allocating `ck_size` bytes.
+        let sub_buf = match usize::try_from(sub_blocks_len)
+            .ok()
+            .and_then(|len| mss.read_boxed_slice_exact(len).ok())
+        {
+            Some(buf) => buf.into_vec(),
+            None => Vec::new(),
+        };
+        let have_sub_buf = sub_buf.len() as u64 == sub_blocks_len;
 
         // `ID_CHANNEL_INFO` (present whenever the file has more than 2 channels, or
         // channels that don't map to the default WAVEFORMATEXTENSIBLE speaker mask)
@@ -509,10 +517,11 @@ impl WavPackReader<'_> {
         let mut pkt_data = prefix.to_vec();
 
         if ck_size > header_payload {
-            // Audio bytes are encoded within the block (ck_size includes them).
+            // Audio bytes are encoded within the block (ck_size includes them). `ck_size` is
+            // untrusted, so read incrementally instead of pre-allocating it.
             let audio_size = (ck_size - header_payload) as usize;
-            pkt_data.resize(32 + audio_size, 0u8);
-            self.reader.read_buf_exact(&mut pkt_data[32..])?;
+            let audio = self.reader.read_boxed_slice_exact(audio_size)?;
+            pkt_data.extend_from_slice(&audio);
         } else {
             // Real WavPack 3.97 files: ck_size == header only; compressed audio
             // follows the block header and extends to the next "wvpk" or EOF.
@@ -561,19 +570,7 @@ impl WavPackReader<'_> {
             return Ok(None);
         }
 
-        // Each stream's mini-block is prefixed with its own byte length so the decoder
-        // can slice out exactly its bytes (needed because the mini-block's audio
-        // bitstream is otherwise unbounded -- it runs to "the end of this stream's
-        // data", which is only unambiguous once we know where this stream ends and
-        // the next one's header begins).
-        let payload_len: usize = streams.iter().map(|s| 4 + s.len()).sum();
-        let mut pkt: Vec<u8> = Vec::with_capacity(8 + payload_len);
-        pkt.extend_from_slice(b"WV45");
-        pkt.extend_from_slice(&(streams.len() as u32).to_le_bytes());
-        for s in &streams {
-            pkt.extend_from_slice(&(s.len() as u32).to_le_bytes());
-            pkt.extend_from_slice(s);
-        }
+        let pkt = assemble_packet(&streams);
 
         // block_samples is the per-channel frame count, shared by every stream in the
         // group (they all cover the same span of the timeline).
@@ -612,6 +609,20 @@ fn read_v4v5_stream_block(reader: &mut MediaSourceStream<'_>) -> Result<Option<(
     let sub_blocks_len = (header.ck_size as u64).saturating_sub(24);
     let end_pos = reader.pos().saturating_add(sub_blocks_len);
 
+    let mini = build_stream_packet(reader, header.flags, header.block_samples, header.crc, end_pos)?;
+
+    Ok(Some((header, mini)))
+}
+
+/// Read sub-blocks from `reader` until its position reaches `end_pos` and serialise them (see
+/// `read_v4v5_stream_block` for the layout) into the per-stream mini-packet the decoder expects.
+fn build_stream_packet<R: ReadBytes>(
+    reader: &mut R,
+    flags: u32,
+    block_samples: u32,
+    crc: u32,
+    end_pos: u64,
+) -> Result<Vec<u8>> {
     let mut terms_data:    Vec<u8> = Vec::new();
     let mut weights_data:  Vec<u8> = Vec::new();
     let mut samples_data:  Vec<u8> = Vec::new();
@@ -658,9 +669,9 @@ fn read_v4v5_stream_block(reader: &mut MediaSourceStream<'_>) -> Result<Option<(
 
     let payload_len: usize = lens.iter().map(|&l| l as usize).sum::<usize>() + audio_data.len();
     let mut mini: Vec<u8> = Vec::with_capacity(44 + payload_len);
-    mini.extend_from_slice(&header.flags.to_le_bytes());
-    mini.extend_from_slice(&header.block_samples.to_le_bytes());
-    mini.extend_from_slice(&header.crc.to_le_bytes());
+    mini.extend_from_slice(&flags.to_le_bytes());
+    mini.extend_from_slice(&block_samples.to_le_bytes());
+    mini.extend_from_slice(&crc.to_le_bytes());
     for l in lens {
         mini.extend_from_slice(&l.to_le_bytes());
     }
@@ -674,7 +685,80 @@ fn read_v4v5_stream_block(reader: &mut MediaSourceStream<'_>) -> Result<Option<(
     mini.extend_from_slice(&wvx_data);
     mini.extend_from_slice(&audio_data);
 
-    Ok(Some((header, mini)))
+    Ok(mini)
+}
+
+/// `INITIAL_BLOCK` (wavpack.h `0x800`).
+const FLAG_INITIAL_BLOCK: u32 = 0x0000_0800;
+/// `FINAL_BLOCK` (wavpack.h `0x1000`).
+const FLAG_FINAL_BLOCK: u32 = 0x0000_1000;
+
+/// Convert one Matroska/WebM `A_WAVPACK4` block into the internal `WV45` packet the decoder
+/// works with (the same one `WavPackReader` produces for native `.wv` files).
+///
+/// Matroska stores WavPack blocks with the 32-byte `wvpk` header stripped down to just the
+/// fields that vary per block. The layout of a frame is:
+///
+///   block_samples(4)                                 -- once per frame
+///   { flags(4) crc(4) [block_size(4)] payload }...   -- one entry per WavPack block
+///
+/// where `block_size` is only present when the block is not a single-block (mono/stereo)
+/// stream, i.e. when the block is not both `INITIAL_BLOCK` and `FINAL_BLOCK`; otherwise the
+/// payload runs to the end of the frame. The payload is the sequence of WavPack sub-blocks.
+pub(crate) fn matroska_block_to_packet(data: &[u8]) -> Result<Vec<u8>> {
+    let mut reader = BufReader::new(data);
+
+    let block_samples = reader.read_u32()?;
+
+    let mut streams: Vec<Vec<u8>> = Vec::new();
+
+    while (reader.pos() as usize) < data.len() && streams.len() < MAX_STREAMS_PER_PACKET {
+        let flags = reader.read_u32()?;
+        let crc = reader.read_u32()?;
+
+        let remaining = data.len() - reader.pos() as usize;
+        let single_block = flags & (FLAG_INITIAL_BLOCK | FLAG_FINAL_BLOCK)
+            == (FLAG_INITIAL_BLOCK | FLAG_FINAL_BLOCK);
+
+        let size = if single_block { remaining } else { reader.read_u32()? as usize };
+
+        let start = reader.pos() as usize;
+        if size > data.len() - start {
+            return decode_error("wavpack: matroska block size exceeds frame");
+        }
+        let mut payload = BufReader::new(&data[start..start + size]);
+        streams.push(build_stream_packet(&mut payload, flags, block_samples, crc, size as u64)?);
+        reader.ignore_bytes(size as u64)?;
+
+        if flags & FLAG_FINAL_BLOCK != 0 {
+            break;
+        }
+    }
+
+    if streams.is_empty() {
+        return decode_error("wavpack: empty matroska block");
+    }
+
+    Ok(assemble_packet(&streams))
+}
+
+/// Serialise per-stream mini-packets into a `WV45` packet.
+///
+/// Each stream's mini-block is prefixed with its own byte length so the decoder
+/// can slice out exactly its bytes (needed because the mini-block's audio
+/// bitstream is otherwise unbounded -- it runs to "the end of this stream's
+/// data", which is only unambiguous once we know where this stream ends and
+/// the next one's header begins).
+fn assemble_packet(streams: &[Vec<u8>]) -> Vec<u8> {
+    let payload_len: usize = streams.iter().map(|s| 4 + s.len()).sum();
+    let mut pkt: Vec<u8> = Vec::with_capacity(8 + payload_len);
+    pkt.extend_from_slice(b"WV45");
+    pkt.extend_from_slice(&(streams.len() as u32).to_le_bytes());
+    for s in streams {
+        pkt.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        pkt.extend_from_slice(s);
+    }
+    pkt
 }
 
 // ---------------------------------------------------------------------------
@@ -1238,4 +1322,133 @@ fn scan_v3_total_samples(mss: &mut MediaSourceStream<'_>, data_start_pos: u64) -
     // Restore the stream to where packet reading actually begins.
     let _ = mss.seek(std::io::SeekFrom::Start(data_start_pos));
     Some(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const INITIAL: u32 = FLAG_INITIAL_BLOCK;
+    const FINAL: u32 = FLAG_FINAL_BLOCK;
+
+    /// Create a sub-block with the ID `id`, and the data `data` (of an even length).
+    fn sub_block(id: u8, data: &[u8]) -> Vec<u8> {
+        assert!(data.len() % 2 == 0 && data.len() / 2 < 0x80);
+        [&[id, (data.len() / 2) as u8], data].concat()
+    }
+
+    /// The lengths of the terms, weights, samples, entropy, hybrid, float, int32, and wvx data
+    /// that follow the first 12 bytes in a stream of a packet.
+    fn stream_lens(stream: &[u8]) -> Vec<u32> {
+        (0..8)
+            .map(|i| u32::from_le_bytes(stream[12 + 4 * i..16 + 4 * i].try_into().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn verify_matroska_single_block_to_packet() {
+        // A stereo block: `block_samples`, `flags`, `crc`, and the sub-blocks.
+        let flags = INITIAL | FINAL | 0x1;
+
+        let mut frame = Vec::new();
+        frame.extend(4096u32.to_le_bytes());
+        frame.extend(flags.to_le_bytes());
+        frame.extend(0xdead_beefu32.to_le_bytes());
+        frame.extend(sub_block(0x02, &[1, 2, 3, 4]));
+        frame.extend(sub_block(0x0a, &[9, 8, 7, 6, 5, 4]));
+
+        let pkt = matroska_block_to_packet(&frame).unwrap();
+
+        // Header: magic, 1 stream, length of the stream.
+        assert_eq!(&pkt[0..4], b"WV45");
+        assert_eq!(u32::from_le_bytes(pkt[4..8].try_into().unwrap()), 1);
+        let len = u32::from_le_bytes(pkt[8..12].try_into().unwrap()) as usize;
+        assert_eq!(pkt.len(), 12 + len);
+
+        let stream = &pkt[12..];
+        assert_eq!(u32::from_le_bytes(stream[0..4].try_into().unwrap()), flags);
+        assert_eq!(u32::from_le_bytes(stream[4..8].try_into().unwrap()), 4096);
+        assert_eq!(u32::from_le_bytes(stream[8..12].try_into().unwrap()), 0xdead_beef);
+        assert_eq!(stream_lens(stream), [4, 0, 0, 0, 0, 0, 0, 0]);
+        // The decorrelation terms, followed by the bitstream.
+        assert_eq!(&stream[44..], &[1, 2, 3, 4, 9, 8, 7, 6, 5, 4]);
+    }
+
+    #[test]
+    fn verify_matroska_multichannel_block_to_packet() {
+        // Two blocks (two stereo streams). Unlike a single block, the blocks have a size.
+        let first = sub_block(0x0a, &[1, 2, 3, 4]);
+        let second = sub_block(0x0a, &[5, 6]);
+
+        let mut frame = Vec::new();
+        frame.extend(1024u32.to_le_bytes());
+
+        frame.extend(INITIAL.to_le_bytes());
+        frame.extend(1u32.to_le_bytes());
+        frame.extend((first.len() as u32).to_le_bytes());
+        frame.extend(&first);
+
+        frame.extend(FINAL.to_le_bytes());
+        frame.extend(2u32.to_le_bytes());
+        frame.extend((second.len() as u32).to_le_bytes());
+        frame.extend(&second);
+
+        let pkt = matroska_block_to_packet(&frame).unwrap();
+        assert_eq!(u32::from_le_bytes(pkt[4..8].try_into().unwrap()), 2);
+
+        let len = u32::from_le_bytes(pkt[8..12].try_into().unwrap()) as usize;
+        let stream0 = &pkt[12..12 + len];
+        assert_eq!(u32::from_le_bytes(stream0[0..4].try_into().unwrap()), INITIAL);
+        assert_eq!(&stream0[44..], &[1, 2, 3, 4]);
+
+        // All blocks share the number of samples.
+        let rest = &pkt[12 + len..];
+        let len = u32::from_le_bytes(rest[0..4].try_into().unwrap()) as usize;
+        let stream1 = &rest[4..4 + len];
+        assert_eq!(u32::from_le_bytes(stream1[0..4].try_into().unwrap()), FINAL);
+        assert_eq!(u32::from_le_bytes(stream1[4..8].try_into().unwrap()), 1024);
+        assert_eq!(&stream1[44..], &[5, 6]);
+        assert_eq!(rest.len(), 4 + len);
+    }
+
+    #[test]
+    fn verify_malformed_matroska_blocks_are_errors() {
+        // Too short to contain anything.
+        assert!(matroska_block_to_packet(&[]).is_err());
+        assert!(matroska_block_to_packet(&[1, 2, 3]).is_err());
+
+        // No blocks.
+        assert!(matroska_block_to_packet(&4096u32.to_le_bytes()).is_err());
+
+        // A block with a truncated header.
+        let mut frame = Vec::new();
+        frame.extend(4096u32.to_le_bytes());
+        frame.extend((INITIAL | FINAL).to_le_bytes());
+        assert!(matroska_block_to_packet(&frame).is_err());
+
+        // A multichannel block with a size larger than the frame.
+        let mut frame = Vec::new();
+        frame.extend(4096u32.to_le_bytes());
+        frame.extend(INITIAL.to_le_bytes());
+        frame.extend(0u32.to_le_bytes());
+        frame.extend(u32::MAX.to_le_bytes());
+        frame.extend([0u8; 16]);
+        assert!(matroska_block_to_packet(&frame).is_err());
+
+        // A sub-block larger than the block.
+        let mut frame = Vec::new();
+        frame.extend(4096u32.to_le_bytes());
+        frame.extend((INITIAL | FINAL).to_le_bytes());
+        frame.extend(0u32.to_le_bytes());
+        frame.extend([0x0a, 0x7f, 1, 2, 3, 4]);
+        assert!(matroska_block_to_packet(&frame).is_err());
+    }
+
+    #[test]
+    fn verify_sub_block_size_does_not_allocate() {
+        // A large sub-block (the 3 byte size is in words) with no data must not allocate its
+        // declared size.
+        let mut reader = BufReader::new(&[0x8a, 0xff, 0xff, 0xff]);
+        assert!(decode_sub_block(&mut reader).is_err());
+    }
 }

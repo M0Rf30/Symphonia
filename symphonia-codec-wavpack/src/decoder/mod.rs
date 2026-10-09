@@ -21,7 +21,9 @@ use symphonia_core::errors::{decode_error, unsupported_error, Result};
 use symphonia_core::packet::PacketRef;
 use symphonia_core::support_audio_codec;
 
-use v3::{DecorrPass, DcState, unpack_init3, unpack_samples_v3, MONO_FLAG};
+use crate::reader::matroska_block_to_packet;
+
+use v3::{DecorrPass, DcState, unpack_init3, unpack_samples_v3, MAX_BLOCK_SAMPLES as MAX_V3_BLOCK_SAMPLES, MONO_FLAG};
 use words::WordState;
 use v4v5::{
     DecorrPass as DecorrPass45, WordsState as WordsState45,
@@ -111,6 +113,9 @@ pub struct WavPackDecoder {
     word_state:  WordState,
     initialized: bool,
     last_flags:  i16,
+    /// The stream comes from Matroska/WebM (`A_WAVPACK4`): packets are bare WavPack frames
+    /// without block headers (see `matroska_block_to_packet`).
+    matroska:    bool,
     // Output buffer
     buf: GenericAudioBuffer,
 }
@@ -130,6 +135,10 @@ impl WavPackDecoder {
         let spec = AudioSpec::new(rate, channels);
         let buf = GenericAudioBuffer::new(sample_format, spec, 0);
 
+        // Matroska stores a 2-byte version number in CodecPrivate, which is how the demuxer
+        // signals that packets are in the Matroska flavour of WavPack blocks.
+        let matroska = params.extra_data.as_ref().is_some_and(|extra| extra.len() == 2);
+
         Ok(WavPackDecoder {
             params: params.clone(),
             dc: DcState::default(),
@@ -138,14 +147,21 @@ impl WavPackDecoder {
             word_state: WordState::default(),
             initialized: false,
             last_flags: 0,
+            matroska,
             buf,
         })
     }
 
     fn decode_inner(&mut self, packet: &PacketRef<'_>) -> Result<()> {
+        // Matroska packets carry no magic; convert them to the internal packet layout first.
+        if self.matroska {
+            let converted = matroska_block_to_packet(packet.data)?;
+            return self.decode_inner_v4v5(&converted);
+        }
+
         // Dispatch on packet type: v4/v5 packets start with "WV45" magic.
         if packet.data.starts_with(PACKET_MAGIC) {
-            return self.decode_inner_v4v5(packet);
+            return self.decode_inner_v4v5(packet.data);
         }
 
         let data = packet.data;
@@ -155,6 +171,10 @@ impl WavPackDecoder {
         if hdr.total_samples <= 0 {
             self.buf.clear();
             return Ok(());
+        }
+        // The sample count comes from untrusted input and sizes the output allocation.
+        if hdr.total_samples as u32 > MAX_V3_BLOCK_SAMPLES {
+            return decode_error("wavpack: block sample count out of range");
         }
         let sample_count = hdr.total_samples as u32;
         let num_channels = hdr.num_channels as u32;
@@ -348,8 +368,7 @@ impl WavPackDecoder {
     /// stream; multichannel files (>2 channels) interleave several streams' worth of
     /// samples into the final output exactly like WavPack's own
     /// `unpack_samples_interleave()` does.
-    fn decode_inner_v4v5(&mut self, packet: &PacketRef<'_>) -> Result<()> {
-        let data = packet.data;
+    fn decode_inner_v4v5(&mut self, data: &[u8]) -> Result<()> {
         if data.len() < 8 {
             return decode_error("wavpack v4/v5: packet too short");
         }
@@ -515,5 +534,72 @@ impl RegisterableAudioDecoder for WavPackDecoder {
 
     fn supported_codecs() -> &'static [SupportedAudioCodec] {
         &[support_audio_codec!(CODEC_ID_WAVPACK, "wavpack", "WavPack Lossless Audio (v1–v3)")]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use symphonia_core::audio::layouts::CHANNEL_LAYOUT_STEREO;
+    use symphonia_core::packet::Packet;
+    use symphonia_core::units::{Duration, Timestamp};
+
+    fn decoder(extra_data: Option<&[u8]>) -> WavPackDecoder {
+        let mut params = AudioCodecParameters::new();
+
+        params
+            .for_codec(CODEC_ID_WAVPACK)
+            .with_sample_rate(44100)
+            .with_channels(CHANNEL_LAYOUT_STEREO)
+            .with_sample_format(SampleFormat::S16);
+
+        if let Some(extra_data) = extra_data {
+            params.with_extra_data(extra_data.into());
+        }
+
+        WavPackDecoder::try_new(&params, &AudioDecoderOptions::default()).unwrap()
+    }
+
+    fn packet(data: Vec<u8>) -> Packet {
+        Packet::new(0, Timestamp::new(0), Duration::new(0), data)
+    }
+
+    #[test]
+    fn verify_v3_block_with_huge_sample_count_is_rejected() {
+        // A 32-byte v3 prefix (version 3, lossless, stereo) that claims the maximum number of
+        // samples. This must be rejected rather than used to allocate the output.
+        let mut data = vec![0u8; 32];
+        data[0..2].copy_from_slice(&3i16.to_le_bytes());
+        data[8..12].copy_from_slice(&i32::MAX.to_le_bytes());
+        data[28..30].copy_from_slice(&2u16.to_le_bytes());
+        data[30..32].copy_from_slice(&2u16.to_le_bytes());
+        data.extend([0u8; 64]);
+
+        assert!(decoder(None).decode(&packet(data)).is_err());
+    }
+
+    #[test]
+    fn verify_matroska_block_with_huge_sample_count_is_rejected() {
+        // A Matroska WavPack block (identified by the 2 byte version number in the codec's extra
+        // data) with `u32::MAX` samples.
+        let mut data = Vec::new();
+        data.extend(u32::MAX.to_le_bytes());
+        data.extend(0x1801u32.to_le_bytes());
+        data.extend(0u32.to_le_bytes());
+        data.extend([0x0a, 0x04, 0, 0, 0, 0, 0, 0, 0, 0]);
+
+        assert!(decoder(Some(&[0x10, 0x04])).decode(&packet(data)).is_err());
+    }
+
+    #[test]
+    fn verify_garbage_in_any_flavour_is_an_error() {
+        // None of these may panic or abort.
+        for extra_data in [None, Some(&[0x10u8, 0x04][..])] {
+            for len in [0, 1, 3, 4, 8, 11, 12, 13, 31, 32, 33, 100] {
+                let data: Vec<u8> = (0..len).map(|i| (i * 37 + 11) as u8).collect();
+                let _ = decoder(extra_data).decode(&packet(data));
+            }
+        }
     }
 }
