@@ -33,11 +33,16 @@ use symphonia::default::formats::*;
 const NEW_FORMATS: [&str; 3] = ["flv", "mpegps", "mpegts"];
 
 /// The samples that are in the new formats, and the format they must be read by.
-const EXPECTED: [(&str, &str); 6] = [
+const EXPECTED: [(&str, &str); 9] = [
     ("unsupported/aac_in_flv.flv", "flv"),
     ("unsupported/mp3_in_flv.flv", "flv"),
     ("unsupported/mp2_in_mpegps.mpg", "mpegps"),
     ("unsupported/aac_in_mpegts.ts", "mpegts"),
+    // HE-AAC in TS/FLV, added with the implicit SBR detection. The ADTS reader used to resync
+    // onto the ADTS frames inside the TS packets of one of them.
+    ("aac/heaac_v1_in_flv.flv", "flv"),
+    ("aac/heaac_v1_in_mpegts.ts", "mpegts"),
+    ("aac/heaac_v2_in_mpegts.ts", "mpegts"),
     // The files of unsupported audio in FLV are claimed by the FLV reader, which does not open
     // them.
     ("unsupported/adpcm_swf_flv.flv", ""),

@@ -998,7 +998,8 @@ fn kf_bfly4(fout: &mut [Complex], fstride: usize, twiddles: &[Complex], m: usize
         }
     }
     else {
-        debug_assert_eq!(mm, 4 * m);
+        // The last stage (n == 1) is called with mm == 1, as in libopus.
+    debug_assert!(n == 1 || mm == 4 * m);
         for chunk in fout.chunks_exact_mut(4 * m).take(n) {
             let (a, rest) = chunk.split_at_mut(m);
             let (b, rest) = rest.split_at_mut(m);
@@ -1031,7 +1032,8 @@ fn kf_bfly4(fout: &mut [Complex], fstride: usize, twiddles: &[Complex], m: usize
 fn kf_bfly3(fout: &mut [Complex], fstride: usize, twiddles: &[Complex], m: usize, n: usize, mm: usize) {
     // C: `epi3 = st->twiddles[fstride*m]` (float build).
     let epi3 = twiddles[fstride * m];
-    debug_assert_eq!(mm, 3 * m);
+    // The last stage (n == 1) is called with mm == 1, as in libopus.
+    debug_assert!(n == 1 || mm == 3 * m);
     for chunk in fout.chunks_exact_mut(3 * m).take(n) {
         let (a, rest) = chunk.split_at_mut(m);
         let (b, c) = rest.split_at_mut(m);
@@ -1061,7 +1063,8 @@ fn kf_bfly3(fout: &mut [Complex], fstride: usize, twiddles: &[Complex], m: usize
 fn kf_bfly5(fout: &mut [Complex], fstride: usize, twiddles: &[Complex], m: usize, n: usize, mm: usize) {
     let ya = twiddles[fstride * m];
     let yb = twiddles[fstride * 2 * m];
-    debug_assert_eq!(mm, 5 * m);
+    // The last stage (n == 1) is called with mm == 1, as in libopus.
+    debug_assert!(n == 1 || mm == 5 * m);
     for chunk in fout.chunks_exact_mut(5 * m).take(n) {
         let (a, rest) = chunk.split_at_mut(m);
         let (b, rest) = rest.split_at_mut(m);
