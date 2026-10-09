@@ -7,7 +7,6 @@
 
 use std::collections::VecDeque;
 use std::io::{Seek, SeekFrom};
-use std::num::NonZero;
 
 use symphonia_core::codecs::CodecParameters;
 use symphonia_core::codecs::audio::AudioCodecParameters;
@@ -25,6 +24,10 @@ use symphonia_core::support_format;
 use symphonia_common::mpeg::audio::*;
 
 use log::{debug, info};
+
+use crate::implicit_sbr::{
+    MAX_IMPLICIT_SBR_CORE_RATE, MAX_PROBE_BLOCKS, detect, may_have_implicit_sbr, with_explicit_sbr,
+};
 
 /// The number of samples per AAC frame (at the core sample rate).
 const SAMPLES_PER_AAC_PACKET: Duration = Duration::new(1024);
@@ -279,6 +282,11 @@ pub struct LoasReader<'s> {
     next_packet_ts: Timestamp,
     config: Option<StreamMuxConfig>,
     pending: VecDeque<Packet>,
+    /// True if the stream uses SBR.
+    sbr: bool,
+    /// The duration of a packet in decoded frames: 1024 per frame of the core codec, doubled for
+    /// dual-rate SBR.
+    packet_dur: Duration,
 }
 
 impl<'s> LoasReader<'s> {
@@ -286,8 +294,7 @@ impl<'s> LoasReader<'s> {
         let first_frame_pos = mss.pos();
 
         let mut config = None;
-        let mut pending = VecDeque::new();
-        let mut next_packet_ts = Timestamp::new(0);
+        let mut payloads: Vec<Box<[u8]>> = Vec::new();
 
         // Read frames until the stream mux config is found. The frames before it are kept: they
         // use the same config if they are complete.
@@ -297,10 +304,10 @@ impl<'s> LoasReader<'s> {
             let len = read_frame_len(&mut mss)?;
             let data = mss.read_boxed_slice_exact(len)?;
 
-            let payloads = match read_audio_mux_element(&data, &mut config) {
+            let frame_payloads = match read_audio_mux_element(&data, &mut config) {
                 Ok(payloads) => payloads,
                 // A truncated frame at the start of the stream.
-                Err(_) if pending.is_empty() => vec![],
+                Err(_) if payloads.is_empty() => vec![],
                 Err(err) => return Err(err),
             };
 
@@ -311,24 +318,12 @@ impl<'s> LoasReader<'s> {
 
             // Frames before the one with the config.
             for early in early_frames.drain(..) {
-                if let Ok(payloads) = read_audio_mux_element(&early, &mut config) {
-                    for payload in payloads {
-                        pending.push_back(Packet::new(
-                            0,
-                            next_packet_ts,
-                            SAMPLES_PER_AAC_PACKET,
-                            payload,
-                        ));
-                        next_packet_ts = next_packet_ts.saturating_add(SAMPLES_PER_AAC_PACKET);
-                    }
+                if let Ok(early_payloads) = read_audio_mux_element(&early, &mut config) {
+                    payloads.extend(early_payloads);
                 }
             }
 
-            for payload in payloads {
-                pending.push_back(Packet::new(0, next_packet_ts, SAMPLES_PER_AAC_PACKET, payload));
-                next_packet_ts = next_packet_ts.saturating_add(SAMPLES_PER_AAC_PACKET);
-            }
-
+            payloads.extend(frame_payloads);
             break;
         }
 
@@ -339,38 +334,98 @@ impl<'s> LoasReader<'s> {
 
         // The sample rate of the core codec is the timebase, whereas the codec parameters
         // describe the decoded output.
-        let core_rate = NonZero::new(config.asc.sample_rate)
-            .ok_or(Error::DecodeError("loas: invalid sample rate"))?;
+        if config.asc.sample_rate == 0 {
+            return decode_error("loas: invalid sample rate");
+        }
+
+        // The stream mux config cannot signal SBR or parametric stereo of an AAC-LC stream
+        // implicitly (HE-AAC without the extension in the audio specific config): look for them
+        // in the first payloads, reading ahead as many frames as required.
+        let mut asc = config.asc.clone();
+        let mut extra_data = config.extra_data.clone();
+
+        let mut stream_config = Some(config.clone());
+
+        if may_have_implicit_sbr(&asc) {
+            while payloads.len() < MAX_PROBE_BLOCKS {
+                let Ok(len) = read_frame_len(&mut mss)
+                else {
+                    break;
+                };
+
+                let Ok(data) = mss.read_boxed_slice_exact(len)
+                else {
+                    break;
+                };
+
+                match read_audio_mux_element(&data, &mut stream_config) {
+                    Ok(more) => payloads.extend(more),
+                    Err(_) => break,
+                }
+            }
+
+            let ext = detect(&config.extra_data, asc.sample_rate, payloads.iter().map(|p| &p[..]));
+
+            if ext.sbr {
+                if let Some(new_extra_data) =
+                    with_explicit_sbr(&config.extra_data, asc.sample_rate.saturating_mul(2), ext.ps)
+                {
+                    if let Ok(new_asc) = AudioSpecificConfig::read(&new_extra_data) {
+                        info!(
+                            "loas: stream has {}, output is {} Hz",
+                            if ext.ps { "sbr and parametric stereo" } else { "sbr" },
+                            new_asc.output_sample_rate()
+                        );
+
+                        asc = new_asc;
+                        extra_data = new_extra_data;
+                    }
+                }
+            }
+        }
+
+        // The timeline of the track is in decoded frames, which are `ratio` per frame of the core
+        // codec.
+        let ratio = u64::from(asc.output_sample_rate() / asc.sample_rate).max(1);
+        let packet_dur = Duration::new(SAMPLES_PER_AAC_PACKET.get() * ratio);
 
         let mut codec_params = AudioCodecParameters::new();
 
         codec_params
             .for_codec(CODEC_ID_AAC)
-            .with_sample_rate(config.asc.output_sample_rate())
-            .with_extra_data(config.extra_data.clone());
+            .with_sample_rate(asc.output_sample_rate())
+            .with_extra_data(extra_data);
 
-        if let Some(channels) = config.asc.output_channels() {
+        if let Some(channels) = asc.output_channels() {
             codec_params.with_channels(channels);
         }
 
-        if let Some(profile) = get_audio_codec_profile(&config.asc) {
+        if let Some(profile) = get_audio_codec_profile(&asc) {
             codec_params.with_profile(profile);
         }
 
         let mut track = Track::new(0);
         track.with_codec_params(CodecParameters::Audio(codec_params));
-        track.with_time_base(TimeBase::from_recip(core_rate));
 
         // The frames of the stream up to the first one with a stream mux config were read.
         // Estimate the duration from the average frame size.
         if let Some(n_frames) = approximate_frame_count(&mut mss, first_frame_pos)? {
             let n_frames = n_frames * (config.num_sub_frames as u64 + 1);
-            let ratio = u64::from(config.asc.output_sample_rate() / config.asc.sample_rate.max(1));
+            let n_frames = n_frames * packet_dur.get();
 
             info!("estimating duration from bitrate, may be inaccurate for vbr streams");
 
-            track.with_duration(Duration::new(n_frames * SAMPLES_PER_AAC_PACKET.get()));
-            track.with_num_frames(n_frames * SAMPLES_PER_AAC_PACKET.get() * ratio.max(1));
+            track.with_duration(Duration::new(n_frames));
+            track.with_num_frames(n_frames);
+        }
+
+        // Build the packets that were read.
+        let mut pending = VecDeque::with_capacity(payloads.len());
+        let mut next_packet_ts = Timestamp::new(0);
+
+        for payload in payloads {
+            pending.push_back(Packet::new(0, next_packet_ts, packet_dur, payload));
+            next_packet_ts = next_packet_ts.saturating_add(packet_dur);
         }
 
         Ok(LoasReader {
@@ -381,19 +436,19 @@ impl<'s> LoasReader<'s> {
             metadata: opts.external_data.metadata.unwrap_or_default(),
             first_frame_pos,
             next_packet_ts,
-            config: Some(config),
+            sbr: asc.sbr_present,
+            config: stream_config,
             pending,
+            packet_dur,
         })
     }
 
     /// Returns true if the stream may use SBR.
     fn may_use_sbr(&self) -> bool {
-        /// The highest core sample rate of an SBR stream.
-        const MAX_SBR_CORE_RATE: u32 = 32_000;
-
-        self.config
-            .as_ref()
-            .is_some_and(|c| c.asc.sbr_present || c.asc.sample_rate <= MAX_SBR_CORE_RATE)
+        self.sbr
+            || self.config.as_ref().is_some_and(|c| {
+                c.asc.sbr_present || c.asc.sample_rate <= MAX_IMPLICIT_SBR_CORE_RATE
+            })
     }
 }
 
@@ -566,12 +621,11 @@ impl FormatReader for LoasReader<'_> {
                 self.pending.push_back(Packet::new(
                     0,
                     self.next_packet_ts,
-                    SAMPLES_PER_AAC_PACKET,
+                    self.packet_dur,
                     payload,
                 ));
 
-                self.next_packet_ts = match self.next_packet_ts.checked_add(SAMPLES_PER_AAC_PACKET)
-                {
+                self.next_packet_ts = match self.next_packet_ts.checked_add(self.packet_dur) {
                     Some(ts) => ts,
                     None => return Ok(None),
                 };
@@ -619,11 +673,10 @@ impl FormatReader for LoasReader<'_> {
         // This applies to coarse seeks too: a decoder started at the required timestamp outputs
         // wrong audio, and, with SBR, never recovers the right noise phase.
         let sbr = self.may_use_sbr();
-        let required_frame =
-            u64::try_from(required_ts.get()).unwrap_or(0) / SAMPLES_PER_AAC_PACKET.get();
-        let mut start_ts = Timestamp::new(
-            (aac_seek_start_frame(required_frame, sbr) * SAMPLES_PER_AAC_PACKET.get()) as i64,
-        );
+        let packet_dur = self.packet_dur.get();
+        let required_frame = u64::try_from(required_ts.get()).unwrap_or(0) / packet_dur;
+        let mut start_ts =
+            Timestamp::new((aac_seek_start_frame(required_frame, sbr) * packet_dur) as i64);
 
         // If the frame to start from is before the next packet, attempt to seek to the start of
         // the stream.
@@ -650,7 +703,7 @@ impl FormatReader for LoasReader<'_> {
                 Err(err) => return Err(err),
             };
 
-            let next_packet_ts = match self.next_packet_ts.checked_add(SAMPLES_PER_AAC_PACKET) {
+            let next_packet_ts = match self.next_packet_ts.checked_add(self.packet_dur) {
                 Some(ts) if ts <= start_ts => ts,
                 // The frame contains the timestamp to start from: rewind to its start.
                 _ => {

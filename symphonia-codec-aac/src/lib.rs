@@ -18,6 +18,7 @@
 
 mod aac;
 mod adts;
+mod implicit_sbr;
 mod loas;
 
 pub use aac::AacDecoder;

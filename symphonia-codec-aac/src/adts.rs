@@ -23,6 +23,11 @@ use symphonia_common::mpeg::audio::*;
 
 use std::io::{Seek, SeekFrom};
 
+use crate::implicit_sbr::{
+    ImplicitExtensions, MAX_IMPLICIT_SBR_CORE_RATE, MAX_PROBE_BLOCKS, detect, plain_asc,
+    with_explicit_sbr,
+};
+
 use log::{debug, info};
 
 const SAMPLES_PER_AAC_PACKET: Duration = Duration::new(1024);
@@ -36,6 +41,13 @@ const ADTS_FORMAT_INFO: FormatInfo = FormatInfo {
 /// Audio Data Transport Stream (ADTS) format reader.
 ///
 /// `AdtsReader` implements a demuxer for ADTS (AAC native frames).
+///
+/// ADTS cannot signal SBR or parametric stereo (HE-AAC): the reader looks for them in the first
+/// frames of the stream. If it finds them, the codec parameters describe the decoded output
+/// (twice the sample rate of the core codec, and stereo for parametric stereo), the timeline of
+/// the track is in decoded frames (the packets have twice the duration of those of the core
+/// codec), and the parameters carry an audio specific config that signals the extension, so that
+/// the decoder is configured for it up front.
 pub struct AdtsReader<'s> {
     reader: MediaSourceStream<'s>,
     media_info: MediaInfo,
@@ -44,7 +56,18 @@ pub struct AdtsReader<'s> {
     metadata: MetadataLog,
     first_frame_pos: u64,
     next_packet_ts: Timestamp,
+    /// The sample rate of the core codec.
+    core_rate: u32,
+    /// True if the stream was found to use SBR.
+    sbr: bool,
+    /// The duration of a packet in decoded frames: 1024 per frame of the core codec, doubled for
+    /// SBR.
+    packet_dur: Duration,
 }
+
+/// The maximum number of bytes of the stream examined to look for SBR: a limit of the buffering of
+/// streams that cannot be rewound.
+const MAX_PROBE_LEN: usize = MAX_PROBE_BLOCKS * 8192;
 
 impl<'s> AdtsReader<'s> {
     pub fn try_new(mut mss: MediaSourceStream<'s>, opts: FormatOptions) -> Result<Self> {
@@ -53,25 +76,66 @@ impl<'s> AdtsReader<'s> {
         // Rewind back to the start of the frame.
         mss.seek_buffered_rev(usize::from(header.header_len()));
 
+        let first_frame_pos = mss.pos();
+
+        // Look for SBR and parametric stereo in the first frames.
+        let ext = probe_implicit_extensions(&mut mss, &header, first_frame_pos)?;
+
         // Use the header to populate the codec parameters.
         let mut codec_params = AudioCodecParameters::new();
 
         codec_params.for_codec(CODEC_ID_AAC).with_sample_rate(header.sample_rate);
 
-        if let Some(channels) = header.channels {
+        if let Some(channels) = header.channels.clone() {
             codec_params.with_channels(channels);
         }
+
+        // If the stream has SBR, the codec parameters describe the output of the decoder, and
+        // the audio specific config tells the decoder.
+        let mut ratio = 1;
+
+        if ext.sbr {
+            let plain = plain_asc(header.sample_rate, header.channel_config);
+            let out_rate = header.sample_rate.saturating_mul(2);
+
+            if let Some(extra_data) = with_explicit_sbr(&plain, out_rate, ext.ps) {
+                if let Ok(asc) = AudioSpecificConfig::read(&extra_data) {
+                    info!(
+                        "adts: stream has {}, output is {} Hz",
+                        if ext.ps { "sbr and parametric stereo" } else { "sbr" },
+                        asc.output_sample_rate()
+                    );
+
+                    codec_params.with_sample_rate(asc.output_sample_rate());
+
+                    if let Some(channels) = asc.output_channels() {
+                        codec_params.with_channels(channels);
+                    }
+
+                    if let Some(profile) = get_audio_codec_profile(&asc) {
+                        codec_params.with_profile(profile);
+                    }
+
+                    codec_params.with_extra_data(extra_data);
+
+                    ratio = u64::from(asc.output_sample_rate() / header.sample_rate.max(1)).max(1);
+                }
+            }
+        }
+
+        let packet_dur = Duration::new(SAMPLES_PER_AAC_PACKET.get() * ratio);
 
         // Populat the track.
         let mut track = Track::new(0);
         track.with_codec_params(CodecParameters::Audio(codec_params));
 
-        let first_frame_pos = mss.pos();
-
         if let Some(num_frames) = approximate_frame_count(&mut mss)? {
             info!("estimating duration from bitrate, may be inaccurate for vbr files");
+
+            // The timeline is in decoded frames, so the duration equals the number of frames
+            // because the timebase is always 1 / sample rate.
+            let num_frames = num_frames * ratio;
             track.with_num_frames(num_frames);
-            // Duration equals the number of frames because the timebase is always 1 / sample rate.
             track.with_duration(Duration::from(num_frames));
         }
 
@@ -83,8 +147,62 @@ impl<'s> AdtsReader<'s> {
             metadata: opts.external_data.metadata.unwrap_or_default(),
             first_frame_pos,
             next_packet_ts: Timestamp::new(0),
+            core_rate: header.sample_rate,
+            sbr: ext.sbr,
+            packet_dur,
         })
     }
+}
+
+/// Looks for SBR and parametric stereo in the first frames of the stream, which is positioned at
+/// the start of the first frame (at `first_frame_pos`) and is left there.
+fn probe_implicit_extensions(
+    mss: &mut MediaSourceStream<'_>,
+    header: &AdtsHeader,
+    first_frame_pos: u64,
+) -> Result<ImplicitExtensions> {
+    // Only a stream of AAC-LC with a predefined channel configuration, and a rate that SBR can
+    // double, may have implicit SBR.
+    if header.profile != AudioObjectType::Lc
+        || header.channels.is_none()
+        || header.sample_rate > MAX_IMPLICIT_SBR_CORE_RATE
+    {
+        return Ok(ImplicitExtensions::default());
+    }
+
+    if !mss.is_seekable() {
+        mss.ensure_seekback_buffer(MAX_PROBE_LEN);
+    }
+
+    let mut blocks = Vec::with_capacity(MAX_PROBE_BLOCKS);
+    let mut n_bytes = 0;
+
+    while blocks.len() < MAX_PROBE_BLOCKS && n_bytes < MAX_PROBE_LEN {
+        let Ok(frame) = AdtsHeader::read(mss)
+        else {
+            break;
+        };
+
+        let Ok(payload) = mss.read_boxed_slice_exact(usize::from(frame.payload_len()))
+        else {
+            break;
+        };
+
+        n_bytes += usize::from(frame.frame_len);
+        blocks.push(payload);
+    }
+
+    // Return to the first frame.
+    if mss.is_seekable() {
+        mss.seek(SeekFrom::Start(first_frame_pos))?;
+    }
+    else {
+        mss.seek_buffered(first_frame_pos);
+    }
+
+    let plain = plain_asc(header.sample_rate, header.channel_config);
+
+    Ok(detect(&plain, header.sample_rate, blocks.iter().map(|b| &b[..])))
 }
 
 impl Scoreable for AdtsReader<'_> {
@@ -117,6 +235,8 @@ struct AdtsHeader {
     profile: AudioObjectType,
     /// Audio channel configuration.
     channels: Option<Channels>,
+    /// The `channel_configuration` field.
+    channel_config: u32,
     /// The sample rate in Hertz.
     sample_rate: u32,
     /// The length of the ADTS frame in bytes including the sync word, header, and payload. Maximum
@@ -162,7 +282,9 @@ impl AdtsHeader {
         bs.ignore_bit()?;
 
         // Channel configuration.
-        let channels = match get_mpeg4_audio_channels_by_config_index(bs.read_bits_leq32(3)?) {
+        let channel_config = bs.read_bits_leq32(3)?;
+
+        let channels = match get_mpeg4_audio_channels_by_config_index(channel_config) {
             Mpeg4AudioChannels::Channels(channels) => Some(channels),
             Mpeg4AudioChannels::Escape => None,
             Mpeg4AudioChannels::Invalid => {
@@ -195,7 +317,7 @@ impl AdtsHeader {
         // The CRC, if the CRC is provided.
         let crc = if has_crc { Some(bs.read_bits_leq32(16)? as u16) } else { None };
 
-        Ok(AdtsHeader { profile, channels, sample_rate, frame_len, crc })
+        Ok(AdtsHeader { profile, channels, channel_config, sample_rate, frame_len, crc })
     }
 
     /// Returns true if the provided word is a valid sync word.
@@ -251,15 +373,7 @@ impl AdtsHeader {
 impl AdtsReader<'_> {
     /// Returns true if the stream may use SBR, which ADTS can only signal implicitly.
     fn may_use_sbr(&self) -> bool {
-        /// The highest core sample rate of an SBR stream.
-        const MAX_SBR_CORE_RATE: u32 = 32_000;
-
-        match &self.tracks[0].codec_params {
-            Some(CodecParameters::Audio(audio)) => {
-                audio.sample_rate.is_some_and(|rate| rate <= MAX_SBR_CORE_RATE)
-            }
-            _ => false,
-        }
+        self.sbr || self.core_rate <= MAX_IMPLICIT_SBR_CORE_RATE
     }
 }
 
@@ -311,7 +425,7 @@ impl FormatReader for AdtsReader<'_> {
 
         let ts = self.next_packet_ts;
 
-        self.next_packet_ts = match self.next_packet_ts.checked_add(SAMPLES_PER_AAC_PACKET) {
+        self.next_packet_ts = match self.next_packet_ts.checked_add(self.packet_dur) {
             Some(ts) => ts,
             None => return Ok(None),
         };
@@ -319,7 +433,7 @@ impl FormatReader for AdtsReader<'_> {
         Ok(Some(Packet::new(
             0,
             ts,
-            SAMPLES_PER_AAC_PACKET,
+            self.packet_dur,
             self.reader.read_boxed_slice_exact(usize::from(header.payload_len()))?,
         )))
     }
@@ -360,11 +474,10 @@ impl FormatReader for AdtsReader<'_> {
         // decoder started at the required timestamp outputs wrong audio, and, with SBR, never
         // recovers the right noise phase.
         let sbr = self.may_use_sbr();
-        let required_frame =
-            u64::try_from(required_ts.get()).unwrap_or(0) / SAMPLES_PER_AAC_PACKET.get();
-        let mut start_ts = Timestamp::new(
-            (aac_seek_start_frame(required_frame, sbr) * SAMPLES_PER_AAC_PACKET.get()) as i64,
-        );
+        let packet_dur = self.packet_dur.get();
+        let required_frame = u64::try_from(required_ts.get()).unwrap_or(0) / packet_dur;
+        let mut start_ts =
+            Timestamp::new((aac_seek_start_frame(required_frame, sbr) * packet_dur) as i64);
 
         // If the frame to start from is before the next packet, attempt to seek to the start of
         // the stream.
@@ -410,7 +523,7 @@ impl FormatReader for AdtsReader<'_> {
 
             // TODO: Support multiple AAC packets per ADTS packet.
 
-            let next_packet_ts = match self.next_packet_ts.checked_add(SAMPLES_PER_AAC_PACKET) {
+            let next_packet_ts = match self.next_packet_ts.checked_add(self.packet_dur) {
                 Some(ts) if ts <= start_ts => ts,
                 // If the next frame's timestamp would exceed the timestamp to start from, or it
                 // exceeds the representable range, rewind back to the start of this frame and end
