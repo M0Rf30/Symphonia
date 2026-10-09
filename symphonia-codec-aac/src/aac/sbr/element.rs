@@ -51,7 +51,7 @@
 
 use super::envelope::{SbrEnvelopeData, SbrNoiseData};
 use super::freq_bands::HiLoTables;
-use super::grid::{SbrDtdf, SbrGrid, SbrInvf};
+use super::grid::{GridSyntax, SbrDtdf, SbrGrid, SbrInvf};
 use super::error::{SbrError as Error, SbrResult as Result};
 use super::bits::BitReader;
 
@@ -115,8 +115,9 @@ fn parse_sinusoidal(reader: &mut BitReader<'_>, n_high: usize) -> Result<Vec<boo
 fn parse_grid_dtdf_invf(
     reader: &mut BitReader<'_>,
     n_q: usize,
+    syntax: GridSyntax,
 ) -> Result<(SbrGrid, SbrDtdf, SbrInvf)> {
-    let grid = SbrGrid::parse(reader)?;
+    let grid = SbrGrid::parse_with(reader, syntax)?;
     let dtdf = SbrDtdf::parse(reader, grid.num_env, grid.num_noise)?;
     let invf = SbrInvf::parse(reader, n_q)?;
     Ok((grid, dtdf, invf))
@@ -134,14 +135,25 @@ impl SbrElement {
         bands: &HiLoTables,
         amp_res: bool,
     ) -> Result<Self> {
+        Self::parse_single_with(reader, bands, amp_res, GridSyntax::Standard)
+    }
+
+    /// [`Self::parse_single`] with the `sbr_grid()` syntax of the codec: that of ordinary SBR,
+    /// or of low delay SBR.
+    pub fn parse_single_with(
+        reader: &mut BitReader<'_>,
+        bands: &HiLoTables,
+        amp_res: bool,
+        syntax: GridSyntax,
+    ) -> Result<Self> {
         let n_q = bands.n_q();
         // bs_data_extra (1 bit) → optional bs_reserved (4).
         if read_flag(reader)? {
             read(reader, 4)?;
         }
 
-        let (grid, dtdf, invf) = parse_grid_dtdf_invf(reader, n_q)?;
-        let eff_amp = amp_res && !grid.amp_res_override;
+        let (grid, dtdf, invf) = parse_grid_dtdf_invf(reader, n_q, syntax)?;
+        let eff_amp = grid.effective_amp_res(amp_res);
 
         let envelope = SbrEnvelopeData::parse(reader, &grid, &dtdf, bands, false, false, eff_amp)?;
         let noise = SbrNoiseData::parse(reader, &grid, &dtdf, n_q, false, false, eff_amp)?;
@@ -175,6 +187,16 @@ impl SbrElement {
         bands: &HiLoTables,
         amp_res: bool,
     ) -> Result<Self> {
+        Self::parse_pair_with(reader, bands, amp_res, GridSyntax::Standard)
+    }
+
+    /// [`Self::parse_pair`] with the `sbr_grid()` syntax of the codec.
+    pub fn parse_pair_with(
+        reader: &mut BitReader<'_>,
+        bands: &HiLoTables,
+        amp_res: bool,
+        syntax: GridSyntax,
+    ) -> Result<Self> {
         let n_q = bands.n_q();
         // bs_data_extra (1 bit) → two bs_reserved (4 each).
         if read_flag(reader)? {
@@ -188,11 +210,11 @@ impl SbrElement {
             // Shared grid; second channel coded in balance mode. Parse
             // order (Table 4.66, coupling): grid(0), dtdf(0), dtdf(1),
             // invf(0).
-            let grid = SbrGrid::parse(reader)?;
+            let grid = SbrGrid::parse_with(reader, syntax)?;
             let dtdf0 = SbrDtdf::parse(reader, grid.num_env, grid.num_noise)?;
             let dtdf1 = SbrDtdf::parse(reader, grid.num_env, grid.num_noise)?;
             let invf0 = SbrInvf::parse(reader, n_q)?;
-            let eff_amp = amp_res && !grid.amp_res_override;
+            let eff_amp = grid.effective_amp_res(amp_res);
 
             // Order (Table 4.66, coupling): env0, noise0, env1, noise1.
             let env0 = SbrEnvelopeData::parse(reader, &grid, &dtdf0, bands, true, false, eff_amp)?;
@@ -223,15 +245,15 @@ impl SbrElement {
             ]
         } else {
             // Independent grids per channel.
-            let grid0 = SbrGrid::parse(reader)?;
-            let grid1 = SbrGrid::parse(reader)?;
+            let grid0 = SbrGrid::parse_with(reader, syntax)?;
+            let grid1 = SbrGrid::parse_with(reader, syntax)?;
             let dtdf0 = SbrDtdf::parse(reader, grid0.num_env, grid0.num_noise)?;
             let dtdf1 = SbrDtdf::parse(reader, grid1.num_env, grid1.num_noise)?;
             let invf0 = SbrInvf::parse(reader, n_q)?;
             let invf1 = SbrInvf::parse(reader, n_q)?;
 
-            let eff0 = amp_res && !grid0.amp_res_override;
-            let eff1 = amp_res && !grid1.amp_res_override;
+            let eff0 = grid0.effective_amp_res(amp_res);
+            let eff1 = grid1.effective_amp_res(amp_res);
 
             // Order (Table 4.66, no coupling): env0, env1, noise0, noise1.
             let env0 = SbrEnvelopeData::parse(reader, &grid0, &dtdf0, bands, false, false, eff0)?;

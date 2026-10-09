@@ -32,14 +32,14 @@ pub struct ChannelPair {
 }
 
 impl ChannelPair {
-    pub fn new(is_pair: bool, channel: usize, sbinfo: GASubbandInfo) -> Self {
+    pub fn new(is_pair: bool, channel: usize, sbinfo: GASubbandInfo, aot: AudioObjectType) -> Self {
         Self {
             is_pair,
             channel,
             ms_mask_present: 0,
             ms_used: [[false; MAX_SFBS]; MAX_WINDOWS],
-            ics0: ics::Ics::new(sbinfo),
-            ics1: ics::Ics::new(sbinfo),
+            ics0: ics::Ics::new(sbinfo, aot),
+            ics1: ics::Ics::new(sbinfo, aot),
         }
     }
 
@@ -64,7 +64,8 @@ impl ChannelPair {
         lcg: &mut Lcg,
         aot: AudioObjectType,
     ) -> Result<()> {
-        let common_window = bs.read_bool()?;
+        // The channel pair element of AAC ELD always has a common window.
+        let common_window = aot == AudioObjectType::ErAacEld || bs.read_bool()?;
 
         if common_window {
             // Decode the common ICS info block into the first channel.

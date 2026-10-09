@@ -51,9 +51,6 @@ use super::error::{SbrError as Error, SbrResult as Result};
 /// `tHFAdj = 2` — the envelope-adjuster offset (§4.6.18.5).
 pub const T_HF_ADJ: usize = 2;
 
-/// `tHFGen = 8` — the HF-generator offset (§4.6.18.5).
-pub const T_HF_GEN: usize = 8;
-
 /// The §4.6.18.6.2 relaxation parameter `εInv`.
 pub const EPS_INV: f64 = 1e-6;
 
@@ -85,6 +82,20 @@ impl Patches {
         b.push(k_x);
         for &n in &self.num {
             b.push(b[b.len() - 1] + n as i32);
+        }
+        b
+    }
+
+    /// The patch borders as the limiter band table uses them: [`Self::borders`], with the last
+    /// border at the top of the SBR range, `k_x + m`. The two differ when the trailing patch
+    /// of fewer than 3 subbands was dropped, and the subbands above the last patch are then
+    /// still a limiter band of their own.
+    /// (This is how the FDK AAC decoder builds its limiter bands.)
+    #[must_use]
+    pub fn limiter_borders(&self, k_x: i32, m: i32) -> Vec<i32> {
+        let mut b = self.borders(k_x);
+        if let Some(last) = b.last_mut() {
+            *last = k_x + m;
         }
         b
     }
@@ -226,20 +237,21 @@ pub fn chirp_factors(cur_invf: &[u8], prev_invf: &[u8], prev_bw: &[f64]) -> Vec<
 ///
 /// `x_low` is slot-major with the spec's absolute column index (the
 /// covariance windows over `n − i + tHFAdj` for
-/// `0 ≤ n < n_slots_frame + 6`), so `x_low` must carry at least
-/// `n_slots_frame + 6 + tHFAdj` columns.
+/// `0 ≤ n < n_slots_frame`, the covariance window: `numTimeSlots·RATE + 6` samples
+/// for ordinary SBR, `numTimeSlots` for low delay SBR), so `x_low` must carry at least
+/// `n_slots_frame + tHFAdj` columns.
 pub fn prediction_coefficients(
     x_low: &[[Complex; 32]],
     k: usize,
     n_slots_frame: usize,
 ) -> Result<(Complex, Complex)> {
-    if k >= 32 || x_low.len() < n_slots_frame + 6 + T_HF_ADJ {
+    if k >= 32 || x_low.len() < n_slots_frame + T_HF_ADJ {
         return Err(Error::SbrFreqBandInvalid);
     }
     // φk(i, j) = Σ_n XLow(k, n - i + tHFAdj) · XLow*(k, n - j + tHFAdj).
     let phi = |i: usize, j: usize| -> Complex {
         let mut acc = Complex::default();
-        for n in 0..(n_slots_frame + 6) {
+        for n in 0..n_slots_frame {
             let a = x_low[n + T_HF_ADJ - i][k];
             let b = x_low[n + T_HF_ADJ - j][k];
             acc += a * b.conj();
@@ -279,7 +291,7 @@ pub fn prediction_coefficients(
 /// §4.6.18.8.3 reflection coefficient for the low-power SBR aliasing
 /// detection: `ref(k) = min(max(−φk(0,1)/φk(1,1), −1), 1)` when
 /// `φk(1,1) ≠ 0`, else `0`, with the covariance sums of §4.6.18.6.2
-/// (over the same `numTimeSlots·RATE + 6` window). The low-power tool
+/// (over the same covariance window). The low-power tool
 /// operates on real-valued subband signals, so the real parts carry
 /// the whole covariance.
 pub fn reflection_coefficient(
@@ -287,12 +299,12 @@ pub fn reflection_coefficient(
     k: usize,
     n_slots_frame: usize,
 ) -> Result<f64> {
-    if k >= 32 || x_low.len() < n_slots_frame + 6 + T_HF_ADJ {
+    if k >= 32 || x_low.len() < n_slots_frame + T_HF_ADJ {
         return Err(Error::SbrFreqBandInvalid);
     }
     let mut phi01 = 0.0f64;
     let mut phi11 = 0.0f64;
-    for n in 0..(n_slots_frame + 6) {
+    for n in 0..n_slots_frame {
         let a = x_low[n + T_HF_ADJ][k].re;
         let b = x_low[n + T_HF_ADJ - 1][k].re;
         phi01 += a * b;
@@ -313,7 +325,8 @@ pub fn reflection_coefficient(
 /// * `bands` — the derived frequency tables (`fTableNoise`, `k_x`).
 /// * `l_range` — the spec's `RATE·tE(0) .. RATE·tE(LE)` column range
 ///   (exclusive end, *before* the `tHFAdj` offset).
-/// * `n_slots_frame` — `numTimeSlots · RATE` (covariance length).
+/// * `n_slots_frame` — the covariance window length: `numTimeSlots · RATE + 6` for ordinary
+///   SBR, `numTimeSlots` for low delay SBR (which has no overlap).
 ///
 /// Returns `XHigh` with the same slot-major layout and column count as
 /// `x_low` (bands outside the patched range stay zero).
@@ -426,9 +439,9 @@ mod tests {
             col[3] = Complex::new(1.0, 0.0); // constant
             col[4] = Complex::new(if c % 2 == 0 { 1.0 } else { -1.0 }, 0.0); // alternating
         }
-        assert_eq!(reflection_coefficient(&x, 3, n).unwrap(), -1.0);
-        assert_eq!(reflection_coefficient(&x, 4, n).unwrap(), 1.0);
-        assert_eq!(reflection_coefficient(&x, 5, n).unwrap(), 0.0);
+        assert_eq!(reflection_coefficient(&x, 3, n + 6).unwrap(), -1.0);
+        assert_eq!(reflection_coefficient(&x, 4, n + 6).unwrap(), 1.0);
+        assert_eq!(reflection_coefficient(&x, 5, n + 6).unwrap(), 0.0);
         assert!(reflection_coefficient(&x, 32, n).is_err());
     }
 

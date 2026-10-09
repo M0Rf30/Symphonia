@@ -59,13 +59,15 @@
 //! its declared bit length), and the prefix-free property (no codeword
 //! is a prefix of another) at extraction time.
 
+use std::sync::LazyLock;
+
 use super::error::{SbrError as Error, SbrResult as Result};
 
 /// `t_huffman_env_1_5dB` — ISO/IEC 14496-3 Table 4.A.79 (LAV = 60).
 ///
 /// 121 entries `(code_length_bits, codeword)` indexed by the Huffman
 /// table index; the decoded value is `index - 60`.
-pub const T_HUFFMAN_ENV_1_5DB: [(u8, u32); 121] = [
+pub static T_HUFFMAN_ENV_1_5DB: [(u8, u32); 121] = [
     (18, 0x0003FFD6),
     (18, 0x0003FFD7),
     (18, 0x0003FFD8),
@@ -193,7 +195,7 @@ pub const T_HUFFMAN_ENV_1_5DB: [(u8, u32); 121] = [
 ///
 /// 121 entries `(code_length_bits, codeword)` indexed by the Huffman
 /// table index; the decoded value is `index - 60`.
-pub const F_HUFFMAN_ENV_1_5DB: [(u8, u32); 121] = [
+pub static F_HUFFMAN_ENV_1_5DB: [(u8, u32); 121] = [
     (19, 0x0007FFE7),
     (19, 0x0007FFE8),
     (20, 0x000FFFD2),
@@ -321,7 +323,7 @@ pub const F_HUFFMAN_ENV_1_5DB: [(u8, u32); 121] = [
 ///
 /// 49 entries `(code_length_bits, codeword)` indexed by the Huffman
 /// table index; the decoded value is `index - 24`.
-pub const T_HUFFMAN_ENV_BAL_1_5DB: [(u8, u32); 49] = [
+pub static T_HUFFMAN_ENV_BAL_1_5DB: [(u8, u32); 49] = [
     (16, 0x0000FFE4),
     (16, 0x0000FFE5),
     (16, 0x0000FFE6),
@@ -377,7 +379,7 @@ pub const T_HUFFMAN_ENV_BAL_1_5DB: [(u8, u32); 49] = [
 ///
 /// 49 entries `(code_length_bits, codeword)` indexed by the Huffman
 /// table index; the decoded value is `index - 24`.
-pub const F_HUFFMAN_ENV_BAL_1_5DB: [(u8, u32); 49] = [
+pub static F_HUFFMAN_ENV_BAL_1_5DB: [(u8, u32); 49] = [
     (18, 0x0003FFE2),
     (18, 0x0003FFE3),
     (18, 0x0003FFE4),
@@ -433,7 +435,7 @@ pub const F_HUFFMAN_ENV_BAL_1_5DB: [(u8, u32); 49] = [
 ///
 /// 63 entries `(code_length_bits, codeword)` indexed by the Huffman
 /// table index; the decoded value is `index - 31`.
-pub const T_HUFFMAN_ENV_3_0DB: [(u8, u32); 63] = [
+pub static T_HUFFMAN_ENV_3_0DB: [(u8, u32); 63] = [
     (18, 0x0003FFED),
     (18, 0x0003FFEE),
     (19, 0x0007FFDE),
@@ -503,7 +505,7 @@ pub const T_HUFFMAN_ENV_3_0DB: [(u8, u32); 63] = [
 ///
 /// 63 entries `(code_length_bits, codeword)` indexed by the Huffman
 /// table index; the decoded value is `index - 31`.
-pub const F_HUFFMAN_ENV_3_0DB: [(u8, u32); 63] = [
+pub static F_HUFFMAN_ENV_3_0DB: [(u8, u32); 63] = [
     (20, 0x000FFFF0),
     (20, 0x000FFFF1),
     (20, 0x000FFFF2),
@@ -573,7 +575,7 @@ pub const F_HUFFMAN_ENV_3_0DB: [(u8, u32); 63] = [
 ///
 /// 25 entries `(code_length_bits, codeword)` indexed by the Huffman
 /// table index; the decoded value is `index - 12`.
-pub const T_HUFFMAN_ENV_BAL_3_0DB: [(u8, u32); 25] = [
+pub static T_HUFFMAN_ENV_BAL_3_0DB: [(u8, u32); 25] = [
     (13, 0x00001FF2),
     (13, 0x00001FF3),
     (13, 0x00001FF4),
@@ -605,7 +607,7 @@ pub const T_HUFFMAN_ENV_BAL_3_0DB: [(u8, u32); 25] = [
 ///
 /// 25 entries `(code_length_bits, codeword)` indexed by the Huffman
 /// table index; the decoded value is `index - 12`.
-pub const F_HUFFMAN_ENV_BAL_3_0DB: [(u8, u32); 25] = [
+pub static F_HUFFMAN_ENV_BAL_3_0DB: [(u8, u32); 25] = [
     (13, 0x00001FF7),
     (13, 0x00001FF8),
     (13, 0x00001FF9),
@@ -637,7 +639,7 @@ pub const F_HUFFMAN_ENV_BAL_3_0DB: [(u8, u32); 25] = [
 ///
 /// 63 entries `(code_length_bits, codeword)` indexed by the Huffman
 /// table index; the decoded value is `index - 31`.
-pub const T_HUFFMAN_NOISE_3_0DB: [(u8, u32); 63] = [
+pub static T_HUFFMAN_NOISE_3_0DB: [(u8, u32); 63] = [
     (13, 0x00001FCE),
     (13, 0x00001FCF),
     (13, 0x00001FD0),
@@ -707,7 +709,7 @@ pub const T_HUFFMAN_NOISE_3_0DB: [(u8, u32); 63] = [
 ///
 /// 25 entries `(code_length_bits, codeword)` indexed by the Huffman
 /// table index; the decoded value is `index - 12`.
-pub const T_HUFFMAN_NOISE_BAL_3_0DB: [(u8, u32); 25] = [
+pub static T_HUFFMAN_NOISE_BAL_3_0DB: [(u8, u32); 25] = [
     (8, 0x000000EC),
     (8, 0x000000ED),
     (8, 0x000000EE),
@@ -823,6 +825,107 @@ pub fn sbr_huff_dec(
     table: &[(u8, u32)],
     lav: i32,
 ) -> Result<i32> {
+    match decode_tree(table) {
+        Some(tree) => tree.decode(reader, lav),
+        None => sbr_huff_dec_scan(reader, table, lav),
+    }
+}
+
+/// A node of a [`DecodeTree`]: a child is the index of an inner node, or `LEAF | index` of a
+/// codebook entry, or `NONE` for a prefix that is no codeword.
+const LEAF: u16 = 0x8000;
+const NONE: u16 = 0;
+
+/// The binary decoding tree of a codebook: one step per bit instead of a scan of the whole
+/// codebook per bit. Node 0 is the root.
+struct DecodeTree {
+    nodes: Vec<[u16; 2]>,
+}
+
+impl DecodeTree {
+    fn new(table: &[(u8, u32)]) -> Self {
+        let mut nodes = vec![[NONE; 2]];
+
+        for (idx, &(len, code)) in table.iter().enumerate() {
+            let mut node = 0usize;
+            for i in (0..len).rev() {
+                let bit = ((code >> i) & 1) as usize;
+                if i == 0 {
+                    nodes[node][bit] = LEAF | idx as u16;
+                }
+                else {
+                    if nodes[node][bit] == NONE {
+                        nodes.push([NONE; 2]);
+                        nodes[node][bit] = (nodes.len() - 1) as u16;
+                    }
+                    node = usize::from(nodes[node][bit]);
+                }
+            }
+        }
+
+        DecodeTree { nodes }
+    }
+
+    fn decode(&self, reader: &mut super::bits::BitReader<'_>, lav: i32) -> Result<i32> {
+        let mut node = 0usize;
+        let mut len: u32 = 0;
+        loop {
+            let bit = reader.read_u32(1).map_err(|_| Error::SbrHuffInvalid)? as usize;
+            len += 1;
+            let next = self.nodes[node][bit];
+            if next & LEAF != 0 {
+                return Ok(i32::from(next & !LEAF) - lav);
+            }
+            if next == NONE {
+                // No codeword has this prefix: like the scan of the codebook, consume the bits up
+                // to the maximum length of a codeword before the failure.
+                while len < SBR_HUFF_MAX_CODE_LEN {
+                    reader.read_u32(1).map_err(|_| Error::SbrHuffInvalid)?;
+                    len += 1;
+                }
+                return Err(Error::SbrHuffInvalid);
+            }
+            if len >= SBR_HUFF_MAX_CODE_LEN {
+                return Err(Error::SbrHuffInvalid);
+            }
+            node = usize::from(next);
+        }
+    }
+}
+
+/// The decoding tree of one of the codebooks of this module, `None` for any other table.
+fn decode_tree(table: &[(u8, u32)]) -> Option<&'static DecodeTree> {
+    macro_rules! trees {
+        ($($table:ident),*) => {{
+            $(
+                if core::ptr::eq(table.as_ptr(), $table.as_ptr()) && table.len() == $table.len() {
+                    static TREE: LazyLock<DecodeTree> = LazyLock::new(|| DecodeTree::new(&$table));
+                    return Some(&TREE);
+                }
+            )*
+            None
+        }};
+    }
+    trees!(
+        T_HUFFMAN_ENV_1_5DB,
+        F_HUFFMAN_ENV_1_5DB,
+        T_HUFFMAN_ENV_BAL_1_5DB,
+        F_HUFFMAN_ENV_BAL_1_5DB,
+        T_HUFFMAN_ENV_3_0DB,
+        F_HUFFMAN_ENV_3_0DB,
+        T_HUFFMAN_ENV_BAL_3_0DB,
+        F_HUFFMAN_ENV_BAL_3_0DB,
+        T_HUFFMAN_NOISE_3_0DB,
+        T_HUFFMAN_NOISE_BAL_3_0DB
+    )
+}
+
+/// The decoding of any codebook by a scan of it after every bit read.
+fn sbr_huff_dec_scan(
+    reader: &mut super::bits::BitReader<'_>,
+    table: &[(u8, u32)],
+    lav: i32,
+) -> Result<i32> {
     let mut codeword: u32 = 0;
     let mut len: u32 = 0;
     loop {
@@ -868,6 +971,41 @@ mod tests {
                 }
                 let shifted = cb >> (lb - la);
                 assert!(shifted != ca, "prefix conflict between index {a} and {b}");
+            }
+        }
+    }
+
+    /// Every codebook has a decoding tree, and it decodes the same as a scan of the codebook.
+    #[test]
+    fn trees_decode_like_a_scan() {
+        for (table, lav) in [
+            (&T_HUFFMAN_ENV_1_5DB[..], 60),
+            (&F_HUFFMAN_ENV_1_5DB[..], 60),
+            (&T_HUFFMAN_ENV_BAL_1_5DB[..], 24),
+            (&F_HUFFMAN_ENV_BAL_1_5DB[..], 24),
+            (&T_HUFFMAN_ENV_3_0DB[..], 31),
+            (&F_HUFFMAN_ENV_3_0DB[..], 31),
+            (&T_HUFFMAN_ENV_BAL_3_0DB[..], 12),
+            (&F_HUFFMAN_ENV_BAL_3_0DB[..], 12),
+            (&T_HUFFMAN_NOISE_3_0DB[..], 31),
+            (&T_HUFFMAN_NOISE_BAL_3_0DB[..], 12),
+        ] {
+            assert!(decode_tree(table).is_some());
+
+            // A pseudo-random stream decodes identically (value, or failure, and position).
+            let mut state = 0x1234_5678u32;
+            let bytes: Vec<u8> = (0..512)
+                .map(|_| {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    (state >> 24) as u8
+                })
+                .collect();
+            let (mut a, mut b) = (BitReader::new(&bytes), BitReader::new(&bytes));
+            while a.bits_left() > 64 {
+                let x = sbr_huff_dec(&mut a, table, lav);
+                let y = sbr_huff_dec_scan(&mut b, table, lav);
+                assert_eq!(x.ok(), y.ok());
+                assert_eq!(a.bit_position(), b.bit_position());
             }
         }
     }

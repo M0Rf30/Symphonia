@@ -325,6 +325,102 @@ pub struct AudioSpecificConfig {
     pub sbr_ps_info: Option<(u32, Option<Channels>)>,
     pub sbr_present: bool,
     pub ps_present: bool,
+    /// True if the config signals the use of the error resilience tools of ER AAC LD and ER AAC
+    /// ELD: Huffman codeword reordering, reversible variable length coding, or virtual codebooks
+    /// (the `aacSectionDataResilienceFlag`, `aacScalefactorDataResilienceFlag`, and
+    /// `aacSpectralDataResilienceFlag`).
+    pub er_resilience: bool,
+    /// The SBR config of an ER AAC ELD stream with low delay SBR (`ldSbrPresentFlag`).
+    pub eld_sbr: Option<EldSbrConfig>,
+}
+
+/// The SBR config of an `ELDSpecificConfig()` (ISO/IEC 14496-3 §4.4.1.2).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EldSbrConfig {
+    /// The `ldSbrSamplingRate` flag. If true, the SBR output has twice the sampling rate of the
+    /// core codec (dual rate). Otherwise, it is the same (downsampled SBR).
+    pub dual_rate: bool,
+    /// The `ldSbrCrcFlag` flag: the SBR payloads are protected by a CRC.
+    pub crc: bool,
+    /// The `sbr_header()` of each SBR element (SCE or CPE) of the stream, in order.
+    pub headers: Vec<SbrHeaderConfig>,
+}
+
+/// The fields of an `sbr_header()` (ISO/IEC 14496-3 §4.6.18.2.1), with the default values for
+/// the fields that are not transmitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SbrHeaderConfig {
+    pub amp_res: bool,
+    pub start_freq: u8,
+    pub stop_freq: u8,
+    pub xover_band: u8,
+    pub freq_scale: u8,
+    pub alter_scale: bool,
+    pub noise_bands: u8,
+    pub limiter_bands: u8,
+    pub limiter_gains: u8,
+    pub interpol_freq: bool,
+    pub smoothing_mode: bool,
+}
+
+impl SbrHeaderConfig {
+    /// Read an `sbr_header()`.
+    fn read<B: ReadBitsLtr>(bs: &mut B) -> Result<SbrHeaderConfig> {
+        let amp_res = bs.read_bool()?;
+        let start_freq = bs.read_bits_leq32(4)? as u8;
+        let stop_freq = bs.read_bits_leq32(4)? as u8;
+        let xover_band = bs.read_bits_leq32(3)? as u8;
+        bs.ignore_bits(2)?; // bs_reserved
+        let header_extra_1 = bs.read_bool()?;
+        let header_extra_2 = bs.read_bool()?;
+
+        let (mut freq_scale, mut alter_scale, mut noise_bands) = (2, true, 2);
+
+        if header_extra_1 {
+            freq_scale = bs.read_bits_leq32(2)? as u8;
+            alter_scale = bs.read_bool()?;
+            noise_bands = bs.read_bits_leq32(2)? as u8;
+        }
+
+        let (mut limiter_bands, mut limiter_gains, mut interpol_freq, mut smoothing_mode) =
+            (2, 2, true, true);
+
+        if header_extra_2 {
+            limiter_bands = bs.read_bits_leq32(2)? as u8;
+            limiter_gains = bs.read_bits_leq32(2)? as u8;
+            interpol_freq = bs.read_bool()?;
+            smoothing_mode = bs.read_bool()?;
+        }
+
+        Ok(SbrHeaderConfig {
+            amp_res,
+            start_freq,
+            stop_freq,
+            xover_band,
+            freq_scale,
+            alter_scale,
+            noise_bands,
+            limiter_bands,
+            limiter_gains,
+            interpol_freq,
+            smoothing_mode,
+        })
+    }
+}
+
+/// The number of `sbr_header()`s in the `ELDSpecificConfig()`: one for each SCE and CPE of the
+/// channel configuration (the numbers of ISO/IEC 14496-3 Table 4.? for the predefined channel
+/// configurations).
+fn eld_num_sbr_headers(elements: &[ChannelElement]) -> usize {
+    elements
+        .iter()
+        .filter(|element| {
+            !matches!(
+                element,
+                ChannelElement::Single(pos) if *pos == Position::LFE1 || *pos == Position::LFE2
+            )
+        })
+        .count()
 }
 
 impl AudioSpecificConfig {
@@ -425,7 +521,13 @@ impl AudioSpecificConfig {
                 // GASpecificConfig
                 let short_frame = bs.read_bool()?;
 
-                asc.samples = if short_frame { 960 } else { 1024 };
+                // The frame length of AAC LD is 512 or 480 samples, rather than 1024 or 960.
+                asc.samples = match (asc.object_type, short_frame) {
+                    (AudioObjectType::ErAacLd, true) => 480,
+                    (AudioObjectType::ErAacLd, false) => 512,
+                    (_, true) => 960,
+                    (_, false) => 1024,
+                };
 
                 let depends_on_core = bs.read_bool()?;
 
@@ -461,9 +563,13 @@ impl AudioSpecificConfig {
                         || (asc.object_type == AudioObjectType::ErAacScalable)
                         || (asc.object_type == AudioObjectType::ErAacLd)
                     {
-                        let _section_data_resilience = bs.read_bool()?;
-                        let _scalefactors_resilience = bs.read_bool()?;
-                        let _spectral_data_resilience = bs.read_bool()?;
+                        let section_data_resilience = bs.read_bool()?;
+                        let scalefactors_resilience = bs.read_bool()?;
+                        let spectral_data_resilience = bs.read_bool()?;
+
+                        asc.er_resilience = section_data_resilience
+                            || scalefactors_resilience
+                            || spectral_data_resilience;
                     }
 
                     let extension_flag3 = bs.read_bool()?;
@@ -518,7 +624,66 @@ impl AudioSpecificConfig {
                 return unsupported_error("common (mp4a): SLS config");
             }
             AudioObjectType::ErAacEld => {
-                return unsupported_error("common (mp4a): ELD config");
+                // ELDSpecificConfig
+                let short_frame = bs.read_bool()?;
+
+                asc.samples = if short_frame { 480 } else { 512 };
+
+                let section_data_resilience = bs.read_bool()?;
+                let scalefactors_resilience = bs.read_bool()?;
+                let spectral_data_resilience = bs.read_bool()?;
+
+                asc.er_resilience =
+                    section_data_resilience || scalefactors_resilience || spectral_data_resilience;
+
+                // ldSbrPresentFlag
+                if bs.read_bool()? {
+                    let dual_rate = bs.read_bool()?;
+                    let crc = bs.read_bool()?;
+
+                    let Some(elements) = asc.channel_elements.as_deref()
+                    else {
+                        return unsupported_error(
+                            "common (mp4a): ELD with SBR requires a predefined channel configuration",
+                        );
+                    };
+
+                    let num_headers = eld_num_sbr_headers(elements);
+
+                    let mut headers = Vec::with_capacity(num_headers);
+
+                    for _ in 0..num_headers {
+                        headers.push(SbrHeaderConfig::read(bs)?);
+                    }
+
+                    asc.sbr_present = true;
+                    asc.sbr_ps_info =
+                        Some((if dual_rate { asc.sample_rate * 2 } else { asc.sample_rate }, None));
+                    asc.eld_sbr = Some(EldSbrConfig { dual_rate, crc, headers });
+                }
+
+                // ELDEXT: skip the extensions.
+                loop {
+                    let ext_type = bs.read_bits_leq32(4)?;
+
+                    // ELDEXT_TERM
+                    if ext_type == 0 {
+                        break;
+                    }
+
+                    let mut len = bs.read_bits_leq32(4)?;
+
+                    if len == 15 {
+                        let len_add = bs.read_bits_leq32(8)?;
+                        len += len_add;
+
+                        if len_add == 255 {
+                            len += bs.read_bits_leq32(16)?;
+                        }
+                    }
+
+                    bs.ignore_bits(len * 8)?;
+                }
             }
             AudioObjectType::SmrSimple | AudioObjectType::SmrMain => {
                 return unsupported_error("common (mp4a): symbolic music config");
@@ -657,27 +822,51 @@ impl AudioSpecificConfig {
         Ok((channels, elements))
     }
 
-    /// Parse `program_config_element()` (ISO/IEC 14496-3 §4.4.1.1, Table 4.2 / Table 8.2).
-    ///
-    /// Assigns each declared front/side/back/LFE element a channel position using the
-    /// conventional ordering used throughout the industry for the common layouts described
-    /// informatively in ISO/IEC 14496-3 subclause 8.5.3: the first front `SCE` is the
-    /// front-center channel; front `CPE`s are assigned outward from the front-left/right pair to
-    /// the front-left/right-of-center "wide" pair; side `CPE`s are the side-left/right pair; the
-    /// first back `CPE` is the rear-left/right pair, optionally followed by a rear-center `SCE`;
-    /// LFE `SCE`s are LFE1, then LFE2. Layouts that don't fit this convention (e.g. more than one
-    /// front SCE, or a side SCE) are rejected as unsupported rather than silently mis-assigned.
+    /// Parse `program_config_element()` and map its elements onto channel positions. See
+    /// [`ProgramConfig`].
+    fn read_program_config_element<B: ReadBitsLtr>(
+        bs: &mut B,
+    ) -> Result<(Channels, Vec<ChannelElement>)> {
+        ProgramConfig::read(bs)?.layout()
+    }
+}
+
+/// The syntax of a `program_config_element()` (ISO/IEC 14496-3 §4.4.1.1): the part of it that
+/// determines the syntactic elements of the program.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProgramConfig {
+    /// The `profile` (2 bits): the audio object type minus 1 (0 is AAC Main, 1 is AAC LC, 2 is AAC
+    /// SSR, 3 is AAC LTP).
+    pub object_type: u32,
+    /// The index of the sampling frequency.
+    pub sampling_frequency_index: u32,
+    /// For each front element, in order, true if it is a channel pair element.
+    pub front_is_cpe: Vec<bool>,
+    /// For each side element, in order, true if it is a channel pair element.
+    pub side_is_cpe: Vec<bool>,
+    /// For each back element, in order, true if it is a channel pair element.
+    pub back_is_cpe: Vec<bool>,
+    /// The number of LFE elements.
+    pub num_lfe: u32,
+    /// The number of associated data elements.
+    pub num_assoc_data: u32,
+    /// The number of valid coupling channel elements.
+    pub num_valid_cc: u32,
+}
+
+impl ProgramConfig {
+    /// Read a `program_config_element()` (ISO/IEC 14496-3 §4.4.1.1, Table 4.2 / Table 8.2) from the
+    /// current position of a bit stream. The byte alignment before the comment field is relative
+    /// to the start of the bit stream.
     ///
     /// Mixdown coefficients, comment fields, and element instance tags (used to associate
     /// elements with mixdowns/CCEs) are parsed for correct bitstream alignment but otherwise
     /// discarded; the element order alone determines how `raw_data_block()` syntactic elements
     /// map onto output channels (see [`ChannelElement`]).
-    fn read_program_config_element<B: ReadBitsLtr>(
-        bs: &mut B,
-    ) -> Result<(Channels, Vec<ChannelElement>)> {
+    pub fn read<B: ReadBitsLtr>(bs: &mut B) -> Result<ProgramConfig> {
         let _element_instance_tag = bs.read_bits_leq32(4)?;
-        let _object_type = bs.read_bits_leq32(2)?;
-        let _sampling_frequency_index = bs.read_bits_leq32(4)?;
+        let object_type = bs.read_bits_leq32(2)?;
+        let sampling_frequency_index = bs.read_bits_leq32(4)?;
 
         let num_front = bs.read_bits_leq32(4)?;
         let num_side = bs.read_bits_leq32(4)?;
@@ -730,13 +919,39 @@ impl AudioSpecificConfig {
             bs.ignore_bits(8)?;
         }
 
+        Ok(ProgramConfig {
+            object_type,
+            sampling_frequency_index,
+            front_is_cpe,
+            side_is_cpe,
+            back_is_cpe,
+            num_lfe,
+            num_assoc_data,
+            num_valid_cc,
+        })
+    }
+
+    /// Map the syntactic elements of the program onto channel positions.
+    ///
+    /// Assigns each declared front/side/back/LFE element a channel position using the
+    /// conventional ordering used throughout the industry for the common layouts described
+    /// informatively in ISO/IEC 14496-3 subclause 8.5.3: the first front `SCE` is the
+    /// front-center channel; front `CPE`s are assigned outward from the front-left/right pair to
+    /// the front-left/right-of-center "wide" pair; side `CPE`s are the side-left/right pair; the
+    /// first back `CPE` is the rear-left/right pair, optionally followed by a rear-center `SCE`;
+    /// LFE `SCE`s are LFE1, then LFE2. Layouts that don't fit this convention (e.g. more than one
+    /// front SCE, or a side SCE) are rejected as unsupported rather than silently mis-assigned.
+    pub fn layout(&self) -> Result<(Channels, Vec<ChannelElement>)> {
+        let ProgramConfig { front_is_cpe, side_is_cpe, back_is_cpe, num_lfe, .. } = self;
+        let num_lfe = *num_lfe;
+
         let mut elements = Vec::new();
         let mut mask = Position::empty();
 
         let mut front_sce_seen = false;
         let mut front_cpe_seen = 0u32;
 
-        for &is_cpe in &front_is_cpe {
+        for &is_cpe in front_is_cpe {
             if is_cpe {
                 let (l, r) = match front_cpe_seen {
                     0 => (Position::FRONT_LEFT, Position::FRONT_RIGHT),
@@ -764,7 +979,7 @@ impl AudioSpecificConfig {
         }
 
         let mut side_cpe_seen = false;
-        for &is_cpe in &side_is_cpe {
+        for &is_cpe in side_is_cpe {
             if !is_cpe || side_cpe_seen {
                 return unsupported_error("common (mp4a): PCE side channel layout too complex");
             }
@@ -781,7 +996,7 @@ impl AudioSpecificConfig {
         let back_cpe_count = back_is_cpe.iter().filter(|&&is_cpe| is_cpe).count();
         let mut back_cpe_seen = 0usize;
         let mut back_sce_seen = false;
-        for &is_cpe in &back_is_cpe {
+        for &is_cpe in back_is_cpe {
             if is_cpe {
                 let (l, r) = match (back_cpe_count, back_cpe_seen) {
                     (1, 0) => (Position::REAR_LEFT, Position::REAR_RIGHT),
@@ -843,14 +1058,68 @@ pub const AAC_SEEK_MAX_PREROLL_FRAMES: u64 = 56;
 ///   is at least 41 frames before the target, up to 56 frames in total. This converges to the
 ///   continuous decode exactly for the HE-AAC v1 and v2 streams of FDK and Nero tested.
 pub fn aac_seek_start_frame(target: u64, sbr: bool) -> u64 {
-    const SBR_PHASE_PERIOD: u64 = 16;
-    const SBR_PREROLL_FRAMES: u64 = 41;
+    aac_seek_start_frame_with_overlap(target, sbr, 1)
+}
 
+/// The number of previous frames whose spectra the output of a frame of an object type depends on
+/// (the overlap of its filterbank): one for AAC-LC and AAC-LD, and three for AAC-ELD, whose
+/// window spans four frames.
+pub fn aac_overlap_frames(object_type: AudioObjectType) -> u64 {
+    match object_type {
+        AudioObjectType::ErAacEld => 3,
+        _ => 1,
+    }
+}
+
+/// As [`aac_seek_start_frame`], for a stream whose filterbank overlaps `overlap` previous frames
+/// (see [`aac_overlap_frames`]).
+pub fn aac_seek_start_frame_with_overlap(target: u64, sbr: bool, overlap: u64) -> u64 {
+    aac_seek_start_frame_with_period(target, sbr, overlap, AAC_SBR_PHASE_PERIOD)
+}
+
+/// The number of frames of the period of the noise and sinusoid phase of SBR in HE-AAC.
+const AAC_SBR_PHASE_PERIOD: u64 = 16;
+
+/// The number of frames before the target that the decoding of SBR starts from, at the most
+/// (the settling of the envelope, gain and filterbank state).
+const AAC_SBR_PREROLL_FRAMES: u64 = 41;
+
+/// The period, in frames, of the noise and sinusoid phase of the SBR of a stream: the number of
+/// frames after which the phase indices are back at their start.
+///
+/// The noise table has 512 entries, and the phase advances by the number of SBR bands (`M`) for
+/// each of the 32 QMF slots of a frame of HE-AAC, which makes a period of 16 frames. In the low
+/// delay SBR of AAC-ELD the phase advances for each of the 16 (frame length of 512) or 15 (480)
+/// slots, which makes 32 frames for the 512 samples (at most, depending on `M`), but, with an odd
+/// number of slots, 512 frames for the 480 samples.
+pub fn aac_sbr_phase_period(asc: &AudioSpecificConfig) -> u64 {
+    match (asc.object_type, asc.samples) {
+        (AudioObjectType::ErAacEld, 512) => 32,
+        (AudioObjectType::ErAacEld, 480) => 512,
+        _ => AAC_SBR_PHASE_PERIOD,
+    }
+}
+
+/// The number of frames [`aac_seek_start_frame_with_period`] starts decoding before the target, at
+/// most, for streams with SBR.
+pub fn aac_seek_max_preroll_frames(phase_period: u64) -> u64 {
+    AAC_SBR_PREROLL_FRAMES + phase_period - 1
+}
+
+/// As [`aac_seek_start_frame_with_overlap`], for a stream whose SBR phase repeats every
+/// `phase_period` frames (see [`aac_sbr_phase_period`]).
+pub fn aac_seek_start_frame_with_period(
+    target: u64,
+    sbr: bool,
+    overlap: u64,
+    phase_period: u64,
+) -> u64 {
     if sbr {
-        (target.saturating_sub(SBR_PREROLL_FRAMES) / SBR_PHASE_PERIOD) * SBR_PHASE_PERIOD
+        let phase_period = phase_period.max(1);
+        (target.saturating_sub(AAC_SBR_PREROLL_FRAMES) / phase_period) * phase_period
     }
     else {
-        target.saturating_sub(1)
+        target.saturating_sub(overlap)
     }
 }
 
@@ -870,6 +1139,8 @@ pub fn get_audio_codec_profile(asc: &AudioSpecificConfig) -> Option<CodecProfile
                 Some(CODEC_PROFILE_AAC_LC)
             }
         }
+        AudioObjectType::ErAacLd => Some(CODEC_PROFILE_AAC_LD),
+        AudioObjectType::ErAacEld => Some(CODEC_PROFILE_AAC_ELD),
         _ => None,
     }
 }
@@ -919,6 +1190,11 @@ mod tests {
     fn aac_seek_start_frames() {
         assert_eq!(aac_seek_start_frame(0, false), 0);
         assert_eq!(aac_seek_start_frame(100, false), 99);
+        assert_eq!(aac_seek_start_frame_with_overlap(100, false, 3), 97);
+        assert_eq!(aac_seek_start_frame_with_overlap(2, false, 3), 0);
+        assert_eq!(aac_overlap_frames(AudioObjectType::ErAacEld), 3);
+        assert_eq!(aac_overlap_frames(AudioObjectType::ErAacLd), 1);
+        assert_eq!(aac_overlap_frames(AudioObjectType::Lc), 1);
         assert_eq!(aac_seek_start_frame(5, true), 0);
         assert_eq!(aac_seek_start_frame(79, true), 32);
         assert_eq!(aac_seek_start_frame(100, true), 48);
@@ -926,6 +1202,34 @@ mod tests {
             let start = aac_seek_start_frame(target, true);
             assert!(start <= target && target - start <= AAC_SEEK_MAX_PREROLL_FRAMES);
         }
+    }
+
+    #[test]
+    fn seek_start_frame_with_the_sbr_phase_period_of_low_delay_sbr() {
+        let asc = |object_type, samples| AudioSpecificConfig {
+            object_type,
+            samples,
+            ..Default::default()
+        };
+
+        assert_eq!(aac_sbr_phase_period(&asc(AudioObjectType::Lc, 1024)), 16);
+        assert_eq!(aac_sbr_phase_period(&asc(AudioObjectType::ErAacEld, 512)), 32);
+        assert_eq!(aac_sbr_phase_period(&asc(AudioObjectType::ErAacEld, 480)), 512);
+        assert_eq!(aac_seek_max_preroll_frames(16), AAC_SEEK_MAX_PREROLL_FRAMES);
+
+        for period in [16, 32, 512] {
+            for target in [0, 1, 40, 41, 100, 1000, 5000] {
+                let start = aac_seek_start_frame_with_period(target, true, 3, period);
+                assert_eq!(start % period, 0);
+                assert!(start <= target);
+                assert!(target - start <= aac_seek_max_preroll_frames(period));
+                // At least 41 frames before the target, unless at the stream start.
+                assert!(start == 0 || target - start >= 41);
+            }
+        }
+
+        // Without SBR, the period does not matter.
+        assert_eq!(aac_seek_start_frame_with_period(100, false, 3, 512), 97);
     }
 
     #[test]
@@ -950,5 +1254,143 @@ mod tests {
         // Plain AAC-LC.
         let asc = AudioSpecificConfig::read(&[0x12, 0x10]).expect("valid asc");
         assert_eq!(asc.output_sample_rate(), 44_100);
+    }
+
+    #[test]
+    fn aac_ld_config() {
+        // AAC LD, 44.1 kHz, mono, frame length 512: the config of a stream encoded by FDK.
+        let asc = AudioSpecificConfig::read(&[0xba, 0x09, 0x00]).expect("valid asc");
+        assert_eq!(asc.object_type, AudioObjectType::ErAacLd);
+        assert_eq!(asc.sample_rate, 44_100);
+        assert_eq!(asc.channels, Some(layouts::CHANNEL_LAYOUT_MONO));
+        assert_eq!(asc.samples, 512);
+        assert!(!asc.er_resilience);
+        assert!(!asc.sbr_present);
+        assert_eq!(get_audio_codec_profile(&asc), Some(CODEC_PROFILE_AAC_LD));
+
+        // The same with a frame length of 480.
+        let asc = AudioSpecificConfig::read(&[0xba, 0x0d, 0x00]).expect("valid asc");
+        assert_eq!(asc.object_type, AudioObjectType::ErAacLd);
+        assert_eq!(asc.samples, 480);
+
+        // Stereo, 48 kHz, frame length 480.
+        let asc = AudioSpecificConfig::read(&[0xb9, 0x95, 0x00]).expect("valid asc");
+        assert_eq!(asc.sample_rate, 48_000);
+        assert_eq!(asc.channels, Some(layouts::CHANNEL_LAYOUT_STEREO));
+        assert_eq!(asc.samples, 480);
+    }
+
+    #[test]
+    fn aac_ld_resilience_flags() {
+        // AAC LD, 44.1 kHz, mono, frame length 512, with the spectral data resilience flag set
+        // (the config of FDK has all of the flags clear).
+        let asc = AudioSpecificConfig::read(&[0xba, 0x09, 0x20]).expect("valid asc");
+        assert_eq!(asc.object_type, AudioObjectType::ErAacLd);
+        assert!(asc.er_resilience);
+    }
+
+    #[test]
+    fn aac_eld_config() {
+        // AAC ELD, 44.1 kHz, mono, frame length 512, without SBR: the config of a stream encoded
+        // by FDK.
+        let asc = AudioSpecificConfig::read(&[0xf8, 0xe8, 0x20, 0x00]).expect("valid asc");
+        assert_eq!(asc.object_type, AudioObjectType::ErAacEld);
+        assert_eq!(asc.sample_rate, 44_100);
+        assert_eq!(asc.output_sample_rate(), 44_100);
+        assert_eq!(asc.channels, Some(layouts::CHANNEL_LAYOUT_MONO));
+        assert_eq!(asc.samples, 512);
+        assert!(!asc.er_resilience);
+        assert!(!asc.sbr_present);
+        assert_eq!(asc.eld_sbr, None);
+        assert_eq!(get_audio_codec_profile(&asc), Some(CODEC_PROFILE_AAC_ELD));
+
+        // Frame length 480, stereo, 48 kHz.
+        let asc = AudioSpecificConfig::read(&[0xf8, 0xe6, 0x50, 0x00]).expect("valid asc");
+        assert_eq!(asc.sample_rate, 48_000);
+        assert_eq!(asc.channels, Some(layouts::CHANNEL_LAYOUT_STEREO));
+        assert_eq!(asc.samples, 480);
+    }
+
+    #[test]
+    fn aac_eld_extensions_are_skipped() {
+        // An ELD config (44.1 kHz, mono, 512) with one extension of type 2 and 3 bytes, followed
+        // by the terminator and epConfig 0.
+        //
+        // 11111 000111 0100 0001 | 0 000 0 | 0010 0011 aabb cc | 0000 | 00
+        let asc =
+            AudioSpecificConfig::read(&[0xf8, 0xe8, 0x20, 0x00, 0x23, 0xaa, 0xbb, 0xcc, 0x00])
+                .expect("valid asc");
+        assert_eq!(asc.object_type, AudioObjectType::ErAacEld);
+        assert_eq!(asc.samples, 512);
+        assert!(!asc.er_resilience);
+    }
+
+    #[test]
+    fn aac_eld_sbr_config() {
+        // ELD at 24 kHz with SBR at 48 kHz (dual rate), mono, with CRC off.
+        let mut bits: Vec<(u32, u32)> = vec![
+            (31, 5),
+            (7, 6), // AOT 39
+            (6, 4), // 24 kHz
+            (1, 4), // mono
+            (0, 1), // frameLengthFlag
+            (0, 3), // resilience flags
+            (1, 1), // ldSbrPresentFlag
+            (1, 1), // ldSbrSamplingRate
+            (0, 1), // ldSbrCrcFlag
+            (1, 1), // bs_amp_res
+            (5, 4), // bs_start_freq
+            (9, 4), // bs_stop_freq
+            (1, 3), // bs_xover_band
+            (0, 2), // bs_reserved
+            (1, 1), // bs_header_extra_1
+            (0, 1), // bs_header_extra_2
+            (3, 2), // bs_freq_scale
+            (0, 1), // bs_alter_scale
+            (1, 2), // bs_noise_bands
+            (0, 4), // ELDEXT_TERM
+            (0, 2), // epConfig
+        ];
+
+        let mut asc_bytes = vec![];
+        let mut acc = 0u32;
+        let mut n = 0;
+
+        for (value, len) in bits.drain(..) {
+            for i in (0..len).rev() {
+                acc = (acc << 1) | ((value >> i) & 1);
+                n += 1;
+
+                if n == 8 {
+                    asc_bytes.push(acc as u8);
+                    acc = 0;
+                    n = 0;
+                }
+            }
+        }
+
+        if n > 0 {
+            asc_bytes.push((acc << (8 - n)) as u8);
+        }
+
+        let asc = AudioSpecificConfig::read(&asc_bytes).expect("valid asc");
+
+        assert_eq!(asc.object_type, AudioObjectType::ErAacEld);
+        assert_eq!(asc.sample_rate, 24_000);
+        assert!(asc.sbr_present);
+        assert_eq!(asc.output_sample_rate(), 48_000);
+
+        let sbr = asc.eld_sbr.expect("ld sbr config");
+        assert!(sbr.dual_rate);
+        assert!(!sbr.crc);
+        assert_eq!(sbr.headers.len(), 1);
+
+        let header = sbr.headers[0];
+        assert!(header.amp_res);
+        assert_eq!((header.start_freq, header.stop_freq, header.xover_band), (5, 9, 1));
+        assert_eq!((header.freq_scale, header.alter_scale, header.noise_bands), (3, false, 1));
+        // The fields that were not transmitted have their defaults.
+        assert_eq!((header.limiter_bands, header.limiter_gains), (2, 2));
+        assert!(header.interpol_freq && header.smoothing_mode);
     }
 }

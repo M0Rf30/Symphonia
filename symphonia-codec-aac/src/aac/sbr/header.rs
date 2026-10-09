@@ -168,6 +168,28 @@ impl SbrHeader {
         })
     }
 
+    /// The header of an ELD stream's `ELDSpecificConfig()`, which carries the `sbr_header()` of
+    /// each SBR element.
+    #[must_use]
+    pub fn from_eld_config(cfg: &symphonia_common::mpeg::audio::SbrHeaderConfig) -> Self {
+        SbrHeader {
+            amp_res: cfg.amp_res,
+            start_freq: cfg.start_freq,
+            stop_freq: cfg.stop_freq,
+            xover_band: cfg.xover_band,
+            reserved: 0,
+            header_extra_1: true,
+            header_extra_2: true,
+            freq_scale: cfg.freq_scale,
+            alter_scale: cfg.alter_scale,
+            noise_bands: cfg.noise_bands,
+            limiter_bands: cfg.limiter_bands,
+            limiter_gains: cfg.limiter_gains,
+            interpol_freq: cfg.interpol_freq,
+            smoothing_mode: cfg.smoothing_mode,
+        }
+    }
+
     /// Whether this header differs from `other` in any field that
     /// affects the §4.6.18.3.2 frequency-band geometry
     /// (`bs_start_freq`, `bs_stop_freq`, `bs_xover_band`,

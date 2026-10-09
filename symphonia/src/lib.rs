@@ -171,6 +171,8 @@ pub mod default {
         #[cfg(any(feature = "mp1", feature = "mp2", feature = "mp3"))]
         pub use symphonia_bundle_mp3::MpaReader;
         #[cfg(feature = "aac")]
+        pub use symphonia_codec_aac::AdifReader;
+        #[cfg(feature = "aac")]
         pub use symphonia_codec_aac::AdtsReader;
         #[cfg(feature = "aac")]
         pub use symphonia_codec_aac::LoasReader;
@@ -308,6 +310,8 @@ pub mod default {
     /// Use this function to easily populate a custom probe with all enabled formats.
     pub fn register_enabled_formats(probe: &mut Probe) {
         // Formats
+        #[cfg(feature = "aac")]
+        probe.register_format::<formats::AdifReader<'_>>();
         #[cfg(feature = "aac")]
         probe.register_format::<formats::AdtsReader<'_>>();
         #[cfg(feature = "aac")]

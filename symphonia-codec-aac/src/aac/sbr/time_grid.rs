@@ -60,6 +60,11 @@ pub struct TimeGrid {
 /// `[0, num_time_slots + 8]` range, are rejected with
 /// [`Error::SbrGridInvalid`] (a malformed variable-border grid).
 pub fn derive_time_grid(grid: &SbrGrid, num_time_slots: i32) -> Result<TimeGrid> {
+    // The `LowDelayGrid` of low delay SBR carries its borders explicitly.
+    if let Some(ld) = &grid.ld_borders {
+        return Ok(TimeGrid { t_e: ld.t_e.clone(), t_q: ld.t_q.clone(), l_a: ld.l_a });
+    }
+
     let le = grid.num_env;
     if le == 0 {
         return Err(Error::SbrGridInvalid);
@@ -218,6 +223,8 @@ mod tests {
             rel_bord_1: vec![],
             pointer: 0,
             amp_res_override: num_env == 1,
+            ld_borders: None,
+            amp_res_frame: None,
         }
     }
 
@@ -261,6 +268,8 @@ mod tests {
             rel_bord_1: vec![1], // reconstructed 2·1 + 2 = 4
             pointer: 0,
             amp_res_override: false,
+            ld_borders: None,
+            amp_res_frame: None,
         };
         let g = derive_time_grid(&grid, 16).unwrap();
         // absBordTrail = 3 + 16 = 19; tE(1) = 19 - 4 = 15.
@@ -288,6 +297,8 @@ mod tests {
             rel_bord_1: vec![],
             pointer: 2,
             amp_res_override: false,
+            ld_borders: None,
+            amp_res_frame: None,
         };
         let g = derive_time_grid(&grid, 16).unwrap();
         assert_eq!(g.t_e, vec![2, 4, 16]);
@@ -313,6 +324,8 @@ mod tests {
             rel_bord_1: vec![3], // 8
             pointer: 0,
             amp_res_override: false,
+            ld_borders: None,
+            amp_res_frame: None,
         };
         let g = derive_time_grid(&grid, 16).unwrap();
         // lead: 1, 1+6 = 7; trail: 18, 18-8 = 10.
@@ -335,6 +348,8 @@ mod tests {
             rel_bord_1: vec![3], // tE(1) = 16 - 8 = 8 … fine
             pointer: 0,
             amp_res_override: false,
+            ld_borders: None,
+            amp_res_frame: None,
         };
         assert!(derive_time_grid(&grid, 16).is_ok());
         let bad = SbrGrid {

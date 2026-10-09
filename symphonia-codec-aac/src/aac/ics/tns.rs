@@ -119,6 +119,11 @@ impl Tns {
             return Ok(None);
         }
 
+        Self::read_data(bs, info, is_lc).map(Some)
+    }
+
+    /// Read a `tns_data()` (the part of the syntax after `tns_data_present`).
+    pub fn read_data<B: ReadBitsLtr>(bs: &mut B, info: &IcsInfo, is_lc: bool) -> Result<Self> {
         // Table 4.156
         let max_order = if !info.long_win {
             7
@@ -143,7 +148,7 @@ impl Tns {
             }
         }
 
-        Ok(Some(Self { n_filt, coeffs }))
+        Ok(Self { n_filt, coeffs })
     }
 
     pub fn synth(
@@ -151,9 +156,14 @@ impl Tns {
         info: &IcsInfo,
         bands: &[usize],
         rate_idx: usize,
+        ld_max_bands: usize,
         coeffs: &mut [f32; 1024],
     ) {
-        let tns_max_bands = (if info.long_win {
+        let tns_max_bands = (if info.long_win && ld_max_bands != 0 {
+            // The frame lengths of AAC LD and ELD.
+            ld_max_bands
+        }
+        else if info.long_win {
             TNS_MAX_LONG_BANDS[rate_idx]
         }
         else {

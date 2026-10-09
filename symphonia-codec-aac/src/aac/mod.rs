@@ -21,19 +21,21 @@ use symphonia_core::codecs::audio::well_known::CODEC_ID_AAC;
 use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoderOptions};
 use symphonia_core::codecs::audio::{AudioDecoder, FinalizeResult};
 use symphonia_core::codecs::registry::{RegisterableAudioDecoder, SupportedAudioCodec};
-use symphonia_core::errors::{Result, unsupported_error};
+use symphonia_core::errors::{Result, decode_error, unsupported_error};
 use symphonia_core::io::{BitReaderLtr, FiniteBitStream, ReadBitsLtr};
 use symphonia_core::packet::PacketRef;
 use symphonia_core::{codec_profile, support_audio_codec};
 
 use symphonia_common::mpeg::audio::{
-    AudioObjectType, AudioSpecificConfig, ChannelElement, channel_elements_for_config,
+    AudioObjectType, AudioSpecificConfig, ChannelElement, ProgramConfig,
+    channel_elements_for_config,
 };
 
 mod codebooks;
 mod common;
 mod cpe;
 mod dsp;
+mod eld_window;
 mod ics;
 mod sbr;
 mod window;
@@ -70,6 +72,9 @@ pub struct AacDecoder {
     /// HE-AAC v1 (SBR) runtime state, present once SBR is known active for this stream. See
     /// [`SbrRuntime`].
     sbr: Option<SbrRuntime>,
+    /// If true, `raw_data_block()`s are only parsed to find where they end: the payload of SBR
+    /// extensions is skipped rather than parsed.
+    syntax_only: bool,
 }
 
 /// Per-stream SBR (HE-AAC v1) runtime state, present once SBR is known active: eagerly at
@@ -82,6 +87,9 @@ struct SbrRuntime {
     /// the core rate for the §4.6.18.4.3 downsampled-output mode (selected when the ASC signals
     /// an extension sampling frequency equal to the core rate).
     fs_sbr: u32,
+    /// The sample rate that the SBR frequency band tables and the patching are derived for: twice
+    /// the core rate, also when the output has the sample rate of the core (downsampled SBR).
+    band_rate: u32,
     /// `true` if the §4.6.18.4.3 downsampled-output mode is selected.
     downsampled: bool,
     /// One SBR decoder + header-reuse state per [`AacDecoder::elem_targets`] entry (SCE/CPE),
@@ -90,6 +98,18 @@ struct SbrRuntime {
     /// Output buffer at `fs_sbr`: `2 ×` the core `AudioBuffer`'s capacity, or the same capacity in
     /// the downsampled SBR mode.
     buf: AudioBuffer<f32>,
+    /// Set for the low delay SBR of AAC-ELD: its payloads follow the channel elements of every
+    /// `er_raw_data_block()`.
+    eld: Option<EldSbr>,
+}
+
+/// The low delay SBR of an AAC-ELD stream.
+#[derive(Clone, Copy)]
+struct EldSbr {
+    /// The SBR payloads are protected by a CRC (`ldSbrCrcFlag`).
+    crc: bool,
+    /// The length of a core frame, 512 or 480.
+    core_samples: usize,
 }
 
 struct SbrElemState {
@@ -108,11 +128,13 @@ impl SbrRuntime {
         core_samples: usize,
         elem_targets: &[(bool, [usize; 2])],
     ) -> Result<Self> {
+        let band_rate = if downsampled { fs_sbr * 2 } else { fs_sbr };
+
         let elems = elem_targets
             .iter()
             .map(|(is_pair, _)| {
                 let mut decoder =
-                    sbr::decoder::SbrDecoder::new(fs_sbr, if *is_pair { 2 } else { 1 })?;
+                    sbr::decoder::SbrDecoder::new(band_rate, if *is_pair { 2 } else { 1 })?;
                 decoder.set_downsampled(downsampled)?;
                 Ok(SbrElemState { decoder, prev_header: None })
             })
@@ -121,7 +143,47 @@ impl SbrRuntime {
         let out_samples = if downsampled { core_samples } else { core_samples * 2 };
         let buf = AudioBuffer::new(AudioSpec::new(fs_sbr, channels), out_samples);
 
-        Ok(SbrRuntime { fs_sbr, downsampled, elems, buf })
+        Ok(SbrRuntime { fs_sbr, band_rate, downsampled, elems, buf, eld: None })
+    }
+
+    /// The SBR state of an AAC-ELD stream with low delay SBR. The `sbr_header()` of each
+    /// element is that of the ELD config, until a payload carries another one.
+    fn new_eld(
+        fs_sbr: u32,
+        channels: Channels,
+        core_samples: usize,
+        elem_targets: &[(bool, [usize; 2])],
+        cfg: &symphonia_common::mpeg::audio::EldSbrConfig,
+    ) -> Result<Self> {
+        let downsampled = !cfg.dual_rate;
+        let band_rate = if downsampled { fs_sbr * 2 } else { fs_sbr };
+
+        let elems = elem_targets
+            .iter()
+            .enumerate()
+            .map(|(idx, (is_pair, _))| {
+                let decoder = sbr::decoder::SbrDecoder::new_eld(
+                    band_rate,
+                    if *is_pair { 2 } else { 1 },
+                    core_samples,
+                    downsampled,
+                )?;
+                let prev_header = cfg.headers.get(idx).map(sbr::header::SbrHeader::from_eld_config);
+                Ok(SbrElemState { decoder, prev_header })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let out_samples = if downsampled { core_samples } else { core_samples * 2 };
+        let buf = AudioBuffer::new(AudioSpec::new(fs_sbr, channels), out_samples);
+
+        Ok(SbrRuntime {
+            fs_sbr,
+            band_rate,
+            downsampled,
+            elems,
+            buf,
+            eld: Some(EldSbr { crc: cfg.crc, core_samples }),
+        })
     }
 
     /// Reset the signal state of every element's SBR decoder (analysis/synthesis filterbanks,
@@ -130,8 +192,19 @@ impl SbrRuntime {
     /// it is what allows a header-less payload (header reuse) to be decoded after a seek.
     fn reset(&mut self, elem_targets: &[(bool, [usize; 2])]) {
         for (elem, (is_pair, _)) in self.elems.iter_mut().zip(elem_targets) {
-            let decoder = sbr::decoder::SbrDecoder::new(self.fs_sbr, if *is_pair { 2 } else { 1 })
-                .and_then(|mut decoder| decoder.set_downsampled(self.downsampled).map(|_| decoder));
+            let n_ch = if *is_pair { 2 } else { 1 };
+            let decoder =
+                match self.eld {
+                    Some(eld) => sbr::decoder::SbrDecoder::new_eld(
+                        self.band_rate,
+                        n_ch,
+                        eld.core_samples,
+                        self.downsampled,
+                    ),
+                    None => sbr::decoder::SbrDecoder::new(self.band_rate, n_ch).and_then(
+                        |mut decoder| decoder.set_downsampled(self.downsampled).map(|_| decoder),
+                    ),
+                };
 
             if let Ok(mut decoder) = decoder {
                 // The decoder is restarted at a frame the demuxer chose to start from, which is
@@ -226,8 +299,36 @@ impl AacDecoder {
                 );
             }
         }
-        if asc.object_type != AudioObjectType::Lc || asc.samples != 1024 {
+        let supported = match asc.object_type {
+            AudioObjectType::Lc => asc.samples == 1024,
+            AudioObjectType::ErAacLd | AudioObjectType::ErAacEld => {
+                asc.samples == 512 || asc.samples == 480
+            }
+            _ => false,
+        };
+
+        if !supported {
             return unsupported_error("aac: aac too complex");
+        }
+
+        // AAC LD and ELD: the tools for error resilience are not supported. SBR is supported
+        // only for AAC-LC, and parametric stereo only with it.
+        let is_er = matches!(asc.object_type, AudioObjectType::ErAacLd | AudioObjectType::ErAacEld);
+
+        if is_er && asc.er_resilience {
+            return unsupported_error("aac: error resilience tools");
+        }
+
+        // SBR with AAC LD, and the HE-AAC v2 parametric stereo tool with ELD, are not defined.
+        if asc.object_type == AudioObjectType::ErAacLd && asc.sbr_present {
+            return unsupported_error("aac: sbr with aac ld");
+        }
+
+        if asc.object_type == AudioObjectType::ErAacEld
+            && asc.sbr_present
+            && (asc.eld_sbr.is_none() || asc.ps_present)
+        {
+            return unsupported_error("aac: sbr with aac eld");
         }
 
         // Map each expected syntactic element (`SCE`/`CPE`/`LFE`), in bitstream order, onto its
@@ -279,7 +380,17 @@ impl AacDecoder {
         // read `codec_params().sample_rate` once at open time need a follow-up fix to also
         // consult the first decoded buffer's spec, mirroring how they already do for channel
         // count.
-        let sbr = if asc.sbr_present {
+        let sbr = if let Some(eld) = &asc.eld_sbr {
+            // The low delay SBR of AAC-ELD.
+            Some(SbrRuntime::new_eld(
+                asc.output_sample_rate(),
+                out_channels.clone(),
+                asc.samples,
+                &elem_targets,
+                eld,
+            )?)
+        }
+        else if asc.sbr_present {
             // An SBR output rate equal to the core rate selects the downsampled SBR mode.
             let fs_sbr = asc.output_sample_rate();
             let downsampled = fs_sbr == asc.sample_rate;
@@ -299,7 +410,17 @@ impl AacDecoder {
             .with_channels(out_channels)
             .with_sample_rate(sbr.as_ref().map_or(asc.sample_rate, |s| s.fs_sbr));
 
-        let sbinfo = GASubbandInfo::find(asc.sample_rate);
+        let dsp = dsp::Dsp::new_for(asc.object_type, asc.samples);
+
+        let sbinfo = if is_er {
+            match GASubbandInfo::find_ld(asc.sample_rate, asc.samples) {
+                Some(sbinfo) => sbinfo,
+                None => return unsupported_error("aac: unsupported frame length"),
+            }
+        }
+        else {
+            GASubbandInfo::find(asc.sample_rate)
+        };
 
         // The pre-SBR/PS "core" buffer stays at the core channel count (mono for a PS
         // stream) — only `sbr.buf` (the tool's own output buffer) is ever widened to stereo;
@@ -311,18 +432,56 @@ impl AacDecoder {
             pairs: Vec::new(),
             lcg: Lcg::new(PNS_SEED),
             elem_targets,
-            dsp: dsp::Dsp::new(),
+            dsp,
             sbinfo,
             params,
             buf,
             opts: *opts,
             sbr,
+            syntax_only: false,
         })
+    }
+
+    /// Create a decoder that is only used to find the end of `raw_data_block()`s, see
+    /// [`Self::measure_raw_data_block`].
+    pub(crate) fn try_new_syntax_parser(params: &AudioCodecParameters) -> Result<Self> {
+        let mut parser = Self::try_new(params, &AudioDecoderOptions::default())?;
+        parser.syntax_only = true;
+        Ok(parser)
+    }
+
+    /// Parse the `raw_data_block()` at the start of `data`, which may be followed by other data,
+    /// and return its length in bytes (the block is byte aligned at its end).
+    ///
+    /// This is how the blocks of a stream that does not delimit them (ADIF) are found: the block
+    /// ends with its `ID_END` element. The state of the parser is not meaningful as a decoder.
+    pub(crate) fn measure_raw_data_block(&mut self, data: &[u8]) -> Result<usize> {
+        match self.asc.object_type {
+            AudioObjectType::Lc => (),
+            _ => return unsupported_error("aac: object type"),
+        }
+
+        let mut bs = BitReaderLtr::new(data);
+
+        let (_, _, terminated) = self.parse_ga(&mut bs, data)?;
+
+        if !terminated {
+            return decode_error("aac: raw data block is not terminated");
+        }
+
+        let bits = (data.len() as u64) * 8 - bs.bits_left();
+
+        Ok(bits.div_ceil(8) as usize)
     }
 
     fn set_pair(&mut self, pair_no: usize, channel: usize, pair: bool) -> Result<()> {
         if self.pairs.len() <= pair_no {
-            self.pairs.push(cpe::ChannelPair::new(pair, channel, self.sbinfo));
+            self.pairs.push(cpe::ChannelPair::new(
+                pair,
+                channel,
+                self.sbinfo,
+                self.asc.object_type,
+            ));
         }
         else {
             validate!(self.pairs[pair_no].channel == channel);
@@ -335,12 +494,16 @@ impl AacDecoder {
         Ok(())
     }
 
-    fn decode_ga<B: ReadBitsLtr + FiniteBitStream>(
+    /// Parse a `raw_data_block()` of AAC-LC. Returns the number of channel elements, the SBR
+    /// extension payload of each of them, and whether the block was terminated by `ID_END`.
+    #[allow(clippy::type_complexity)]
+    fn parse_ga<B: ReadBitsLtr + FiniteBitStream>(
         &mut self,
         bs: &mut B,
         data: &[u8],
-    ) -> Result<()> {
+    ) -> Result<(usize, Vec<Option<sbr::extension::SbrExtensionData>>, bool)> {
         let mut cur_pair = 0;
+        let mut terminated = false;
         let mut sbr_ext: Vec<Option<sbr::extension::SbrExtensionData>> =
             vec![None; self.elem_targets.len()];
         while bs.bits_left() > 3 {
@@ -392,16 +555,10 @@ impl AacDecoder {
                 }
                 5 => {
                     // ID_PCE appearing inside raw_data_block(), as opposed to inside the
-                    // AudioSpecificConfig's GASpecificConfig() (which IS parsed and honoured; see
-                    // `AudioSpecificConfig::read` / `channel_elements`). This in-band form is used
-                    // when the transport carries no out-of-band channel configuration: MP4/ESDS
-                    // always carries an ASC (so this is unreachable there), but ADTS's own
-                    // `channel_configuration` field can itself be 0, in which case a `raw_data_
-                    // block()` is required to open with exactly this element. Supporting it would
-                    // mean deferring the decoder's channel count / output buffer sizing (currently
-                    // fixed at construction from `AudioSpecificConfig`/ADTS header) until the
-                    // first packet has been parsed; a real (if rare) case, but out of scope here.
-                    return unsupported_error("aac: program config element in raw_data_block");
+                    // AudioSpecificConfig's GASpecificConfig(). The channel layout comes from
+                    // the config of the stream (a decoder is always created with one), so the
+                    // element is only parsed to skip it.
+                    let _ = ProgramConfig::read(bs)?;
                 }
                 6 => {
                     // ID_FIL
@@ -416,7 +573,7 @@ impl AacDecoder {
                     if count > 0 {
                         let ext_type = bs.read_bits_leq32(4)?;
 
-                        if matches!(ext_type, 0xd | 0xe) && cur_pair > 0 {
+                        if matches!(ext_type, 0xd | 0xe) && cur_pair > 0 && !self.syntax_only {
                             // EXT_SBR_DATA (0xd) / EXT_SBR_DATA_CRC (0xe). `sbr_extension_data()`
                             // starts immediately after this 4-bit `extension_type` field (no
                             // byte alignment) and runs to the end of this `count`-byte
@@ -463,7 +620,7 @@ impl AacDecoder {
                                 &mut sbr_bs,
                                 id_aac,
                                 crc_flag,
-                                sbr.fs_sbr,
+                                sbr.band_rate,
                                 Some(count as u32),
                                 prev_header,
                             )?;
@@ -484,11 +641,120 @@ impl AacDecoder {
                 }
                 7 => {
                     // ID_TERM
+                    terminated = true;
                     break;
                 }
                 _ => unreachable!(),
             };
         }
+
+        // An `ID_END` element at the very end of the data has no bit after it to satisfy the
+        // loop condition above.
+        if !terminated && bs.bits_left() == 3 && bs.read_bits_leq32(3)? == 7 {
+            terminated = true;
+        }
+
+        Ok((cur_pair, sbr_ext, terminated))
+    }
+
+    fn decode_ga<B: ReadBitsLtr + FiniteBitStream>(
+        &mut self,
+        bs: &mut B,
+        data: &[u8],
+    ) -> Result<()> {
+        let (cur_pair, sbr_ext, _) = self.parse_ga(bs, data)?;
+
+        self.synth_block(cur_pair, sbr_ext)
+    }
+
+    /// Parse a `raw_data_block()` of AAC LD or ELD (an `er_raw_data_block()`): the channel
+    /// elements of the channel configuration, in order, without element identifiers. Returns the
+    /// number of channel elements and their SBR payloads.
+    #[allow(clippy::type_complexity)]
+    fn parse_er<B: ReadBitsLtr + FiniteBitStream>(
+        &mut self,
+        bs: &mut B,
+        data: &[u8],
+    ) -> Result<(usize, Vec<Option<sbr::extension::SbrExtensionData>>)> {
+        let mut sbr_ext: Vec<Option<sbr::extension::SbrExtensionData>> =
+            vec![None; self.elem_targets.len()];
+
+        for idx in 0..self.elem_targets.len() {
+            let (is_pair, indices) = self.elem_targets[idx];
+
+            self.set_pair(idx, indices[0], is_pair)?;
+
+            // The `element_instance_tag`: AAC ELD has none.
+            if self.asc.object_type != AudioObjectType::ErAacEld {
+                bs.ignore_bits(4)?;
+            }
+
+            if is_pair {
+                self.pairs[idx].decode_ga_cpe(bs, &mut self.lcg, self.asc.object_type)?;
+            }
+            else {
+                self.pairs[idx].decode_ga_sce(bs, &mut self.lcg, self.asc.object_type)?;
+            }
+        }
+
+        // The payloads of low delay SBR follow all the channel elements, one for each SCE and
+        // CPE, in order.
+        if let Some(eld) = self.sbr.as_ref().and_then(|sbr| sbr.eld) {
+            if !self.syntax_only {
+                let num_time_slots = if eld.core_samples == 480 { 15 } else { 16 };
+
+                for idx in 0..self.elem_targets.len() {
+                    let id_aac = if self.elem_targets[idx].0 {
+                        sbr::IdSynEle::Cpe
+                    }
+                    else {
+                        sbr::IdSynEle::Sce
+                    };
+
+                    let payload_start = (data.len() as u64) * 8 - bs.bits_left();
+
+                    let sbr = self.sbr.as_mut().expect("checked above");
+
+                    let mut sbr_bs = sbr::bits::BitReader::new(data);
+                    sbr_bs.ignore_bits(u32::try_from(payload_start).unwrap_or(u32::MAX))?;
+
+                    let ext = sbr::extension::SbrExtensionData::parse_eld(
+                        &mut sbr_bs,
+                        id_aac,
+                        eld.crc,
+                        sbr.band_rate,
+                        num_time_slots,
+                        sbr.elems[idx].prev_header,
+                    )?;
+
+                    let consumed = sbr_bs.bit_position() - payload_start;
+                    bs.ignore_bits(u32::try_from(consumed).unwrap_or(0))?;
+
+                    sbr.elems[idx].prev_header = Some(ext.header);
+                    sbr_ext[idx] = Some(ext);
+                }
+            }
+        }
+
+        Ok((self.elem_targets.len(), sbr_ext))
+    }
+
+    fn decode_er<B: ReadBitsLtr + FiniteBitStream>(
+        &mut self,
+        bs: &mut B,
+        data: &[u8],
+    ) -> Result<()> {
+        let (cur_pair, sbr_ext) = self.parse_er(bs, data)?;
+
+        self.synth_block(cur_pair, sbr_ext)
+    }
+
+    /// Synthesise the audio of the `cur_pair` channel elements that were parsed.
+    fn synth_block(
+        &mut self,
+        cur_pair: usize,
+        sbr_ext: Vec<Option<sbr::extension::SbrExtensionData>>,
+    ) -> Result<()> {
         let rate_idx = GASubbandInfo::find_idx(self.asc.sample_rate);
         for pair in 0..cur_pair {
             self.pairs[pair].synth_audio(&mut self.dsp, &mut self.buf, rate_idx);
@@ -598,6 +864,9 @@ impl AacDecoder {
         // Choose decode step based on the object type.
         match self.asc.object_type {
             AudioObjectType::Lc => self.decode_ga(&mut bs, packet.data)?,
+            AudioObjectType::ErAacLd | AudioObjectType::ErAacEld => {
+                self.decode_er(&mut bs, packet.data)?
+            }
             _ => return unsupported_error("aac: object type"),
         }
 
@@ -687,13 +956,19 @@ impl RegisterableAudioDecoder for AacDecoder {
     }
 
     fn supported_codecs() -> &'static [SupportedAudioCodec] {
-        use symphonia_core::codecs::audio::well_known::profiles::CODEC_PROFILE_AAC_LC;
+        use symphonia_core::codecs::audio::well_known::profiles::{
+            CODEC_PROFILE_AAC_ELD, CODEC_PROFILE_AAC_LC, CODEC_PROFILE_AAC_LD,
+        };
 
         &[support_audio_codec!(
             CODEC_ID_AAC,
             "aac",
             "Advanced Audio Coding",
-            &[codec_profile!(CODEC_PROFILE_AAC_LC, "aac-lc", "Low Complexity"),]
+            &[
+                codec_profile!(CODEC_PROFILE_AAC_LC, "aac-lc", "Low Complexity"),
+                codec_profile!(CODEC_PROFILE_AAC_LD, "aac-ld", "Low Delay"),
+                codec_profile!(CODEC_PROFILE_AAC_ELD, "aac-eld", "Enhanced Low Delay"),
+            ]
         )]
     }
 }

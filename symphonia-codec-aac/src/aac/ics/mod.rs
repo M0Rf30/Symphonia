@@ -114,15 +114,32 @@ impl IcsInfo {
     }
 
     /// this method should be called from Ics::decode_info() which will perform additional validations for max_sfb
-    pub fn decode<B: ReadBitsLtr>(&mut self, bs: &mut B) -> Result<()> {
+    pub fn decode<B: ReadBitsLtr>(&mut self, bs: &mut B, aot: AudioObjectType) -> Result<()> {
         self.prev_window_sequence = self.window_sequence;
         self.prev_window_shape = self.window_shape;
+
+        if aot == AudioObjectType::ErAacEld {
+            // The `ics_info()` of AAC ELD has no `window_sequence` and `window_shape`: the window
+            // is always the one of the low delay filterbank. There are no short windows.
+            self.window_sequence = ONLY_LONG_SEQUENCE;
+            self.window_groups = 1;
+            self.long_win = true;
+            self.num_windows = 1;
+            self.max_sfb = bs.read_bits_leq32(6)? as usize;
+            self.ltp = None;
+            return Ok(());
+        }
 
         if bs.read_bool()? {
             return decode_error("aac: ics reserved bit set");
         }
 
         self.window_sequence = bs.read_bits_leq32(2)? as u8;
+
+        // The frames of AAC LD are always a single long window.
+        if aot == AudioObjectType::ErAacLd && self.window_sequence != ONLY_LONG_SEQUENCE {
+            return decode_error("aac: ld frame is not a long window");
+        }
 
         match self.prev_window_sequence {
             ONLY_LONG_SEQUENCE | LONG_STOP_SEQUENCE
@@ -203,12 +220,15 @@ pub struct Ics {
     num_sec: [usize; MAX_WINDOWS],
     pub scales: [[f32; MAX_SFBS]; MAX_WINDOWS],
     sbinfo: GASubbandInfo,
+    /// The audio object type: it selects the syntax of the `ics_info()` and the filterbank.
+    aot: AudioObjectType,
     pub coeffs: [f32; 1024],
-    delay: [f32; 1024],
+    /// The overlap-add state of the filterbank.
+    delay: Vec<f32>,
 }
 
 impl Ics {
-    pub fn new(sbinfo: GASubbandInfo) -> Self {
+    pub fn new(sbinfo: GASubbandInfo, aot: AudioObjectType) -> Self {
         Self {
             global_gain: 0,
             info: IcsInfo::new(),
@@ -221,14 +241,15 @@ impl Ics {
             scales: [[0.0; MAX_SFBS]; MAX_WINDOWS],
             num_sec: [0; MAX_WINDOWS],
             sbinfo,
+            aot,
             coeffs: [0.0; 1024],
-            delay: [0.0; 1024],
+            delay: vec![0.0; dsp::delay_len(aot)],
         }
     }
 
     pub fn reset(&mut self) {
         self.info = IcsInfo::new();
-        self.delay = [0.0; 1024];
+        self.delay.fill(0.0);
     }
 
     fn decode_section_data<B: ReadBitsLtr>(&mut self, bs: &mut B) -> Result<()> {
@@ -298,7 +319,7 @@ impl Ics {
     }
 
     pub fn decode_info<B: ReadBitsLtr>(&mut self, bs: &mut B) -> Result<()> {
-        self.info.decode(bs)?;
+        self.info.decode(bs, self.aot)?;
 
         // validate info.max_sfb - it should not be bigger than bands array len - 1
         if self.info.max_sfb + 1 > self.get_bands().len() {
@@ -426,19 +447,47 @@ impl Ics {
 
         self.decode_scale_factor_data(bs)?;
 
-        self.pulse = pulse::Pulse::read(bs)?;
+        // AAC ELD has no pulse data and no gain control. The ER object types (AAC LD and ELD)
+        // have the data of the TNS filters after the (absent) gain control data, though the
+        // `tns_data_present` flag is before it: "this is what both reference and real
+        // implementations do".
+        let is_er = matches!(aot, AudioObjectType::ErAacLd | AudioObjectType::ErAacEld);
+        let is_eld = aot == AudioObjectType::ErAacEld;
+
+        self.pulse = if is_eld { None } else { pulse::Pulse::read(bs)? };
 
         validate!(self.pulse.is_none() || self.info.long_win);
 
-        let is_aac_lc = aot == AudioObjectType::Lc;
+        // The TNS filters of AAC LD and ELD are as long as those of AAC LC.
+        let is_aac_lc = matches!(
+            aot,
+            AudioObjectType::Lc | AudioObjectType::ErAacLd | AudioObjectType::ErAacEld
+        );
 
-        self.tns = tns::Tns::read(bs, &self.info, is_aac_lc)?;
+        if is_er {
+            let tns_data_present = bs.read_bool()?;
 
-        match aot {
-            AudioObjectType::Ssr => self.gain = gain::GainControl::read(bs)?,
-            _ => {
+            if !is_eld {
                 let gain_control_data_present = bs.read_bool()?;
                 validate!(!gain_control_data_present);
+            }
+
+            self.tns = if tns_data_present {
+                Some(tns::Tns::read_data(bs, &self.info, is_aac_lc)?)
+            }
+            else {
+                None
+            };
+        }
+        else {
+            self.tns = tns::Tns::read(bs, &self.info, is_aac_lc)?;
+
+            match aot {
+                AudioObjectType::Ssr => self.gain = gain::GainControl::read(bs)?,
+                _ => {
+                    let gain_control_data_present = bs.read_bool()?;
+                    validate!(!gain_control_data_present);
+                }
             }
         }
 
@@ -454,17 +503,33 @@ impl Ics {
         }
 
         if let Some(tns) = &self.tns {
-            tns.synth(&self.info, bands, rate_idx, &mut self.coeffs);
+            tns.synth(
+                &self.info,
+                bands,
+                rate_idx,
+                self.sbinfo.tns_max_long_bands,
+                &mut self.coeffs,
+            );
         }
 
-        dsp.synth(
-            &self.coeffs,
-            &mut self.delay,
-            self.info.window_sequence,
-            self.info.window_shape,
-            self.info.prev_window_shape,
-            dst,
-        );
+        match self.aot {
+            AudioObjectType::ErAacLd => dsp.synth_ld(
+                &self.coeffs,
+                &mut self.delay,
+                self.info.window_shape,
+                self.info.prev_window_shape,
+                dst,
+            ),
+            AudioObjectType::ErAacEld => dsp.synth_eld(&self.coeffs, &mut self.delay, dst),
+            _ => dsp.synth(
+                &self.coeffs,
+                &mut self.delay,
+                self.info.window_sequence,
+                self.info.window_shape,
+                self.info.prev_window_shape,
+                dst,
+            ),
+        }
     }
 }
 
@@ -625,7 +690,7 @@ mod tests {
         // each fit comfortably in this buffer.
         let buf = [0u8; (MAX_SFBS + 1) * 9 / 8 + 1];
 
-        let mut ics = Ics::new(GASubbandInfo::find(44100));
+        let mut ics = Ics::new(GASubbandInfo::find(44100), AudioObjectType::Lc);
         ics.info.long_win = true;
         ics.info.window_groups = 1;
         ics.info.max_sfb = 1;

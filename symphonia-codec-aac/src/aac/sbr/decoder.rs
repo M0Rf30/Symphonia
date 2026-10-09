@@ -40,7 +40,13 @@
 //! output splice, and the reset rules are from the §4.6.18.5 text and
 //! Figure 4.47 of the staged spec. No part of this implementation is
 //! derived from any external decoder.
+//!
+//! Low delay SBR (ELD, [`SbrDecoder::new_eld`]) is the exception: the specification text was not
+//! available, so its geometry (no overlap, `RATE = 1`, 16 or 15 time slots), the rates the band
+//! tables are derived for, and the CLDFB filterbanks of [`super::cldfb`] were established from
+//! the FDK AAC source code, and checked against the output of its decoder.
 
+use super::cldfb::{CldfbAnalysis, CldfbSynthesis};
 use super::dequant::{dequant_coupled, dequant_single, DequantizedSbr};
 use super::element::EXTENSION_ID_PS;
 use super::env_adjust::{adjust, EnvAdjustState, EnvParams};
@@ -48,7 +54,7 @@ use super::extension::SbrExtensionData;
 use super::freq_bands::{k0 as derive_k0, k2 as derive_k2, master_table, HiLoTables};
 use super::header::SbrHeader;
 use super::hf_gen::{
-    build_patches, chirp_factors, generate_hf, reflection_coefficient, Patches, T_HF_ADJ, T_HF_GEN,
+    build_patches, chirp_factors, generate_hf, reflection_coefficient, Patches, T_HF_ADJ,
 };
 use super::limiter::limiter_table;
 use super::lp::{aliasing_degree, deg_patched};
@@ -62,17 +68,63 @@ use super::reconstruct::{EnvelopeScalefactors, NoiseScalefactors};
 use super::time_grid::derive_time_grid;
 use super::error::{SbrError as Error, SbrResult as Result};
 
-/// `numTimeSlots` for the 1024-sample core frame (§4.6.18.2.6).
-pub const NUM_TIME_SLOTS: i32 = 16;
+/// The time geometry of an SBR frame: how many QMF time slots it has, and how they relate to
+/// the envelope time borders and to the previous frame.
+///
+/// Ordinary SBR (1024-sample core frames) has `numTimeSlots = 16` envelope time slots of
+/// `RATE = 2` QMF slots each, and the high frequency generator and adjuster work on QMF columns
+/// that lag the core by an `overlap` of 6 slots (§4.6.18.5). Low delay SBR (ELD) has
+/// `numTimeSlots` of 16 or 15 for 512 or 480 sample core frames, with `RATE = 1` and no overlap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Geometry {
+    /// `numTimeSlots` (§4.6.18.2.6).
+    num_time_slots: usize,
+    /// `RATE` (§4.6.18.2.5).
+    rate: usize,
+    /// The slots of the previous frame that the covariance window of the HF generator
+    /// reaches back into.
+    overlap: usize,
+}
 
-/// `RATE = 2` (§4.6.18.2.5).
-pub const RATE: i32 = 2;
+impl Geometry {
+    /// Ordinary SBR on a 1024-sample core frame.
+    const STANDARD: Geometry = Geometry { num_time_slots: 16, rate: 2, overlap: 6 };
 
-/// Slots per frame at the SBR rate (`lf = numTimeSlots · RATE`).
-const LF: usize = (NUM_TIME_SLOTS * RATE) as usize;
+    /// Low delay SBR on a core frame of 512 or 480 samples.
+    fn eld(core_samples: usize) -> Option<Geometry> {
+        match core_samples {
+            512 => Some(Geometry { num_time_slots: 16, rate: 1, overlap: 0 }),
+            480 => Some(Geometry { num_time_slots: 15, rate: 1, overlap: 0 }),
+            _ => None,
+        }
+    }
 
-/// Total `XLow` / `XHigh` / `Y` columns (`lf + tHFGen`).
-const COLS: usize = LF + T_HF_GEN;
+    /// Slots per frame at the SBR rate (`lf = numTimeSlots · RATE`).
+    fn lf(&self) -> usize {
+        self.num_time_slots * self.rate
+    }
+
+    /// The `XLow` history slots kept from the previous frame (`tHFGen`): the two of the
+    /// linear prediction, and the overlap.
+    fn t_hf_gen(&self) -> usize {
+        T_HF_ADJ + self.overlap
+    }
+
+    /// Total `XLow` / `XHigh` / `Y` columns (`lf + tHFGen`).
+    fn cols(&self) -> usize {
+        self.lf() + self.t_hf_gen()
+    }
+
+    /// The core samples of a frame: 32 per analysis slot.
+    fn core_samples(&self) -> usize {
+        self.lf() * 32
+    }
+
+    /// The covariance window of the HF generator.
+    fn window(&self) -> usize {
+        self.lf() + self.overlap
+    }
+}
 
 /// The synthesis filterbank of one output channel: the §4.6.18.4.2
 /// 64-band dual-rate bank, or the §4.6.18.4.3 32-channel downsampled
@@ -89,10 +141,18 @@ enum SynthesisBank {
     RealDual(RealSynthesisQmf),
     /// §4.6.18.8.2.4 — the real-valued low-power core-rate bank.
     RealDown(RealDownsampledSynthesisQmf),
+    /// The low delay bank of ELD: 64 bands (dual-rate) or 32 (downsampled).
+    Cldfb(CldfbSynthesis),
 }
 
 impl SynthesisBank {
-    fn new(downsampled: bool, low_power: bool) -> Self {
+    fn new(downsampled: bool, low_power: bool, eld: bool) -> Self {
+        if eld {
+            let bands = if downsampled { 32 } else { 64 };
+            return SynthesisBank::Cldfb(
+                CldfbSynthesis::new(bands).expect("32 and 64 are valid band counts"),
+            );
+        }
         match (low_power, downsampled) {
             (false, false) => SynthesisBank::Dual(SynthesisQmf::new()),
             (false, true) => SynthesisBank::Down(DownsampledSynthesisQmf::new()),
@@ -106,6 +166,7 @@ impl SynthesisBank {
         match self {
             SynthesisBank::Dual(_) | SynthesisBank::RealDual(_) => 64,
             SynthesisBank::Down(_) | SynthesisBank::RealDown(_) => 32,
+            SynthesisBank::Cldfb(s) => s.bands(),
         }
     }
 
@@ -116,6 +177,7 @@ impl SynthesisBank {
         match self {
             SynthesisBank::Dual(s) => out.extend_from_slice(&s.push_slot(x)?),
             SynthesisBank::Down(s) => out.extend_from_slice(&s.push_slot(&x[..32])?),
+            SynthesisBank::Cldfb(s) => s.push_slot(x, out)?,
             SynthesisBank::RealDual(s) => {
                 let mut re = [0.0f64; 64];
                 for (r, c) in re.iter_mut().zip(x.iter()) {
@@ -143,11 +205,15 @@ impl SynthesisBank {
 enum AnalysisBank {
     Complex(AnalysisQmf),
     Real(RealAnalysisQmf),
+    /// The low delay bank of ELD.
+    Cldfb(CldfbAnalysis),
 }
 
 impl AnalysisBank {
-    fn new(low_power: bool) -> Self {
-        if low_power {
+    fn new(low_power: bool, eld: bool) -> Self {
+        if eld {
+            AnalysisBank::Cldfb(CldfbAnalysis::new())
+        } else if low_power {
             AnalysisBank::Real(RealAnalysisQmf::new())
         } else {
             AnalysisBank::Complex(AnalysisQmf::new())
@@ -157,6 +223,7 @@ impl AnalysisBank {
     fn push_slot(&mut self, samples: &[f64]) -> Result<[Complex; 32]> {
         match self {
             AnalysisBank::Complex(a) => a.push_slot(samples),
+            AnalysisBank::Cldfb(a) => a.push_slot(samples),
             AnalysisBank::Real(a) => {
                 let w = a.push_slot(samples)?;
                 let mut out = [Complex::default(); 32];
@@ -172,10 +239,15 @@ impl AnalysisBank {
 /// Per-channel cross-frame state.
 #[derive(Debug)]
 struct ChannelState {
+    geo: Geometry,
     analysis: AnalysisBank,
     synthesis: SynthesisBank,
     /// The previous frame's last `tHFGen` analysis slots (`W'`).
     w_hist: Vec<[Complex; 32]>,
+    /// Buffers of a frame that are kept to avoid allocating them again: the `XLow` buffer, and
+    /// the assembled `X` columns.
+    x_low_buf: Vec<[Complex; 32]>,
+    x_cols_buf: Vec<[Complex; 64]>,
     /// The previous frame's `Y` buffer (spec absolute columns).
     y_prev: Vec<[Complex; 64]>,
     /// `tE'(LE')` — the previous frame's trailing envelope border.
@@ -191,13 +263,16 @@ struct ChannelState {
 }
 
 impl ChannelState {
-    fn new(downsampled: bool, low_power: bool) -> Self {
+    fn new(geo: Geometry, downsampled: bool, low_power: bool, eld: bool) -> Self {
         ChannelState {
-            analysis: AnalysisBank::new(low_power),
-            synthesis: SynthesisBank::new(downsampled, low_power),
-            w_hist: vec![[Complex::default(); 32]; T_HF_GEN],
-            y_prev: vec![[Complex::default(); 64]; COLS],
-            t_e_last_prev: NUM_TIME_SLOTS,
+            geo,
+            analysis: AnalysisBank::new(low_power, eld),
+            synthesis: SynthesisBank::new(downsampled, low_power, eld),
+            w_hist: vec![[Complex::default(); 32]; geo.t_hf_gen()],
+            x_low_buf: Vec::with_capacity(geo.cols()),
+            x_cols_buf: Vec::with_capacity(geo.lf()),
+            y_prev: vec![[Complex::default(); 64]; geo.cols()],
+            t_e_last_prev: geo.num_time_slots as i32,
             k_x_prev: 0,
             m_prev: 0,
             env_state: EnvAdjustState::new(),
@@ -212,17 +287,19 @@ impl ChannelState {
     /// the `XLow` buffer: columns `0..tHFGen` are the previous frame's
     /// trailing slots (`W'`), columns `tHFGen..` the current `W`.
     fn analyze(&mut self, core: &[f64]) -> Result<Vec<[Complex; 32]>> {
-        if core.len() != 1024 {
+        if core.len() != self.geo.core_samples() {
             return Err(Error::SbrQmfInvalid);
         }
-        let mut x_low = Vec::with_capacity(COLS);
+        let (lf, cols, t_hf_gen) = (self.geo.lf(), self.geo.cols(), self.geo.t_hf_gen());
+        let mut x_low = core::mem::take(&mut self.x_low_buf);
+        x_low.clear();
         x_low.extend_from_slice(&self.w_hist);
-        for slot in 0..LF {
+        for slot in 0..lf {
             let w = self.analysis.push_slot(&core[slot * 32..(slot + 1) * 32])?;
             x_low.push(w);
         }
         self.w_hist.clear();
-        self.w_hist.extend_from_slice(&x_low[COLS - T_HF_GEN..]);
+        self.w_hist.extend_from_slice(&x_low[cols - t_hf_gen..]);
         Ok(x_low)
     }
 }
@@ -239,6 +316,11 @@ pub struct SbrDecoder {
     /// 32-channel bank and every frame yields 1024 samples per channel
     /// at the *core* rate instead of 2048 at `fs_sbr`.
     downsampled: bool,
+    /// The time geometry of a frame.
+    geo: Geometry,
+    /// Low delay SBR of ELD: CLDFB filterbanks, the grid syntax of low delay SBR, and no
+    /// overlap with the previous frame.
+    eld: bool,
     /// §4.6.18.8 low-power mode: real-valued filterbanks, ×2 energy
     /// estimation, aliasing detection/reduction, modified sinusoid
     /// injection. PS payloads are rejected ([`Error::SbrLowPowerPs`]).
@@ -280,16 +362,37 @@ impl SbrDecoder {
             patches: None,
             f_table_lim: Vec::new(),
             downsampled: false,
+            geo: Geometry::STANDARD,
+            eld: false,
             low_power: false,
             k0: 0,
             started: false,
             resumed: false,
             channels: (0..num_channels)
-                .map(|_| ChannelState::new(false, false))
+                .map(|_| ChannelState::new(Geometry::STANDARD, false, false, false))
                 .collect(),
             ps: None,
         })
     }
+
+    /// A fresh decoder for low delay SBR (ELD). `fs_sbr` is the SBR output rate, `core_samples`
+    /// the length (512 or 480) of the core frame, and `downsampled` selects the 32 band
+    /// synthesis (output at the core rate) instead of the 64 band one (dual-rate).
+    pub fn new_eld(
+        fs_sbr: u32,
+        num_channels: usize,
+        core_samples: usize,
+        downsampled: bool,
+    ) -> Result<Self> {
+        let geo = Geometry::eld(core_samples).ok_or(Error::SbrQmfInvalid)?;
+        let mut dec = Self::new(fs_sbr, num_channels)?;
+        dec.geo = geo;
+        dec.eld = true;
+        dec.downsampled = downsampled;
+        dec.rebuild_banks();
+        Ok(dec)
+    }
+
 
     /// Select the §4.6.18.4.3 downsampled output mode: the SBR-processed
     /// subband signals are synthesized through the 32-channel QMF bank,
@@ -358,11 +461,10 @@ impl SbrDecoder {
     /// (only legal before the first frame).
     fn rebuild_banks(&mut self) {
         for ch in &mut self.channels {
-            ch.analysis = AnalysisBank::new(self.low_power);
-            ch.synthesis = SynthesisBank::new(self.downsampled, self.low_power);
+            *ch = ChannelState::new(self.geo, self.downsampled, self.low_power, self.eld);
         }
         if let Some(ps) = &mut self.ps {
-            ps.synthesis_r = SynthesisBank::new(self.downsampled, self.low_power);
+            ps.synthesis_r = SynthesisBank::new(self.downsampled, self.low_power, self.eld);
         }
     }
 
@@ -382,7 +484,8 @@ impl SbrDecoder {
         let n_ch = self.channels.len();
         for (ch, core_ch) in self.channels.iter_mut().zip(core.iter()) {
             let x_low = ch.analyze(core_ch)?;
-            let mut x_cols: [[Complex; 64]; LF] = [[Complex::default(); 64]; LF];
+            let lf = ch.geo.lf();
+            let mut x_cols: Vec<[Complex; 64]> = vec![[Complex::default(); 64]; lf];
             for (l, x) in x_cols.iter_mut().enumerate() {
                 x[..32].copy_from_slice(&x_low[l + T_HF_ADJ]);
             }
@@ -396,9 +499,9 @@ impl SbrDecoder {
                 if let Some(ps) = self.ps.as_mut() {
                     let x_input = build_x_input(&x_cols, &x_low);
                     if let Some((lq, rq)) = ps.dec.process(None, &x_input, 32)? {
-                        let mut pcm_l = Vec::with_capacity(LF * sps);
-                        let mut pcm_r = Vec::with_capacity(LF * sps);
-                        for l in 0..LF {
+                        let mut pcm_l = Vec::with_capacity(lf * sps);
+                        let mut pcm_r = Vec::with_capacity(lf * sps);
+                        for l in 0..lf {
                             ch.synthesis.push_slot(&lq[l], &mut pcm_l)?;
                             ps.synthesis_r.push_slot(&rq[l], &mut pcm_r)?;
                         }
@@ -409,7 +512,7 @@ impl SbrDecoder {
                 }
             }
             if !emitted {
-                let mut pcm = Vec::with_capacity(LF * sps);
+                let mut pcm = Vec::with_capacity(lf * sps);
                 for x in &x_cols {
                     ch.synthesis.push_slot(x, &mut pcm)?;
                 }
@@ -420,7 +523,7 @@ impl SbrDecoder {
             ch.y_prev
                 .iter_mut()
                 .for_each(|c| *c = [Complex::default(); 64]);
-            ch.t_e_last_prev = NUM_TIME_SLOTS;
+            ch.t_e_last_prev = ch.geo.num_time_slots as i32;
         }
         Ok(out)
     }
@@ -455,7 +558,7 @@ impl SbrDecoder {
             let patches = build_patches(&f_master, k0v, bands.k_x, bands.m, self.fs_sbr)?;
             self.f_table_lim = limiter_table(
                 &bands,
-                &patches.borders(bands.k_x),
+                &patches.limiter_borders(bands.k_x, bands.m),
                 ext.header.limiter_bands,
             )?;
             self.bands = Some(bands);
@@ -517,7 +620,7 @@ impl SbrDecoder {
         let mut out = Vec::with_capacity(n_ch);
         for c in 0..n_ch {
             let sbr_ch = &ext.element.channels[c];
-            let grid = derive_time_grid(&sbr_ch.grid, NUM_TIME_SLOTS)?;
+            let grid = derive_time_grid(&sbr_ch.grid, self.geo.num_time_slots as i32)?;
 
             // Coupling: the second channel transmits no sbr_invf()
             // (Table 4.66) — it shares the first channel's
@@ -537,8 +640,10 @@ impl SbrDecoder {
             let x_low = ch.analyze(core[c])?;
 
             // HF generation over the envelope span.
-            let l_range = (RATE * grid.t_e[0])..(RATE * grid.t_e[grid.t_e.len() - 1]);
-            let x_high = generate_hf(&x_low, patches, &bw, bands, l_range, LF)?;
+            let rate = self.geo.rate as i32;
+            let (lf, window) = (self.geo.lf(), self.geo.window());
+            let l_range = (rate * grid.t_e[0])..(rate * grid.t_e[grid.t_e.len() - 1]);
+            let x_high = generate_hf(&x_low, patches, &bw, bands, l_range, window)?;
 
             // §4.6.18.8.3 aliasing detection (low power): reflection
             // coefficients over the low band, the Figure 4.53 degree
@@ -547,7 +652,7 @@ impl SbrDecoder {
                 let k0_cnt = usize::try_from(self.k0).map_err(|_| Error::SbrFreqBandInvalid)?;
                 let mut refl = Vec::with_capacity(k0_cnt);
                 for k in 0..k0_cnt.min(32) {
-                    refl.push(reflection_coefficient(&x_low, k, LF)?);
+                    refl.push(reflection_coefficient(&x_low, k, window)?);
                 }
                 let deg = aliasing_degree(&refl);
                 Some(deg_patched(&deg, patches, bands.k_x, bands.m)?)
@@ -572,18 +677,22 @@ impl SbrDecoder {
                 limiter_gains: ext.header.limiter_gains,
                 reset,
                 resumed: self.resumed,
+                rate,
                 low_power: self.low_power,
                 deg_patched: dp.as_deref(),
             };
             let y = adjust(&x_high, &params, &mut ch.env_state)?;
 
             // §4.6.18.5 X assembly.
-            let l_temp = (RATE * ch.t_e_last_prev - NUM_TIME_SLOTS * RATE).max(0) as usize;
-            let mut x_cols: [[Complex; 64]; LF] = [[Complex::default(); 64]; LF];
+            let l_temp = (rate * ch.t_e_last_prev - self.geo.num_time_slots as i32 * rate).max(0)
+                as usize;
+            let mut x_cols = core::mem::take(&mut ch.x_cols_buf);
+            x_cols.clear();
+            x_cols.resize(lf, [Complex::default(); 64]);
             for (l, x) in x_cols.iter_mut().enumerate() {
                 *x = [Complex::default(); 64];
                 let (kx_cur, m_cur, y_col) = if l < l_temp {
-                    (ch.k_x_prev, ch.m_prev, &ch.y_prev[l + T_HF_ADJ + LF])
+                    (ch.k_x_prev, ch.m_prev, &ch.y_prev[l + T_HF_ADJ + lf])
                 } else {
                     (bands.k_x, bands.m, &y[l + T_HF_ADJ])
                 };
@@ -631,7 +740,7 @@ impl SbrDecoder {
             if ps_payload.is_some() && self.ps.is_none() {
                 self.ps = Some(PsState {
                     dec: PsDecoder::new(),
-                    synthesis_r: SynthesisBank::new(self.downsampled, self.low_power),
+                    synthesis_r: SynthesisBank::new(self.downsampled, self.low_power, self.eld),
                 });
             }
             let sps = ch.synthesis.samples_per_slot();
@@ -641,9 +750,9 @@ impl SbrDecoder {
                     let x_input = build_x_input(&x_cols, &x_low);
                     let kx_plus_m = (bands.k_x + bands.m).max(0) as usize;
                     if let Some((lq, rq)) = ps.dec.process(ps_payload, &x_input, kx_plus_m)? {
-                        let mut pcm_l = Vec::with_capacity(LF * sps);
-                        let mut pcm_r = Vec::with_capacity(LF * sps);
-                        for l in 0..LF {
+                        let mut pcm_l = Vec::with_capacity(lf * sps);
+                        let mut pcm_r = Vec::with_capacity(lf * sps);
+                        for l in 0..lf {
                             ch.synthesis.push_slot(&lq[l], &mut pcm_l)?;
                             ps.synthesis_r.push_slot(&rq[l], &mut pcm_r)?;
                         }
@@ -654,7 +763,7 @@ impl SbrDecoder {
                 }
             }
             if !emitted {
-                let mut pcm = Vec::with_capacity(LF * sps);
+                let mut pcm = Vec::with_capacity(lf * sps);
                 for x in &x_cols {
                     ch.synthesis.push_slot(x, &mut pcm)?;
                 }
@@ -662,6 +771,8 @@ impl SbrDecoder {
             }
 
             // Thread cross-frame state.
+            ch.x_low_buf = x_low;
+            ch.x_cols_buf = x_cols;
             ch.y_prev = y;
             ch.t_e_last_prev = grid.t_e[grid.t_e.len() - 1];
             ch.k_x_prev = bands.k_x;
@@ -680,13 +791,11 @@ impl SbrDecoder {
 /// columns followed by `LOOKAHEAD` slots taken from `XLow` beyond the
 /// frame (`XLow(k, l + tHFAdj)`, `k < 5` — the split bands the hybrid
 /// filterbank consumes ahead of time).
-fn build_x_input(
-    x_cols: &[[Complex; 64]; LF],
-    x_low: &[[Complex; 32]],
-) -> [[Complex; 64]; LF + LOOKAHEAD] {
-    let mut v = [[Complex::default(); 64]; LF + LOOKAHEAD];
-    v[..LF].copy_from_slice(x_cols);
-    for (l, col) in v.iter_mut().enumerate().skip(LF) {
+fn build_x_input(x_cols: &[[Complex; 64]], x_low: &[[Complex; 32]]) -> Vec<[Complex; 64]> {
+    let lf = x_cols.len();
+    let mut v = vec![[Complex::default(); 64]; lf + LOOKAHEAD];
+    v[..lf].copy_from_slice(x_cols);
+    for (l, col) in v.iter_mut().enumerate().skip(lf) {
         col[..5].copy_from_slice(&x_low[l + T_HF_ADJ][..5]);
     }
     v
@@ -696,11 +805,7 @@ fn build_x_input(
 /// The effective `bs_amp_res` after the single-envelope FIXFIX
 /// override (§4.4.2.8 Table 4.69 Note).
 fn effective_amp_res(header: &SbrHeader, grid: &super::grid::SbrGrid) -> bool {
-    if grid.amp_res_override {
-        false
-    } else {
-        header.amp_res
-    }
+    grid.effective_amp_res(header.amp_res)
 }
 
 #[cfg(test)]
@@ -778,6 +883,8 @@ mod tests {
             rel_bord_1: vec![],
             pointer: 0,
             amp_res_override: true,
+            ld_borders: None,
+            amp_res_frame: None,
         };
         let dtdf = SbrDtdf {
             df_env: vec![false],

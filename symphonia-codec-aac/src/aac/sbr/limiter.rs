@@ -180,4 +180,20 @@ mod tests {
             assert!(t.windows(2).all(|w| w[0] < w[1]));
         }
     }
+
+    /// A trailing patch of fewer than 3 subbands is dropped, but the subbands above the last
+    /// patch still end the last limiter band: the top border is that of the SBR range.
+    #[test]
+    fn top_of_the_range_stays_a_border_above_a_dropped_patch() {
+        use super::super::hf_gen::Patches;
+
+        let b = bands(vec![16, 18, 20, 23, 27, 31]);
+        let patches = Patches { start: vec![2], num: vec![13] };
+        let borders = patches.limiter_borders(16, 15);
+        assert_eq!(borders, vec![16, 31]);
+
+        let t = limiter_table(&b, &borders, 2).unwrap();
+        assert_eq!(t.first(), Some(&16));
+        assert_eq!(t.last(), Some(&31));
+    }
 }

@@ -532,8 +532,12 @@ pub mod well_known {
         pub const CODEC_PROFILE_AAC_LTP: CodecProfile = CodecProfile(3);
         /// High Efficiency AAC (HE-AAC) Profile (using Spectral Band Replication)
         pub const CODEC_PROFILE_AAC_HE: CodecProfile = CodecProfile(4);
+        /// AAC Low Delay (LD) Profile
+        pub const CODEC_PROFILE_AAC_LD: CodecProfile = CodecProfile(22);
         /// High Efficiency AAC v2 (HE-AACv2) Profile (using Parametric Stereo)
         pub const CODEC_PROFILE_AAC_HE_V2: CodecProfile = CodecProfile(28);
+        /// AAC Enhanced Low Delay (ELD) Profile
+        pub const CODEC_PROFILE_AAC_ELD: CodecProfile = CodecProfile(38);
         /// Extended HE-AAC (xHE-AAC) Profile (using Unified Speech and Audio Coding)
         pub const CODEC_PROFILE_AAC_USAC: CodecProfile = CodecProfile(41);
     }

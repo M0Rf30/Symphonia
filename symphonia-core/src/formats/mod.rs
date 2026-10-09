@@ -729,4 +729,6 @@ pub mod well_known {
     pub const FORMAT_ID_MUSEPACK: FormatId = FormatId(0x10e);
     /// Low Overhead Audio Stream (AAC in LATM)
     pub const FORMAT_ID_LOAS: FormatId = FormatId(0x10f);
+    /// Audio Data Interchange Format (AAC)
+    pub const FORMAT_ID_ADIF: FormatId = FormatId(0x120);
 }
