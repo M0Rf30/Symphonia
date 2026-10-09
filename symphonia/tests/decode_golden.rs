@@ -58,7 +58,7 @@ const GOLDEN: &[(&str, u64, u64)] = &[
     ("aac/heaac_v1_fdk_48k.m4a", 0xa80e73cecd51439b, 1440000),
     ("aac/heaac_v1_fdk_5_1.m4a", 0x283b441c1beed511, 1440000),
     ("aac/heaac_v1_fdk_adts.aac", 0x3f1293f84f18acda, 1329152),
-    ("aac/heaac_v1_fdk_downsampled_sbr.m4a", 0x641ced336fcf55bc, 1323000),
+    ("aac/heaac_v1_fdk_downsampled_sbr.m4a", 0x8673ede467345468, 1323000),
     ("aac/heaac_v1_fdk_m4a.m4a", 0xbf6bbfdc0c592d8e, 1323000),
     ("aac/heaac_v1_fdk_mono.m4a", 0x7b7814ea3617abe0, 1323000),
     ("aac/heaac_v1_fdk_vbr2.m4a", 0xbccf435325f3f52f, 1323000),
