@@ -10,6 +10,11 @@
 use super::bits::Bits;
 use super::words::{get_old_word1, get_word1, get_word2, get_word3, WordState, WORD_EOF};
 
+/// Upper bound on the number of samples per channel accepted in a single v2/v3 block. Real
+/// encoders emit blocks of well under 200k samples; the limit rejects a malformed or mutated
+/// `total_samples` field before it can drive an unbounded allocation.
+pub const MAX_BLOCK_SAMPLES: u32 = 1 << 20;
+
 // ---------------------------------------------------------------------------
 // Flag constants (match WavpackHeader3 flags field)
 // ---------------------------------------------------------------------------
@@ -188,7 +193,7 @@ pub fn unpack_samples_v3(
     let mut diff_level = dc.diff_level;
 
     let per_frame = if is_mono { 1 } else { 2 };
-    let mut out = Vec::with_capacity(sample_count as usize * per_frame);
+    let mut out = Vec::with_capacity(sample_count.min(MAX_BLOCK_SAMPLES) as usize * per_frame);
     let mut decoded = 0u32;
 
     // -----------------------------------------------------------------------

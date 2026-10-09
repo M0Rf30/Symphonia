@@ -8,7 +8,7 @@
 //! WavPack v4/v5 sub-block parsing.
 
 use symphonia_core::errors::Result;
-use symphonia_core::io::{MediaSourceStream, ReadBytes};
+use symphonia_core::io::ReadBytes;
 
 use log::debug;
 
@@ -51,7 +51,7 @@ pub(super) enum Encoding {
 }
 
 /// Parse one sub-block from the stream. Called repeatedly after the block header.
-pub(super) fn decode_sub_block(source: &mut MediaSourceStream<'_>) -> Result<SubBlock> {
+pub(super) fn decode_sub_block<R: ReadBytes>(source: &mut R) -> Result<SubBlock> {
     let id = source.read_u8()?;
     if id & 0x3f == 0x3f {
         debug!("unique metadata function ID");
@@ -63,9 +63,10 @@ pub(super) fn decode_sub_block(source: &mut MediaSourceStream<'_>) -> Result<Sub
     } else {
         source.read_byte()? as u32
     };
-    let datasize = size_in_words * 2;
-    let mut data = vec![0u8; datasize as usize];
-    source.read_buf_exact(&mut data)?;
+    let datasize = size_in_words as usize * 2;
+    // The size comes from untrusted input: read it incrementally so that the allocation never
+    // exceeds the number of bytes actually present in the stream.
+    let mut data = source.read_boxed_slice_exact(datasize)?.into_vec();
     // ID_ODD_SIZE: the stored length is padded up to a 16-bit word; the
     // last byte is padding and must not be exposed to the sub-block parser.
     // The byte still occupies space in the stream (already read above) but

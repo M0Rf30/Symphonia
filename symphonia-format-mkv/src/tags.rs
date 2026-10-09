@@ -174,6 +174,10 @@ pub fn map_std_tag(raw: &RawTag, lower_ctx: &TagContext) -> Option<StandardTag> 
 
         let value = value.clone();
 
+        // Tag names are defined to be upper case, but tools that write non-standard (Vorbis
+        // comment style) names do not always follow this convention.
+        let tag_uc = tag.to_ascii_uppercase();
+
         // Attempt the match against the full raw tag key (target & tag name).
         let std = match raw_key {
             // Target level 70.
@@ -219,7 +223,7 @@ pub fn map_std_tag(raw: &RawTag, lower_ctx: &TagContext) -> Option<StandardTag> 
             // Official target type names for video: SHOT
 
             // Attempt to match only against the tag name.
-            _ => match tag {
+            _ => match tag_uc.as_str() {
                 // Entities
                 "ARTIST" => StandardTag::Artist(value),
                 "LEAD_PERFORMER" => StandardTag::Performer(value),
@@ -272,6 +276,10 @@ pub fn map_std_tag(raw: &RawTag, lower_ctx: &TagContext) -> Option<StandardTag> 
                 "DATE_RELEASE" => StandardTag::ReleaseDate(value), // Unofficial.
                 "DATE_RELEASED" => StandardTag::ReleaseDate(value),
                 "DATE_RECORDED" => StandardTag::RecordingDate(value),
+                // Not a Matroska-defined tag name, but how ffmpeg (and most other taggers)
+                // write the generic "date" tag, mirroring the Vorbis comment `DATE` field.
+                "DATE" => StandardTag::RecordingDate(value),
+                "ORIGINALDATE" | "ORIGINAL_DATE" => StandardTag::OriginalReleaseDate(value),
                 "DATE_ENCODED" => StandardTag::EncodingDate(value),
                 "DATE_TAGGED" => StandardTag::TaggingDate(value),
                 "DATE_DIGITIZED" => StandardTag::DigitizedDate(value),
@@ -299,6 +307,29 @@ pub fn map_std_tag(raw: &RawTag, lower_ctx: &TagContext) -> Option<StandardTag> 
 
                 // Identifiers
                 "ISRC" => StandardTag::IdentIsrc(value),
+
+                // MusicBrainz identifiers. Not Matroska-defined tag names, but how MusicBrainz
+                // Picard (and other taggers) write them, mirroring the Vorbis comment fields.
+                "MUSICBRAINZ_TRACKID" => StandardTag::MusicBrainzTrackId(value),
+                "MUSICBRAINZ_RELEASETRACKID" => StandardTag::MusicBrainzReleaseTrackId(value),
+                "MUSICBRAINZ_RECORDINGID" => StandardTag::MusicBrainzRecordingId(value),
+                "MUSICBRAINZ_ALBUMID" => StandardTag::MusicBrainzAlbumId(value),
+                "MUSICBRAINZ_ARTISTID" => StandardTag::MusicBrainzArtistId(value),
+                "MUSICBRAINZ_ALBUMARTISTID" => StandardTag::MusicBrainzAlbumArtistId(value),
+                "MUSICBRAINZ_RELEASEGROUPID" => StandardTag::MusicBrainzReleaseGroupId(value),
+                "MUSICBRAINZ_ORIGINALALBUMID" => StandardTag::MusicBrainzOriginalAlbumId(value),
+                "MUSICBRAINZ_ORIGINALARTISTID" => StandardTag::MusicBrainzOriginalArtistId(value),
+                "MUSICBRAINZ_WORKID" => StandardTag::MusicBrainzWorkId(value),
+                "MUSICBRAINZ_DISCID" => StandardTag::MusicBrainzDiscId(value),
+
+                // ReplayGain. The Matroska-defined `REPLAYGAIN_GAIN` and `REPLAYGAIN_PEAK` tag
+                // names are mapped above, where the target (TRACK or ALBUM) is known. These are
+                // the (more common) fully-qualified names, mirroring the Vorbis comment fields.
+                "REPLAYGAIN_TRACK_GAIN" => StandardTag::ReplayGainTrackGain(value),
+                "REPLAYGAIN_TRACK_PEAK" => StandardTag::ReplayGainTrackPeak(value),
+                "REPLAYGAIN_ALBUM_GAIN" => StandardTag::ReplayGainAlbumGain(value),
+                "REPLAYGAIN_ALBUM_PEAK" => StandardTag::ReplayGainAlbumPeak(value),
+                "REPLAYGAIN_REFERENCE_LOUDNESS" => StandardTag::ReplayGainReferenceLoudness(value),
                 "ISBN" => StandardTag::IdentIsbn(value),
                 "BARCODE" => StandardTag::IdentBarcode(value),
                 "CATALOG_NUMBER" => StandardTag::IdentCatalogNumber(value),
@@ -710,7 +741,10 @@ mod tests {
         // own title, not dropped or treated as an album title.
         let ctx = TagContext { is_video: false, target: None };
         let raw = raw_string("TITLE", "Opus in MKA");
-        assert_eq!(map_std_tag(&raw, &ctx), Some(StandardTag::TrackTitle(Arc::new("Opus in MKA".into()))));
+        assert_eq!(
+            map_std_tag(&raw, &ctx),
+            Some(StandardTag::TrackTitle(Arc::new("Opus in MKA".into())))
+        );
     }
 
     #[test]
@@ -748,6 +782,9 @@ mod tests {
             target: Some(Target { value: 30, name: Some(Rc::new("TRACK".to_string().into())) }),
         };
         let raw = raw_string("TRACK@TITLE", "My Track");
-        assert_eq!(map_std_tag(&raw, &ctx), Some(StandardTag::TrackTitle(Arc::new("My Track".into()))));
+        assert_eq!(
+            map_std_tag(&raw, &ctx),
+            Some(StandardTag::TrackTitle(Arc::new("My Track".into())))
+        );
     }
 }
