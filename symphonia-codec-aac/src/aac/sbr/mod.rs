@@ -45,6 +45,8 @@
 //! port has been validated against uses the standard complex-QMF path.
 
 pub(crate) mod bits;
+mod cldfb;
+mod cldfb_tables;
 mod crc;
 mod dequant;
 mod element;
