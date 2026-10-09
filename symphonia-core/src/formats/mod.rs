@@ -154,6 +154,41 @@ pub struct ExternalFormatData {
     pub metadata: Option<MetadataLog>,
     /// Optional chapter information.
     pub chapters: Option<ChapterGroup>,
+    /// Optional sidecar (companion) byte source for formats whose data is split over two
+    /// files, such as the `.wvc` correction file that accompanies a hybrid WavPack `.wv` file.
+    ///
+    /// A `FormatReader` that supports a sidecar takes it (see [`SidecarSource::take`]); readers
+    /// that do not simply ignore it.
+    pub sidecar: Option<SidecarSource>,
+}
+
+/// A cloneable, take-once handle to a caller-provided secondary [`MediaSource`] (a "sidecar"
+/// file) that accompanies the primary source passed to a `FormatReader`.
+///
+/// `FormatOptions` must be `Clone`, but a `MediaSource` generally cannot be, so the source is
+/// shared behind a lock and handed to whichever `FormatReader` takes it first.
+#[derive(Clone)]
+pub struct SidecarSource {
+    inner: std::sync::Arc<std::sync::Mutex<Option<Box<dyn crate::io::MediaSource>>>>,
+}
+
+impl SidecarSource {
+    /// Wrap `source` in a new `SidecarSource`.
+    pub fn new(source: Box<dyn crate::io::MediaSource>) -> Self {
+        SidecarSource { inner: std::sync::Arc::new(std::sync::Mutex::new(Some(source))) }
+    }
+
+    /// Take the source out of this handle (and all of its clones). Returns `None` if it was
+    /// already taken.
+    pub fn take(&self) -> Option<Box<dyn crate::io::MediaSource>> {
+        self.inner.lock().ok().and_then(|mut source| source.take())
+    }
+}
+
+impl fmt::Debug for SidecarSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SidecarSource").finish_non_exhaustive()
+    }
 }
 
 impl Default for FormatOptions {
@@ -188,6 +223,13 @@ impl FormatOptions {
     /// highly-interactive applications, this value should be decreased.
     pub fn seek_index_fill_period_ms(mut self, period: u16) -> Self {
         self.seek_index_fill_period_ms = period;
+        self
+    }
+
+    /// Provide a sidecar (companion) source for the container, e.g. the `.wvc` correction file of
+    /// a hybrid WavPack `.wv` file. See [`ExternalFormatData::sidecar`].
+    pub fn sidecar(mut self, source: Box<dyn crate::io::MediaSource>) -> Self {
+        self.external_data.sidecar = Some(SidecarSource::new(source));
         self
     }
 }
