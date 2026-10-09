@@ -1,0 +1,28 @@
+[package]
+name = "symphonia-format-mpegts"
+description = "Pure Rust MPEG transport stream (audio-only) demuxer (a part of project Symphonia)."
+authors = ["M0Rf30 <morf3089@gmail.com>"]
+readme = "README.md"
+categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
+keywords = ["audio", "media", "demuxer", "mpegts"]
+# Common package metadata located in workspace Cargo.toml.
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+log = { workspace = true }
+symphonia-common = { version = "0.6.1", path = "../symphonia-common" }
+symphonia-core = { version = "0.6.1", path = "../symphonia-core" }
+
+[dev-dependencies]
+symphonia-bundle-mp3 = { version = "0.6.1", path = "../symphonia-bundle-mp3" }
+symphonia-codec-aac = { version = "0.6.1", path = "../symphonia-codec-aac" }
+symphonia-codec-opus = { version = "0.6.1", path = "../symphonia-codec-opus" }
+symphonia-format-ogg = { version = "0.6.1", path = "../symphonia-format-ogg" }
+
+[lints]
+workspace = true
