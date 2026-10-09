@@ -167,11 +167,59 @@ pub fn read_frame(
     }
 }
 
-/// Scans the `data` chunk, `[start_pos, end_pos)`, and returns the byte offset (relative to
-/// `start_pos`) of every MPEG audio frame in it, in order. Frame boundaries are found exactly as
-/// [`read_frame`] finds them, so the `n`th offset is the position of the `n`th packet produced by
-/// [`next_packet`]. The reader must be positioned at `start_pos`; its position is undefined when
-/// this function returns.
+/// The position of an MPEG audio frame in the `data` chunk, and the information needed to find the
+/// frames that must be decoded before it to reproduce a continuous decode (see
+/// [`preroll_start`]).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct FrameIndexEntry {
+    /// The byte offset of the frame, relative to the start of the data chunk.
+    pub offset: u64,
+    /// The `main_data_begin` field of the side information (Layer III only, otherwise 0).
+    pub main_data_begin: u16,
+    /// The number of bytes of main data in the frame (Layer III only, otherwise 0).
+    pub main_data_len: usize,
+}
+
+/// The number of frames before a seek target that are always decoded. Mirrors
+/// `symphonia-bundle-mp3`'s `SEEK_PREROLL_FRAMES`: the output of a frame depends on the overlap-add
+/// of the previous granule and on the polyphase synthesis filterbank history, so the frames up to
+/// 2 granules before the target must be decoded correctly.
+pub const SEEK_PREROLL_FRAMES: usize = 3;
+
+/// Given the index of all frames and the index of the target frame, return the index of the
+/// oldest frame that must be decoded to produce the same output for the target frame as a
+/// continuous decode.
+///
+/// The output of the target frame depends on the main data of the target and of
+/// [`SEEK_PREROLL_FRAMES`] frames before it. The main data of a Layer III frame may begin in an
+/// earlier frame, `main_data_begin` bytes (of main data only) before the end of the main data of
+/// the previous frame. Mirrors `symphonia-bundle-mp3`'s `find_preroll_start`.
+pub fn preroll_start(index: &[FrameIndexEntry], target: usize) -> usize {
+    let first = target.saturating_sub(SEEK_PREROLL_FRAMES);
+    let mut start = first;
+
+    for frame_idx in first..=target {
+        let mut remaining = usize::from(index[frame_idx].main_data_begin);
+        let mut begin_idx = frame_idx;
+
+        // Walk back through the main data of the previous frames until the main data of the frame
+        // is covered.
+        while remaining > 0 && begin_idx > 0 {
+            begin_idx -= 1;
+            remaining = remaining.saturating_sub(index[begin_idx].main_data_len);
+        }
+
+        start = start.min(begin_idx);
+    }
+
+    start
+}
+
+/// Scans the `data` chunk, `[start_pos, end_pos)`, and returns the position (relative to
+/// `start_pos`) and Layer III bit reservoir information of every MPEG audio frame in it, in order.
+/// Frame boundaries are found exactly as [`read_frame`] finds them, so the `n`th entry is the
+/// position of the `n`th packet produced by [`next_packet`]. The reader must be positioned at
+/// `start_pos`; its position is undefined when this function returns.
 ///
 /// MPEG audio frames are variable-length (padding, VBR), so a frame's byte offset can't be
 /// derived from its timestamp by arithmetic without accumulating error. An index of the frame
@@ -180,8 +228,8 @@ pub fn scan_frame_offsets(
     reader: &mut MediaSourceStream<'_>,
     start_pos: u64,
     end_pos: u64,
-) -> Result<Vec<u64>> {
-    let mut offsets = Vec::new();
+) -> Result<Vec<FrameIndexEntry>> {
+    let mut entries = Vec::new();
 
     loop {
         let pos = reader.pos();
@@ -197,17 +245,61 @@ pub fn scan_frame_offsets(
         };
 
         match parse_header(word) {
-            Some((_, frame_len)) => {
+            Some((format, frame_len)) => {
                 // A truncated final frame is not a frame (see `read_frame`).
                 if pos.saturating_add(frame_len as u64) > end_pos {
                     break;
                 }
 
-                if reader.ignore_bytes(frame_len as u64 - 4).is_err() {
+                let mut body_len = frame_len - 4;
+                let mut main_data_begin = 0;
+                let mut main_data_len = 0;
+
+                if format.codec == CODEC_ID_MP3 {
+                    // The optional CRC, followed by the start of the side information.
+                    let has_crc = (word >> 16) & 0x1 == 0;
+                    let is_mpeg1 = (word >> 19) & 0x3 == 0b11;
+                    let is_mono = (word >> 6) & 0x3 == 0b11;
+
+                    let side_info_len = match (is_mpeg1, is_mono) {
+                        (true, true) => 17,
+                        (true, false) => 32,
+                        (false, true) => 9,
+                        (false, false) => 17,
+                    };
+
+                    let crc_len = if has_crc { 2 } else { 0 };
+                    let prefix_len = (crc_len + 2).min(body_len);
+                    let mut prefix = [0u8; 4];
+
+                    if reader.read_buf_exact(&mut prefix[..prefix_len]).is_err() {
+                        break;
+                    }
+
+                    body_len -= prefix_len;
+
+                    if prefix_len == crc_len + 2 {
+                        let side = &prefix[crc_len..];
+                        main_data_begin = if is_mpeg1 {
+                            u16::from_be_bytes([side[0], side[1]]) >> 7
+                        }
+                        else {
+                            u16::from(side[0])
+                        };
+                    }
+
+                    main_data_len = (frame_len - 4).saturating_sub(crc_len + side_info_len);
+                }
+
+                if reader.ignore_bytes(body_len as u64).is_err() {
                     break;
                 }
 
-                offsets.push(pos - start_pos);
+                entries.push(FrameIndexEntry {
+                    offset: pos - start_pos,
+                    main_data_begin,
+                    main_data_len,
+                });
             }
             // Not a frame header, slide the window forward by one byte.
             None => {
@@ -216,7 +308,7 @@ pub fn scan_frame_offsets(
         }
     }
 
-    Ok(offsets)
+    Ok(entries)
 }
 
 /// Reads the next MPEG audio frame from the `data` chunk and wraps it in a [`Packet`], advancing
@@ -318,5 +410,57 @@ mod tests {
         assert!(parse_header(0x0000_0000).is_none()); // no sync word
         assert!(parse_header(0xFFFF_FFFF).is_none()); // reserved bit-rate (0xf)
         assert!(parse_header(0xFFE0_0000).is_none()); // free-format bit-rate (0)
+    }
+
+    #[test]
+    fn finds_preroll_start() {
+        let entry = |main_data_begin: u16| FrameIndexEntry {
+            offset: 0,
+            main_data_begin,
+            main_data_len: 100,
+        };
+
+        let mut index: Vec<_> = (0..10).map(|_| entry(0)).collect();
+        assert_eq!(preroll_start(&index, 9), 9 - SEEK_PREROLL_FRAMES);
+        assert_eq!(preroll_start(&index, 1), 0);
+
+        // Target uses 450 bytes: 5 frames.
+        index[9] = entry(450);
+        assert_eq!(preroll_start(&index, 9), 4);
+
+        // A pre-roll frame uses a lot: 7 - 5 frames.
+        index[9] = entry(0);
+        index[7] = entry(500);
+        assert_eq!(preroll_start(&index, 9), 2);
+    }
+
+    #[test]
+    fn scans_main_data_begin() {
+        use std::io::Cursor;
+        use symphonia_core::io::MediaSourceStreamOptions;
+
+        // MPEG-1 Layer III, 128 kbps, 44.1 kHz, stereo, no CRC, no padding: 417 byte frames,
+        // 4 byte header, 32 byte side information.
+        let mut data = Vec::new();
+        for mdb in [0u16, 100, 511] {
+            let start = data.len();
+            data.extend_from_slice(&0xFFFB_9000u32.to_be_bytes());
+            data.extend_from_slice(&(mdb << 7).to_be_bytes());
+            data.resize(start + 417, 0);
+        }
+
+        let mut mss = MediaSourceStream::new(
+            Box::new(Cursor::new(data)),
+            MediaSourceStreamOptions::default(),
+        );
+        let entries = scan_frame_offsets(&mut mss, 0, u64::MAX).unwrap();
+
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[2].offset, 834);
+        assert_eq!(
+            entries.iter().map(|e| e.main_data_begin).collect::<Vec<_>>(),
+            vec![0, 100, 511]
+        );
+        assert!(entries.iter().all(|e| e.main_data_len == 417 - 4 - 32));
     }
 }

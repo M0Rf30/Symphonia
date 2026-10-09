@@ -86,7 +86,7 @@ pub struct WavReader<'s> {
     /// Byte offset, relative to the start of the data chunk, of every MPEG frame. MPEG frames are
     /// variable-length, so this index is the only way to seek to an exact frame. It is built
     /// lazily on the first seek (which requires scanning the entire data chunk).
-    mpeg_frame_index: Option<Vec<u64>>,
+    mpeg_frame_index: Option<Vec<mpeg::FrameIndexEntry>>,
 }
 
 impl<'s> WavReader<'s> {
@@ -408,14 +408,18 @@ impl<'s> WavReader<'s> {
         // Frames are all the same codec so all have the same number of samples.
         let frame_index = (required_ts.get() as u64) / self.mpeg_samples_per_frame;
 
-        let Some(frame_offset) = usize::try_from(frame_index).ok().and_then(|i| index.get(i))
+        let Some(frame_index) = usize::try_from(frame_index).ok().filter(|&i| i < index.len())
         else {
             return seek_error(SeekErrorKind::OutOfRange);
         };
 
-        self.reader.seek(SeekFrom::Start(self.data_start_pos + frame_offset))?;
+        // Start decoding some frames before the target, and the frames its bit reservoir
+        // references, so that the output of the target frame is identical to a continuous decode.
+        let start_index = mpeg::preroll_start(index, frame_index);
 
-        let aligned_ts = frame_index * self.mpeg_samples_per_frame;
+        self.reader.seek(SeekFrom::Start(self.data_start_pos + index[start_index].offset))?;
+
+        let aligned_ts = (start_index as u64) * self.mpeg_samples_per_frame;
 
         let actual_ts = Timestamp::try_from(aligned_ts)
             .map_err(|_| Error::SeekError(SeekErrorKind::OutOfRange))?;
@@ -974,7 +978,7 @@ mod tests {
 
             let delta = seeked.actual_ts.abs_delta(Timestamp::new(target_ts as i64)).get();
             assert!(
-                delta <= SAMPLES_PER_FRAME,
+                delta <= (mpeg::SEEK_PREROLL_FRAMES as u64 + 1) * SAMPLES_PER_FRAME,
                 "seek to ts={target_ts} landed {delta} samples away (actual={})",
                 seeked.actual_ts
             );
@@ -1079,8 +1083,10 @@ mod tests {
                 .unwrap_or_else(|e| panic!("seek to {target_secs}s failed: {e:?}"));
 
             let delta = seeked.actual_ts.abs_delta(required_ts).get();
+            // The seek lands on the pre-roll frames (and the frames of the bit reservoir) before
+            // the frame containing the target.
             assert!(
-                delta <= 1152,
+                delta <= 12 * 1152,
                 "seek to {target_secs}s landed {delta} samples away (target={required_ts}, actual={})",
                 seeked.actual_ts
             );
@@ -1553,8 +1559,10 @@ mod tests {
                 };
                 let mut frame = vec![0u8; len];
                 frame[0..4].copy_from_slice(&header.to_be_bytes());
-                frame[4] = (n / 100) as u8;
-                frame[5] = (n % 100) as u8;
+                // Identify the frame in its last bytes, leaving the side information (and thus
+                // `main_data_begin`) zero.
+                frame[len - 2] = (n / 100) as u8;
+                frame[len - 1] = (n % 100) as u8;
                 frame
             })
             .collect()
@@ -1576,15 +1584,19 @@ mod tests {
                 .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: required_ts, track_id: 0 })
                 .unwrap_or_else(|e| panic!("seek to frame {index} failed: {e:?}"));
 
-            assert_eq!(seeked.actual_ts.get() as u64, index as u64 * SAMPLES_PER_FRAME);
+            // Decoding starts a fixed number of frames before the target frame.
+            let start = index.saturating_sub(mpeg::SEEK_PREROLL_FRAMES);
+            assert_eq!(seeked.actual_ts.get() as u64, start as u64 * SAMPLES_PER_FRAME);
 
-            // The very frame that was seeked to follows, and then the one after it.
-            let packet = reader.next_packet().unwrap().expect("packet after seek");
-            assert_eq!(packet.pts, seeked.actual_ts);
-            assert_eq!(&packet.data[..], &frames[index][..]);
+            // The pre-roll frames follow, and then the target frame.
+            for i in start..=index {
+                let packet = reader.next_packet().unwrap().expect("packet after seek");
+                assert_eq!(packet.pts.get() as u64, i as u64 * SAMPLES_PER_FRAME);
+                assert_eq!(&packet.data[..], &frames[i][..]);
+            }
 
             if index + 1 < NUM_FRAMES {
-                let packet = reader.next_packet().unwrap().expect("second packet after seek");
+                let packet = reader.next_packet().unwrap().expect("packet after target");
                 assert_eq!(packet.pts.get() as u64, (index as u64 + 1) * SAMPLES_PER_FRAME);
                 assert_eq!(&packet.data[..], &frames[index + 1][..]);
             }
