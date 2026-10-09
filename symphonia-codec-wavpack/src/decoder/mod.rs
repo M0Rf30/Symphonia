@@ -27,11 +27,14 @@ use v3::{DecorrPass, DcState, unpack_init3, unpack_samples_v3, MAX_BLOCK_SAMPLES
 use words::WordState;
 use v4v5::{
     DecorrPass as DecorrPass45, WordsState as WordsState45,
-    PACKET_MAGIC, STREAM_HDR,
+    PACKET_MAGIC, WvxInput, WvcInput,
     parse_decorr_terms, parse_decorr_weights, parse_decorr_samples,
     parse_entropy_vars, parse_int32_info,
     unpack_samples_v4v5,
 };
+
+// The layout of the per-stream mini-blocks the reader builds (see `STREAM_HDR`).
+pub(crate) use v4v5::{EXT_WVC_WVX_NEW, EXT_WVX_NEW, STREAM_HDR};
 
 /// One physical wvpk block's decoded samples: a stream is a mono or stereo pair of
 /// output channels; a multichannel "block group" is made of several of these (see
@@ -297,18 +300,26 @@ impl WavPackDecoder {
         let fil = read_u32(32); // float info
         let il  = read_u32(36); // int32 info
         let wxl = read_u32(40); // wvx (float/int32 extension) bitstream
+        let shl = read_u32(44); // shaping weights (from the .wvc block)
+        let wcl = read_u32(48); // wvc correction bitstream
+        let wcxl = read_u32(52); // wvx bitstream from the .wvc block
+        let wvc_crc = read_u32(56) as u32; // CRC of the lossless data, from the .wvc block
+        let ext_flags = read_u32(60) as u32;
 
         let mut pos = STREAM_HDR;
         let end     = stream_data.len();
 
-        let terms_raw   = &stream_data[pos..pos.saturating_add(tl).min(end)];  pos += tl;
-        let weights_raw = &stream_data[pos..pos.saturating_add(wl).min(end)];  pos += wl;
-        let samples_raw = &stream_data[pos..pos.saturating_add(sl).min(end)];  pos += sl;
-        let entropy_raw = &stream_data[pos..pos.saturating_add(el).min(end)];  pos += el;
-        let hybrid_raw  = &stream_data[pos..pos.saturating_add(hpl).min(end)]; pos += hpl;
-        let float_raw   = &stream_data[pos..pos.saturating_add(fil).min(end)]; pos += fil;
-        let int32_raw   = &stream_data[pos..pos.saturating_add(il).min(end)];  pos += il;
-        let wvx_raw     = &stream_data[pos..pos.saturating_add(wxl).min(end)]; pos += wxl;
+        let terms_raw   = &stream_data[pos..pos.saturating_add(tl).min(end)];  pos = pos.saturating_add(tl);
+        let weights_raw = &stream_data[pos.min(end)..pos.saturating_add(wl).min(end)];  pos = pos.saturating_add(wl);
+        let samples_raw = &stream_data[pos.min(end)..pos.saturating_add(sl).min(end)];  pos = pos.saturating_add(sl);
+        let entropy_raw = &stream_data[pos.min(end)..pos.saturating_add(el).min(end)];  pos = pos.saturating_add(el);
+        let hybrid_raw  = &stream_data[pos.min(end)..pos.saturating_add(hpl).min(end)]; pos = pos.saturating_add(hpl);
+        let float_raw   = &stream_data[pos.min(end)..pos.saturating_add(fil).min(end)]; pos = pos.saturating_add(fil);
+        let int32_raw   = &stream_data[pos.min(end)..pos.saturating_add(il).min(end)];  pos = pos.saturating_add(il);
+        let wvx_raw     = &stream_data[pos.min(end)..pos.saturating_add(wxl).min(end)]; pos = pos.saturating_add(wxl);
+        let shaping_raw = &stream_data[pos.min(end)..pos.saturating_add(shl).min(end)]; pos = pos.saturating_add(shl);
+        let wvc_raw     = &stream_data[pos.min(end)..pos.saturating_add(wcl).min(end)]; pos = pos.saturating_add(wcl);
+        let wvc_wvx_raw = &stream_data[pos.min(end)..pos.saturating_add(wcxl).min(end)]; pos = pos.saturating_add(wcxl);
         let audio       = &stream_data[pos.min(end)..];
 
         let is_mono = (flags & v4v5::MONO_DATA) != 0;
@@ -333,6 +344,19 @@ impl WavPackDecoder {
         let i32info = parse_int32_info(int32_raw);
         let float_info = if is_float { floats::parse_float_info(float_raw) } else { None };
 
+        let main_wvx = WvxInput::parse(wvx_raw, ext_flags & EXT_WVX_NEW != 0);
+        let wvc = if wvc_raw.is_empty() {
+            None
+        }
+        else {
+            Some(WvcInput {
+                bits:    wvc_raw,
+                crc:     wvc_crc,
+                shaping: shaping_raw,
+                wvx:     WvxInput::parse(wvc_wvx_raw, ext_flags & EXT_WVC_WVX_NEW != 0),
+            })
+        };
+
         let samples = if block_samples == 0 {
             Vec::new()
         }
@@ -343,7 +367,8 @@ impl WavPackDecoder {
                 &mut words,
                 &i32info,
                 float_info.as_ref(),
-                wvx_raw,
+                main_wvx,
+                wvc.as_ref(),
                 audio,
             ).ok_or(symphonia_core::errors::Error::DecodeError(
                 "wavpack v4/v5: unsupported encoding"

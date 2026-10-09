@@ -24,7 +24,8 @@ const FLOAT_SHIFT_SENT: u8 = 4; // bits shifted into float are sent literally
 const FLOAT_ZEROS_SENT: u8 = 8; // "zeros" are not all real zeros
 const FLOAT_NEG_ZEROS: u8 = 0x10; // contains negative zeros
 
-/// Parsed contents of an `ID_FLOAT_INFO` sub-block (always exactly 4 bytes).
+/// Parsed contents of an `ID_FLOAT_INFO` sub-block (always exactly 4 bytes), plus the two
+/// 5-bit fields that start an `ID_WVX_NEW_BITSTREAM` of float data.
 #[derive(Default, Clone, Copy)]
 pub struct FloatInfo {
     pub flags: u8,
@@ -32,40 +33,54 @@ pub struct FloatInfo {
     pub max_exp: u8,
     #[allow(dead_code)]
     pub norm_exp: u8,
+    /// `float_min_shifted_zeros`: only set by `ID_WVX_NEW_BITSTREAM`, otherwise 0.
+    pub min_shifted_zeros: i32,
+    /// `float_max_shifted_ones`: only set by `ID_WVX_NEW_BITSTREAM`, otherwise 0.
+    pub max_shifted_ones: i32,
 }
 
 pub fn parse_float_info(data: &[u8]) -> Option<FloatInfo> {
     if data.len() != 4 {
         return None;
     }
-    Some(FloatInfo { flags: data[0], shift: data[1], max_exp: data[2], norm_exp: data[3] })
+    Some(FloatInfo {
+        flags: data[0],
+        shift: data[1],
+        max_exp: data[2],
+        norm_exp: data[3],
+        ..Default::default()
+    })
 }
 
 /// Restore `values` (raw 24-bit-shifted integer magnitudes produced by the entropy
 /// decoder + decorrelator) into IEEE-754 `f32` bit patterns in place.
 ///
 /// `wvx` is the `ID_WVX_BITSTREAM` sub-block bit reader (the "extension" stream that
-/// carries the bits needed for bit-exact float reconstruction), if present in this
-/// block. It is embedded in the same WavPack block as the main audio bitstream (not a
-/// separate file), so no external file is required for lossless float decoding.
-/// Mirrors `float_values()` / `float_values_nowvx()` in unpack_floats.c.
-pub fn float_values(values: &mut [i32], info: &FloatInfo, wvx: Option<&mut Bits<'_>>) {
+/// carries the bits needed for bit-exact float reconstruction), if present. It is embedded
+/// in the same WavPack block as the main audio bitstream for lossless files, and in the
+/// `.wvc` correction block for hybrid-lossless ones.
+/// Mirrors `float_values()` / `float_values_nowvx()` in unpack_floats.c. With a `wvx`, the
+/// CRC of the restored values (to compare against the one stored in the sub-block) is returned.
+pub fn float_values(
+    values: &mut [i32],
+    info: &FloatInfo,
+    wvx: Option<&mut Bits<'_>>,
+) -> Option<u32> {
     match wvx {
-        Some(bs) => float_values_wvx(values, info, bs),
-        None => float_values_nowvx(values, info),
+        Some(bs) => Some(float_values_wvx(values, info, bs)),
+        None => {
+            float_values_nowvx(values, info);
+            None
+        }
     }
 }
 
-// `float_min_shifted_zeros` / `float_max_shifted_ones` are only ever populated from the
-// 5-bit prefix carried by `ID_WVX_NEW_BITSTREAM`, which the reference encoder only ever
-// emits for the 32-bit-integer optimization path (`CONFIG_OPTIMIZE_32BIT`), never for
-// `FLOAT_DATA`. For float streams these two fields are therefore always their
-// zero-initialized default, which is what is hard-coded below.
-const FLOAT_MIN_SHIFTED_ZEROS: i32 = 0;
-const FLOAT_MAX_SHIFTED_ONES: i32 = 0;
-
 /// Port of `float_values()` in unpack_floats.c (the "has wvx bitstream" path).
-fn float_values_wvx(values: &mut [i32], info: &FloatInfo, bs: &mut Bits<'_>) {
+fn float_values_wvx(values: &mut [i32], info: &FloatInfo, bs: &mut Bits<'_>) -> u32 {
+    let min_shifted_zeros = info.min_shifted_zeros;
+    let max_shifted_ones = info.max_shifted_ones;
+    let mut crc: u32 = 0xffff_ffff;
+
     for v in values.iter_mut() {
         let mut shift_count: i32 = 0;
         let mut exp = info.max_exp as i32;
@@ -133,15 +148,15 @@ fn float_values_wvx(values: &mut [i32], info: &FloatInfo, bs: &mut Bits<'_>) {
                         let mask = (1u32 << shift_count) - 1;
                         let mut num_zeros = 0i32;
 
-                        if FLOAT_MAX_SHIFTED_ONES != 0 && shift_count > FLOAT_MAX_SHIFTED_ONES {
-                            num_zeros = shift_count - FLOAT_MAX_SHIFTED_ONES;
+                        if max_shifted_ones != 0 && shift_count > max_shifted_ones {
+                            num_zeros = shift_count - max_shifted_ones;
                         }
-                        if FLOAT_MIN_SHIFTED_ZEROS > num_zeros {
-                            num_zeros = if FLOAT_MIN_SHIFTED_ZEROS > shift_count {
+                        if min_shifted_zeros > num_zeros {
+                            num_zeros = if min_shifted_zeros > shift_count {
                                 shift_count
                             }
                             else {
-                                FLOAT_MIN_SHIFTED_ZEROS
+                                min_shifted_zeros
                             };
                         }
 
@@ -158,8 +173,16 @@ fn float_values_wvx(values: &mut [i32], info: &FloatInfo, bs: &mut Bits<'_>) {
             }
         }
 
+        crc = crc
+            .wrapping_mul(27)
+            .wrapping_add((outval & 0x007f_ffff).wrapping_mul(9))
+            .wrapping_add(((outval >> 23) & 0xff).wrapping_mul(3))
+            .wrapping_add(outval >> 31);
+
         *v = outval as i32;
     }
+
+    crc
 }
 
 /// Port of `float_values_nowvx()` in unpack_floats.c (no correction/extension bits
