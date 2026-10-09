@@ -21,7 +21,6 @@ use symphonia_core::meta::{Metadata, MetadataLog};
 
 use symphonia_common::mpeg::audio::*;
 
-use std::collections::VecDeque;
 use std::io::{Seek, SeekFrom};
 
 use log::{debug, info};
@@ -337,7 +336,7 @@ impl FormatReader for AdtsReader<'_> {
         &self.tracks
     }
 
-    fn seek(&mut self, mode: SeekMode, to: SeekTo) -> Result<SeekedTo> {
+    fn seek(&mut self, _mode: SeekMode, to: SeekTo) -> Result<SeekedTo> {
         // Get the timestamp of the desired audio frame.
         let required_ts = match to {
             // Frame timestamp given.
@@ -355,9 +354,21 @@ impl FormatReader for AdtsReader<'_> {
 
         debug!("seeking to ts={required_ts}");
 
-        // If the desired timestamp is less-than the next packet timestamp, attempt to seek
-        // to the start of the stream.
-        if required_ts < self.next_packet_ts {
+        // The frame to start decoding from. For a decoder to reproduce a continuous decode at the
+        // required timestamp, it must be fed some frames before it (MDCT overlap, SBR state), a
+        // choice that depends on the codec features in use. This applies to coarse seeks too: a
+        // decoder started at the required timestamp outputs wrong audio, and, with SBR, never
+        // recovers the right noise phase.
+        let sbr = self.may_use_sbr();
+        let required_frame =
+            u64::try_from(required_ts.get()).unwrap_or(0) / SAMPLES_PER_AAC_PACKET.get();
+        let mut start_ts = Timestamp::new(
+            (aac_seek_start_frame(required_frame, sbr) * SAMPLES_PER_AAC_PACKET.get()) as i64,
+        );
+
+        // If the frame to start from is before the next packet, attempt to seek to the start of
+        // the stream.
+        if start_ts < self.next_packet_ts {
             // If the reader is not seekable then only forward seeks are possible.
             if self.reader.is_seekable() {
                 let seeked_pos = self.reader.seek(SeekFrom::Start(self.first_frame_pos))?;
@@ -368,27 +379,23 @@ impl FormatReader for AdtsReader<'_> {
                     return seek_error(SeekErrorKind::Unseekable);
                 }
             }
-            else {
+            else if required_ts < self.next_packet_ts {
                 return seek_error(SeekErrorKind::ForwardOnly);
             }
+            else {
+                // The stream cannot be rewound to the frame to start decoding from, but the
+                // required timestamp can still be reached.
+                start_ts = self.next_packet_ts;
+            }
 
-            // Successfuly seeked to the start of the stream, reset the next packet timestamp.
-            self.next_packet_ts = Timestamp::from(0);
+            if self.reader.is_seekable() {
+                // Successfuly seeked to the start of the stream, reset the next packet timestamp.
+                self.next_packet_ts = Timestamp::from(0);
+            }
         }
 
-        // For an accurate seek, the decoder must be fed some frames before the target for it to
-        // converge (MDCT overlap, SBR state). Remember the position of the most recent frames.
-        let sbr = self.may_use_sbr();
-        let preroll = match (mode == SeekMode::Accurate, sbr) {
-            (false, _) => 0,
-            (true, false) => 1,
-            // The maximum distance between the target and the start frame.
-            (true, true) => AAC_SEEK_MAX_PREROLL_FRAMES as usize,
-        };
-        let mut recent: VecDeque<(u64, Timestamp)> = VecDeque::with_capacity(preroll + 1);
-
-        // Parse frames from the stream until the frame containing the desired timestamp is
-        // reached.
+        // Parse frames from the stream until the frame to start from is reached. If the stream
+        // cannot be rewound (non-seekable), the frame closest to it that is available is used.
         loop {
             // Parse the next frame header.
             let header = match AdtsHeader::read(&mut self.reader) {
@@ -404,8 +411,8 @@ impl FormatReader for AdtsReader<'_> {
             // TODO: Support multiple AAC packets per ADTS packet.
 
             let next_packet_ts = match self.next_packet_ts.checked_add(SAMPLES_PER_AAC_PACKET) {
-                Some(ts) if ts <= required_ts => ts,
-                // If the next frame's timestamp would exceed the desired timestamp, or it
+                Some(ts) if ts <= start_ts => ts,
+                // If the next frame's timestamp would exceed the timestamp to start from, or it
                 // exceeds the representable range, rewind back to the start of this frame and end
                 // the search.
                 _ => {
@@ -414,38 +421,11 @@ impl FormatReader for AdtsReader<'_> {
                 }
             };
 
-            if preroll > 0 {
-                if recent.len() == preroll {
-                    recent.pop_front();
-                }
-                recent.push_back((
-                    self.reader.pos().saturating_sub(u64::from(header.header_len())),
-                    self.next_packet_ts,
-                ));
-            }
-
             // Ignore the frame body.
             self.reader.ignore_bytes(u64::from(header.payload_len()))?;
 
             // Increment the timestamp for the next packet.
             self.next_packet_ts = next_packet_ts;
-        }
-
-        // Rewind to the frame to start decoding from, if possible and not already there.
-        if preroll > 0 && self.reader.is_seekable() {
-            let target = u64::try_from(self.next_packet_ts.get()).unwrap_or(0)
-                / SAMPLES_PER_AAC_PACKET.get();
-            let start = aac_seek_start_frame(target, sbr);
-
-            let start_frame = recent.iter().find(|(_, ts)| {
-                u64::try_from(ts.get()).ok() == start.checked_mul(SAMPLES_PER_AAC_PACKET.get())
-            });
-
-            if let Some(&(pos, ts)) = start_frame {
-                if self.reader.seek(SeekFrom::Start(pos)).is_ok() {
-                    self.next_packet_ts = ts;
-                }
-            }
         }
 
         debug!(
@@ -538,5 +518,85 @@ fn approximate_frame_count(mut source: &mut MediaSourceStream<'_>) -> Result<Opt
     match parsed_n_frames {
         0 => Ok(None),
         _ => Ok(Some(remaining_len / (n_bytes / parsed_n_frames) * SAMPLES_PER_AAC_PACKET.get())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build an ADTS stream of `n` frames with `payload_len` byte payloads. The sample rate index
+    /// selects the sample rate (4 = 44.1 kHz, 7 = 22.05 kHz).
+    fn adts_stream(n: usize, rate_idx: u8, payload_len: usize) -> Vec<u8> {
+        let frame_len = 7 + payload_len;
+        let mut data = vec![];
+
+        for i in 0..n {
+            // Sync word, MPEG-4, no CRC.
+            data.extend_from_slice(&[0xff, 0xf1]);
+            // AAC-LC, sample rate, private bit, channel configuration 2 (high bit).
+            data.push((1 << 6) | (rate_idx << 2));
+            data.push(2 << 6 | ((frame_len >> 11) & 0x3) as u8);
+            data.push(((frame_len >> 3) & 0xff) as u8);
+            data.push((((frame_len & 0x7) << 5) | 0x1f) as u8);
+            // Buffer fullness (low bits) and a single raw data block.
+            data.push(0xfc);
+            data.extend(std::iter::repeat_n(i as u8, payload_len));
+        }
+
+        data
+    }
+
+    fn reader(data: Vec<u8>) -> AdtsReader<'static> {
+        let mss = MediaSourceStream::new(Box::new(std::io::Cursor::new(data)), Default::default());
+        AdtsReader::try_new(mss, Default::default()).expect("adts stream")
+    }
+
+    fn seek(reader: &mut AdtsReader<'_>, mode: SeekMode, frame: i64) -> SeekedTo {
+        let ts = Timestamp::new(frame * 1024 + 10);
+        reader.seek(mode, SeekTo::Timestamp { ts, track_id: 0 }).expect("seek")
+    }
+
+    #[test]
+    fn seek_starts_a_frame_before_the_target_without_sbr() {
+        let mut reader = reader(adts_stream(300, 4, 12));
+
+        for mode in [SeekMode::Accurate, SeekMode::Coarse] {
+            let seeked = seek(&mut reader, mode, 150);
+            assert_eq!(seeked.actual_ts.get(), 149 * 1024);
+
+            // The reader is positioned at that frame.
+            let packet = reader.next_packet().unwrap().unwrap();
+            assert_eq!(packet.pts.get(), 149 * 1024);
+            assert_eq!(packet.data[0], 149);
+        }
+
+        // Seeks to the start return the first frame.
+        assert_eq!(seek(&mut reader, SeekMode::Accurate, 0).actual_ts.get(), 0);
+        assert_eq!(reader.next_packet().unwrap().unwrap().pts.get(), 0);
+    }
+
+    #[test]
+    fn seek_rewinds_to_a_frame_aligned_start_for_sbr() {
+        // 22.05 kHz may be the core rate of an SBR stream.
+        let mut reader = reader(adts_stream(400, 7, 12));
+
+        for mode in [SeekMode::Accurate, SeekMode::Coarse] {
+            // A decoder is reset to a frame that is a multiple of 16: 41 frames or more before.
+            let seeked = seek(&mut reader, mode, 150);
+            assert_eq!(seeked.actual_ts.get(), 96 * 1024);
+            assert_eq!(reader.next_packet().unwrap().unwrap().data[0], 96);
+
+            // Seeking to a position that has a start frame earlier than the current position
+            // must rewind, even if the position is after the start frame.
+            let seeked = seek(&mut reader, mode, 130);
+            assert_eq!(seeked.actual_ts.get(), 80 * 1024);
+            assert_eq!(reader.next_packet().unwrap().unwrap().data[0], 80);
+
+            // And a forward seek, past frames that were not examined.
+            let seeked = seek(&mut reader, mode, 390);
+            assert_eq!(seeked.actual_ts.get(), 336 * 1024);
+            assert_eq!(reader.next_packet().unwrap().unwrap().data[0], (336 % 256) as u8);
+        }
     }
 }

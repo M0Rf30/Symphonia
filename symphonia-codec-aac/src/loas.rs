@@ -591,7 +591,7 @@ impl FormatReader for LoasReader<'_> {
         &self.tracks
     }
 
-    fn seek(&mut self, mode: SeekMode, to: SeekTo) -> Result<SeekedTo> {
+    fn seek(&mut self, _mode: SeekMode, to: SeekTo) -> Result<SeekedTo> {
         // Only streams with a single payload per frame can be seeked by frame.
         if !matches!(&self.config, Some(config) if config.num_sub_frames == 0) {
             return seek_error(SeekErrorKind::Unseekable);
@@ -614,31 +614,33 @@ impl FormatReader for LoasReader<'_> {
         // packet timestamp are positioned after them.
         self.pending.clear();
 
-        // If the desired timestamp is less-than the next packet timestamp, attempt to seek to the
-        // start of the stream.
-        if required_ts < self.next_packet_ts {
+        // The frame to start decoding from. For a decoder to reproduce a continuous decode at the
+        // required timestamp, it must be fed some frames before it (MDCT overlap, SBR state).
+        // This applies to coarse seeks too: a decoder started at the required timestamp outputs
+        // wrong audio, and, with SBR, never recovers the right noise phase.
+        let sbr = self.may_use_sbr();
+        let required_frame =
+            u64::try_from(required_ts.get()).unwrap_or(0) / SAMPLES_PER_AAC_PACKET.get();
+        let mut start_ts = Timestamp::new(
+            (aac_seek_start_frame(required_frame, sbr) * SAMPLES_PER_AAC_PACKET.get()) as i64,
+        );
+
+        // If the frame to start from is before the next packet, attempt to seek to the start of
+        // the stream.
+        if start_ts < self.next_packet_ts {
             if self.reader.is_seekable() {
                 self.reader.seek(SeekFrom::Start(self.first_frame_pos))?;
+                self.next_packet_ts = Timestamp::new(0);
             }
-            else {
+            else if required_ts < self.next_packet_ts {
                 return seek_error(SeekErrorKind::ForwardOnly);
             }
-
-            self.next_packet_ts = Timestamp::new(0);
+            else {
+                start_ts = self.next_packet_ts;
+            }
         }
 
-        // For an accurate seek, the decoder must be fed some frames before the target for it to
-        // converge. Remember the position of the most recent frames.
-        let sbr = self.may_use_sbr();
-        let preroll = match (mode == SeekMode::Accurate, sbr) {
-            (false, _) => 0,
-            (true, false) => 1,
-            (true, true) => AAC_SEEK_MAX_PREROLL_FRAMES as usize,
-        };
-        let mut recent: VecDeque<(u64, Timestamp)> = VecDeque::with_capacity(preroll + 1);
-
-        // Parse frames from the stream until the frame containing the desired timestamp is
-        // reached.
+        // Parse frames from the stream until the frame to start from is reached.
         loop {
             let len = match read_frame_len(&mut self.reader) {
                 Ok(len) => len,
@@ -649,43 +651,16 @@ impl FormatReader for LoasReader<'_> {
             };
 
             let next_packet_ts = match self.next_packet_ts.checked_add(SAMPLES_PER_AAC_PACKET) {
-                Some(ts) if ts <= required_ts => ts,
-                // The frame contains the desired timestamp: rewind to its start.
+                Some(ts) if ts <= start_ts => ts,
+                // The frame contains the timestamp to start from: rewind to its start.
                 _ => {
                     self.reader.seek_buffered_rev(LOAS_HEADER_LEN as usize);
                     break;
                 }
             };
 
-            if preroll > 0 {
-                if recent.len() == preroll {
-                    recent.pop_front();
-                }
-                recent.push_back((
-                    self.reader.pos().saturating_sub(LOAS_HEADER_LEN),
-                    self.next_packet_ts,
-                ));
-            }
-
             self.reader.ignore_bytes(len as u64)?;
             self.next_packet_ts = next_packet_ts;
-        }
-
-        // Rewind to the frame to start decoding from, if possible and not already there.
-        if preroll > 0 && self.reader.is_seekable() {
-            let target = u64::try_from(self.next_packet_ts.get()).unwrap_or(0)
-                / SAMPLES_PER_AAC_PACKET.get();
-            let start = aac_seek_start_frame(target, sbr);
-
-            let start_frame = recent.iter().find(|(_, ts)| {
-                u64::try_from(ts.get()).ok() == start.checked_mul(SAMPLES_PER_AAC_PACKET.get())
-            });
-
-            if let Some(&(pos, ts)) = start_frame {
-                if self.reader.seek(SeekFrom::Start(pos)).is_ok() {
-                    self.next_packet_ts = ts;
-                }
-            }
         }
 
         debug!(
