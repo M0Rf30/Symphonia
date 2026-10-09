@@ -13,5 +13,9 @@
 #![allow(clippy::manual_range_contains)]
 
 pub mod audio;
+pub mod es;
 pub mod formats;
+pub mod pes;
+pub mod seek;
+pub mod timeline;
 pub mod video;
