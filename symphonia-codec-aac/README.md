@@ -19,13 +19,33 @@ Parametric Stereo is only supported when the whole stream is a single mono `SCE`
 element (the near-universal real-world HE-AAC v2 shape); PS combined with any other channel
 configuration is rejected as unsupported rather than guessed at.
 
-Two output-*shape* transitions (sample rate for SBR, channel count for PS) can only be
-known once decoding starts rather than at `try_new`, for *implicit* signalling (an ASC/ADTS
-header that declares plain LC at the core rate/mono, with the real SBR/PS payload only
-discovered in-band): a caller that reads `codec_params()` once at open time will not see the
-doubled rate / widened channel count. Such a caller must instead re-check the `AudioSpec` of
-the first decoded `AudioBuffer` (`decode_ref`/`last_decoded`) and react to a change, the same
-way it must already react to `channelConfiguration == 0`'s deferred channel layout.
+AAC-LD (audio object type 23) and AAC-ELD (audio object type 39) are decoded with frame lengths
+of 512 and 480 samples, for any channel configuration of 1-7. Their low overlap window, the low
+delay filterbank, and their scale factor bands and syntax (which has no element identifiers and
+puts the TNS data after the gain control flag) are implemented. The error resilience tools
+(Huffman codeword reordering, reversible variable length coding, and virtual codebooks), LTP in
+AAC-LD, and low delay SBR (`ldSbrPresentFlag`) of AAC-ELD are not supported, and such streams are
+rejected as unsupported. The scale factor band tables of AAC-LD and AAC-ELD are those of 22.05
+kHz and above of the standard: lower sampling frequencies use those of 22.05 kHz and 24 kHz.
+
+## Transports
+
+* `AdtsReader` demultiplexes ADTS (one raw data block per frame).
+* `LoasReader` demultiplexes LATM with LOAS framing (a single program and layer).
+* `AdifReader` demultiplexes ADIF (a single program). Raw data blocks of an ADIF stream have no
+  frame headers: the reader finds the end of each block by parsing its syntax, up to its `ID_END`
+  element, so it costs as much as parsing (but not synthesising) the audio, and a stream that ends
+  with other data ends at its last block. The duration is estimated from the first blocks. Seeking
+  is by block: positions of blocks are remembered as they are parsed, so a first seek into a long
+  stream parses up to the target.
+
+HE-AAC in ADTS, ADIF, and LATM with a plain AAC-LC config does not signal SBR or Parametric
+Stereo. The readers look for an `EXT_SBR_DATA` payload in the first blocks of the stream. If they
+find one, the codec parameters report the decoder output (twice the core rate, stereo for
+Parametric Stereo), the audio specific config of the parameters signals the extension, and the
+timeline (packet timestamps and durations, duration, seek positions) is in decoded frames, as it is
+for MP4. SBR can only be found in streams of a core rate of at most 32 kHz, which are
+AAC-LC with a predefined channel configuration (or the program of an ADIF header).
 
 ## Attribution
 
