@@ -3,8 +3,8 @@
 
 use std::f64::consts::PI;
 
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::*;
+/// Number of independent accumulators (lanes) in the dot product.
+const LANES: usize = 16;
 
 /// FIR decimation filter
 ///
@@ -13,16 +13,15 @@ use std::arch::x86_64::*;
 pub struct FirDecimator {
     /// Filter coefficients
     coefficients: Vec<f32>,
+    /// Filter coefficients zero-padded to a multiple of `LANES`.
+    padded: Vec<f32>,
     /// Decimation ratio
     decimation: usize,
-    /// Sample history as a *doubled* linear buffer (length `2 * taps`): each
-    /// incoming sample is written at `pos` and `pos + taps`, so the most recent
-    /// `taps` samples are always available as one contiguous (non-wrapping)
-    /// slice — letting the convolution use straight SIMD loads instead of a
-    /// per-tap gather.
-    buffer: Vec<f32>,
-    /// Current position in buffer
-    buffer_pos: usize,
+    /// The `taps - 1` most recent input samples (oldest first) preceding the next input.
+    history: Vec<f32>,
+    /// Scratch buffer holding `history`, the current input and zero padding, so that every
+    /// output window is one contiguous slice.
+    scratch: Vec<f32>,
     /// Sample counter for decimation
     sample_count: usize,
 }
@@ -40,16 +39,24 @@ impl FirDecimator {
         assert!(taps % 2 == 1, "Taps should be odd for symmetric filter");
         assert!(cutoff > 0.0 && cutoff < 0.5, "Cutoff must be between 0 and 0.5");
 
-        log::debug!("FirDecimator::new called with decimation={}, taps={}, cutoff={}",
-                    decimation, taps, cutoff);
+        log::debug!(
+            "FirDecimator::new called with decimation={}, taps={}, cutoff={}",
+            decimation,
+            taps,
+            cutoff
+        );
 
         let coefficients = Self::design_kaiser_lpf(taps, cutoff);
+
+        let mut padded = coefficients.clone();
+        padded.resize(taps.next_multiple_of(LANES), 0.0);
 
         let fir = FirDecimator {
             coefficients,
             decimation,
-            buffer: vec![0.0; taps * 2],
-            buffer_pos: 0,
+            history: vec![0.0; taps - 1],
+            scratch: Vec::new(),
+            padded,
             sample_count: 0,
         };
 
@@ -74,12 +81,8 @@ impl FirDecimator {
             let x = n as f64 - center;
 
             // Sinc function for ideal low-pass filter
-            let sinc = if x.abs() < 1e-10 {
-                2.0 * PI * cutoff
-            }
-            else {
-                (2.0 * PI * cutoff * x).sin() / x
-            };
+            let sinc =
+                if x.abs() < 1e-10 { 2.0 * PI * cutoff } else { (2.0 * PI * cutoff * x).sin() / x };
 
             // Kaiser window
             let window_arg = 2.0 * n as f64 / (taps - 1) as f64 - 1.0;
@@ -120,146 +123,89 @@ impl FirDecimator {
     /// Returns Some(output) when decimation produces an output,
     /// None otherwise.
     pub fn process(&mut self, input: f32) -> Option<f32> {
-        let taps = self.coefficients.len();
-
-        // Doubled-buffer push: write the sample twice so the recent-sample
-        // window stays contiguous regardless of position.
-        self.buffer[self.buffer_pos] = input;
-        self.buffer[self.buffer_pos + taps] = input;
-        self.buffer_pos += 1;
-        if self.buffer_pos == taps {
-            self.buffer_pos = 0;
-        }
-
-        // Decimation: only compute output every Rth sample
-        self.sample_count += 1;
-        if self.sample_count < self.decimation {
-            return None;
-        }
-        self.sample_count = 0;
-
-        // Contiguous window of the last `taps` samples. The Kaiser LPF is
-        // symmetric, so dotting in oldest→newest order matches the original
-        // reverse-circular convolution.
-        let window = &self.buffer[self.buffer_pos..self.buffer_pos + taps];
-        let mut output = 0.0f32;
-        for (coeff, sample) in self.coefficients.iter().zip(window) {
-            output += coeff * sample;
-        }
-
-        Some(output)
+        let mut output = [0.0];
+        (self.process_buffer(&[input], &mut output) == 1).then_some(output[0])
     }
 
     /// Process a buffer of samples
+    ///
+    /// Returns the number of output samples written. If `output` is too small for all the outputs
+    /// of `input`, only the input up to the last output that fits is consumed.
     pub fn process_buffer(&mut self, input: &[f32], output: &mut [f32]) -> usize {
-        // Use SIMD-optimized version if available
-        #[cfg(target_arch = "x86_64")]
-        {
-            if is_x86_feature_detected!("avx") && is_x86_feature_detected!("fma") {
-                // SAFETY: We've verified CPU support for AVX and FMA instructions
-                return unsafe { self.process_buffer_simd_avx(input, output) };
-            }
-        }
-
-        // Fallback to scalar processing
-        self.process_buffer_scalar(input, output)
-    }
-
-    /// Scalar (non-SIMD) buffer processing
-    fn process_buffer_scalar(&mut self, input: &[f32], output: &mut [f32]) -> usize {
-        let mut out_idx = 0;
-
-        for &sample in input {
-            if let Some(out_sample) = self.process(sample) {
-                if out_idx < output.len() {
-                    output[out_idx] = out_sample;
-                    out_idx += 1;
-                }
-                else {
-                    break;
-                }
-            }
-        }
-
-        out_idx
-    }
-
-    /// SIMD-optimized buffer processing using AVX
-    #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "avx,fma")]
-    unsafe fn process_buffer_simd_avx(&mut self, input: &[f32], output: &mut [f32]) -> usize {
-        let mut out_idx = 0;
         let taps = self.coefficients.len();
+        let decimation = self.decimation;
 
-        for &sample in input {
-            // Doubled-buffer push keeps the window contiguous for SIMD.
-            self.buffer[self.buffer_pos] = sample;
-            self.buffer[self.buffer_pos + taps] = sample;
-            self.buffer_pos += 1;
-            if self.buffer_pos == taps {
-                self.buffer_pos = 0;
-            }
+        // Input samples until the next output is due, and the number of outputs due.
+        let first = decimation - self.sample_count;
+        let due = if input.len() < first { 0 } else { (input.len() - first) / decimation + 1 };
+        let count = due.min(output.len());
 
-            self.sample_count += 1;
-            if self.sample_count < self.decimation {
-                continue;
-            }
-            self.sample_count = 0;
+        let consumed = match count {
+            0 if due > 0 => 0,
+            n if n == due => input.len(),
+            n => first + (n - 1) * decimation,
+        };
+        let input = &input[..consumed];
 
-            if out_idx >= output.len() {
-                break;
-            }
+        // Lay out the history followed by the input contiguously: the window of each output is
+        // then a plain slice, with no wrap-around handling and no per-sample bookkeeping. The
+        // zero padding extends the last window to a multiple of the lane count.
+        self.scratch.clear();
+        self.scratch.extend_from_slice(&self.history);
+        self.scratch.extend_from_slice(input);
+        let end = self.scratch.len();
+        self.scratch.resize(end + self.padded.len() - taps, 0.0);
 
-            let window = &self.buffer[self.buffer_pos..self.buffer_pos + taps];
-            output[out_idx] = Self::dot_avx(&self.coefficients, window);
-            out_idx += 1;
+        // The newest sample of output `j` is input sample `first - 1 + j * decimation`, which is
+        // the last sample of the window starting at that same index of `scratch`. The Kaiser LPF
+        // is symmetric, so dotting in oldest→newest order matches the original reverse-circular
+        // convolution.
+        let padded_len = self.padded.len();
+        for (j, out) in output[..count].iter_mut().enumerate() {
+            let start = (first - 1) + j * decimation;
+            *out = dot(&self.padded, &self.scratch[start..start + padded_len]);
         }
 
-        out_idx
-    }
+        self.history.copy_from_slice(&self.scratch[end - (taps - 1)..end]);
+        self.sample_count = (self.sample_count + consumed) % decimation;
 
-    /// Dot product of `coeffs` with a contiguous `window` of equal length,
-    /// using AVX + FMA. Both inputs are contiguous, so no gather is needed.
-    #[cfg(target_arch = "x86_64")]
-    #[target_feature(enable = "avx,fma")]
-    unsafe fn dot_avx(coeffs: &[f32], window: &[f32]) -> f32 {
-        let n = coeffs.len().min(window.len());
-        let mut sum = _mm256_setzero_ps();
-
-        let mut i = 0;
-        while i + 8 <= n {
-            let c = _mm256_loadu_ps(coeffs.as_ptr().add(i));
-            let w = _mm256_loadu_ps(window.as_ptr().add(i));
-            sum = _mm256_fmadd_ps(c, w, sum);
-            i += 8;
-        }
-
-        // Horizontal sum of the 8 accumulated lanes
-        let sum_high = _mm256_extractf128_ps(sum, 1);
-        let sum_low = _mm256_castps256_ps128(sum);
-        let sum128 = _mm_add_ps(sum_low, sum_high);
-        let sum64 = _mm_add_ps(sum128, _mm_movehl_ps(sum128, sum128));
-        let sum32 = _mm_add_ss(sum64, _mm_shuffle_ps(sum64, sum64, 0x1));
-        let mut result = _mm_cvtss_f32(sum32);
-
-        // Scalar tail for the remaining (< 8) coefficients
-        while i < n {
-            result += coeffs[i] * window[i];
-            i += 1;
-        }
-
-        result
+        count
     }
 
     /// Reset filter state
     pub fn reset(&mut self) {
-        for sample in &mut self.buffer {
-            *sample = 0.0;
-        }
-        self.buffer_pos = 0;
+        self.history.fill(0.0);
         self.sample_count = 0;
     }
+}
 
+/// Dot product of `coeffs` with a window of the same length, which must be a multiple of
+/// `LANES`.
+///
+/// The sum is formed in `LANES` independent partial sums in a fixed order, which breaks the serial
+/// dependency of a plain `acc += c * w` loop and lets the compiler emit SIMD (SSE, AVX or NEON,
+/// depending on the target) without any `unsafe` code or `-ffast-math` reassociation. Products
+/// and sums are not fused, so the result is identical on every target.
+#[inline(always)]
+fn dot(coeffs: &[f32], window: &[f32]) -> f32 {
+    debug_assert_eq!(coeffs.len() % LANES, 0);
+    debug_assert_eq!(coeffs.len(), window.len());
+
+    let mut acc = [0.0f32; LANES];
+
+    for (c, w) in coeffs.chunks_exact(LANES).zip(window.chunks_exact(LANES)) {
+        for lane in 0..LANES {
+            acc[lane] += c[lane] * w[lane];
+        }
+    }
+
+    // Reduce the lanes in a fixed tree: halves, quarters, eighths, then the final pair.
+    let mut half = [0.0f32; LANES / 2];
+    for i in 0..LANES / 2 {
+        half[i] = acc[i] + acc[i + LANES / 2];
+    }
+    let quarter = [half[0] + half[4], half[1] + half[5], half[2] + half[6], half[3] + half[7]];
+    (quarter[0] + quarter[2]) + (quarter[1] + quarter[3])
 }
 
 #[cfg(test)]
@@ -338,10 +284,7 @@ mod tests {
 
         // State should be cleared
         assert_eq!(fir.sample_count, 0);
-        assert_eq!(fir.buffer_pos, 0);
-        for &sample in &fir.buffer {
-            assert_eq!(sample, 0.0);
-        }
+        assert!(fir.history.iter().all(|&sample| sample == 0.0));
     }
 
     #[test]
@@ -365,5 +308,107 @@ mod tests {
             let diff = (fir.coefficients[i] - fir.coefficients[len - 1 - i]).abs();
             assert!(diff < 1e-6, "Coefficients not symmetric at index {}", i);
         }
+    }
+
+    /// Deterministic pseudo-random samples in [-1, 1).
+    fn test_signal(len: usize, seed: u32) -> Vec<f32> {
+        let mut state = seed;
+        (0..len)
+            .map(|_| {
+                state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                (state >> 8) as f32 / (1u32 << 23) as f32 - 1.0
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_fir_matches_f64_convolution() {
+        for &(decimation, taps) in &[(2usize, 63usize), (4, 63), (8, 31), (2, 31), (3, 7)] {
+            let mut fir = FirDecimator::new(decimation, taps, 0.4 / decimation as f64);
+            let coefficients = fir.coefficients.clone();
+            let input = test_signal(1000, 7 + taps as u32);
+
+            let mut output = vec![0.0; 1000 / decimation];
+            let n = fir.process_buffer(&input, &mut output);
+            assert_eq!(n, 1000 / decimation);
+
+            for (m, &got) in output.iter().enumerate() {
+                // The newest sample of output m is input[(m + 1) * decimation - 1].
+                let newest = (m + 1) * decimation - 1;
+                let expected: f64 = coefficients
+                    .iter()
+                    .enumerate()
+                    .map(|(k, &c)| {
+                        // Coefficient k applies to the sample taps - 1 - k steps before the newest.
+                        let age = taps - 1 - k;
+                        newest.checked_sub(age).map_or(0.0, |i| f64::from(c) * f64::from(input[i]))
+                    })
+                    .sum();
+                assert!(
+                    (f64::from(got) - expected).abs() < 1e-5,
+                    "output {m}: {got} vs {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_fir_buffer_and_sample_paths_agree() {
+        let input = test_signal(777, 99);
+
+        let mut a = FirDecimator::new(2, 63, 0.2);
+        let expected: Vec<f32> = input.iter().filter_map(|&s| a.process(s)).collect();
+
+        // Odd chunk sizes exercise partial decimation blocks across calls.
+        let mut b = FirDecimator::new(2, 63, 0.2);
+        let mut got = Vec::new();
+        for chunk in input.chunks(13) {
+            let mut out = vec![0.0; chunk.len()];
+            let n = b.process_buffer(chunk, &mut out);
+            got.extend_from_slice(&out[..n]);
+        }
+
+        assert_eq!(got.len(), expected.len());
+        assert!(got.iter().zip(&expected).all(|(x, y)| x.to_bits() == y.to_bits()));
+    }
+
+    #[test]
+    fn test_fir_small_output_buffer() {
+        let input = test_signal(100, 5);
+
+        let mut full = FirDecimator::new(4, 31, 0.1);
+        let mut expected = vec![0.0; 25];
+        assert_eq!(full.process_buffer(&input, &mut expected), 25);
+
+        // With room for only 10 outputs, the input is consumed up to the 10th output; feeding the
+        // rest afterwards continues seamlessly.
+        let mut split = FirDecimator::new(4, 31, 0.1);
+        let mut got = vec![0.0; 10];
+        assert_eq!(split.process_buffer(&input, &mut got), 10);
+        let mut rest = vec![0.0; 15];
+        assert_eq!(split.process_buffer(&input[40..], &mut rest), 15);
+        got.extend_from_slice(&rest);
+
+        assert!(got.iter().zip(&expected).all(|(a, b)| a.to_bits() == b.to_bits()));
+    }
+
+    #[test]
+    fn test_dot_lane_order() {
+        // Pin the (target independent) summation order with values that expose reassociation:
+        // lane 0 sees 1e8 then -1e8, the other lanes see small values.
+        let mut coeffs = vec![0.0f32; 2 * LANES];
+        let mut window = vec![0.0f32; 2 * LANES];
+        coeffs[0] = 1.0;
+        window[0] = 1.0e8;
+        coeffs[LANES] = 1.0;
+        window[LANES] = -1.0e8;
+        coeffs[1] = 1.0;
+        window[1] = 3.0;
+        // Lane 0: (1e8 + -1e8) = 0 exactly, then 3.0 from lane 1 survives.
+        assert_eq!(dot(&coeffs, &window), 3.0);
+
+        // A serial sum would give 0.0 as 1e8 + 3.0 rounds to 1e8 + 4.0 first.
+        let serial: f32 = coeffs.iter().zip(&window).fold(0.0, |a, (c, w)| a + c * w);
+        assert_ne!(serial, 3.0);
     }
 }

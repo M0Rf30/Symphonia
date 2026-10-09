@@ -32,6 +32,8 @@ Converts DSD to high-quality PCM using a two-stage decimation pipeline:
    - Efficient high-ratio decimation (32-128x)
    - No multiplications required
    - i64 accumulators prevent overflow
+   - Evaluated exactly (integer arithmetic) directly on the packed DSD bits with a nibble
+     lookup table, so no per-bit floating point work is needed
    - Configurable stages (typically 4)
 
 2. **FIR Filter** (Finite Impulse Response)

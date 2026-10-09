@@ -1,31 +1,45 @@
 // DSD Codec Benchmarks
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId, Throughput};
-use symphonia_codec_dsd::{DsdDecoder, CODEC_ID_DSD};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use symphonia_codec_dsd::{CODEC_ID_DSD, DsdDecoder};
 use symphonia_core::audio::Channels;
 use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
 use symphonia_core::packet::PacketRef;
 use symphonia_core::units::{Duration, Timestamp};
 
-/// Benchmark CIC filter processing
+/// Deterministic pseudo-random DSD bytes (a dense bit pattern, like real DSD noise-shaped data).
+fn dsd_bytes(len: usize) -> Vec<u8> {
+    let mut state = 0x2545f4914f6cdd1du64;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 24) as u8
+        })
+        .collect()
+}
+
+/// Benchmark CIC filter processing (4 stages, 8192 bits = 1024 bytes per iteration)
 fn bench_cic_filter(c: &mut Criterion) {
     use symphonia_codec_dsd::cic::CicFilter;
+    use symphonia_core::codecs::audio::BitOrder;
 
     let mut group = c.benchmark_group("cic_filter");
 
-    for decimation in [8, 16, 32, 64].iter() {
+    for decimation in [4, 8, 16, 32, 64, 128].iter() {
         group.throughput(Throughput::Elements(8192));
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("decimation_{}", decimation)),
             decimation,
             |b, &decimation| {
                 let mut filter = CicFilter::new(decimation, 4);
-                let input = vec![0.5f32; 8192];
+                let input = dsd_bytes(1024);
                 let mut output = vec![0.0f32; 8192 / decimation];
 
                 b.iter(|| {
                     filter.reset();
-                    black_box(filter.process_buffer(&input, &mut output))
+                    black_box(filter.process_bytes(&input, BitOrder::LsbFirst, &mut output))
                 });
             },
         );
@@ -73,6 +87,9 @@ fn bench_dsd_decimation(c: &mut Criterion) {
         ("DSD64_to_88k", 2822400, 88200),
         ("DSD128_to_44k", 5644800, 44100),
         ("DSD128_to_88k", 5644800, 88200),
+        ("DSD256_to_44k", 11289600, 44100),
+        ("DSD512_to_44k", 22579200, 44100),
+        ("DSD64_to_352k", 2822400, 352800),
     ];
 
     for (name, dsd_rate, pcm_rate) in configs.iter() {
@@ -80,26 +97,21 @@ fn bench_dsd_decimation(c: &mut Criterion) {
         let bytes_per_packet = 4096;
 
         group.throughput(Throughput::Bytes(bytes_per_packet as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(name),
-            &config,
-            |b, config| {
-                let mut decimator = DsdDecimator::new(*config, 2, BitOrder::LsbFirst);
-                let dsd_input = vec![0x55u8; bytes_per_packet];
-                let dsd_planes = vec![dsd_input.as_slice(); 2];
+        group.bench_with_input(BenchmarkId::from_parameter(name), &config, |b, config| {
+            let mut decimator = DsdDecimator::new(*config, 2, BitOrder::LsbFirst);
+            let dsd_input = dsd_bytes(bytes_per_packet);
+            let dsd_planes = vec![dsd_input.as_slice(); 2];
 
-                let output_samples = (bytes_per_packet * 8) / config.total_decimation;
-                let mut pcm_output = vec![vec![0.0f32; output_samples]; 2];
-                let mut pcm_planes: Vec<&mut [f32]> = pcm_output.iter_mut()
-                    .map(|v| v.as_mut_slice())
-                    .collect();
+            let output_samples = (bytes_per_packet * 8) / config.total_decimation;
+            let mut pcm_output = vec![vec![0.0f32; output_samples]; 2];
+            let mut pcm_planes: Vec<&mut [f32]> =
+                pcm_output.iter_mut().map(|v| v.as_mut_slice()).collect();
 
-                b.iter(|| {
-                    decimator.reset();
-                    black_box(decimator.process_planar(&dsd_planes, &mut pcm_planes).unwrap())
-                });
-            },
-        );
+            b.iter(|| {
+                decimator.reset();
+                black_box(decimator.process_planar(&dsd_planes, &mut pcm_planes).unwrap())
+            });
+        });
     }
 
     group.finish();
@@ -150,11 +162,12 @@ fn bench_decoder_passthrough(c: &mut Criterion) {
                     .with_channels(Channels::Discrete(2))
                     .with_max_frames_per_packet(size as u64);
 
-                let mut decoder = DsdDecoder::try_new(&params, &AudioDecoderOptions::default())
-                    .unwrap();
+                let mut decoder =
+                    DsdDecoder::try_new(&params, &AudioDecoderOptions::default()).unwrap();
 
                 let data = vec![0x55u8; size];
-                let packet = PacketRef::new(0, Timestamp::new(0), Duration::new(size as u64), &data);
+                let packet =
+                    PacketRef::new(0, Timestamp::new(0), Duration::new(size as u64), &data);
 
                 b.iter(|| {
                     decoder.reset();
@@ -171,10 +184,7 @@ fn bench_decoder_passthrough(c: &mut Criterion) {
 fn bench_decoder_pcm(c: &mut Criterion) {
     let mut group = c.benchmark_group("decoder_pcm");
 
-    let configs = [
-        ("DSD64_to_44k", 2822400, 44100),
-        ("DSD64_to_88k", 2822400, 88200),
-    ];
+    let configs = [("DSD64_to_44k", 2822400, 44100), ("DSD64_to_88k", 2822400, 88200)];
 
     for (name, dsd_rate, pcm_rate) in configs.iter() {
         let packet_size = 4096usize;
@@ -195,11 +205,12 @@ fn bench_decoder_pcm(c: &mut Criterion) {
                 let extra_data = (pcm_rate as u32).to_le_bytes().to_vec().into_boxed_slice();
                 params.extra_data = Some(extra_data);
 
-                let mut decoder = DsdDecoder::try_new(&params, &AudioDecoderOptions::default())
-                    .unwrap();
+                let mut decoder =
+                    DsdDecoder::try_new(&params, &AudioDecoderOptions::default()).unwrap();
 
                 let data = vec![0xAAu8; packet_size]; // Alternating pattern
-                let packet = PacketRef::new(0, Timestamp::new(0), Duration::new(packet_size as u64), &data);
+                let packet =
+                    PacketRef::new(0, Timestamp::new(0), Duration::new(packet_size as u64), &data);
 
                 b.iter(|| {
                     decoder.reset();
