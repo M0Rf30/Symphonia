@@ -2,10 +2,11 @@
 // Copyright (c) 2026 ombs.io. Licensed under MIT OR Apache-2.0; see LICENSE-MIT, LICENSE-APACHE
 // and NOTICE in this directory. Modified for Symphonia.
 
-/// Range coder for Monkey's Audio (version >= 3990).
-///
-/// All u32 arithmetic uses wrapping operations to match C++ unsigned overflow semantics.
-use crate::mac::bitreader::BitReader;
+//! Range coder for Monkey's Audio (version >= 3990).
+//!
+//! All u32 arithmetic uses wrapping operations to match C++ unsigned overflow semantics.
+
+use crate::mac::bitreader::ByteReader;
 use crate::mac::error::{ApeError, ApeResult};
 
 // ---------------------------------------------------------------------------
@@ -15,7 +16,7 @@ use crate::mac::error::{ApeError, ApeResult};
 const CODE_BITS: u32 = 32;
 const TOP_VALUE: u32 = 1u32 << (CODE_BITS - 1); // 0x80000000
 const EXTRA_BITS: u32 = (CODE_BITS - 2) % 8 + 1; // 7
-const BOTTOM_VALUE: u32 = TOP_VALUE >> 8; // 0x00800000
+pub const BOTTOM_VALUE: u32 = TOP_VALUE >> 8; // 0x00800000
 const RANGE_OVERFLOW_SHIFT: u32 = 16;
 const MODEL_ELEMENTS: u32 = 64;
 const OVERFLOW_SIGNAL: u32 = 1;
@@ -40,20 +41,106 @@ const RANGE_WIDTH_2: [u32; 64] = [
 ];
 
 // ---------------------------------------------------------------------------
-// Overflow lookup table (built once at init)
+// Overflow lookup table (built at compile time)
 // ---------------------------------------------------------------------------
 
 /// Build the 65536-entry overflow lookup table from RANGE_TOTAL_2.
-fn build_overflow_table() -> Box<[u8; 65536]> {
-    let mut table = Box::new([0u8; 65536]);
-    let mut overflow: u8 = 0;
-    for z in 0..65536u32 {
-        if z >= RANGE_TOTAL_2[(overflow as usize) + 1] {
+const fn build_overflow_table() -> [u8; 65536] {
+    let mut table = [0u8; 65536];
+    let mut overflow: usize = 0;
+    let mut z: usize = 0;
+    while z < 65536 {
+        if z as u32 >= RANGE_TOTAL_2[overflow + 1] {
             overflow += 1;
         }
-        table[z as usize] = overflow;
+        table[z] = overflow as u8;
+        z += 1;
     }
     table
+}
+
+static OVERFLOW_TABLE: [u8; 65536] = build_overflow_table();
+
+// ---------------------------------------------------------------------------
+// Entropy state
+// ---------------------------------------------------------------------------
+
+const K_SUM_MIN_BOUNDARY: [u32; 32] = [
+    0,          // [0]
+    32,         // [1]
+    64,         // [2]
+    128,        // [3]
+    256,        // [4]
+    512,        // [5]
+    1024,       // [6]
+    2048,       // [7]
+    4096,       // [8]
+    8192,       // [9]
+    16384,      // [10]  <-- initial k=10, k_sum=16384
+    32768,      // [11]
+    65536,      // [12]
+    131072,     // [13]
+    262144,     // [14]
+    524288,     // [15]
+    1048576,    // [16]
+    2097152,    // [17]
+    4194304,    // [18]
+    8388608,    // [19]
+    16777216,   // [20]
+    33554432,   // [21]
+    67108864,   // [22]
+    134217728,  // [23]
+    268435456,  // [24]
+    536870912,  // [25]
+    1073741824, // [26]
+    2147483648, // [27]
+    0,          // [28]  zero sentinel
+    0,          // [29]
+    0,          // [30]
+    0,          // [31]
+];
+
+/// Per-channel entropy decoder state tracking the adaptive k parameter.
+pub struct EntropyState {
+    k: u32,
+    k_sum: u32,
+}
+
+impl EntropyState {
+    pub fn new() -> Self {
+        let mut state = EntropyState { k: 0, k_sum: 0 };
+        state.flush();
+        state
+    }
+
+    /// Reset state at the start of each frame.
+    pub fn flush(&mut self) {
+        self.k = 10;
+        self.k_sum = (1u32 << self.k).wrapping_mul(16); // 1024 * 16 = 16384
+    }
+
+    /// Adapt `k_sum` and `k` to the unsigned (interleaved) value that was just decoded.
+    #[inline(always)]
+    fn update(&mut self, value: i64) {
+        // (value + 1) / 2 is the magnitude of the signed result.
+        self.k_sum = self
+            .k_sum
+            .wrapping_add(((value + 1) / 2) as u32)
+            .wrapping_sub((self.k_sum.wrapping_add(16)) >> 5);
+
+        // k is at most 27 (the boundary after it is the zero sentinel), the masks only remove the
+        // bounds checks.
+        let k = (self.k & 31) as usize;
+        if self.k_sum < K_SUM_MIN_BOUNDARY[k] {
+            self.k -= 1;
+        }
+        else {
+            let next = K_SUM_MIN_BOUNDARY[(k + 1) & 31];
+            if next != 0 && self.k_sum >= next {
+                self.k += 1;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -61,72 +148,55 @@ fn build_overflow_table() -> Box<[u8; 65536]> {
 // ---------------------------------------------------------------------------
 
 pub struct RangeCoder {
-    pub low: u32,
-    pub range: u32,
-    pub buffer: u32,
-    overflow_table: Box<[u8; 65536]>,
+    low: u32,
+    range: u32,
+    buffer: u32,
 }
 
 impl RangeCoder {
-    /// Create a new range coder with zeroed state and precomputed overflow table.
-    pub fn new() -> Self {
-        RangeCoder { low: 0, range: 0, buffer: 0, overflow_table: build_overflow_table() }
-    }
-
-    /// Initialize the range coder from the bit array at the start of a frame.
+    /// Initialize the range coder at the start of a frame's entropy coded data.
     ///
-    /// Advances to byte boundary, skips the mandatory dummy byte, reads the seed
-    /// byte, and sets initial range/low values.
-    pub fn flush_bit_array(&mut self, br: &mut BitReader) {
-        br.advance_to_byte_boundary();
-        br.decode_value_x_bits(8); // skip dummy byte
-        self.buffer = br.decode_value_x_bits(8); // seed byte
-        self.low = self.buffer >> (8 - EXTRA_BITS); // buffer >> 1
-        self.range = 1u32 << EXTRA_BITS; // 128
-    }
-
-    /// Range normalization loop.
-    ///
-    /// Feeds bytes from the bit reader into the range coder state until
-    /// `range > BOTTOM_VALUE`.
-    #[inline]
-    pub fn normalize(&mut self, br: &mut BitReader) {
-        while self.range <= BOTTOM_VALUE {
-            self.buffer = self.buffer.wrapping_shl(8) | br.decode_byte();
-            self.low = self.low.wrapping_shl(8) | ((self.buffer >> 1) & 0xFF);
-            self.range = self.range.wrapping_shl(8);
+    /// Skips the mandatory dummy byte, reads the seed byte, and sets initial range/low values.
+    pub fn new(br: &mut ByteReader<'_>) -> Self {
+        br.next_byte(); // skip dummy byte
+        let buffer = br.next_byte(); // seed byte
+        RangeCoder {
+            buffer,
+            low: buffer >> (8 - EXTRA_BITS), // buffer >> 1
+            range: 1u32 << EXTRA_BITS,       // 128
         }
     }
 
-    /// Decode a value from a uniform distribution of size `1 << shift`.
-    ///
-    /// Does NOT update `low` -- the caller must do so (used by `decode_overflow`).
-    /// Returns 0 if range wraps to zero (end-of-life sentinel).
-    #[inline]
-    pub fn range_decode_fast(&mut self, br: &mut BitReader, shift: u32) -> u32 {
-        // Normalize with end-of-life check
-        while self.range <= BOTTOM_VALUE {
-            self.buffer = self.buffer.wrapping_shl(8) | br.decode_byte();
-            self.low = self.low.wrapping_shl(8) | ((self.buffer >> 1) & 0xFF);
-            self.range = self.range.wrapping_shl(8);
+    /// Feed one byte of the stream into the range coder state.
+    #[inline(always)]
+    fn shift_in(&mut self, br: &mut ByteReader<'_>) {
+        self.buffer = self.buffer.wrapping_shl(8) | br.next_byte();
+        self.low = self.low.wrapping_shl(8) | ((self.buffer >> 1) & 0xFF);
+        self.range = self.range.wrapping_shl(8);
+    }
 
+    /// Range normalization loop: feeds stream bytes into the range coder until `range >
+    /// BOTTOM_VALUE`. Returns `false` if the range wrapped to zero (the end-of-life sentinel of
+    /// a corrupt stream), in which case no further data can be decoded.
+    #[inline(always)]
+    fn normalize(&mut self, br: &mut ByteReader<'_>) -> bool {
+        while self.range <= BOTTOM_VALUE {
+            self.shift_in(br);
             if self.range == 0 {
-                return 0;
+                return false;
             }
         }
-
-        self.range >>= shift;
-        self.low / self.range
+        true
     }
 
-    /// Decode a value from a uniform distribution of size `1 << shift`,
-    /// updating `low` to `low % range` afterward.
+    /// Decode a value from a uniform distribution of size `1 << shift`, updating `low` to
+    /// `low % range` afterward.
     ///
     /// Returns an error if range becomes zero (corrupt input).
-    #[inline]
-    pub fn range_decode_fast_with_update(
+    #[inline(always)]
+    fn range_decode_fast_with_update(
         &mut self,
-        br: &mut BitReader,
+        br: &mut ByteReader<'_>,
         shift: u32,
     ) -> ApeResult<u32> {
         // Normalize with corruption check
@@ -136,9 +206,7 @@ impl RangeCoder {
                     "range coder: range is zero during normalization",
                 ));
             }
-            self.buffer = self.buffer.wrapping_shl(8) | br.decode_byte();
-            self.low = self.low.wrapping_shl(8) | ((self.buffer >> 1) & 0xFF);
-            self.range = self.range.wrapping_shl(8);
+            self.shift_in(br);
         }
 
         self.range >>= shift;
@@ -152,52 +220,126 @@ impl RangeCoder {
         Ok(result)
     }
 
-    /// Decode the overflow (quotient) portion of a value using the model
-    /// probability tables and the overflow lookup table.
+    /// Decode the overflow (quotient) portion of a value using the model probability tables and
+    /// the overflow lookup table.
     ///
-    /// `pivot_value` may be mutated to `OVERFLOW_PIVOT_VALUE` if the overflow
-    /// signaling mechanism fires.
-    pub fn decode_overflow(&mut self, br: &mut BitReader, pivot_value: &mut u32) -> ApeResult<u32> {
-        // Step 1: decode from uniform distribution of size 65536
-        let range_total = self.range_decode_fast(br, RANGE_OVERFLOW_SHIFT);
-        if range_total >= 65536 {
-            return Err(ApeError::DecodingError("range coder: overflow range_total out of bounds"));
-        }
-
-        // Step 2: look up symbol from the 65536-entry table
-        let mut overflow = self.overflow_table[range_total as usize] as u32;
-
-        // Step 3: update range coder state using model probabilities
-        // low -= range * RANGE_TOTAL_2[overflow] (wrapping)
-        self.low = self.low.wrapping_sub(self.range.wrapping_mul(RANGE_TOTAL_2[overflow as usize]));
-        // range = range * RANGE_WIDTH_2[overflow] (wrapping)
-        self.range = self.range.wrapping_mul(RANGE_WIDTH_2[overflow as usize]);
-
-        // Step 4: handle large overflow (symbol == 63)
-        if overflow == (MODEL_ELEMENTS - 1) {
-            // Read two 16-bit halves to form a 32-bit overflow value
-            overflow = self.range_decode_fast_with_update(br, 16)?;
-            overflow <<= 16;
-            overflow |= self.range_decode_fast_with_update(br, 16)?;
-
-            // Detect overflow signaling: recurse with forced pivot
-            if overflow == OVERFLOW_SIGNAL {
-                *pivot_value = OVERFLOW_PIVOT_VALUE;
-                return self.decode_overflow(br, pivot_value);
+    /// `pivot_value` may be mutated to `OVERFLOW_PIVOT_VALUE` if the overflow signaling
+    /// mechanism fires.
+    #[inline(always)]
+    fn decode_overflow(
+        &mut self,
+        br: &mut ByteReader<'_>,
+        pivot_value: &mut u32,
+    ) -> ApeResult<u32> {
+        loop {
+            // Decode from a uniform distribution of size 65536. If the range wraps to zero
+            // (end of life) the result is zero.
+            let range_total = if self.normalize(br) {
+                self.range >>= RANGE_OVERFLOW_SHIFT;
+                self.low / self.range
             }
-        }
+            else {
+                0
+            };
 
-        Ok(overflow)
+            if range_total >= 65536 {
+                return Err(ApeError::DecodingError(
+                    "range coder: overflow range_total out of bounds",
+                ));
+            }
+
+            // Look up the symbol from the 65536-entry table, and update the range coder state
+            // using the model probabilities.
+            let mut overflow = u32::from(OVERFLOW_TABLE[range_total as usize]) & 63;
+            let total = RANGE_TOTAL_2[overflow as usize];
+            let width = RANGE_WIDTH_2[overflow as usize];
+            self.low = self.low.wrapping_sub(self.range.wrapping_mul(total));
+            self.range = self.range.wrapping_mul(width);
+
+            // Handle a large overflow (symbol 63).
+            if overflow == (MODEL_ELEMENTS - 1) {
+                // Read two 16-bit halves to form a 32-bit overflow value
+                overflow = self.range_decode_fast_with_update(br, 16)?;
+                overflow <<= 16;
+                overflow |= self.range_decode_fast_with_update(br, 16)?;
+
+                // Detect overflow signaling: decode again with a forced pivot
+                if overflow == OVERFLOW_SIGNAL {
+                    *pivot_value = OVERFLOW_PIVOT_VALUE;
+                    continue;
+                }
+            }
+
+            return Ok(overflow);
+        }
     }
 
-    /// Consume remaining normalization bytes at the end of a frame.
-    pub fn finalize(&mut self, br: &mut BitReader) {
-        while self.range <= BOTTOM_VALUE {
-            br.advance(8);
-            self.range = self.range.wrapping_shl(8);
-            if self.range == 0 {
-                return;
+    /// Decode a single sample residual value from the range-coded bitstream.
+    ///
+    /// Returns the signed residual. The value is decoded from an unsigned interleaved
+    /// representation (0, +1, -1, +2, -2, ...) and converted to signed form at the end.
+    #[inline(always)]
+    pub fn decode_value(
+        &mut self,
+        es: &mut EntropyState,
+        br: &mut ByteReader<'_>,
+    ) -> ApeResult<i64> {
+        // Compute the pivot value from k_sum
+        let mut pivot_value: u32 = (es.k_sum >> 5).max(1);
+
+        // Decode the overflow (quotient)
+        let overflow: u32 = self.decode_overflow(br, &mut pivot_value)?;
+
+        // Decode the base (remainder) from the uniform distribution [0, pivot_value)
+        let base: u32;
+
+        if pivot_value >= (1 << 16) {
+            // Large pivot: split into two smaller range-coded values
+            let pivot_value_bits: u32 = 32 - pivot_value.leading_zeros();
+
+            let shift = if pivot_value_bits >= 16 { pivot_value_bits - 16 } else { 0 };
+            let split_factor: u32 = 1u32 << shift;
+
+            let pivot_value_a: u32 = (pivot_value / split_factor).wrapping_add(1);
+            let pivot_value_b: u32 = split_factor;
+
+            // Decode upper portion
+            if !self.normalize(br) {
+                return Ok(0); // end-of-life
             }
+            self.range /= pivot_value_a;
+            let base_a = self.low / self.range;
+            self.low %= self.range;
+
+            // Decode lower portion
+            if !self.normalize(br) {
+                return Ok(0); // end-of-life
+            }
+            self.range /= pivot_value_b;
+            let base_b = self.low / self.range;
+            self.low %= self.range;
+
+            base = base_a.wrapping_mul(split_factor).wrapping_add(base_b);
         }
+        else {
+            // Small pivot: single range-coded value
+            if !self.normalize(br) {
+                return Ok(0); // end-of-life
+            }
+            self.range /= pivot_value;
+            base = self.low / self.range;
+            self.low %= self.range;
+        }
+
+        // Combine overflow and base into the unsigned interleaved value
+        let value: i64 = (base as i64) + (overflow as i64) * (pivot_value as i64);
+
+        // Update k_sum and k
+        es.update(value);
+
+        // Convert from unsigned interleaved to signed
+        //   odd  values -> positive: (value >> 1) + 1
+        //   even values -> non-positive: -(value >> 1)
+        if (value & 1) != 0 { Ok((value >> 1) + 1) } else { Ok(-(value >> 1)) }
     }
 }

@@ -2,135 +2,155 @@
 // Copyright (c) 2026 ombs.io. Licensed under MIT OR Apache-2.0; see LICENSE-MIT, LICENSE-APACHE
 // and NOTICE in this directory. Modified for Symphonia.
 
-/// Neural Network Filter for the Monkey's Audio decoder.
-///
-/// Two concrete types instead of generics, matching the C++ template
-/// instantiations:
-///
-/// - `NNFilter16` -- for 8/16/24-bit audio (INTTYPE=i32, DATATYPE=i16)
-/// - `NNFilter32` -- for 32-bit audio (INTTYPE=i64, DATATYPE=i32)
-///
-/// Reference: `NNFilter.h`, `NNFilter.cpp`, `NNFilterGeneric.cpp`,
-/// `NNFilterCommon.h`.
-use crate::mac::roll_buffer::RollBuffer;
+//! Neural network filters of the Monkey's Audio decoder.
+//!
+//! Two concrete types instead of generics, matching the C++ template instantiations:
+//!
+//! - `NnFilter16` -- for 8/16/24-bit audio (INTTYPE=i32, DATATYPE=i16)
+//! - `NnFilter32` -- for 32-bit audio (INTTYPE=i64, DATATYPE=i32)
+//!
+//! Reference: `NNFilter.h`, `NNFilter.cpp`, `NNFilterGeneric.cpp`, `NNFilterCommon.h`.
+//!
+//! A filter is stepped one sample at a time: a residual goes in, the filtered sample comes out.
+//! The filters of a channel form a cascade that only depends on that channel's own residuals.
 
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
-
-/// Clamp an i32 value to i16 range using the C++ bit-trick.
-#[inline(always)]
-fn get_saturated_short_from_i32(value: i32) -> i16 {
-    let s = value as i16;
-    if s as i32 != value { ((value >> 31) ^ 0x7FFF) as i16 } else { s }
-}
-
-/// Clamp an i64 value to i16 range using the C++ bit-trick.
-#[inline(always)]
-fn get_saturated_short_from_i64(value: i64) -> i16 {
-    let s = value as i16;
-    if s as i64 != value { ((value >> 63) ^ 0x7FFF) as i16 } else { s }
-}
-
-// ---------------------------------------------------------------------------
-// Dot-product functions
-// ---------------------------------------------------------------------------
-
-/// Dot product for <i32, i16> path: i16*i16 accumulated in i32.
-#[inline(always)]
-fn calculate_dot_product_16(a: &[i16], b: &[i16], order: usize) -> i32 {
-    let mut dot: i32 = 0;
-    for i in 0..order {
-        dot += (a[i] as i32) * (b[i] as i32);
-    }
-    dot
-}
-
-/// Dot product for <i64, i32> path: each i32*i32 TRUNCATES to i32 via
-/// wrapping_mul BEFORE widening to i64 for accumulation.
-#[inline(always)]
-fn calculate_dot_product_32(a: &[i32], b: &[i32], order: usize) -> i64 {
-    let mut dot: i64 = 0;
-    for i in 0..order {
-        let temp: i32 = a[i].wrapping_mul(b[i]);
-        dot += temp as i64;
-    }
-    dot
-}
-
-// ---------------------------------------------------------------------------
-// Adapt functions
-// ---------------------------------------------------------------------------
-
-/// Adapt weights for <i32, i16> path.
-#[inline(always)]
-fn adapt_16(m: &mut [i16], delta: &[i16], direction: i32, order: usize) {
-    if direction < 0 {
-        for i in 0..order {
-            m[i] = m[i].wrapping_add(delta[i]);
-        }
-    }
-    else if direction > 0 {
-        for i in 0..order {
-            m[i] = m[i].wrapping_sub(delta[i]);
-        }
-    }
-}
-
-/// Adapt weights for <i64, i32> path.
-#[inline(always)]
-fn adapt_32(m: &mut [i32], delta: &[i32], direction: i64, order: usize) {
-    if direction < 0 {
-        for i in 0..order {
-            m[i] = m[i].wrapping_add(delta[i]);
-        }
-    }
-    else if direction > 0 {
-        for i in 0..order {
-            m[i] = m[i].wrapping_sub(delta[i]);
-        }
-    }
-}
-
-// ===================================================================
-// NNFilter16 -- for 8/16/24-bit audio (INTTYPE=i32, DATATYPE=i16)
-// ===================================================================
-
+/// Number of samples a filter's history buffers hold in addition to the `order` samples of
+/// history, before they are rolled back to the start.
 const NN_WINDOW: usize = 512;
 
+/// Compression level constants.
+pub const COMPRESSION_FAST: u32 = 1000;
+pub const COMPRESSION_NORMAL: u32 = 2000;
+pub const COMPRESSION_HIGH: u32 = 3000;
+pub const COMPRESSION_EXTRA_HIGH: u32 = 4000;
+pub const COMPRESSION_INSANE: u32 = 5000;
+
+/// Filter configuration: (order, shift).
+type FilterConfig = (usize, u32);
+
+/// Return the filter configurations for a given compression level.
+///
+/// The returned list is in creation order (largest filter first for multi-filter levels). The
+/// filters are applied in the reverse order.
+fn filter_configs(compression_level: u32) -> &'static [FilterConfig] {
+    match compression_level {
+        COMPRESSION_FAST => &[],
+        COMPRESSION_NORMAL => &[(16, 11)],
+        COMPRESSION_HIGH => &[(64, 11)],
+        COMPRESSION_EXTRA_HIGH => &[(256, 13), (32, 10)],
+        COMPRESSION_INSANE => &[(1280, 15), (256, 13), (16, 11)],
+        _ => &[],
+    }
+}
+
+/// Whether a file version uses the current delta update rule (>= 3980) or the old one.
+#[inline]
+fn uses_new_delta(version: i32) -> bool {
+    version == -1 || version >= 3980
+}
+
+// ===================================================================
+// NnFilter16 -- for 8/16/24-bit audio (INTTYPE=i32, DATATYPE=i16)
+// ===================================================================
+
+/// Fused dot product and weight adaptation for the <i32, i16> path.
+///
+/// Computes the dot product of `hist` and the weights `w` (i16 * i16 accumulated in i32), and
+/// adapts the weights (`w += delta` if `SUB` is false, `w -= delta` otherwise) in the same pass.
+/// The dot product uses the weights as they were before the adaptation.
+///
+/// The accumulator lanes and the chunks of 8 elements are what lets the compiler turn this into
+/// multiply-add (`pmaddwd`) instructions. The kernels are not inlined, as that makes the compiler
+/// lose track of the weights not aliasing the history and deltas.
+#[inline(never)]
+fn dot_adapt_16<const N: usize, const SUB: bool>(
+    hist: &[i16; N],
+    w: &mut [i16; N],
+    delta: &[i16; N],
+) -> i32 {
+    let mut acc = [0i32; 8];
+    for ((h, w), d) in hist.chunks_exact(8).zip(w.chunks_exact_mut(8)).zip(delta.chunks_exact(8)) {
+        for j in 0..8 {
+            acc[j] = acc[j].wrapping_add(i32::from(h[j]) * i32::from(w[j]));
+        }
+        for j in 0..8 {
+            w[j] = if SUB { w[j].wrapping_sub(d[j]) } else { w[j].wrapping_add(d[j]) };
+        }
+    }
+    acc.iter().fold(0i32, |sum, &v| sum.wrapping_add(v))
+}
+
+/// Fused dot product and weight adaptation, with the deltas multiplied by the adaptation
+/// direction `s` (-1, 0 or 1) instead of being added or subtracted.
+#[inline(never)]
+fn dot_adapt_mul_16<const N: usize>(
+    hist: &[i16; N],
+    w: &mut [i16; N],
+    delta: &[i16; N],
+    s: i16,
+) -> i32 {
+    let mut acc = [0i32; 8];
+    for ((h, w), d) in hist.chunks_exact(8).zip(w.chunks_exact_mut(8)).zip(delta.chunks_exact(8)) {
+        for j in 0..8 {
+            acc[j] = acc[j].wrapping_add(i32::from(h[j]) * i32::from(w[j]));
+        }
+        for j in 0..8 {
+            w[j] = w[j].wrapping_add(d[j].wrapping_mul(s));
+        }
+    }
+    acc.iter().fold(0i32, |sum, &v| sum.wrapping_add(v))
+}
+
+/// Dot product for the <i32, i16> path, for when the weights are not adapted.
+#[inline(never)]
+fn dot_16<const N: usize>(hist: &[i16; N], w: &[i16; N]) -> i32 {
+    let mut acc = [0i32; 8];
+    for (h, w) in hist.chunks_exact(8).zip(w.chunks_exact(8)) {
+        for j in 0..8 {
+            acc[j] = acc[j].wrapping_add(i32::from(h[j]) * i32::from(w[j]));
+        }
+    }
+    acc.iter().fold(0i32, |sum, &v| sum.wrapping_add(v))
+}
+
+/// A neural network filter for 8/16/24-bit audio.
 #[derive(Clone)]
-pub struct NNFilter16 {
+pub struct NnFilter16 {
     order: usize,
-    shift: i32,
+    shift: u32,
     one_shifted: i32,
-    version: i32,
+    new_delta: bool,
     weights: Vec<i16>,
-    rb_input: RollBuffer<i16>,
-    rb_delta_m: RollBuffer<i16>,
+    /// Saturated output history; `order + NN_WINDOW` samples.
+    hist: Vec<i16>,
+    /// Weight adaptation deltas; `order + NN_WINDOW` samples.
+    delta: Vec<i16>,
+    /// Index of the next sample in `hist` and `delta`.
+    pos: usize,
     running_average: i32,
     interim_mode: bool,
 }
 
-impl NNFilter16 {
+impl NnFilter16 {
     /// Create a new 16-bit NN filter.
     ///
-    /// * `order` -- must be 16 or a multiple of 32.
+    /// * `order` -- 16, 32, 64, 256 or 1280.
     /// * `shift` -- right-shift applied after dot product.
     /// * `version` -- file version; -1 means "current" (>= 3980 behaviour).
-    pub fn new(order: usize, shift: i32, version: i32) -> Self {
+    pub fn new(order: usize, shift: u32, version: i32) -> Self {
         assert!(
-            order > 0 && (order == 16 || order % 32 == 0),
-            "NNFilter16: order must be 16 or a multiple of 32, got {}",
-            order
+            matches!(order, 16 | 32 | 64 | 256 | 1280),
+            "NnFilter16: unsupported order {order}"
         );
         Self {
             order,
             shift,
             one_shifted: 1i32 << (shift - 1),
-            version,
+            new_delta: uses_new_delta(version),
             weights: vec![0i16; order],
-            rb_input: RollBuffer::new(NN_WINDOW, order),
-            rb_delta_m: RollBuffer::new(NN_WINDOW, order),
+            hist: vec![0i16; order + NN_WINDOW],
+            delta: vec![0i16; order + NN_WINDOW],
+            pos: order,
             running_average: 0,
             interim_mode: false,
         }
@@ -142,218 +162,267 @@ impl NNFilter16 {
 
     /// Reset all state. Called at the start of each frame.
     pub fn flush(&mut self) {
-        self.weights.iter_mut().for_each(|w| *w = 0);
-        self.rb_input.flush();
-        self.rb_delta_m.flush();
+        self.weights.fill(0);
+        // Only the history that will be read before it is written needs to be cleared.
+        self.hist[..=self.order].fill(0);
+        self.delta[..=self.order].fill(0);
+        self.pos = self.order;
         self.running_average = 0;
     }
 
-    /// Core decompression: takes an encoded residual, returns the reconstructed
-    /// sample value.
-    pub fn decompress(&mut self, input: i32) -> i32 {
-        // 1. Dot product over history
-        let input_hist = self.rb_input.slice(-(self.order as isize), self.order);
-        let dot_product = calculate_dot_product_16(input_hist, &self.weights, self.order);
+    /// Core decompression: takes an encoded residual, returns the reconstructed sample value.
+    #[inline(always)]
+    pub fn step(&mut self, input: i32) -> i32 {
+        match self.order {
+            16 => self.step_inline::<16>(input),
+            32 => self.step_inline::<32>(input),
+            64 => self.step_inline::<64>(input),
+            256 => self.step_outline::<256>(input),
+            1280 => self.step_outline::<1280>(input),
+            _ => unreachable!("order is checked by the constructor"),
+        }
+    }
+
+    #[inline(always)]
+    fn step_inline<const N: usize>(&mut self, input: i32) -> i32 {
+        self.step_order::<N, false>(input)
+    }
+
+    // The large filters are expensive enough for the call not to matter, and are not worth
+    // inlining everywhere.
+    #[inline(never)]
+    fn step_outline<const N: usize>(&mut self, input: i32) -> i32 {
+        self.step_order::<N, true>(input)
+    }
+
+    /// `BRANCH` selects how the weights are adapted for the direction of the input: with branches
+    /// (best for the large filters, where a misprediction is cheap in comparison) or by
+    /// multiplying the deltas with the direction (best for the small filters).
+    #[inline(always)]
+    fn step_order<const N: usize, const BRANCH: bool>(&mut self, input: i32) -> i32 {
+        let pos = self.pos;
+
+        // 1. Dot product over history, and 3. adapt the weights -- CRITICAL: the adaptation
+        // direction is the sign of the INPUT (the residual), NOT the output. Both are done in
+        // one pass over the weights.
+        let weights: &mut [i16; N] = (&mut self.weights[..N]).try_into().unwrap();
+        let input_hist: &[i16; N] = (&self.hist[pos - N..pos]).try_into().unwrap();
+        let delta_hist: &[i16; N] = (&self.delta[pos - N..pos]).try_into().unwrap();
+        let dot_product = if BRANCH {
+            if input < 0 {
+                dot_adapt_16::<N, false>(input_hist, weights, delta_hist)
+            }
+            else if input > 0 {
+                dot_adapt_16::<N, true>(input_hist, weights, delta_hist)
+            }
+            else {
+                dot_16(input_hist, weights)
+            }
+        }
+        else {
+            let direction = i16::from(input < 0) - i16::from(input > 0);
+            dot_adapt_mul_16(input_hist, weights, delta_hist, direction)
+        };
 
         // 2. Compute output (prediction + residual)
         let output: i32 = if self.interim_mode {
             // Widen to i64 before adding rounding bias and shifting
-            input + ((dot_product as i64 + self.one_shifted as i64) >> self.shift) as i32
+            input.wrapping_add(
+                ((i64::from(dot_product) + i64::from(self.one_shifted)) >> self.shift) as i32,
+            )
         }
         else {
-            input + ((dot_product + self.one_shifted) >> self.shift)
+            input.wrapping_add(dot_product.wrapping_add(self.one_shifted) >> self.shift)
         };
 
-        // 3. Adapt weights -- CRITICAL: uses INPUT (the residual), NOT output
-        {
-            let delta_slice = self.rb_delta_m.slice(-(self.order as isize), self.order);
-            adapt_16(&mut self.weights, delta_slice, input, self.order);
-        }
-
         // 4. Update delta buffer -- CRITICAL: uses OUTPUT (reconstructed sample)
-        if self.version == -1 || self.version >= 3980 {
-            self.update_delta_new(output);
+        let delta = &mut self.delta;
+        if self.new_delta {
+            // UPDATE_DELTA_NEW (version >= 3980 or version == -1).
+            let abs_value = output.wrapping_abs();
+            let running_average = self.running_average;
+            let magnitude: i32 = if abs_value > running_average.wrapping_mul(3) {
+                32
+            }
+            else if abs_value > running_average.wrapping_mul(4) / 3 {
+                16
+            }
+            else if abs_value > 0 {
+                8
+            }
+            else {
+                0
+            };
+            delta[pos] = (if output < 0 { magnitude } else { -magnitude }) as i16;
+
+            // Exponential moving average (integer division truncates toward zero)
+            self.running_average =
+                running_average.wrapping_add(abs_value.wrapping_sub(running_average) / 16);
+
+            // Decay historical deltas at positions [-1], [-2], [-8]
+            delta[pos - 1] >>= 1;
+            delta[pos - 2] >>= 1;
+            delta[pos - 8] >>= 1;
         }
         else {
-            self.update_delta_old(output);
+            // UPDATE_DELTA_OLD (version < 3980).
+            delta[pos] = if output == 0 {
+                0
+            }
+            else if output < 0 {
+                4
+            }
+            else {
+                -4
+            };
+
+            // Decay historical deltas at positions [-4], [-8]
+            delta[pos - 4] >>= 1;
+            delta[pos - 8] >>= 1;
         }
 
         // 5. Store saturated value in input history
-        self.rb_input.set(0, get_saturated_short_from_i32(output));
+        self.hist[pos] = output.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
 
-        // 6. Advance both roll buffers
-        self.rb_input.increment_safe();
-        self.rb_delta_m.increment_safe();
+        // 6. Advance, rolling the history back to the start of the buffers if they are full.
+        self.pos += 1;
+        if self.pos == N + NN_WINDOW {
+            self.hist.copy_within(NN_WINDOW.., 0);
+            self.delta.copy_within(NN_WINDOW.., 0);
+            self.pos = N;
+        }
 
         output
     }
-
-    /// UPDATE_DELTA_NEW (version >= 3980 or version == -1).
-    fn update_delta_new(&mut self, value: i32) {
-        let abs_value = value.abs();
-
-        if abs_value > self.running_average * 3 {
-            self.rb_delta_m.set(0, (((value >> 25) & 64) - 32) as i16);
-        }
-        else if abs_value > (self.running_average * 4) / 3 {
-            self.rb_delta_m.set(0, (((value >> 26) & 32) - 16) as i16);
-        }
-        else if abs_value > 0 {
-            self.rb_delta_m.set(0, (((value >> 27) & 16) - 8) as i16);
-        }
-        else {
-            self.rb_delta_m.set(0, 0);
-        }
-
-        // Exponential moving average (integer division truncates toward zero)
-        self.running_average += (abs_value - self.running_average) / 16;
-
-        // Decay historical deltas at positions [-1], [-2], [-8]
-        *self.rb_delta_m.get_mut(-1) >>= 1;
-        *self.rb_delta_m.get_mut(-2) >>= 1;
-        *self.rb_delta_m.get_mut(-8) >>= 1;
-    }
-
-    /// UPDATE_DELTA_OLD (version < 3980).
-    fn update_delta_old(&mut self, value: i32) {
-        if value == 0 {
-            self.rb_delta_m.set(0, 0);
-        }
-        else {
-            self.rb_delta_m.set(0, (((value >> 28) & 8) - 4) as i16);
-        }
-
-        // Decay historical deltas at positions [-4], [-8]
-        *self.rb_delta_m.get_mut(-4) >>= 1;
-        *self.rb_delta_m.get_mut(-8) >>= 1;
-    }
 }
 
 // ===================================================================
-// NNFilter32 -- for 32-bit audio (INTTYPE=i64, DATATYPE=i32)
+// NnFilter32 -- for 32-bit audio (INTTYPE=i64, DATATYPE=i32)
 // ===================================================================
 
+/// A neural network filter for 32-bit audio.
 #[derive(Clone)]
-pub struct NNFilter32 {
+pub struct NnFilter32 {
     order: usize,
-    shift: i32,
-    one_shifted: i32,
-    version: i32,
+    shift: u32,
+    one_shifted: i64,
+    new_delta: bool,
     weights: Vec<i32>,
-    rb_input: RollBuffer<i32>,
-    rb_delta_m: RollBuffer<i32>,
+    hist: Vec<i32>,
+    delta: Vec<i32>,
+    pos: usize,
     running_average: i64,
-    interim_mode: bool,
 }
 
-impl NNFilter32 {
+impl NnFilter32 {
     /// Create a new 32-bit NN filter.
-    pub fn new(order: usize, shift: i32, version: i32) -> Self {
+    pub fn new(order: usize, shift: u32, version: i32) -> Self {
         assert!(
-            order > 0 && (order == 16 || order % 32 == 0),
-            "NNFilter32: order must be 16 or a multiple of 32, got {}",
-            order
+            matches!(order, 16 | 32 | 64 | 256 | 1280),
+            "NnFilter32: unsupported order {order}"
         );
         Self {
             order,
             shift,
-            one_shifted: 1i32 << (shift - 1),
-            version,
+            one_shifted: i64::from(1i32 << (shift - 1)),
+            new_delta: uses_new_delta(version),
             weights: vec![0i32; order],
-            rb_input: RollBuffer::new(NN_WINDOW, order),
-            rb_delta_m: RollBuffer::new(NN_WINDOW, order),
+            hist: vec![0i32; order + NN_WINDOW],
+            delta: vec![0i32; order + NN_WINDOW],
+            pos: order,
             running_average: 0,
-            interim_mode: false,
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn set_interim_mode(&mut self, mode: bool) {
-        self.interim_mode = mode;
     }
 
     pub fn flush(&mut self) {
-        self.weights.iter_mut().for_each(|w| *w = 0);
-        self.rb_input.flush();
-        self.rb_delta_m.flush();
+        self.weights.fill(0);
+        self.hist[..=self.order].fill(0);
+        self.delta[..=self.order].fill(0);
+        self.pos = self.order;
         self.running_average = 0;
     }
 
-    pub fn decompress(&mut self, input: i64) -> i64 {
-        // 1. Dot product
-        let input_hist = self.rb_input.slice(-(self.order as isize), self.order);
-        let dot_product = calculate_dot_product_32(input_hist, &self.weights, self.order);
+    /// Core decompression: takes an encoded residual, returns the reconstructed sample value.
+    #[inline(always)]
+    pub fn step(&mut self, input: i64) -> i64 {
+        let order = self.order;
+        let pos = self.pos;
+        let weights = &mut self.weights[..order];
+
+        // 1. Dot product over history: each i32*i32 TRUNCATES to i32 via wrapping_mul BEFORE
+        // widening to i64 for accumulation.
+        let input_hist = &self.hist[pos - order..pos];
+        let mut dot_product: i64 = 0;
+        for (h, w) in input_hist.iter().zip(weights.iter()) {
+            dot_product = dot_product.wrapping_add(i64::from(h.wrapping_mul(*w)));
+        }
 
         // 2. Compute output
-        let output: i64 = if self.interim_mode {
-            input + ((dot_product as i64 + self.one_shifted as i64) >> self.shift)
-        }
-        else {
-            input + ((dot_product + self.one_shifted as i64) >> self.shift)
-        };
+        let output: i64 =
+            input.wrapping_add(dot_product.wrapping_add(self.one_shifted) >> self.shift);
 
         // 3. Adapt weights -- CRITICAL: uses INPUT (the residual)
-        {
-            let delta_slice = self.rb_delta_m.slice(-(self.order as isize), self.order);
-            adapt_32(&mut self.weights, delta_slice, input, self.order);
+        let delta_hist = &self.delta[pos - order..pos];
+        if input < 0 {
+            for (w, d) in weights.iter_mut().zip(delta_hist.iter()) {
+                *w = w.wrapping_add(*d);
+            }
+        }
+        else if input > 0 {
+            for (w, d) in weights.iter_mut().zip(delta_hist.iter()) {
+                *w = w.wrapping_sub(*d);
+            }
         }
 
         // 4. Update delta buffer -- uses OUTPUT
-        if self.version == -1 || self.version >= 3980 {
-            self.update_delta_new(output);
+        let delta = &mut self.delta;
+        if self.new_delta {
+            let abs_value = output.wrapping_abs();
+            let running_average = self.running_average;
+
+            // The shifts (25/26/27) operate on the full i64 width. Sign extraction only works
+            // correctly when the value fits in 32 bits (which it generally does after
+            // saturation clamping).
+            delta[pos] = if abs_value > running_average.wrapping_mul(3) {
+                (((output >> 25) & 64) - 32) as i32
+            }
+            else if abs_value > running_average.wrapping_mul(4) / 3 {
+                (((output >> 26) & 32) - 16) as i32
+            }
+            else if abs_value > 0 {
+                (((output >> 27) & 16) - 8) as i32
+            }
+            else {
+                0
+            };
+
+            self.running_average =
+                running_average.wrapping_add(abs_value.wrapping_sub(running_average) / 16);
+
+            delta[pos - 1] >>= 1;
+            delta[pos - 2] >>= 1;
+            delta[pos - 8] >>= 1;
         }
         else {
-            self.update_delta_old(output);
+            delta[pos] = if output == 0 { 0 } else { (((output >> 28) & 8) - 4) as i32 };
+
+            delta[pos - 4] >>= 1;
+            delta[pos - 8] >>= 1;
         }
 
-        // 5. Store saturated value in input history.
-        // For <i64, i32>: DATATYPE is i32, but GetSaturatedShortFromInt still
-        // returns i16 which is then widened to i32 on assignment.
-        self.rb_input.set(0, get_saturated_short_from_i64(output) as i32);
+        // 5. Store saturated value in input history. For <i64, i32>: DATATYPE is i32, but the
+        // saturation is still to the i16 range.
+        self.hist[pos] = output.clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i32;
 
         // 6. Advance
-        self.rb_input.increment_safe();
-        self.rb_delta_m.increment_safe();
+        self.pos += 1;
+        if self.pos == order + NN_WINDOW {
+            self.hist.copy_within(NN_WINDOW.., 0);
+            self.delta.copy_within(NN_WINDOW.., 0);
+            self.pos = order;
+        }
 
         output
-    }
-
-    fn update_delta_new(&mut self, value: i64) {
-        let abs_value = value.abs();
-
-        // The shifts (25/26/27) operate on the full i64 width. Sign extraction
-        // only works correctly when the value fits in 32 bits (which it
-        // generally does after saturation clamping).
-        if abs_value > self.running_average * 3 {
-            self.rb_delta_m.set(0, (((value >> 25) & 64) - 32) as i32);
-        }
-        else if abs_value > (self.running_average * 4) / 3 {
-            self.rb_delta_m.set(0, (((value >> 26) & 32) - 16) as i32);
-        }
-        else if abs_value > 0 {
-            self.rb_delta_m.set(0, (((value >> 27) & 16) - 8) as i32);
-        }
-        else {
-            self.rb_delta_m.set(0, 0);
-        }
-
-        self.running_average += (abs_value - self.running_average) / 16;
-
-        *self.rb_delta_m.get_mut(-1) >>= 1;
-        *self.rb_delta_m.get_mut(-2) >>= 1;
-        *self.rb_delta_m.get_mut(-8) >>= 1;
-    }
-
-    fn update_delta_old(&mut self, value: i64) {
-        if value == 0 {
-            self.rb_delta_m.set(0, 0);
-        }
-        else {
-            self.rb_delta_m.set(0, (((value >> 28) & 8) - 4) as i32);
-        }
-
-        *self.rb_delta_m.get_mut(-4) >>= 1;
-        *self.rb_delta_m.get_mut(-8) >>= 1;
     }
 }
 
@@ -361,90 +430,19 @@ impl NNFilter32 {
 // Filter cascade helpers
 // ===================================================================
 
-/// Compression level constants.
-pub const COMPRESSION_FAST: u32 = 1000;
-pub const COMPRESSION_NORMAL: u32 = 2000;
-pub const COMPRESSION_HIGH: u32 = 3000;
-pub const COMPRESSION_EXTRA_HIGH: u32 = 4000;
-pub const COMPRESSION_INSANE: u32 = 5000;
-
-/// Filter configuration: (order, shift).
-type FilterConfig = (usize, i32);
-
-/// Return the filter configurations for a given compression level.
-/// The returned list is in creation order (largest filter first for
-/// multi-filter levels).
-pub fn filter_configs(compression_level: u32) -> Vec<FilterConfig> {
-    match compression_level {
-        COMPRESSION_FAST => vec![],
-        COMPRESSION_NORMAL => vec![(16, 11)],
-        COMPRESSION_HIGH => vec![(64, 11)],
-        COMPRESSION_EXTRA_HIGH => vec![(256, 13), (32, 10)],
-        COMPRESSION_INSANE => vec![(1280, 15), (256, 13), (16, 11)],
-        _ => vec![],
-    }
-}
-
-/// Create NNFilter16 instances for a compression level.
-/// Returns filters in creation order; call `decompress_cascade_16` to apply
-/// them in the correct (reverse) order.
-pub fn create_filters_16(compression_level: u32, version: i32) -> Vec<NNFilter16> {
+/// Create NnFilter16 instances for a compression level, in creation order. The filters are
+/// applied in the reverse order.
+pub fn create_filters_16(compression_level: u32, version: i32) -> Vec<NnFilter16> {
     filter_configs(compression_level)
-        .into_iter()
-        .map(|(order, shift)| NNFilter16::new(order, shift, version))
+        .iter()
+        .map(|&(order, shift)| NnFilter16::new(order, shift, version))
         .collect()
 }
 
-/// Create NNFilter32 instances for a compression level.
-pub fn create_filters_32(compression_level: u32, version: i32) -> Vec<NNFilter32> {
+/// Create NnFilter32 instances for a compression level, in creation order.
+pub fn create_filters_32(compression_level: u32, version: i32) -> Vec<NnFilter32> {
     filter_configs(compression_level)
-        .into_iter()
-        .map(|(order, shift)| NNFilter32::new(order, shift, version))
+        .iter()
+        .map(|&(order, shift)| NnFilter32::new(order, shift, version))
         .collect()
-}
-
-/// Apply the NNFilter16 cascade in decompression order (reverse of creation:
-/// last/smallest filter first, then toward the largest).
-#[inline]
-pub fn decompress_cascade_16(filters: &mut [NNFilter16], mut value: i32) -> i32 {
-    for f in filters.iter_mut().rev() {
-        value = f.decompress(value);
-    }
-    value
-}
-
-/// Apply the NNFilter32 cascade in decompression order.
-#[inline]
-pub fn decompress_cascade_32(filters: &mut [NNFilter32], mut value: i64) -> i64 {
-    for f in filters.iter_mut().rev() {
-        value = f.decompress(value);
-    }
-    value
-}
-
-/// Flush all filters in a cascade.
-pub fn flush_cascade_16(filters: &mut [NNFilter16]) {
-    for f in filters.iter_mut() {
-        f.flush();
-    }
-}
-
-pub fn flush_cascade_32(filters: &mut [NNFilter32]) {
-    for f in filters.iter_mut() {
-        f.flush();
-    }
-}
-
-/// Set interim mode on all filters in a cascade.
-pub fn set_interim_mode_16(filters: &mut [NNFilter16], mode: bool) {
-    for f in filters.iter_mut() {
-        f.set_interim_mode(mode);
-    }
-}
-
-#[allow(dead_code)]
-pub fn set_interim_mode_32(filters: &mut [NNFilter32], mode: bool) {
-    for f in filters.iter_mut() {
-        f.set_interim_mode(mode);
-    }
 }

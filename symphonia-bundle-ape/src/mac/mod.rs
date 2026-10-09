@@ -13,12 +13,10 @@
 
 pub mod bitreader;
 pub mod crc;
-pub mod entropy;
 pub mod error;
 pub mod format;
 pub mod frame;
 pub mod nn_filter;
 pub mod predictor;
 pub mod range_coder;
-pub mod roll_buffer;
 pub mod unprepare;

@@ -2,13 +2,21 @@
 // Copyright (c) 2026 ombs.io. Licensed under MIT OR Apache-2.0; see LICENSE-MIT, LICENSE-APACHE
 // and NOTICE in this directory. Modified for Symphonia.
 
-use crate::mac::bitreader::BitReader;
+//! Stateful APE frame decoder for external demuxer integration.
+//!
+//! A frame is decoded in blocks of [`CHUNK`] samples per channel, in three phases: the residuals
+//! of the block are range decoded, they are run through the neural network filter cascade of
+//! their channel, and finally the second prediction stage and the channel decorrelation
+//! reconstruct the PCM samples. This is possible because the entropy decoding does not depend on
+//! the predictors, and the neural network filters do not depend on the other channels.
+
 use crate::mac::crc::ape_crc;
-use crate::mac::entropy::EntropyState;
 use crate::mac::error::{ApeError, ApeResult};
 use crate::mac::predictor::{Predictor3950, Predictor3950_32};
-use crate::mac::range_coder::RangeCoder;
-use crate::mac::unprepare;
+use crate::mac::range_coder::{EntropyState, RangeCoder};
+use crate::mac::unprepare::{unprepare_mono, unprepare_multichannel, unprepare_stereo};
+
+use crate::mac::bitreader::ByteReader;
 
 // Special frame codes (from Prepare.h)
 const SPECIAL_FRAME_MONO_SILENCE: i32 = 1;
@@ -16,252 +24,62 @@ const SPECIAL_FRAME_LEFT_SILENCE: i32 = 1;
 const SPECIAL_FRAME_RIGHT_SILENCE: i32 = 2;
 const SPECIAL_FRAME_PSEUDO_STEREO: i32 = 4;
 
+/// The number of blocks (samples per channel) that are decoded phase by phase.
+const CHUNK: usize = 4096;
+
+/// The largest PCM size of a frame that will be decoded.
+const MAX_FRAME_PCM_BYTES: usize = 64 * 1024 * 1024;
+
+/// What the frame decoding needs from a predictor.
+trait Predictor {
+    /// Whether more than two channels are decoded (the 32-bit path only does mono and stereo).
+    const MULTICHANNEL: bool;
+
+    fn flush(&mut self);
+
+    /// Reconstruct a sample from its entropy-decoded residual and the cross-channel value.
+    fn decompress_value(&mut self, residual: i64, n_b: i32) -> i32;
+}
+
+impl Predictor for Predictor3950 {
+    const MULTICHANNEL: bool = true;
+
+    fn flush(&mut self) {
+        Predictor3950::flush(self);
+    }
+
+    #[inline(always)]
+    fn decompress_value(&mut self, residual: i64, n_b: i32) -> i32 {
+        Predictor3950::decompress_value(self, residual, n_b)
+    }
+}
+
+impl Predictor for Predictor3950_32 {
+    const MULTICHANNEL: bool = false;
+
+    fn flush(&mut self) {
+        Predictor3950_32::flush(self);
+    }
+
+    #[inline(always)]
+    fn decompress_value(&mut self, residual: i64, n_b: i32) -> i32 {
+        Predictor3950_32::decompress_value(self, residual, n_b)
+    }
+}
+
+/// The predictors of a decoder, one per channel.
 enum Predictors {
     Path16(Vec<Predictor3950>),
     Path32(Vec<Predictor3950_32>),
 }
 
-// ---------------------------------------------------------------------------
-// Frame decode implementations (shared between owned and borrowed paths)
-// ---------------------------------------------------------------------------
-
-fn try_decode_frame_16(
-    frame_data: &[u8],
-    seek_remainder: u32,
-    frame_blocks: usize,
+/// The stream parameters a frame decode needs.
+struct Params {
     version: i32,
     channels: u16,
-    bits: u16,
+    bits_per_sample: u16,
     block_align: usize,
-    predictors: &mut [Predictor3950],
-    entropy_states: &mut [EntropyState],
-    range_coder: &mut RangeCoder,
-) -> ApeResult<Vec<u8>> {
-    let mut br = BitReader::from_frame_bytes(frame_data, seek_remainder * 8);
-
-    // --- StartFrame ---
-    let mut stored_crc = br.decode_value_x_bits(32);
-    let mut special_codes: i32 = 0;
-    if version > 3820 {
-        if stored_crc & 0x80000000 != 0 {
-            special_codes = br.decode_value_x_bits(32) as i32;
-        }
-        stored_crc &= 0x7FFFFFFF;
-    }
-
-    for p in predictors.iter_mut() {
-        p.flush();
-    }
-    for s in entropy_states.iter_mut() {
-        s.flush();
-    }
-    range_coder.flush_bit_array(&mut br);
-
-    let mut last_x: i32 = 0;
-    let pcm_size =
-        frame_blocks.checked_mul(block_align).ok_or(ApeError::InvalidFormat("frame too large"))?;
-    if pcm_size > 64 * 1024 * 1024 {
-        return Err(ApeError::InvalidFormat("frame PCM size exceeds 64 MB"));
-    }
-    let mut pcm_output = Vec::with_capacity(pcm_size);
-
-    let decode_result: ApeResult<()> = (|| {
-        if channels == 2 {
-            if (special_codes & SPECIAL_FRAME_LEFT_SILENCE) != 0
-                && (special_codes & SPECIAL_FRAME_RIGHT_SILENCE) != 0
-            {
-                for _ in 0..frame_blocks {
-                    unprepare::unprepare(&[0, 0], channels, bits, &mut pcm_output)?;
-                }
-            }
-            else if (special_codes & SPECIAL_FRAME_PSEUDO_STEREO) != 0 {
-                for _ in 0..frame_blocks {
-                    let val = entropy_states[0].decode_value_range(range_coder, &mut br)?;
-                    let x = predictors[0].decompress_value(val, 0);
-                    unprepare::unprepare(&[x, 0], channels, bits, &mut pcm_output)?;
-                }
-            }
-            else if version >= 3950 {
-                for _ in 0..frame_blocks {
-                    let ny = entropy_states[1].decode_value_range(range_coder, &mut br)?;
-                    let nx = entropy_states[0].decode_value_range(range_coder, &mut br)?;
-                    let y = predictors[1].decompress_value(ny, last_x as i64);
-                    let x = predictors[0].decompress_value(nx, y as i64);
-                    last_x = x;
-                    unprepare::unprepare(&[x, y], channels, bits, &mut pcm_output)?;
-                }
-            }
-            else {
-                for _ in 0..frame_blocks {
-                    let ex = entropy_states[0].decode_value_range(range_coder, &mut br)?;
-                    let ey = entropy_states[1].decode_value_range(range_coder, &mut br)?;
-                    let x = predictors[0].decompress_value(ex, 0);
-                    let y = predictors[1].decompress_value(ey, 0);
-                    unprepare::unprepare(&[x, y], channels, bits, &mut pcm_output)?;
-                }
-            }
-        }
-        else if channels == 1 {
-            if (special_codes & SPECIAL_FRAME_MONO_SILENCE) != 0 {
-                for _ in 0..frame_blocks {
-                    unprepare::unprepare(&[0], channels, bits, &mut pcm_output)?;
-                }
-            }
-            else {
-                for _ in 0..frame_blocks {
-                    let val = entropy_states[0].decode_value_range(range_coder, &mut br)?;
-                    let decoded = predictors[0].decompress_value(val, 0);
-                    unprepare::unprepare(&[decoded], channels, bits, &mut pcm_output)?;
-                }
-            }
-        }
-        else {
-            let ch = channels as usize;
-            let mut values = vec![0i32; ch];
-            for _ in 0..frame_blocks {
-                for c in 0..ch {
-                    let val = entropy_states[c].decode_value_range(range_coder, &mut br)?;
-                    values[c] = predictors[c].decompress_value(val, 0);
-                }
-                unprepare::unprepare(&values, channels, bits, &mut pcm_output)?;
-            }
-        }
-        Ok(())
-    })();
-
-    decode_result?;
-
-    // --- EndFrame ---
-    range_coder.finalize(&mut br);
-    let computed_crc = ape_crc(&pcm_output);
-    if computed_crc != stored_crc {
-        return Err(ApeError::InvalidChecksum);
-    }
-
-    // Post-processing transforms (applied AFTER CRC, matching C++ GetData behavior)
-    apply_post_processing(&mut pcm_output, bits, channels);
-
-    Ok(pcm_output)
 }
-
-fn try_decode_frame_32(
-    frame_data: &[u8],
-    seek_remainder: u32,
-    frame_blocks: usize,
-    version: i32,
-    channels: u16,
-    bits: u16,
-    block_align: usize,
-    predictors: &mut [Predictor3950_32],
-    entropy_states: &mut [EntropyState],
-    range_coder: &mut RangeCoder,
-) -> ApeResult<Vec<u8>> {
-    let mut br = BitReader::from_frame_bytes(frame_data, seek_remainder * 8);
-
-    let mut stored_crc = br.decode_value_x_bits(32);
-    let mut special_codes: i32 = 0;
-    if version > 3820 {
-        if stored_crc & 0x80000000 != 0 {
-            special_codes = br.decode_value_x_bits(32) as i32;
-        }
-        stored_crc &= 0x7FFFFFFF;
-    }
-
-    for p in predictors.iter_mut() {
-        p.flush();
-    }
-    for s in entropy_states.iter_mut() {
-        s.flush();
-    }
-    range_coder.flush_bit_array(&mut br);
-
-    let mut last_x: i64 = 0;
-    let pcm_size =
-        frame_blocks.checked_mul(block_align).ok_or(ApeError::InvalidFormat("frame too large"))?;
-    if pcm_size > 64 * 1024 * 1024 {
-        return Err(ApeError::InvalidFormat("frame PCM size exceeds 64 MB"));
-    }
-    let mut pcm_output = Vec::with_capacity(pcm_size);
-
-    if channels == 2 {
-        if (special_codes & SPECIAL_FRAME_LEFT_SILENCE) != 0
-            && (special_codes & SPECIAL_FRAME_RIGHT_SILENCE) != 0
-        {
-            for _ in 0..frame_blocks {
-                unprepare::unprepare(&[0, 0], channels, bits, &mut pcm_output)?;
-            }
-        }
-        else if (special_codes & SPECIAL_FRAME_PSEUDO_STEREO) != 0 {
-            for _ in 0..frame_blocks {
-                let val = entropy_states[0].decode_value_range(range_coder, &mut br)?;
-                let x = predictors[0].decompress_value(val, 0);
-                unprepare::unprepare(&[x as i32, 0], channels, bits, &mut pcm_output)?;
-            }
-        }
-        else {
-            for _ in 0..frame_blocks {
-                let ny = entropy_states[1].decode_value_range(range_coder, &mut br)?;
-                let nx = entropy_states[0].decode_value_range(range_coder, &mut br)?;
-                let y = predictors[1].decompress_value(ny, last_x);
-                let x = predictors[0].decompress_value(nx, y as i64);
-                last_x = x as i64;
-                unprepare::unprepare(&[x as i32, y as i32], channels, bits, &mut pcm_output)?;
-            }
-        }
-    }
-    else if channels == 1 {
-        if (special_codes & SPECIAL_FRAME_MONO_SILENCE) != 0 {
-            for _ in 0..frame_blocks {
-                unprepare::unprepare(&[0], channels, bits, &mut pcm_output)?;
-            }
-        }
-        else {
-            for _ in 0..frame_blocks {
-                let val = entropy_states[0].decode_value_range(range_coder, &mut br)?;
-                let decoded = predictors[0].decompress_value(val, 0);
-                unprepare::unprepare(&[decoded as i32], channels, bits, &mut pcm_output)?;
-            }
-        }
-    }
-
-    range_coder.finalize(&mut br);
-    let computed_crc = ape_crc(&pcm_output);
-    if computed_crc != stored_crc {
-        return Err(ApeError::InvalidChecksum);
-    }
-
-    // Post-processing transforms (applied AFTER CRC, matching C++ GetData behavior)
-    apply_post_processing(&mut pcm_output, bits, channels);
-
-    Ok(pcm_output)
-}
-
-/// Apply format-flag-dependent transforms to decoded PCM data.
-///
-/// These are applied AFTER CRC verification and match the C++ `GetData()` behavior.
-/// For WAV-sourced files (the common case), all flags are 0 and this is a no-op.
-fn apply_post_processing(pcm: &mut [u8], bits: u16, _channels: u16) {
-    // The format flags are embedded in the APE header and control how the raw
-    // PCM bytes should be transformed for the output format. Since our decoder
-    // targets the same format as the source, these transforms are only needed
-    // when the source was in a non-standard format.
-    //
-    // Note: In the current implementation, format flags are exposed via ApeInfo
-    // but the caller is responsible for checking them. The transforms below
-    // would be applied when the corresponding flags are set, but since all
-    // our test fixtures are standard WAV (flags = 0), they're not exercised.
-    //
-    // The transforms are documented here for future implementation if needed:
-    //
-    // APE_FORMAT_FLAG_FLOATING_POINT: apply FloatTransform to each 32-bit sample
-    // APE_FORMAT_FLAG_SIGNED_8_BIT: add 128 (wrapping) to each byte
-    // APE_FORMAT_FLAG_BIG_ENDIAN: byte-swap each sample
-    let _ = (pcm, bits);
-}
-
-// ---------------------------------------------------------------------------
-// FrameDecoder — stateful frame decoder for external demuxer integration
-// ---------------------------------------------------------------------------
 
 /// A stateful APE frame decoder that works on raw compressed frame bytes.
 ///
@@ -270,7 +88,8 @@ fn apply_post_processing(pcm: &mut [u8], bits: u16, _channels: u16) {
 pub struct FrameDecoder {
     predictors: Predictors,
     entropy_states: Vec<EntropyState>,
-    range_coder: RangeCoder,
+    /// Scratch space for the reconstructed samples of a block, one vector per channel.
+    scratch: Vec<Vec<i32>>,
     version: i32,
     channels: u16,
     bits_per_sample: u16,
@@ -281,13 +100,13 @@ pub struct FrameDecoder {
 impl FrameDecoder {
     /// Create a new `FrameDecoder` with the given APE stream parameters.
     ///
-    /// * `version` — APE file version (e.g., 3990). Must be >= 3950.
-    /// * `channels` — Number of audio channels (1–32).
-    /// * `bits_per_sample` — Bits per sample (8, 16, 24, or 32).
-    /// * `compression_level` — Compression level (1000–5000).
+    /// * `version` -- APE file version (e.g., 3990). Must be >= 3950.
+    /// * `channels` -- Number of audio channels (1-32).
+    /// * `bits_per_sample` -- Bits per sample (8, 16, 24, or 32).
+    /// * `compression_level` -- Compression level (1000-5000).
     ///
-    /// Returns an error if the parameters are invalid (unsupported version,
-    /// zero channels, or unsupported bit depth).
+    /// Returns an error if the parameters are invalid (unsupported version, zero channels, or
+    /// unsupported bit depth).
     pub fn new(
         version: u16,
         channels: u16,
@@ -304,26 +123,27 @@ impl FrameDecoder {
             return Err(ApeError::InvalidFormat("bits per sample must be 8, 16, 24, or 32"));
         }
 
-        let v = version as i32;
-        let comp = compression_level as u32;
+        let v = i32::from(version);
+        let comp = u32::from(compression_level);
+        let nch = usize::from(channels);
 
         let predictors = if bits_per_sample >= 32 {
-            Predictors::Path32((0..channels).map(|_| Predictor3950_32::new(comp, v)).collect())
+            Predictors::Path32((0..nch).map(|_| Predictor3950_32::new(comp, v)).collect())
         }
         else {
             Predictors::Path16(
-                (0..channels).map(|_| Predictor3950::new(comp, v, bits_per_sample)).collect(),
+                (0..nch).map(|_| Predictor3950::new(comp, v, bits_per_sample)).collect(),
             )
         };
 
-        let entropy_states = (0..channels).map(|_| EntropyState::new()).collect();
-        let bytes_per_sample = (bits_per_sample / 8) as usize;
-        let block_align = bytes_per_sample * channels as usize;
+        let entropy_states = (0..nch).map(|_| EntropyState::new()).collect();
+        let bytes_per_sample = usize::from(bits_per_sample / 8);
+        let block_align = bytes_per_sample * nch;
 
         Ok(FrameDecoder {
             predictors,
             entropy_states,
-            range_coder: RangeCoder::new(),
+            scratch: vec![vec![0; CHUNK]; nch],
             version: v,
             channels,
             bits_per_sample,
@@ -334,30 +154,32 @@ impl FrameDecoder {
 
     /// Decode a compressed frame to raw PCM bytes.
     ///
-    /// * `frame_data` — Compressed frame bytes (including alignment prefix),
-    ///   as read by the demuxer.
-    /// * `seek_remainder` — Byte alignment offset for this frame,
-    ///   as computed by the demuxer.
-    /// * `frame_blocks` — Number of audio blocks (samples per channel) in this frame.
+    /// * `frame_data` -- Compressed frame bytes (including alignment prefix).
+    /// * `seek_remainder` -- Byte alignment offset for this frame.
+    /// * `frame_blocks` -- Number of audio blocks (samples per channel) in this frame.
     pub fn decode_frame(
         &mut self,
         frame_data: &[u8],
         seek_remainder: u32,
         frame_blocks: usize,
     ) -> ApeResult<Vec<u8>> {
+        let params = Params {
+            version: self.version,
+            channels: self.channels,
+            bits_per_sample: self.bits_per_sample,
+            block_align: self.block_align,
+        };
+
         match &mut self.predictors {
             Predictors::Path16(predictors) => {
-                let result = try_decode_frame_16(
+                let result = decode_frame_impl(
+                    &params,
                     frame_data,
                     seek_remainder,
                     frame_blocks,
-                    self.version,
-                    self.channels,
-                    self.bits_per_sample,
-                    self.block_align,
                     predictors,
+                    &mut self.scratch,
                     &mut self.entropy_states,
-                    &mut self.range_coder,
                 );
 
                 match result {
@@ -369,34 +191,203 @@ impl FrameDecoder {
                         for p in predictors.iter_mut() {
                             p.set_interim_mode(true);
                         }
-                        try_decode_frame_16(
+                        decode_frame_impl(
+                            &params,
                             frame_data,
                             seek_remainder,
                             frame_blocks,
-                            self.version,
-                            self.channels,
-                            self.bits_per_sample,
-                            self.block_align,
                             predictors,
+                            &mut self.scratch,
                             &mut self.entropy_states,
-                            &mut self.range_coder,
                         )
                     }
                     Err(e) => Err(e),
                 }
             }
-            Predictors::Path32(predictors) => try_decode_frame_32(
+            Predictors::Path32(predictors) => decode_frame_impl(
+                &params,
                 frame_data,
                 seek_remainder,
                 frame_blocks,
-                self.version,
-                self.channels,
-                self.bits_per_sample,
-                self.block_align,
                 predictors,
+                &mut self.scratch,
                 &mut self.entropy_states,
-                &mut self.range_coder,
             ),
         }
     }
+}
+
+fn decode_frame_impl<P: Predictor>(
+    params: &Params,
+    frame_data: &[u8],
+    seek_remainder: u32,
+    frame_blocks: usize,
+    predictors: &mut [P],
+    scratch: &mut [Vec<i32>],
+    entropy_states: &mut [EntropyState],
+) -> ApeResult<Vec<u8>> {
+    let Params { version, channels, bits_per_sample: bits, block_align } = *params;
+    let mut br = ByteReader::new(frame_data, seek_remainder);
+
+    // --- StartFrame ---
+    let mut stored_crc = br.next_u32();
+    let mut special_codes: i32 = 0;
+    if version > 3820 {
+        if stored_crc & 0x80000000 != 0 {
+            special_codes = br.next_u32() as i32;
+        }
+        stored_crc &= 0x7FFFFFFF;
+    }
+
+    for p in predictors.iter_mut() {
+        p.flush();
+    }
+    for s in entropy_states.iter_mut() {
+        s.flush();
+    }
+    let mut rc = RangeCoder::new(&mut br);
+
+    let pcm_size =
+        frame_blocks.checked_mul(block_align).ok_or(ApeError::InvalidFormat("frame too large"))?;
+    if pcm_size > MAX_FRAME_PCM_BYTES {
+        return Err(ApeError::InvalidFormat("frame PCM size exceeds 64 MB"));
+    }
+
+    // The 32-bit path only decodes mono and stereo, and produces no output otherwise.
+    let decodes = channels <= 2 || P::MULTICHANNEL;
+    let mut pcm = if decodes { vec![0u8; pcm_size] } else { Vec::new() };
+
+    // The previous X output, which the Y predictor of the next block takes as input.
+    let mut last_x: i32 = 0;
+
+    let mut done = 0;
+    while decodes && done < frame_blocks {
+        let n = (frame_blocks - done).min(CHUNK);
+        let out = &mut pcm[done * block_align..(done + n) * block_align];
+
+        // The samples of the block are decoded one after the other, since the entropy decoding
+        // and the predictors are independent chains of dependent operations that the processor
+        // can overlap. The entropy decoding error that stops the block, if any, is held back
+        // until the blocks decoded before it are reconstructed, since they may fail in a way that
+        // takes precedence.
+        let mut n_ok = n;
+        let mut entropy_error = None;
+
+        if channels == 2 {
+            let (s0, s1) = {
+                let (a, b) = scratch.split_at_mut(1);
+                (&mut a[0][..n], &mut b[0][..n])
+            };
+            let (p0, p1) = {
+                let (a, b) = predictors.split_at_mut(1);
+                (&mut a[0], &mut b[0])
+            };
+            let (e0, e1) = {
+                let (a, b) = entropy_states.split_at_mut(1);
+                (&mut a[0], &mut b[0])
+            };
+
+            if (special_codes & SPECIAL_FRAME_LEFT_SILENCE) != 0
+                && (special_codes & SPECIAL_FRAME_RIGHT_SILENCE) != 0
+            {
+                s0.fill(0);
+                s1.fill(0);
+            }
+            else if (special_codes & SPECIAL_FRAME_PSEUDO_STEREO) != 0 {
+                s1.fill(0);
+                for (i, x) in s0.iter_mut().enumerate() {
+                    match rc.decode_value(e0, &mut br) {
+                        Ok(v) => *x = p0.decompress_value(v, 0),
+                        Err(e) => {
+                            entropy_error = Some(e);
+                            n_ok = i;
+                            break;
+                        }
+                    }
+                }
+            }
+            else {
+                for (i, (x, y)) in s0.iter_mut().zip(s1.iter_mut()).enumerate() {
+                    // The second channel is coded first.
+                    let ny = match rc.decode_value(e1, &mut br) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            entropy_error = Some(e);
+                            n_ok = i;
+                            break;
+                        }
+                    };
+                    let nx = match rc.decode_value(e0, &mut br) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            entropy_error = Some(e);
+                            n_ok = i;
+                            break;
+                        }
+                    };
+                    *y = p1.decompress_value(ny, last_x);
+                    *x = p0.decompress_value(nx, *y);
+                    last_x = *x;
+                }
+            }
+
+            // s0 and s1 are the "mid" and "side" values, which are decorrelated here.
+            unprepare_stereo(bits, &s0[..n_ok], &s1[..n_ok], &mut out[..n_ok * block_align])?;
+        }
+        else if channels == 1 {
+            let s0 = &mut scratch[0][..n];
+            let p0 = &mut predictors[0];
+            let e0 = &mut entropy_states[0];
+
+            if (special_codes & SPECIAL_FRAME_MONO_SILENCE) != 0 {
+                s0.fill(0);
+            }
+            else {
+                for (i, x) in s0.iter_mut().enumerate() {
+                    match rc.decode_value(e0, &mut br) {
+                        Ok(v) => *x = p0.decompress_value(v, 0),
+                        Err(e) => {
+                            entropy_error = Some(e);
+                            n_ok = i;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            unprepare_mono(bits, &s0[..n_ok], &mut out[..n_ok * block_align])?;
+        }
+        else {
+            // More than two channels; the samples of a block are coded channel by channel.
+            'blocks: for i in 0..n {
+                for ((p, e), s) in
+                    predictors.iter_mut().zip(entropy_states.iter_mut()).zip(scratch.iter_mut())
+                {
+                    match rc.decode_value(e, &mut br) {
+                        Ok(v) => s[i] = p.decompress_value(v, 0),
+                        Err(err) => {
+                            entropy_error = Some(err);
+                            n_ok = i;
+                            break 'blocks;
+                        }
+                    }
+                }
+            }
+
+            unprepare_multichannel(bits, scratch, n_ok, &mut out[..n_ok * block_align])?;
+        }
+
+        if let Some(e) = entropy_error {
+            return Err(e);
+        }
+        done += n;
+    }
+
+    // --- EndFrame ---
+    let computed_crc = ape_crc(&pcm);
+    if computed_crc != stored_crc {
+        return Err(ApeError::InvalidChecksum);
+    }
+
+    Ok(pcm)
 }
