@@ -8,7 +8,9 @@
 use symphonia_core::codecs::CodecParameters;
 use symphonia_core::support_format;
 
-use symphonia_core::codecs::audio::well_known::{CODEC_ID_AAC, CODEC_ID_ALAC, CODEC_ID_FLAC};
+use symphonia_core::codecs::audio::well_known::{
+    CODEC_ID_AAC, CODEC_ID_ALAC, CODEC_ID_FLAC, CODEC_ID_OPUS,
+};
 use symphonia_core::errors::{
     Error, Result, SeekErrorKind, decode_error, seek_error, unsupported_error,
 };
@@ -33,6 +35,9 @@ use symphonia_common::mpeg::audio::{
 use crate::stream::*;
 
 use log::{debug, info, trace, warn};
+
+/// Opus seek pre-roll in frames at 48 kHz (80 ms, RFC 7845 section 4.6).
+const OPUS_SEEK_PREROLL_FRAMES: u64 = 3840;
 
 const ISOMP4_FORMAT_INFO: FormatInfo = FormatInfo {
     format: FORMAT_ID_ISOMP4,
@@ -177,7 +182,7 @@ impl TrackState {
             frames_per_tick: frames_per_tick.unwrap_or(1),
             media_time_base: TimeBase::from_recip(timespan.timescale),
             stts_nominal: nominal_sample_delta(trak),
-            seek_preroll: SeekPreroll::new(&track),
+            seek_preroll: SeekPreroll::new(&track, nominal_sample_delta(trak), timespan.timescale),
         };
 
         (state, track)
@@ -192,10 +197,13 @@ enum SeekPreroll {
     /// AAC. Start decoding some samples (packets) before the target. See
     /// [`aac_seek_start_frame`].
     Aac { sbr: bool },
+    /// Opus. Start decoding a fixed number of packets before the target, covering at least 80 ms
+    /// (3840 frames at 48 kHz), as mandated by RFC 7845 section 4.6.
+    Opus { packets: u32 },
 }
 
 impl SeekPreroll {
-    fn new(track: &Track) -> Self {
+    fn new(track: &Track, nominal_dur: Option<u64>, timescale: NonZero<u32>) -> Self {
         match &track.codec_params {
             Some(CodecParameters::Audio(audio)) if audio.codec == CODEC_ID_AAC => {
                 let sbr = audio
@@ -206,6 +214,16 @@ impl SeekPreroll {
 
                 SeekPreroll::Aac { sbr }
             }
+            Some(CodecParameters::Audio(audio)) if audio.codec == CODEC_ID_OPUS => {
+                // The pre-roll is 80 ms regardless of the OpusHead pre-skip (which is excluded
+                // from the seek timeline). Convert to packets using the nominal packet duration
+                // (in ticks of the media timescale), assuming 20 ms packets if unknown.
+                let ticks =
+                    (u64::from(timescale.get()) * OPUS_SEEK_PREROLL_FRAMES).div_ceil(48_000);
+                let nominal = nominal_dur.filter(|&d| d > 0).unwrap_or(ticks.div_ceil(4).max(1));
+                let packets = ticks.div_ceil(nominal).min(u64::from(u16::MAX));
+                SeekPreroll::Opus { packets: packets as u32 }
+            }
             _ => SeekPreroll::None,
         }
     }
@@ -215,6 +233,7 @@ impl SeekPreroll {
     fn start_sample(self, target: u32, from_start: bool) -> u32 {
         match self {
             SeekPreroll::None => target,
+            SeekPreroll::Opus { packets } => target.saturating_sub(packets),
             // The state of an SBR decoder is a function of the frames since the start of the
             // stream (the noise phase), so audio is only correct if decoding starts at a frame
             // from which a reset decoder converges. Therefore, an SBR stream is pre-rolled
@@ -307,6 +326,47 @@ fn nominal_packet_dur(
     }
 
     stts_nominal.filter(|&nominal| nominal > dur.get()).map(Duration::new).unwrap_or(dur)
+}
+
+#[cfg(test)]
+mod opus_preroll_tests {
+    use super::{OPUS_SEEK_PREROLL_FRAMES, SeekPreroll};
+    use std::num::NonZero;
+    use symphonia_core::codecs::CodecParameters;
+    use symphonia_core::codecs::audio::AudioCodecParameters;
+    use symphonia_core::codecs::audio::well_known::CODEC_ID_OPUS;
+    use symphonia_core::formats::Track;
+
+    fn opus_track() -> Track {
+        let mut params = AudioCodecParameters::new();
+        params.for_codec(CODEC_ID_OPUS);
+        let mut track = Track::new(0);
+        track.with_codec_params(CodecParameters::Audio(params));
+        track
+    }
+
+    #[test]
+    fn verify_opus_preroll_covers_80ms() {
+        assert_eq!(OPUS_SEEK_PREROLL_FRAMES, 3840);
+        let ts = NonZero::new(48_000).unwrap();
+
+        // 20 ms packets: 4 packets.
+        let p = SeekPreroll::new(&opus_track(), Some(960), ts);
+        assert_eq!(p, SeekPreroll::Opus { packets: 4 });
+        assert_eq!(p.start_sample(100, false), 96);
+        assert_eq!(p.start_sample(2, true), 0);
+
+        // 60 ms packets: 2 packets (>= 80 ms).
+        assert_eq!(
+            SeekPreroll::new(&opus_track(), Some(2880), ts),
+            SeekPreroll::Opus { packets: 2 }
+        );
+        // 10 ms packets: 8 packets.
+        assert_eq!(
+            SeekPreroll::new(&opus_track(), Some(480), ts),
+            SeekPreroll::Opus { packets: 8 }
+        );
+    }
 }
 
 #[cfg(test)]
