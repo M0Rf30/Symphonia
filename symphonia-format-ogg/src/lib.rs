@@ -20,5 +20,7 @@ mod logical;
 mod mappings;
 mod page;
 mod physical;
+#[cfg(feature = "writer")]
+pub mod writer;
 
 pub use demuxer::OggReader;

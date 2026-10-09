@@ -1,6 +1,6 @@
 [package]
 name = "symphonia-format-ogg"
-description = "Pure Rust OGG demuxer (a part of project Symphonia)."
+description = "Pure Rust OGG demuxer and minimal page writer (a part of project Symphonia)."
 authors = ["Philip Deljanov <philip.deljanov@gmail.com>"]
 readme = "README.md"
 categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
@@ -23,6 +23,11 @@ version = "0.6.1"
 path = "../symphonia-metadata"
 default-features = false
 features = ["vorbis"]
+
+[features]
+default = []
+# A minimal Ogg page writer (`symphonia_format_ogg::writer`).
+writer = []
 
 [lints]
 workspace = true

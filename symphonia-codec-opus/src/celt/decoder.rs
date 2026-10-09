@@ -730,17 +730,11 @@ impl CeltDecoder {
 
         let silence = if tell >= total_bits { true } else if tell == 1 { rd.dec_bit_logp(15) } else { false };
         if silence {
-            // NOTE: C additionally does `dec->nbits_total += tell-ec_tell(dec)` here so that
-            // *every* later `ec_tell()`/`ec_tell_frac()` call (including inside
-            // `unquant_coarse_energy`/`clt_compute_allocation`/etc., owned by "CeltBitstream")
-            // also observes the packet as fully consumed. `range.rs` (wave 0, not ours to
-            // modify) has no accessor for this; `tell`/`total_bits` are fixed up locally for
-            // this function's own budget checks below, but the shared `rd` doesn't reflect it.
-            // In practice `silence` requires an exact-zero-sample encoder decision (vanishingly
-            // rare outside synthetic all-zero test input), so this is a known, narrow gap rather
-            // than a general accuracy issue; revisit with a `RangeDecoder` coordination request
-            // if a real vector's final range diverges on a silent packet.
+            // Pretend we've read all the remaining bits, so that every later `tell()` /
+            // `tell_frac()` (including inside the energy and allocation decoding) observes the
+            // packet as fully consumed. C: `dec->nbits_total += tell-ec_tell(dec)`.
             tell = len * 8;
+            rd.force_tell(tell);
         }
 
         let mut postfilter_gain = 0f32;

@@ -13,14 +13,14 @@ use crate::range::RangeDecoder;
 
 /// The minimum probability of an energy delta (out of 32768). C: `LAPLACE_MINP`
 /// (`LAPLACE_LOG_MINP` is `0`, so `LAPLACE_MINP = 1<<0`).
-const LAPLACE_MINP: u32 = 1;
-const LAPLACE_LOG_MINP: u32 = 0;
+pub(crate) const LAPLACE_MINP: u32 = 1;
+pub(crate) const LAPLACE_LOG_MINP: u32 = 0;
 /// The minimum number of guaranteed representable energy deltas (in one direction).
 /// C: `LAPLACE_NMIN`.
-const LAPLACE_NMIN: u32 = 16;
+pub(crate) const LAPLACE_NMIN: u32 = 16;
 
 /// C: `ec_laplace_get_freq1`. Called with `decay` positive and at most `11456`.
-fn ec_laplace_get_freq1(fs0: u32, decay: i32) -> u32 {
+pub(crate) fn ec_laplace_get_freq1(fs0: u32, decay: i32) -> u32 {
     let ft = 32768 - LAPLACE_MINP * (2 * LAPLACE_NMIN) - fs0;
     ((ft as i64 * (16384 - decay) as i64) >> 15) as u32
 }

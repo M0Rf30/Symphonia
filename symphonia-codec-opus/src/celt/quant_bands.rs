@@ -27,19 +27,19 @@ pub(crate) static E_MEANS: [f32; 25] = [
 
 /// C: `pred_coef` (`celt/quant_bands.c`, float build). Prediction coefficients: 0.9, 0.8, 0.65,
 /// 0.5.
-static PRED_COEF: [f32; 4] = [29440.0 / 32768.0, 26112.0 / 32768.0, 21248.0 / 32768.0, 16384.0 / 32768.0];
+pub(crate) static PRED_COEF: [f32; 4] = [29440.0 / 32768.0, 26112.0 / 32768.0, 21248.0 / 32768.0, 16384.0 / 32768.0];
 
 /// C: `beta_coef` (`celt/quant_bands.c`, float build).
-static BETA_COEF: [f32; 4] = [30147.0 / 32768.0, 22282.0 / 32768.0, 12124.0 / 32768.0, 6554.0 / 32768.0];
+pub(crate) static BETA_COEF: [f32; 4] = [30147.0 / 32768.0, 22282.0 / 32768.0, 12124.0 / 32768.0, 6554.0 / 32768.0];
 
 /// C: `beta_intra` (`celt/quant_bands.c`, float build).
-const BETA_INTRA: f32 = 4915.0 / 32768.0;
+pub(crate) const BETA_INTRA: f32 = 4915.0 / 32768.0;
 
 /// C: `e_prob_model[4][2][42]` (`celt/quant_bands.c`). Parameters of the Laplace-like
 /// probability models used for the coarse energy: one pair (p0, decay), in Q8, per frame size
 /// (indexed `[LM]`), prediction type (`[intra]`), and band number.
 #[rustfmt::skip]
-static E_PROB_MODEL: [[[u8; 42]; 2]; 4] = [
+pub(crate) static E_PROB_MODEL: [[[u8; 42]; 2]; 4] = [
     // 120 sample frames
     [
         // Inter
@@ -103,10 +103,10 @@ static E_PROB_MODEL: [[[u8; 42]; 2]; 4] = [
 ];
 
 /// C: `small_energy_icdf` (`celt/quant_bands.c`).
-static SMALL_ENERGY_ICDF: [u8; 3] = [2, 1, 0];
+pub(crate) static SMALL_ENERGY_ICDF: [u8; 3] = [2, 1, 0];
 
 /// Maximum number of fine-energy bits per band per channel. C: `MAX_FINE_BITS` (`celt/rate.h`).
-const MAX_FINE_BITS: i32 = 8;
+pub(crate) const MAX_FINE_BITS: i32 = 8;
 
 /// C: `unquant_coarse_energy`. Decodes coarse per-band log-energy into `old_e_bands`
 /// (length `channels * mode.nb_ebands`, dB-scaled `Q8` fixed-point-equivalent as `f32`).

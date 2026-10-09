@@ -62,9 +62,9 @@ pub(crate) const SPREAD_AGGRESSIVE: i32 = 3;
 pub(crate) const SPREAD_FACTOR: [i32; 3] = [15, 10, 5];
 
 /// C: `QTHETA_OFFSET` (`celt/rate.h`).
-const QTHETA_OFFSET: i32 = 4;
+pub(crate) const QTHETA_OFFSET: i32 = 4;
 /// C: `QTHETA_OFFSET_TWOPHASE` (`celt/rate.h`).
-const QTHETA_OFFSET_TWOPHASE: i32 = 16;
+pub(crate) const QTHETA_OFFSET_TWOPHASE: i32 = 16;
 /// C: `NORM_SCALING` / `Q15ONE` (`celt/arch.h`, float build): both `1.f`.
 const NORM_SCALING: f32 = 1.0;
 
@@ -77,7 +77,7 @@ pub fn celt_lcg_rand(seed: u32) -> u32 {
 /// regardless of the float/fixed-point build (used by the *bit-exact* `bitexact_cos`/
 /// `bitexact_log2tan`, which must behave identically in both builds since their output affects
 /// the bitstream).
-fn frac_mul16(a: i32, b: i32) -> i32 {
+pub(crate) fn frac_mul16(a: i32, b: i32) -> i32 {
     let a16 = a as i16 as i32;
     let b16 = b as i16 as i32;
     (16384 + a16 * b16) >> 15
@@ -182,7 +182,7 @@ pub fn interleave_hadamard(x: &mut [f32], n0: i32, stride: i32, hadamard: bool) 
 }
 
 /// C: `compute_qn`.
-fn compute_qn(n: i32, b: i32, offset: i32, pulse_cap: i32, stereo: bool) -> i32 {
+pub(crate) fn compute_qn(n: i32, b: i32, offset: i32, pulse_cap: i32, stereo: bool) -> i32 {
     const EXP2_TABLE8: [i32; 8] = [16384, 17866, 19483, 21247, 23170, 25267, 27554, 30048];
     let mut n2 = 2 * n - 1;
     if stereo && n == 2 {

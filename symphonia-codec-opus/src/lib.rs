@@ -23,10 +23,14 @@
 //! - [`decoder`]: the top-level hybrid decoder (`src/opus_decoder.c`).
 //! - [`multistream`]: the multistream/Ogg-mapping decoder (`src/opus_multistream_decoder.c`).
 //! - [`audio_decoder`]: the Symphonia `AudioDecoder`/`RegisterableAudioDecoder` integration.
+//! - `encoder` (cargo feature `encoder`): a pure-Rust CELT-only Opus encoder plus RFC 7845
+//!   header builders; with feature `ogg`, an Ogg Opus muxer.
 
 pub mod audio_decoder;
 pub mod celt;
 pub mod decoder;
+#[cfg(feature = "encoder")]
+pub mod encoder;
 pub mod mapping;
 pub mod multistream;
 pub mod packet;
