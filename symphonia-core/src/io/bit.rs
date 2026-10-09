@@ -878,17 +878,30 @@ impl<'a> BitReaderLtr<'a> {
 impl private::FetchBitsLtr for BitReaderLtr<'_> {
     #[inline]
     fn fetch_bits_partial(&mut self) -> io::Result<()> {
+        const WORD_LEN: usize = std::mem::size_of::<u64>();
+
         let num_bytes = (u64::BITS - self.n_bits_left) as usize >> 3;
+        let read_len = min(self.buf.len(), num_bytes);
 
-        let mut num_bytes_read = 0;
+        if read_len > 0 {
+            if let Some(bytes) = self.buf.first_chunk::<WORD_LEN>() {
+                // Fast path: at least 8 bytes remain, so load them with a single 64-bit read.
+                let read_bits = (read_len as u32) << 3;
+                // Mask off the lookahead bytes that this refill does not consume.
+                let word = u64::from_be_bytes(*bytes) & (u64::MAX << (u64::BITS - read_bits));
+                self.bits |= word >> self.n_bits_left;
+                self.n_bits_left += read_bits;
+            }
+            else {
+                // Slow path: drain the last few bytes of the buffer one at a time.
+                for &byte in &self.buf[..read_len] {
+                    self.bits |= u64::from(byte) << (u64::BITS - 8 - self.n_bits_left);
+                    self.n_bits_left += 8;
+                }
+            }
 
-        for &byte in self.buf.iter().take(num_bytes) {
-            self.bits |= u64::from(byte) << (u64::BITS - 8 - self.n_bits_left);
-            self.n_bits_left += 8;
-            num_bytes_read += 1;
+            self.buf = &self.buf[read_len..];
         }
-
-        self.buf = &self.buf[num_bytes_read..];
 
         Ok(())
     }
@@ -1318,17 +1331,30 @@ impl<'a> BitReaderRtl<'a> {
 impl private::FetchBitsRtl for BitReaderRtl<'_> {
     #[inline]
     fn fetch_bits_partial(&mut self) -> io::Result<()> {
+        const WORD_LEN: usize = std::mem::size_of::<u64>();
+
         let num_bytes = (u64::BITS - self.n_bits_left) as usize >> 3;
+        let read_len = min(self.buf.len(), num_bytes);
 
-        let mut num_bytes_read = 0;
+        if read_len > 0 {
+            if let Some(bytes) = self.buf.first_chunk::<WORD_LEN>() {
+                // Fast path: at least 8 bytes remain, so load them with a single 64-bit read.
+                let read_bits = (read_len as u32) << 3;
+                // Mask off the lookahead bytes that this refill does not consume.
+                let word = u64::from_le_bytes(*bytes) & (u64::MAX >> (u64::BITS - read_bits));
+                self.bits |= word << self.n_bits_left;
+                self.n_bits_left += read_bits;
+            }
+            else {
+                // Slow path: drain the last few bytes of the buffer one at a time.
+                for &byte in &self.buf[..read_len] {
+                    self.bits |= u64::from(byte) << self.n_bits_left;
+                    self.n_bits_left += 8;
+                }
+            }
 
-        for &byte in self.buf.iter().take(num_bytes) {
-            self.bits |= u64::from(byte) << self.n_bits_left;
-            self.n_bits_left += 8;
-            num_bytes_read += 1;
+            self.buf = &self.buf[read_len..];
         }
-
-        self.buf = &self.buf[num_bytes_read..];
 
         Ok(())
     }
@@ -1384,6 +1410,80 @@ mod tests {
     use super::vlc::{BitOrder, Codebook, CodebookBuilder, Entry8x8};
     use super::{BitReaderLtr, ReadBitsLtr};
     use super::{BitReaderRtl, ReadBitsRtl};
+
+    /// Checks that partial refills keep the cache consistent with the stream (cached bits equal the
+    /// next stream bits, unused bits are zero, no bits are lost) for every buffer length.
+    #[test]
+    fn verify_partial_refill_matches_bit_model() {
+        use rand::RngExt as _;
+
+        use super::FiniteBitStream;
+        use super::private::{FetchBitsLtr, FetchBitsRtl};
+
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(0x5eed);
+
+        for len in 0..40usize {
+            let buf: Vec<u8> = (0..len).map(|_| rng.random()).collect();
+            let total = 8 * len as u64;
+            // Stream bit `i` in LTR (msb first) and RTL (lsb first) order.
+            let ltr_bit = |i: u64| u64::from(buf[(i / 8) as usize] >> (7 - i % 8) & 1);
+            let rtl_bit = |i: u64| u64::from(buf[(i / 8) as usize] >> (i % 8) & 1);
+
+            for _ in 0..50 {
+                let mut l = BitReaderLtr::new(&buf);
+                let mut r = BitReaderRtl::new(&buf);
+                let mut pos = 0u64;
+
+                loop {
+                    // Refill both readers, then check the cache.
+                    l.fetch_bits_partial().unwrap();
+                    r.fetch_bits_partial().unwrap();
+
+                    for (is_ltr, bits, n) in [
+                        (true, l.get_bits(), l.num_bits_left()),
+                        (false, r.get_bits(), r.num_bits_left()),
+                    ] {
+                        let mut expect = 0u64;
+                        for k in 0..u64::from(n) {
+                            if is_ltr {
+                                expect |= ltr_bit(pos + k) << (63 - k);
+                            }
+                            else {
+                                expect |= rtl_bit(pos + k) << k;
+                            }
+                        }
+                        assert_eq!(bits, expect, "len={len} pos={pos} ltr={is_ltr}");
+                        assert!(n == 64 || pos + u64::from(n) == total || n > 56, "under-filled");
+                    }
+                    assert_eq!(l.bits_left(), total - pos);
+                    assert_eq!(r.bits_left(), total - pos);
+
+                    if pos == total {
+                        break;
+                    }
+
+                    // Consume a random number of bits that are present in the cache.
+                    let avail = l.num_bits_left().min(32);
+                    let n = rng.random_range(0..=avail);
+                    assert_eq!(
+                        l.read_bits_leq32(n).unwrap(),
+                        (0..n).fold(0u32, |a, k| { a << 1 | ltr_bit(pos + u64::from(k)) as u32 })
+                    );
+                    assert_eq!(
+                        r.read_bits_leq32(n).unwrap(),
+                        (0..n).fold(0u32, |a, k| { a | (rtl_bit(pos + u64::from(k)) as u32) << k })
+                    );
+                    pos += u64::from(n);
+                    // Guarantee progress when the random draw consumed nothing.
+                    if n == 0 && l.num_bits_left() > 0 {
+                        l.read_bool().unwrap();
+                        r.read_bool().unwrap();
+                        pos += 1;
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     #[allow(clippy::bool_assert_comparison)]
