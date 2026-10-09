@@ -115,6 +115,8 @@ struct Track {
     seek_pre_roll: u64,
     /// `DefaultDuration` in nanoseconds.
     default_duration: Option<u64>,
+    /// `CodecPrivate`.
+    codec_private: Option<Vec<u8>>,
 }
 
 impl Track {
@@ -128,6 +130,7 @@ impl Track {
             codec_delay: 0,
             seek_pre_roll: 0,
             default_duration: None,
+            codec_private: None,
         }
     }
 
@@ -141,6 +144,34 @@ impl Track {
             codec_delay: 6_500_000,
             seek_pre_roll: 80_000_000,
             default_duration: Some(20_000_000),
+            codec_private: None,
+        }
+    }
+
+    /// 16-bit stereo FLAC at 44.1kHz with a fixed block size of 4096.
+    fn flac() -> Self {
+        // The STREAMINFO block.
+        let mut info = Vec::new();
+        info.extend(4096u16.to_be_bytes());
+        info.extend(4096u16.to_be_bytes());
+        info.extend([0u8; 6]);
+        let packed: u64 = (44100u64 << 44) | (1 << 41) | (15 << 36) | 40960;
+        info.extend(packed.to_be_bytes());
+        info.extend([0u8; 16]);
+
+        let mut private = b"fLaC".to_vec();
+        private.extend([0x80, 0, 0, info.len() as u8]);
+        private.extend(info);
+
+        Track {
+            codec: "A_FLAC",
+            sample_rate: 44100.0,
+            channels: 2,
+            bit_depth: Some(16),
+            codec_delay: 0,
+            seek_pre_roll: 0,
+            default_duration: None,
+            codec_private: Some(private),
         }
     }
 
@@ -167,6 +198,9 @@ impl Track {
         }
         if let Some(dur) = self.default_duration {
             entry.push(uint(&[0x23, 0xe3, 0x83], dur));
+        }
+        if let Some(private) = &self.codec_private {
+            entry.push(el(&[0x63, 0xa2], private));
         }
 
         el(ID_TRACKS, &el(&[0xae], &entry.concat()))
@@ -198,6 +232,8 @@ struct Cue {
     cluster: usize,
     /// The index of the block in the cluster the cue refers to.
     block: usize,
+    /// The track number the cue is for.
+    track: u64,
 }
 
 #[derive(Default)]
@@ -286,7 +322,7 @@ impl File {
                 let positions = el(
                     &[0xb7],
                     &[
-                        uint(&[0xf7], 1),
+                        uint(&[0xf7], cue.track),
                         uint32(&[0xf1], cluster_pos[cue.cluster] as u32),
                         uint32(&[0xf0], block_offsets[cue.cluster][cue.block] as u32),
                     ]
@@ -436,9 +472,9 @@ fn seek_with_cues_uses_the_timestamp_of_the_cluster() {
     // Cue points refer to blocks in the middle of clusters, so that their timestamps are not the
     // timestamps of the clusters.
     file.cues = vec![
-        Cue { time: 120, cluster: 0, block: 12 },
-        Cue { time: 250, cluster: 1, block: 0 },
-        Cue { time: 370, cluster: 1, block: 12 },
+        Cue { time: 120, cluster: 0, block: 12, track: 1 },
+        Cue { time: 250, cluster: 1, block: 0, track: 1 },
+        Cue { time: 370, cluster: 1, block: 12, track: 1 },
     ];
 
     let mut reader = open(file.to_bytes(&Track::pcm()));
@@ -457,6 +493,78 @@ fn seek_with_cues_uses_the_timestamp_of_the_cluster() {
     let seeked = seek_time(&mut reader, 995).unwrap();
     assert_eq!(seeked.actual_ts.get(), 990 * 48);
     assert_eq!(reader.next_packet().unwrap().unwrap().data[0], 99);
+}
+
+#[test]
+fn seek_with_cues_of_another_track_starts_at_the_first_block() {
+    let mut file = pcm_file();
+
+    // The only cue point is for another track (e.g., a video track in the same file), and refers
+    // to the second block of the cluster. The (audio) block before it must not be skipped.
+    file.cues = vec![Cue { time: 0, cluster: 0, block: 1, track: 2 }];
+
+    let mut reader = open(file.to_bytes(&Track::pcm()));
+
+    let seeked = seek_time(&mut reader, 0).unwrap();
+    assert_eq!(seeked.required_ts.get(), 0);
+    assert_eq!(seeked.actual_ts.get(), 0);
+    assert_eq!(reader.next_packet().unwrap().unwrap().data[0], 0);
+
+    // A seek past the cue also starts from the cluster, and is not late.
+    let seeked = seek_time(&mut reader, 135).unwrap();
+    assert_eq!(seeked.actual_ts.get(), 130 * 48);
+    assert_eq!(reader.next_packet().unwrap().unwrap().data[0], 13);
+}
+
+#[test]
+fn seek_with_a_wrong_cue_position_is_not_late() {
+    let mut file = pcm_file();
+
+    // The cue point for the track says the block at time 0 is the 6th block of the cluster.
+    file.cues = vec![Cue { time: 0, cluster: 0, block: 5, track: 1 }];
+
+    let mut reader = open(file.to_bytes(&Track::pcm()));
+
+    let seeked = seek_time(&mut reader, 0).unwrap();
+    assert_eq!(seeked.actual_ts.get(), 0);
+    assert_eq!(reader.next_packet().unwrap().unwrap().data[0], 0);
+}
+
+#[test]
+fn lossless_block_timestamps_are_sample_exact() {
+    // 4096 frame blocks at 44.1kHz do not start at whole milliseconds. The muxer rounds the
+    // timestamps (and block durations) to the millisecond, and writes no default duration.
+    let mut file = File::default();
+
+    let blocks = (0..10i64)
+        .map(|i| {
+            let ts = (i * 4096 * 1000 + 22050) / 44100;
+            Block { ts, len: 100, duration: Some(93), padding: None }
+        })
+        .collect();
+    file.clusters.push((0, blocks));
+
+    let mut reader = open(file.to_bytes(&Track::flac()));
+
+    let packets = read_all(&mut reader);
+    assert_eq!(packets.len(), 10);
+
+    for (i, packet) in packets.iter().enumerate() {
+        assert_eq!(packet.pts.get(), 4096 * i as i64);
+        assert_eq!(packet.dur.get(), 4096);
+    }
+
+    // Seeks are exact: 0.5s is frame 22050, which is in the block starting at 5 * 4096.
+    let seeked = seek_time(&mut reader, 500).unwrap();
+    assert_eq!(seeked.required_ts.get(), 22050);
+    assert_eq!(seeked.actual_ts.get(), 5 * 4096);
+
+    let packet = reader.next_packet().unwrap().unwrap();
+    assert_eq!((packet.pts.get(), packet.data[0]), (5 * 4096, 5));
+
+    // So the number of frames to discard after decoding from `actual_ts` to reach the required
+    // timestamp is exact too.
+    assert_eq!(seeked.required_ts.get() - seeked.actual_ts.get(), 22050 - 20480);
 }
 
 /// Six 20ms Opus packets (the first with a 6.5ms pre-skip, and the last with 13.5ms of padding), as

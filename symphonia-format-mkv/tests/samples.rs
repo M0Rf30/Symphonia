@@ -229,3 +229,26 @@ fn cover_attachment_is_a_visual() {
     assert_eq!(revision.media.visuals.len(), 1);
     assert!(revision.media.visuals[0].dimensions.is_some());
 }
+
+/// The cue points of this file are for the video track only, and refer to the block after the
+/// first audio block. Accurate seeks must never land after the requested position.
+#[test]
+fn seek_in_file_with_video_cues_is_not_late() {
+    let Some(mut reader) = open("mkv_audio_only_dummy_video.mkv")
+    else {
+        return;
+    };
+
+    let audio_id = reader.tracks()[0].id;
+
+    for secs in [0.0, 7.5, 0.0, 29.9, 0.0] {
+        let time = Time::try_from_secs_f64(secs).expect("valid time");
+        let seeked = reader
+            .seek(SeekMode::Accurate, SeekTo::Time { time, track_id: Some(audio_id) })
+            .expect("seek should succeed");
+        assert!(seeked.actual_ts <= seeked.required_ts, "{secs}s");
+
+        // The audio track is a lossless one: the position is exact (a multiple of the block size).
+        assert_eq!(seeked.actual_ts.get() % 4096, 0, "{secs}s");
+    }
+}
