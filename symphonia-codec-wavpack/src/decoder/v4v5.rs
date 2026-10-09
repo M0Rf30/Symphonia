@@ -99,6 +99,9 @@ macro_rules! wp_trace {
 // LSB-first bit reader (identical scheme to the v3 Bits struct)
 // ---------------------------------------------------------------------------
 
+/// A stream that reads past its end yields zero bits, like the C reference. The window `sr`
+/// holds the next `bc` valid bits of the stream (LSB first), and is refilled a whole `u64` at a
+/// time; bits above `bc` are either zero or the genuine following bits of the stream.
 pub(super) struct Bits<'a> {
     data: &'a [u8],
     ptr:  usize,
@@ -111,30 +114,56 @@ impl<'a> Bits<'a> {
         Bits { data, ptr: 0, bc: 0, sr: 0 }
     }
 
+    /// Top the window up to at least 56 valid bits.
     #[inline(always)]
-    pub(super) fn getbit(&mut self) -> u32 {
-        if self.bc == 0 {
-            let byte = self.next_byte() as u64;
-            self.sr = byte;
-            self.bc = 7;
-            let bit = (self.sr & 1) as u32;
-            self.sr >>= 1;
-            bit
-        } else {
-            self.bc -= 1;
-            let bit = (self.sr & 1) as u32;
-            self.sr >>= 1;
-            bit
+    fn refill(&mut self) {
+        match self.data.get(self.ptr..).and_then(|rest| rest.first_chunk::<8>()) {
+            Some(chunk) => {
+                self.sr |= u64::from_le_bytes(*chunk) << self.bc;
+                self.ptr += ((63 - self.bc) >> 3) as usize;
+                self.bc |= 56;
+            }
+            None => self.refill_slow(),
+        }
+    }
+
+    /// Refill near the end of the data: byte by byte, padding with zeros.
+    #[cold]
+    #[inline(never)]
+    fn refill_slow(&mut self) {
+        while self.bc <= 56 {
+            let byte = match self.data.get(self.ptr) {
+                Some(&b) => {
+                    self.ptr += 1;
+                    b
+                }
+                None => 0,
+            };
+            self.sr |= u64::from(byte) << self.bc;
+            self.bc += 8;
         }
     }
 
     #[inline(always)]
+    pub(super) fn getbit(&mut self) -> u32 {
+        if self.bc == 0 {
+            self.refill();
+        }
+        let bit = (self.sr & 1) as u32;
+        self.sr >>= 1;
+        self.bc -= 1;
+        bit
+    }
+
+    /// Read `nbits` (at most 32) bits, LSB first.
+    #[inline(always)]
     pub(super) fn getbits(&mut self, nbits: u32) -> u32 {
-        if nbits == 0 { return 0; }
-        while nbits > self.bc {
-            let byte = self.next_byte() as u64;
-            self.sr |= byte << self.bc;
-            self.bc += 8;
+        debug_assert!(nbits <= 32);
+        if nbits == 0 {
+            return 0;
+        }
+        if self.bc < nbits {
+            self.refill();
         }
         let val = (self.sr & ((1u64 << nbits) - 1)) as u32;
         self.sr >>= nbits;
@@ -142,15 +171,19 @@ impl<'a> Bits<'a> {
         val
     }
 
+    /// Count (and consume) the 1 bits up to `max` (at most 33), and, if fewer than `max` were
+    /// found, the 0 bit that ends them. Equivalent to `while n < max && getbit() == 1 { n += 1 }`.
     #[inline(always)]
-    fn next_byte(&mut self) -> u8 {
-        if self.ptr < self.data.len() {
-            let b = self.data[self.ptr];
-            self.ptr += 1;
-            b
-        } else {
-            0x00
+    fn count_ones(&mut self, max: u32) -> u32 {
+        debug_assert!(max <= 33);
+        if self.bc < 40 {
+            self.refill();
         }
+        let ones = (!self.sr).trailing_zeros();
+        let n = if ones >= max { max } else { ones + 1 };
+        self.sr >>= n;
+        self.bc -= n;
+        ones.min(max)
     }
 }
 
@@ -619,35 +652,30 @@ fn dec_med2(c: &mut EntropyChannel) {
 // Returns None on end-of-stream (33 ones or 33 cbits seen)
 // ---------------------------------------------------------------------------
 
-fn count_ones_lim(bs: &mut Bits<'_>) -> Option<u32> {
-    let mut ones_count: u32 = 0;
-    while ones_count <= LIMIT_ONES && bs.getbit() == 1 {
-        ones_count += 1;
+/// Read an extended-range count (the "zero run" length, or the large part of a ones count):
+/// a unary number of bits `cbits` followed by `cbits - 1` bits. `None` is the end of the stream
+/// (33 ones).
+#[inline(always)]
+fn read_ext_count(bs: &mut Bits<'_>) -> Option<u32> {
+    let cbits = bs.count_ones(33);
+    if cbits == 33 {
+        return None;
     }
+    if cbits < 2 {
+        Some(cbits)
+    } else {
+        Some(bs.getbits(cbits - 1) | (1u32 << (cbits - 1)))
+    }
+}
+
+fn count_ones_lim(bs: &mut Bits<'_>) -> Option<u32> {
+    let ones_count = bs.count_ones(LIMIT_ONES + 1);
 
     if ones_count >= LIMIT_ONES {
         if ones_count > LIMIT_ONES { return None; } // 17+ consecutive ones = EOS
 
         // Extended range coding for large values
-        let mut cbits: u32 = 0;
-        while cbits < 33 && bs.getbit() == 1 { cbits += 1; }
-        if cbits == 33 { return None; }
-
-        if cbits < 2 {
-            ones_count = cbits;
-        } else {
-            let mut mask = 1u32;
-            ones_count = 0;
-            let mut remaining = cbits - 1;
-            while remaining > 0 {
-                remaining -= 1;
-                if bs.getbit() == 1 { ones_count |= mask; }
-                mask <<= 1;
-            }
-            ones_count |= mask;
-        }
-
-        ones_count += LIMIT_ONES;
+        return Some(read_ext_count(bs)?.wrapping_add(LIMIT_ONES));
     }
 
     Some(ones_count)
@@ -709,25 +737,12 @@ fn get_words_lossless(
                 // zeros_acc just hit 0 — fall through to normal decode
             } else {
                 // Read a zero-run count from the bitstream
-                let mut cbits: u32 = 0;
-                while cbits < 33 && bs.getbit() == 1 { cbits += 1; }
-                if cbits == 33 { wp_trace!("[gwl] cs={} EOS (cbits=33)", csamples); break; }
+                ws.zeros_acc = match read_ext_count(bs) {
+                    Some(v) => v,
+                    None => { wp_trace!("[gwl] cs={} EOS (cbits=33)", csamples); break; }
+                };
 
-                if cbits < 2 {
-                    ws.zeros_acc = cbits;
-                } else {
-                    let mut mask = 1u32;
-                    ws.zeros_acc = 0;
-                    let mut rem = cbits - 1;
-                    while rem > 0 {
-                        rem -= 1;
-                        if bs.getbit() == 1 { ws.zeros_acc |= mask; }
-                        mask <<= 1;
-                    }
-                    ws.zeros_acc |= mask;
-                }
-
-                wp_trace!("[gwl] cs={} zeros path cbits={} zeros_acc={}", csamples, cbits, ws.zeros_acc);
+                wp_trace!("[gwl] cs={} zeros path zeros_acc={}", csamples, ws.zeros_acc);
 
                 if ws.zeros_acc != 0 {
                     // Reset both channels' medians then emit one zero sample
@@ -868,23 +883,10 @@ fn get_words_hybrid(
                         continue;
                     }
                 } else {
-                    let mut cbits: u32 = 0;
-                    while cbits < 33 && bs.getbit() == 1 { cbits += 1; }
-                    if cbits == 33 { break; }
-
-                    if cbits < 2 {
-                        ws.zeros_acc = cbits;
-                    } else {
-                        let mut mask = 1u32;
-                        ws.zeros_acc = 0;
-                        let mut rem = cbits - 1;
-                        while rem > 0 {
-                            rem -= 1;
-                            if bs.getbit() == 1 { ws.zeros_acc |= mask; }
-                            mask <<= 1;
-                        }
-                        ws.zeros_acc |= mask;
-                    }
+                    ws.zeros_acc = match read_ext_count(bs) {
+                        Some(v) => v,
+                        None => break,
+                    };
 
                     if ws.zeros_acc != 0 {
                         if (flags & HYBRID_BITRATE) != 0 {
