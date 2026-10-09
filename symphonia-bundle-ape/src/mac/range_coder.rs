@@ -131,15 +131,10 @@ impl EntropyState {
         // k is at most 27 (the boundary after it is the zero sentinel), the masks only remove the
         // bounds checks.
         let k = (self.k & 31) as usize;
-        if self.k_sum < K_SUM_MIN_BOUNDARY[k] {
-            self.k -= 1;
-        }
-        else {
-            let next = K_SUM_MIN_BOUNDARY[(k + 1) & 31];
-            if next != 0 && self.k_sum >= next {
-                self.k += 1;
-            }
-        }
+        let decrease = self.k_sum < K_SUM_MIN_BOUNDARY[k];
+        let next = K_SUM_MIN_BOUNDARY[(k + 1) & 31];
+        let increase = !decrease && next != 0 && self.k_sum >= next;
+        self.k = self.k - u32::from(decrease) + u32::from(increase);
     }
 }
 
@@ -340,6 +335,8 @@ impl RangeCoder {
         // Convert from unsigned interleaved to signed
         //   odd  values -> positive: (value >> 1) + 1
         //   even values -> non-positive: -(value >> 1)
-        if (value & 1) != 0 { Ok((value >> 1) + 1) } else { Ok(-(value >> 1)) }
+        let odd = value & 1;
+        let m = odd - 1;
+        Ok((((value >> 1) ^ m) - m) + odd)
     }
 }
