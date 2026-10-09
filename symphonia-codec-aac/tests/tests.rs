@@ -546,3 +546,12 @@ fn sample_accurate_seek_converges_aac_ld_and_eld() {
         check_accurate_seek_converges(name, 1e-6);
     }
 }
+
+#[test]
+fn sample_accurate_seek_converges_aac_eld_sbr() {
+    // Low delay SBR, with SBR at the core rate and at twice the core rate, and with a frame length
+    // of 480 samples (in LATM), whose SBR phase only repeats every 512 frames.
+    for name in ["aac_eld_sbr_fdk.m4a", "aac_eld_sbr_dual_fdk.m4a", "aac_eld_sbr_480_latm.aac"] {
+        check_accurate_seek_converges(name, 1e-4);
+    }
+}

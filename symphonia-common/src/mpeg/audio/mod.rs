@@ -1071,11 +1071,49 @@ pub fn aac_overlap_frames(object_type: AudioObjectType) -> u64 {
 /// As [`aac_seek_start_frame`], for a stream whose filterbank overlaps `overlap` previous frames
 /// (see [`aac_overlap_frames`]).
 pub fn aac_seek_start_frame_with_overlap(target: u64, sbr: bool, overlap: u64) -> u64 {
-    const SBR_PHASE_PERIOD: u64 = 16;
-    const SBR_PREROLL_FRAMES: u64 = 41;
+    aac_seek_start_frame_with_period(target, sbr, overlap, AAC_SBR_PHASE_PERIOD)
+}
 
+/// The number of frames of the period of the noise and sinusoid phase of SBR in HE-AAC.
+const AAC_SBR_PHASE_PERIOD: u64 = 16;
+
+/// The number of frames before the target that the decoding of SBR starts from, at the most
+/// (the settling of the envelope, gain and filterbank state).
+const AAC_SBR_PREROLL_FRAMES: u64 = 41;
+
+/// The period, in frames, of the noise and sinusoid phase of the SBR of a stream: the number of
+/// frames after which the phase indices are back at their start.
+///
+/// The noise table has 512 entries, and the phase advances by the number of SBR bands (`M`) for
+/// each of the 32 QMF slots of a frame of HE-AAC, which makes a period of 16 frames. In the low
+/// delay SBR of AAC-ELD the phase advances for each of the 16 (frame length of 512) or 15 (480)
+/// slots, which makes 32 frames for the 512 samples (at most, depending on `M`), but, with an odd
+/// number of slots, 512 frames for the 480 samples.
+pub fn aac_sbr_phase_period(asc: &AudioSpecificConfig) -> u64 {
+    match (asc.object_type, asc.samples) {
+        (AudioObjectType::ErAacEld, 512) => 32,
+        (AudioObjectType::ErAacEld, 480) => 512,
+        _ => AAC_SBR_PHASE_PERIOD,
+    }
+}
+
+/// The number of frames [`aac_seek_start_frame_with_period`] starts decoding before the target, at
+/// most, for streams with SBR.
+pub fn aac_seek_max_preroll_frames(phase_period: u64) -> u64 {
+    AAC_SBR_PREROLL_FRAMES + phase_period - 1
+}
+
+/// As [`aac_seek_start_frame_with_overlap`], for a stream whose SBR phase repeats every
+/// `phase_period` frames (see [`aac_sbr_phase_period`]).
+pub fn aac_seek_start_frame_with_period(
+    target: u64,
+    sbr: bool,
+    overlap: u64,
+    phase_period: u64,
+) -> u64 {
     if sbr {
-        (target.saturating_sub(SBR_PREROLL_FRAMES) / SBR_PHASE_PERIOD) * SBR_PHASE_PERIOD
+        let phase_period = phase_period.max(1);
+        (target.saturating_sub(AAC_SBR_PREROLL_FRAMES) / phase_period) * phase_period
     }
     else {
         target.saturating_sub(overlap)
@@ -1161,6 +1199,34 @@ mod tests {
             let start = aac_seek_start_frame(target, true);
             assert!(start <= target && target - start <= AAC_SEEK_MAX_PREROLL_FRAMES);
         }
+    }
+
+    #[test]
+    fn seek_start_frame_with_the_sbr_phase_period_of_low_delay_sbr() {
+        let asc = |object_type, samples| AudioSpecificConfig {
+            object_type,
+            samples,
+            ..Default::default()
+        };
+
+        assert_eq!(aac_sbr_phase_period(&asc(AudioObjectType::Lc, 1024)), 16);
+        assert_eq!(aac_sbr_phase_period(&asc(AudioObjectType::ErAacEld, 512)), 32);
+        assert_eq!(aac_sbr_phase_period(&asc(AudioObjectType::ErAacEld, 480)), 512);
+        assert_eq!(aac_seek_max_preroll_frames(16), AAC_SEEK_MAX_PREROLL_FRAMES);
+
+        for period in [16, 32, 512] {
+            for target in [0, 1, 40, 41, 100, 1000, 5000] {
+                let start = aac_seek_start_frame_with_period(target, true, 3, period);
+                assert_eq!(start % period, 0);
+                assert!(start <= target);
+                assert!(target - start <= aac_seek_max_preroll_frames(period));
+                // At least 41 frames before the target, unless at the stream start.
+                assert!(start == 0 || target - start >= 41);
+            }
+        }
+
+        // Without SBR, the period does not matter.
+        assert_eq!(aac_seek_start_frame_with_period(100, false, 3, 512), 97);
     }
 
     #[test]

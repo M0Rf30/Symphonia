@@ -283,6 +283,8 @@ pub struct LoasReader<'s> {
     sbr: bool,
     /// The number of previous frames the output of a frame depends on.
     overlap: u64,
+    /// The period of the SBR phase in frames.
+    phase_period: u64,
     /// The duration of a packet in decoded frames: 1024 per frame of the core codec, doubled for
     /// dual-rate SBR.
     packet_dur: Duration,
@@ -437,6 +439,7 @@ impl<'s> LoasReader<'s> {
             next_packet_ts,
             sbr: asc.sbr_present,
             overlap: aac_overlap_frames(asc.object_type),
+            phase_period: aac_sbr_phase_period(&asc),
             config: stream_config,
             pending,
             packet_dur,
@@ -676,8 +679,8 @@ impl FormatReader for LoasReader<'_> {
         let packet_dur = self.packet_dur.get();
         let required_frame = u64::try_from(required_ts.get()).unwrap_or(0) / packet_dur;
         let mut start_ts = Timestamp::new(
-            (aac_seek_start_frame_with_overlap(required_frame, sbr, self.overlap) * packet_dur)
-                as i64,
+            (aac_seek_start_frame_with_period(required_frame, sbr, self.overlap, self.phase_period)
+                * packet_dur) as i64,
         );
 
         // If the frame to start from is before the next packet, attempt to seek to the start of

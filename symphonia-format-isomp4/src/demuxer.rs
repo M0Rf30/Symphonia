@@ -29,8 +29,8 @@ use std::sync::Arc;
 use crate::atoms::{AtomError, AtomIterator, AtomType, ReadAtom};
 use crate::atoms::{FtypAtom, GaplessInfo, MetaAtom, MoofAtom, MoovAtom, SidxAtom, TrakAtom};
 use symphonia_common::mpeg::audio::{
-    AAC_SEEK_MAX_PREROLL_FRAMES, AudioSpecificConfig, aac_overlap_frames,
-    aac_seek_start_frame_with_overlap,
+    AudioSpecificConfig, aac_overlap_frames, aac_sbr_phase_period, aac_seek_max_preroll_frames,
+    aac_seek_start_frame_with_period,
 };
 
 use crate::stream::*;
@@ -196,9 +196,9 @@ enum SeekPreroll {
     /// Start decoding at the sample containing the seek target.
     None,
     /// AAC. Start decoding some samples (packets) before the target. See
-    /// [`aac_seek_start_frame_with_overlap`]. `overlap` is the number of previous frames the
-    /// output of a frame depends on.
-    Aac { sbr: bool, overlap: u32 },
+    /// [`aac_seek_start_frame_with_period`]. `overlap` is the number of previous frames the
+    /// output of a frame depends on, and `period` the period of the phase of SBR in frames.
+    Aac { sbr: bool, overlap: u32, period: u32 },
     /// Opus. Start decoding a fixed number of packets before the target, covering at least 80 ms
     /// (3840 frames at 48 kHz), as mandated by RFC 7845 section 4.6.
     Opus { packets: u32 },
@@ -218,7 +218,11 @@ impl SeekPreroll {
                     u32::try_from(aac_overlap_frames(asc.object_type)).unwrap_or(1)
                 });
 
-                SeekPreroll::Aac { sbr, overlap }
+                let period = asc
+                    .as_ref()
+                    .map_or(16, |asc| u32::try_from(aac_sbr_phase_period(asc)).unwrap_or(16));
+
+                SeekPreroll::Aac { sbr, overlap, period }
             }
             Some(CodecParameters::Audio(audio)) if audio.codec == CODEC_ID_OPUS => {
                 // The pre-roll is 80 ms regardless of the OpusHead pre-skip (which is excluded
@@ -247,15 +251,18 @@ impl SeekPreroll {
             //
             // The pre-roll is aligned to the stream start, which is only known for a segment
             // that starts the track. Otherwise, use the maximum pre-roll.
-            SeekPreroll::Aac { sbr: true, .. } if !from_start => {
-                target.saturating_sub(AAC_SEEK_MAX_PREROLL_FRAMES as u32)
+            SeekPreroll::Aac { sbr: true, period, .. } if !from_start => target.saturating_sub(
+                u32::try_from(aac_seek_max_preroll_frames(u64::from(period))).unwrap_or(0),
+            ),
+            SeekPreroll::Aac { sbr, overlap, period } => {
+                u32::try_from(aac_seek_start_frame_with_period(
+                    u64::from(target),
+                    sbr,
+                    u64::from(overlap),
+                    u64::from(period),
+                ))
+                .unwrap_or(target)
             }
-            SeekPreroll::Aac { sbr, overlap } => u32::try_from(aac_seek_start_frame_with_overlap(
-                u64::from(target),
-                sbr,
-                u64::from(overlap),
-            ))
-            .unwrap_or(target),
         }
     }
 }
