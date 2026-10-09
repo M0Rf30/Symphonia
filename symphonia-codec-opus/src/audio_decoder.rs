@@ -26,15 +26,15 @@
 //!
 //! # Pre-roll
 //!
-//! Per RFC 7845 section 4.3, Opus decoders need audio *before* a seek target to "warm up" state
-//! (SILK LPC history, CELT MDCT overlap, the post-filter) -- 80 ms is the RFC's recommended
-//! pre-roll. Neither `symphonia-format-ogg` nor `symphonia-format-mkv` currently seek back by any
-//! pre-roll margin or signal one to the decoder (`FormatReader::seek` seeks to the target packet
-//! directly); [`Self::reset`] resets decoder state cleanly on any discontinuity, but the first
-//! `80` ms of post-seek output will not be bit-exact with a non-seeking decode until fresh
-//! decoder state has "warmed up" on its own (typically inaudible, but not a guarantee). Fixing
-//! this precisely requires the demuxer to rewind and re-decode (discarding) a pre-roll window,
-//! which is out of scope here -- flagged for the format-reader owners.
+//! Per RFC 7845 section 4.3, an Opus decoder needs audio *before* a seek target to "warm up"
+//! its state (SILK LPC history, CELT MDCT overlap, the post-filter, and the CELT inter-frame
+//! energy prediction). `symphonia-format-ogg` and `symphonia-format-mkv` seek back by the
+//! recommended 80 ms pre-roll, and the caller decodes and discards the audio up to the requested
+//! timestamp after calling [`Self::reset`]. Output after exactly 80 ms is close to, but not
+//! bit-exact with, a continuous decode: the decoder state is identical to libopus' (decoding a
+//! stream from a cold start matches libopus exactly), and the CELT energy predictor converges
+//! geometrically (about 6 dB of SNR per 20 ms frame), reaching bit-exactness after a few hundred
+//! milliseconds.
 
 use symphonia_core::audio::{AsGenericAudioBufferRef, AudioBuffer, AudioSpec, Channels, GenericAudioBufferRef, Position};
 use symphonia_core::codecs::CodecInfo;

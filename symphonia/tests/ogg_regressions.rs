@@ -76,10 +76,14 @@ fn encode(name: &str, ext: &str, n: usize, layout: &str, codec_args: &[&str]) ->
 
 fn ffmpeg_decode_f32(path: &Path, decoder: &str) -> Vec<f32> {
     let raw_path = path.with_extension("ref.f32");
+    // libopus' ffmpeg wrapper decodes to 16-bit (with soft clipping) by default. Request float
+    // output, which is the unclipped decode that Symphonia produces.
     run_ffmpeg(&[
         "-y",
         "-v",
         "error",
+        "-request_sample_fmt",
+        "flt",
         "-c:a",
         decoder,
         "-i",
@@ -139,6 +143,43 @@ fn decode_all(path: &Path) -> (Vec<f32>, usize) {
     }
 
     (pcm, channels)
+}
+
+/// Decodes from the current position of `format`, returning at least `frames` interleaved frames
+/// starting at timestamp `required` (and the timestamp of the first returned frame). Frames are
+/// positioned by each packet's `pts + trim_start`.
+fn read_after_seek(
+    format: &mut dyn FormatReader,
+    decoder: &mut dyn AudioDecoder,
+    required: i64,
+    frames: usize,
+    channels: usize,
+) -> (Option<i64>, Vec<f32>) {
+    let mut got = Vec::new();
+    let mut first_pos = None;
+    let mut scratch = Vec::new();
+
+    while got.len() < frames * channels {
+        let packet = match format.next_packet() {
+            Ok(Some(p)) => p,
+            _ => break,
+        };
+        let decoded = decoder.decode(&packet).expect("decode failed");
+        decoded.copy_to_vec_interleaved(&mut scratch);
+
+        let pos = packet.pts.get() + packet.trim_start.get() as i64;
+        let skip = (required - pos).max(0) as usize;
+
+        if skip * channels >= scratch.len() {
+            continue;
+        }
+        if first_pos.is_none() {
+            first_pos = Some(pos + skip as i64);
+        }
+        got.extend_from_slice(&scratch[skip * channels..]);
+    }
+
+    (first_pos, got)
 }
 
 fn snr_db(reference: &[f32], test: &[f32]) -> f64 {
@@ -244,7 +285,7 @@ fn opus_family1_3ch() {
         "3.0",
         &["-c:a", "libopus", "-b:a", "192k", "-mapping_family", "1"],
         "libopus",
-        40.0,
+        120.0,
     );
 }
 
@@ -257,7 +298,7 @@ fn opus_family1_5_1() {
         "5.1",
         &["-c:a", "libopus", "-b:a", "256k", "-mapping_family", "1"],
         "libopus",
-        40.0,
+        120.0,
     );
 }
 
@@ -270,7 +311,7 @@ fn opus_family1_7_1() {
         "7.1",
         &["-c:a", "libopus", "-b:a", "384k", "-mapping_family", "1"],
         "libopus",
-        40.0,
+        120.0,
     );
 }
 
@@ -326,30 +367,8 @@ fn opus_timeline_excludes_pre_skip() {
         assert_eq!(seeked.required_ts.get(), required as i64, "required ts at {secs}s");
         decoder.reset();
 
-        // Decode from the seek point, positioning each packet by its pts + trim.
-        let mut got = Vec::new();
-        let mut first_pos = None;
-        let mut scratch = Vec::new();
-
-        while got.len() < 2 * 4800 * channels {
-            let packet = match format.next_packet() {
-                Ok(Some(p)) => p,
-                _ => break,
-            };
-            let decoded = decoder.decode(&packet).expect("decode failed");
-            decoded.copy_to_vec_interleaved(&mut scratch);
-
-            let pos = packet.pts.get() + packet.trim_start.get() as i64;
-            let skip = (required as i64 - pos).max(0) as usize;
-
-            if skip * channels >= scratch.len() {
-                continue;
-            }
-            if first_pos.is_none() {
-                first_pos = Some(pos + skip as i64);
-            }
-            got.extend_from_slice(&scratch[skip * channels..]);
-        }
+        let (first_pos, got) =
+            read_after_seek(format.as_mut(), decoder.as_mut(), required as i64, 4800, channels);
 
         assert_eq!(first_pos, Some(required as i64), "first frame position after seek to {secs}s");
 
@@ -395,6 +414,247 @@ fn external_multichannel_samples() {
         assert_eq!(reference.len(), pcm.len(), "{file}: length");
         let snr = snr_db(&reference, &pcm);
         println!("{file}: SNR={snr:.1} dB");
-        assert!(snr > 40.0, "{file}: SNR {snr:.1} dB");
+        assert!(snr > 100.0, "{file}: SNR {snr:.1} dB");
+    }
+}
+
+#[test]
+fn opus_family_255_and_2() {
+    if !have_encoder("libopus") {
+        return;
+    }
+    for family in ["255", "2"] {
+        check_multichannel(
+            &format!("opus_family{family}"),
+            "opus",
+            4,
+            "quad",
+            &["-c:a", "libopus", "-b:a", "192k", "-mapping_family", family],
+            "libopus",
+            120.0,
+        );
+    }
+}
+
+/// Decoding a cut stream from a cold decoder is identical to libopus (including the warm-up
+/// frames), i.e. the difference of a seek with an 80 ms pre-roll to a continuous decode is
+/// inherent to the format (CELT energy prediction converges geometrically).
+#[test]
+fn opus_cold_start_matches_libopus() {
+    if !have_encoder("libopus") {
+        return;
+    }
+    let path = encode("opus_cold", "opus", 2, "stereo", &["-c:a", "libopus", "-b:a", "128k"]);
+    let cut = fixtures_dir().join("opus_cold_cut.opus");
+    run_ffmpeg(&[
+        "-y",
+        "-v",
+        "error",
+        "-ss",
+        "1.0",
+        "-i",
+        path.to_str().unwrap(),
+        "-c:a",
+        "copy",
+        cut.to_str().unwrap(),
+    ]);
+    let reference = ffmpeg_decode_f32(&cut, "libopus");
+    let (pcm, _) = decode_all(&cut);
+    assert_eq!(reference.len(), pcm.len());
+    let snr = snr_db(&reference, &pcm);
+    println!("cold start SNR vs libopus = {snr:.1} dB");
+    assert!(snr > 120.0, "SNR {snr:.1} dB");
+}
+
+fn concat(name: &str, parts: &[&Path]) -> PathBuf {
+    let path = fixtures_dir().join(name);
+    let mut data = Vec::new();
+    for part in parts {
+        data.extend(std::fs::read(part).unwrap());
+    }
+    std::fs::write(&path, data).unwrap();
+    path
+}
+
+fn encode_stereo(name: &str, ext: &str, secs: &str, rate: &str, codec_args: &[&str]) -> PathBuf {
+    let mut args = vec!["-t", secs, "-ar", rate];
+    args.extend_from_slice(codec_args);
+    encode(name, ext, 2, "stereo", &args)
+}
+
+/// Seeks (by chain time) to `secs`, handling the `ResetRequired` returned when the seek switches
+/// links. Returns the number of `ResetRequired` errors.
+fn seek_chain(
+    format: &mut dyn FormatReader,
+    decoder: &mut Box<dyn AudioDecoder>,
+    secs: f64,
+) -> (usize, symphonia::core::formats::SeekedTo) {
+    let mut resets = 0;
+    loop {
+        let to = SeekTo::Time { time: Time::try_from_secs_f64(secs).unwrap(), track_id: None };
+        match format.seek(SeekMode::Accurate, to) {
+            Ok(seeked) => {
+                decoder.reset();
+                return (resets, seeked);
+            }
+            Err(Error::ResetRequired) => {
+                resets += 1;
+                assert!(resets < 2, "seek must complete after one reset");
+                *decoder = make_decoder(&*format);
+            }
+            Err(e) => panic!("seek to {secs}s failed: {e}"),
+        }
+    }
+}
+
+fn check_chain(name: &str, ext: &str, codec_args: &[&str], rates: [&str; 2], exact_db: f64) {
+    let a = encode_stereo(&format!("{name}_a"), ext, "2", rates[0], codec_args);
+    let b = encode_stereo(&format!("{name}_b"), ext, "3", rates[1], codec_args);
+    let chain = concat(&format!("{name}_chain.{ext}"), &[&a, &b]);
+
+    let (full_a, _) = decode_all(&a);
+    let (full_b, _) = decode_all(&b);
+    let rate_a = rates[0].parse::<usize>().unwrap();
+    let rate_b = rates[1].parse::<usize>().unwrap();
+    assert_eq!(full_a.len() / 2, 2 * rate_a);
+    assert_eq!(full_b.len() / 2, 3 * rate_b);
+
+    let mut format = open(&chain);
+
+    // The media information describes the whole chain.
+    let info = format.media_info().clone();
+    let tb = info.time_base.expect("chain time base");
+    let total = tb.calc_duration(info.duration.expect("chain duration")).unwrap().as_secs_f64();
+    assert!((total - 5.0).abs() < 1e-3, "chain duration {total}");
+
+    // The first link is current.
+    let mut decoder = make_decoder(&*format);
+    assert_eq!(format.default_track(TrackType::Audio).unwrap().num_frames, Some(2 * rate_a as u64));
+
+    // Seek into the second link: (time, link frames, link rate).
+    let (resets, seeked) = seek_chain(format.as_mut(), &mut decoder, 3.0);
+    assert_eq!(resets, 1, "seeking into another link requires one reset");
+    let required = rate_b as i64;
+    assert_eq!(seeked.required_ts.get(), required);
+    assert_eq!(format.default_track(TrackType::Audio).unwrap().num_frames, Some(3 * rate_b as u64));
+    let (first, got) = read_after_seek(format.as_mut(), decoder.as_mut(), required, 4800, 2);
+    assert_eq!(first, Some(required));
+    let n = got.len().min(4800 * 2);
+    let snr = snr_db(&full_b[required as usize * 2..][..n], &got[..n]);
+    println!("{name}: seek into link 2 SNR {snr:.1} dB");
+    assert!(snr > exact_db, "link 2 SNR {snr:.1} dB");
+
+    // Seek within the same link: no reset.
+    let (resets, seeked) = seek_chain(format.as_mut(), &mut decoder, 4.5);
+    assert_eq!(resets, 0);
+    let required = (2.5 * rate_b as f64) as i64;
+    assert_eq!(seeked.required_ts.get(), required);
+    let (first, got) = read_after_seek(format.as_mut(), decoder.as_mut(), required, 4800, 2);
+    assert_eq!(first, Some(required));
+    let n = got.len().min(4800 * 2);
+    let snr = snr_db(&full_b[required as usize * 2..][..n], &got[..n]);
+    assert!(snr > exact_db, "link 2 (same link) SNR {snr:.1} dB");
+
+    // Read to the end of the chain, then seek back into the first link.
+    while let Ok(Some(_)) = format.next_packet() {}
+    let (resets, seeked) = seek_chain(format.as_mut(), &mut decoder, 0.5);
+    assert_eq!(resets, 1);
+    let required = rate_a as i64 / 2;
+    assert_eq!(seeked.required_ts.get(), required);
+    let (first, got) = read_after_seek(format.as_mut(), decoder.as_mut(), required, 4800, 2);
+    assert_eq!(first, Some(required));
+    let n = got.len().min(4800 * 2);
+    let snr = snr_db(&full_a[required as usize * 2..][..n], &got[..n]);
+    println!("{name}: seek back into link 1 SNR {snr:.1} dB");
+    assert!(snr > exact_db, "link 1 SNR {snr:.1} dB");
+
+    // Seeking past the end of the chain is out-of-range.
+    let to = SeekTo::Time { time: Time::try_from_secs_f64(5.5).unwrap(), track_id: None };
+    assert!(matches!(
+        format.seek(SeekMode::Accurate, to),
+        Err(Error::SeekError(symphonia::core::errors::SeekErrorKind::OutOfRange))
+    ));
+
+    // Sequential decoding still signals each link with `ResetRequired`, exactly once.
+    let mut format = open(&chain);
+    let mut resets = 0;
+    let mut frames = 0u64;
+    loop {
+        match format.next_packet() {
+            Ok(Some(p)) => frames += p.dur.get(),
+            Ok(None) => break,
+            Err(Error::ResetRequired) => resets += 1,
+            Err(e) => panic!("{e}"),
+        }
+    }
+    assert_eq!(resets, 1);
+    assert_eq!(frames, (2 * rate_a + 3 * rate_b) as u64);
+}
+
+#[test]
+fn chained_vorbis_seeking() {
+    if !have_encoder("libvorbis") {
+        return;
+    }
+    check_chain(
+        "chain_vorbis",
+        "ogg",
+        &["-c:a", "libvorbis", "-q:a", "4"],
+        ["44100", "48000"],
+        60.0,
+    );
+}
+
+#[test]
+fn chained_opus_seeking() {
+    if !have_encoder("libopus") {
+        return;
+    }
+    // After a cold start the Opus decoder converges within a few hundred ms (see above), so only
+    // require the correct alignment here.
+    check_chain(
+        "chain_opus",
+        "opus",
+        &["-c:a", "libopus", "-b:a", "128k"],
+        ["48000", "48000"],
+        20.0,
+    );
+}
+
+/// The externally generated chained streams: the chain duration covers all links and a seek into
+/// the second link works.
+#[test]
+fn external_chained_samples() {
+    let Ok(dir) = std::env::var("RMPD_SAMPLES")
+    else {
+        eprintln!("RMPD_SAMPLES not set; skipping");
+        return;
+    };
+
+    for (file, expected_secs) in [
+        ("vorbis/vorbis_chained_same.ogg", 60.0),
+        ("vorbis/vorbis_chained_diff.ogg", 60.0),
+        ("opus/opus_chained.opus", 60.0),
+    ] {
+        let path = Path::new(&dir).join(file);
+        if !path.exists() {
+            eprintln!("{file} missing; skipping");
+            continue;
+        }
+
+        let mut format = open(&path);
+        let info = format.media_info().clone();
+        let secs = info.time_base.unwrap().calc_duration(info.duration.unwrap()).unwrap();
+        println!("{file}: chain duration {:.3}s", secs.as_secs_f64());
+        assert!((secs.as_secs_f64() - expected_secs).abs() < 6.0, "{file}: {secs:?}");
+
+        let mut decoder = make_decoder(&*format);
+        let (resets, seeked) = seek_chain(format.as_mut(), &mut decoder, secs.as_secs_f64() * 0.9);
+        println!("{file}: resets={resets} seeked={seeked:?}");
+        assert_eq!(resets, 1);
+        let (first, got) =
+            read_after_seek(format.as_mut(), decoder.as_mut(), seeked.required_ts.get(), 4800, 2);
+        assert_eq!(first, Some(seeked.required_ts.get()));
+        assert!(!got.is_empty());
     }
 }

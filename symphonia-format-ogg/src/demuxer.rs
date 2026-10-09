@@ -16,6 +16,7 @@ use symphonia_core::formats::well_known::FORMAT_ID_OGG;
 use symphonia_core::io::*;
 use symphonia_core::meta::{Metadata, MetadataLog, MetadataSideData};
 use symphonia_core::support_format;
+use symphonia_core::units::Time;
 
 use log::{debug, info, warn};
 
@@ -28,9 +29,50 @@ use super::physical;
 const OGG_FORMAT_INFO: FormatInfo =
     FormatInfo { format: FORMAT_ID_OGG, short_name: "ogg", long_name: "Ogg" };
 
+/// A link (physical bitstream) of a chained Ogg stream.
+#[derive(Copy, Clone, Debug)]
+struct Link {
+    /// The position of the first byte of the link's first page.
+    byte_start: u64,
+    /// The start time of the link in the chain's timeline in nanoseconds.
+    start_ns: i128,
+    /// The duration of the link in nanoseconds.
+    duration_ns: i128,
+}
+
+/// The maximum number of links of a chained stream that are scanned when the stream is opened.
+const MAX_CHAIN_LINKS: usize = 1 << 14;
+
+/// A physical bitstream (link) that has been fully probed.
+struct PhysicalStream {
+    /// `LogicalStream` for each serial.
+    streams: BTreeMap<u32, LogicalStream>,
+    /// The position of the first byte of the first bitstream page of the physical stream.
+    byte_range_start: u64,
+    /// The position of the first byte after the physical stream, if available.
+    byte_range_end: Option<u64>,
+}
+
 /// OGG demultiplexer.
 ///
 /// `OggReader` implements a demuxer for Xiph's OGG container format.
+///
+/// # Chained streams
+///
+/// A chained Ogg stream is a sequence of independent physical bitstreams (links), each with its
+/// own set of logical streams (tracks, and typically serial numbers), codec parameters, and
+/// metadata. The reader exposes the tracks of one link at a time. Timestamps (`pts`, and
+/// `SeekTo::Timestamp`) are always relative to the start of the current link.
+///
+/// While reading sequentially, `Error::ResetRequired` is returned by `next_packet` when the next
+/// link starts. The tracks must then be re-examined and the decoders re-created.
+///
+/// If the media source is seekable and its length is known, all links are located when the
+/// stream is opened. In that case, `MediaInfo` describes the whole chain (the duration is the sum
+/// of the durations of all links, in nanoseconds), and `SeekTo::Time` is interpreted relative to
+/// the start of the chain. A time seek that targets a different link than the current one
+/// switches to that link and returns `Error::ResetRequired`. After re-examining the tracks and
+/// re-creating the decoders, the same seek must be repeated; it then completes within the link.
 pub struct OggReader<'s> {
     reader: MediaSourceStream<'s>,
     media_info: MediaInfo,
@@ -45,12 +87,19 @@ pub struct OggReader<'s> {
     phys_byte_range_start: u64,
     /// The position of the first byte of the next physical stream, if available.
     phys_byte_range_end: Option<u64>,
+    /// The links of a chained stream. Empty unless the stream is chained and seekable.
+    links: Vec<Link>,
+    /// The index of the current link in `links`.
+    link_idx: usize,
 }
 
 impl<'s> OggReader<'s> {
     pub fn try_new(mut mss: MediaSourceStream<'s>, opts: FormatOptions) -> Result<Self> {
         // A seekback buffer equal to the maximum OGG page size is required for this reader.
         mss.ensure_seekback_buffer(OGG_PAGE_MAX_SIZE);
+
+        // The position of the first link.
+        let link0_byte_start = mss.pos();
 
         let pages = PageReader::try_new(&mut mss)?;
 
@@ -68,11 +117,160 @@ impl<'s> OggReader<'s> {
             pages,
             phys_byte_range_start: 0,
             phys_byte_range_end: None,
+            links: Vec::new(),
+            link_idx: 0,
         };
 
         ogg.start_new_physical_stream()?;
+        ogg.scan_links(link0_byte_start)?;
 
         Ok(ogg)
+    }
+
+    /// If the stream is seekable and chained, locates all the links and builds the timeline of
+    /// the chain. The reader is left at the start of the first link.
+    fn scan_links(&mut self, link0_byte_start: u64) -> Result<()> {
+        let Some(total_len) = self.reader.byte_len()
+        else {
+            return Ok(());
+        };
+
+        if !self.reader.is_seekable() {
+            return Ok(());
+        }
+
+        // The first link was already probed.
+        let mut links = Vec::new();
+        let mut start_ns = 0i128;
+        let mut next_pos = self.phys_byte_range_end;
+        let mut complete = true;
+
+        let Some(duration_ns) = Self::link_duration_ns(&self.tracks)
+        else {
+            return Ok(());
+        };
+
+        links.push(Link { byte_start: link0_byte_start, start_ns, duration_ns });
+        start_ns += duration_ns;
+
+        // Probe each of the remaining links.
+        while let Some(pos) = next_pos {
+            // The next link must start after the current link, and before the end of the source.
+            let cur_start = links.last().map(|l| l.byte_start).unwrap_or(0);
+
+            if pos >= total_len || pos <= cur_start {
+                break;
+            }
+
+            if links.len() >= MAX_CHAIN_LINKS {
+                complete = false;
+                break;
+            }
+
+            if self.reader.seek(SeekFrom::Start(pos)).is_err()
+                || self.pages.next_page(&mut self.reader).is_err()
+                || !self.pages.header().is_first_page
+            {
+                break;
+            }
+
+            let Ok(link) = self.read_physical_stream(false)
+            else {
+                break;
+            };
+
+            let tracks: Vec<Track> = link.streams.values().map(|s| s.track().clone()).collect();
+
+            let Some(duration_ns) = Self::link_duration_ns(&tracks)
+            else {
+                complete = false;
+                break;
+            };
+
+            links.push(Link { byte_start: pos, start_ns, duration_ns });
+            start_ns += duration_ns;
+            next_pos = link.byte_range_end;
+        }
+
+        // Return to the first bitstream page of the first link.
+        self.reader.seek(SeekFrom::Start(self.phys_byte_range_start))?;
+        self.pages.next_page(&mut self.reader)?;
+
+        // Only a chain with a complete timeline can be seeked.
+        if complete && links.len() > 1 {
+            debug!("ogg: chained stream with {} links, duration={start_ns}ns", links.len());
+
+            let mut media_info = MediaInfo::new();
+
+            if let Some(tb) = TimeBase::try_new(1, 1_000_000_000) {
+                media_info.with_time_base(tb);
+                media_info
+                    .with_duration(Duration::new(u64::try_from(start_ns).unwrap_or(u64::MAX)));
+                media_info.start_ts = Timestamp::ZERO;
+
+                self.media_info = media_info;
+                self.links = links;
+                self.link_idx = 0;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Gets the duration, in nanoseconds, of the longest track of a link.
+    fn link_duration_ns(tracks: &[Track]) -> Option<i128> {
+        tracks
+            .iter()
+            .filter_map(|track| {
+                let tb = track.time_base?;
+                let num_frames = track.num_frames?;
+                Some(tb.calc_duration(Duration::new(num_frames))?.as_nanos())
+            })
+            .max()
+    }
+
+    /// Switches to a link of a chained stream. The reader is left at the start of the link.
+    fn switch_link(&mut self, link_idx: usize) -> Result<()> {
+        let byte_start = self.links[link_idx].byte_start;
+
+        self.reader.seek(SeekFrom::Start(byte_start))?;
+        self.pages.next_page(&mut self.reader)?;
+
+        if !self.pages.header().is_first_page {
+            return decode_error("ogg: expected the first page of a chained stream");
+        }
+
+        self.start_new_physical_stream()?;
+        self.link_idx = link_idx;
+
+        Ok(())
+    }
+
+    /// Converts a time relative to the start of the chain to a time relative to the start of the
+    /// current link. If the time is within another link, switches to that link and returns
+    /// `Error::ResetRequired`.
+    fn chain_time_to_link_time(&mut self, time: Time) -> Result<Time> {
+        let ns = time.as_nanos();
+
+        let Some(last) = self.links.last()
+        else {
+            return Ok(time);
+        };
+
+        if ns < 0 || ns > last.start_ns + last.duration_ns {
+            return seek_error(SeekErrorKind::OutOfRange);
+        }
+
+        // Find the link that contains the time.
+        let link_idx = self.links.partition_point(|link| link.start_ns <= ns).saturating_sub(1);
+
+        if link_idx != self.link_idx {
+            self.switch_link(link_idx)?;
+            return reset_error();
+        }
+
+        Time::try_from_nanos_i128(ns - self.links[link_idx].start_ns)
+            .ok_or(Error::SeekError(SeekErrorKind::OutOfRange))
     }
 
     fn read_page(&mut self) -> Result<()> {
@@ -92,6 +290,12 @@ impl<'s> OggReader<'s> {
         // If the page is marked as a first page, then try to start a new physical stream.
         if page.header.is_first_page {
             self.start_new_physical_stream()?;
+
+            // Keep track of the current link in a chained stream.
+            if !self.links.is_empty() {
+                self.link_idx = (self.link_idx + 1).min(self.links.len() - 1);
+            }
+
             return reset_error();
         }
 
@@ -305,7 +509,45 @@ impl<'s> OggReader<'s> {
         Ok(SeekedTo { track_id: serial, actual_ts, required_ts })
     }
 
+    /// Starts a new physical stream. The current page must be a first page.
     fn start_new_physical_stream(&mut self) -> Result<()> {
+        let phys = self.read_physical_stream(true)?;
+
+        // At this point it can safely be assumed that a new physical stream is starting.
+
+        // Clear the existing track listing.
+        self.tracks.clear();
+
+        // Add a track for each logical stream.
+        for (&serial, stream) in phys.streams.iter() {
+            // Warn if the track is not ready. This should not happen if the physical stream was
+            // muxed properly.
+            if !stream.is_ready() {
+                warn!("track for serial={serial:#x} may not be ready");
+            }
+
+            self.tracks.push(stream.track().clone());
+        }
+
+        // Update media information. The media information of a chained stream describes the
+        // entire chain.
+        if self.links.is_empty() {
+            self.media_info = MediaInfo::from_tracks(&self.tracks);
+        }
+
+        // Replace all logical streams with the new set.
+        self.streams = phys.streams;
+
+        // Store the lower and upper byte boundaries of the physical stream for seeking.
+        self.phys_byte_range_start = phys.byte_range_start;
+        self.phys_byte_range_end = phys.byte_range_end;
+
+        Ok(())
+    }
+
+    /// Reads and probes a physical stream. The current page must be a first page. If
+    /// `update_side_data` is false, the metadata and chapters of the stream are discarded.
+    fn read_physical_stream(&mut self, update_side_data: bool) -> Result<PhysicalStream> {
         // The new mapper set.
         let mut streams = BTreeMap::<u32, LogicalStream>::new();
 
@@ -363,6 +605,10 @@ impl<'s> OggReader<'s> {
 
                 // Consume each piece of side data.
                 for data in side_data {
+                    if !update_side_data {
+                        break;
+                    }
+
                     match data {
                         SideData::Metadata { rev, side_data } => {
                             self.metadata.push(rev);
@@ -413,33 +659,7 @@ impl<'s> OggReader<'s> {
             }
         }
 
-        // At this point it can safely be assumed that a new physical stream is starting.
-
-        // Clear the existing track listing.
-        self.tracks.clear();
-
-        // Add a track for each logical stream.
-        for (&serial, stream) in streams.iter() {
-            // Warn if the track is not ready. This should not happen if the physical stream was
-            // muxed properly.
-            if !stream.is_ready() {
-                warn!("track for serial={serial:#x} may not be ready");
-            }
-
-            self.tracks.push(stream.track().clone());
-        }
-
-        // Update media information.
-        self.media_info = MediaInfo::from_tracks(&self.tracks);
-
-        // Replace all logical streams with the new set.
-        self.streams = streams;
-
-        // Store the lower and upper byte boundaries of the physical stream for seeking.
-        self.phys_byte_range_start = byte_range_start;
-        self.phys_byte_range_end = byte_range_end;
-
-        Ok(())
+        Ok(PhysicalStream { streams, byte_range_start, byte_range_end })
     }
 }
 
@@ -539,6 +759,14 @@ impl FormatReader for OggReader<'_> {
                     // No tracks.
                     return seek_error(SeekErrorKind::Unseekable);
                 };
+
+                // The track must belong to the current link.
+                if !self.streams.contains_key(&serial) {
+                    return seek_error(SeekErrorKind::InvalidTrack);
+                }
+
+                // In a chained stream, the time is relative to the start of the chain.
+                let time = self.chain_time_to_link_time(time)?;
 
                 // Convert the time to a timestamp.
                 let ts = if let Some(stream) = self.streams.get(&serial) {
