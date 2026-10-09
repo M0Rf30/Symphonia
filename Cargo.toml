@@ -20,6 +20,7 @@ members = [
     "symphonia-format-dsd",
     "symphonia-format-isomp4",
     "symphonia-format-mkv",
+    "symphonia-format-mpegts",
     "symphonia-format-ogg",
     "symphonia-format-riff",
     "symphonia-metadata",
