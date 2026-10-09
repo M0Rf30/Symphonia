@@ -6,10 +6,9 @@ WavPack demuxer and lossless decoder for Project Symphonia.
 
 Supports the WavPack v1-v3 RIFF/WAVE-wrapped stream and the native WavPack v4/v5 block
 stream: lossless PCM (8/16/24/32-bit), lossless and hybrid-lossy IEEE 32-bit float,
-hybrid-lossy PCM, and multichannel files (mono/stereo/quad/5.1/7.1/... — anything
-expressible as a WAVEFORMATEXTENSIBLE speaker mask, or discrete channels otherwise). The
-`.wvc` correction-file mechanism (needed for exact lossless reconstruction of a hybrid
-stream) is not supported; see below.
+hybrid-lossy PCM, hybrid-lossless PCM and float with the `.wvc` correction file, and
+multichannel files (mono/stereo/quad/5.1/7.1/... — anything expressible as a
+WAVEFORMATEXTENSIBLE speaker mask, or discrete channels otherwise).
 
 ### Multichannel (>2 channel) files
 
@@ -23,23 +22,33 @@ The channel count and WAVEFORMATEXTENSIBLE speaker mask come from the file's
 `ID_CHANNEL_INFO` metadata; a mask that doesn't cleanly match the channel count (e.g. a
 file with "unassigned" channels) falls back to `Channels::Discrete`.
 
-### Hybrid (`-b<n>`) streams and `.wvc`
+### Hybrid (`-b<n>`) streams and `.wvc` correction files
 
-WavPack's hybrid mode splits a stream into a "lossy" main bitstream plus an optional
-`.wvc` correction file that refines it back to bit-exact lossless. This decoder always
-decodes the lossy approximation from the main bitstream alone (bit-exact vs. `wvunpack
--i`, which forces the same "ignore .wvc" behaviour), even when a sibling `.wvc` file
-exists next to the `.wv` file being played.
+WavPack's hybrid mode splits a stream into a "lossy" main bitstream (`.wv`) plus an optional
+`.wvc` correction file that refines it back to bit-exact lossless. Without the correction
+file a hybrid `.wv` decodes to its lossy approximation (bit-exact vs. `wvunpack -i`); with
+it, the decoder reconstructs the lossless audio exactly like `wvunpack` does: the correction
+bitstream narrows every sample down to its exact value, the noise-shaping state is restored
+from the correction block, and the result is verified against the lossless CRC of the
+correction block (and the CRC of the extension bits for 32-bit float / integer data).
 
-This is a hard limitation of the current Symphonia API rather than a decoding gap:
-`symphonia_core::formats::FormatOptions::external_data` (`ExternalFormatData`) only
-carries pre-parsed metadata/chapters, not an extra `MediaSourceStream`, so a
-`FormatReader::try_new` has no side channel through which a caller could hand it the
-correction file. Supporting `.wvc` would need a new `ExternalFormatData` field (e.g. an
-optional boxed `MediaSourceStream`/reader for the correction file) plumbed through the
-probe/format-registration API; that is out of scope for this crate alone. A caller (e.g.
-rmpd) that wants lossless hybrid playback today has no way to supply the `.wvc` stream to
-this reader.
+Attach the correction stream in any of these ways:
+
+* `WavPackReader::try_new_with_correction(wv_mss, wvc_mss, opts)`: both streams explicitly;
+  an unusable correction stream is an error.
+* `FormatOptions::sidecar(Box<dyn MediaSource>)`: a side channel through the regular probe
+  (`Probe::probe`) or `WavPackReader::try_new`; a correction stream that cannot be used is
+  ignored and the lossy audio is decoded.
+* For applications that open files by path,
+  `symphonia_codec_wavpack::with_sibling_correction(path, opts)` adds the `.wvc` file next
+  to the `.wv` file (if there is one) to the options, and
+  `symphonia_codec_wavpack::correction_path(path)` returns its path.
+
+Block by block, a correction block is matched to its main block by sample position (as in
+the reference library); a block without a matching or intact correction block (missing,
+corrupt, truncated, or from another file) is decoded lossy, the others stay lossless.
+`WavPackReader::has_correction()` reports whether a correction stream is attached. Seeking
+needs both streams to be seekable.
 
 IEEE float and hybrid-lossy int/float decoding were ported from the reference WavPack
 library (BSD-3-Clause, see `LICENSE`/`NOTICE`); the ported functions are documented at

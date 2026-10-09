@@ -27,6 +27,8 @@ use symphonia_core::audio::sample::SampleFormat;
 
 use log::debug;
 
+use crate::decoder::{EXT_WVC_WVX_NEW, EXT_WVX_NEW, STREAM_HDR};
+
 mod sub_block;
 use sub_block::{decode_sub_block, Encoding, SubBlock};
 
@@ -79,6 +81,8 @@ pub struct WavPackReader<'a> {
     /// Byte offset of the first WavPack block, used to restart a linear scan on `seek`.
     restart_pos: u64,
     format_version: FormatVersion,
+    /// The `.wvc` correction stream of a hybrid file, if one is attached.
+    correction: Option<Correction<'a>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -86,7 +90,68 @@ pub struct WavPackReader<'a> {
 // ---------------------------------------------------------------------------
 
 impl<'s> WavPackReader<'s> {
-    pub fn try_new(mut mss: MediaSourceStream<'s>, mut opts: FormatOptions) -> Result<Self> {
+    /// Create a reader for the WavPack stream `mss`.
+    ///
+    /// If `opts` carries a sidecar source (`FormatOptions::sidecar`), it is used as the `.wvc`
+    /// correction stream of a hybrid file, which makes the decoder produce the bit-exact
+    /// lossless audio. A sidecar that is not a valid correction stream is ignored (the lossy
+    /// audio is decoded) and so is one provided for a v1-v3 file.
+    pub fn try_new(mss: MediaSourceStream<'s>, mut opts: FormatOptions) -> Result<Self> {
+        let sidecar = opts.external_data.sidecar.take().and_then(|sidecar| sidecar.take());
+
+        let mut reader = Self::try_new_main(mss, opts)?;
+
+        if let Some(sidecar) = sidecar {
+            if let Err(err) = reader.attach_correction(MediaSourceStream::new(sidecar, Default::default())) {
+                log::warn!("wavpack: ignoring the correction stream: {}", err);
+            }
+        }
+
+        Ok(reader)
+    }
+
+    /// Create a reader for the hybrid WavPack stream `mss` (a `.wv` file) with its `.wvc`
+    /// correction stream `wvc`, which makes the decoder produce the bit-exact lossless audio.
+    ///
+    /// Unlike [`try_new`](Self::try_new), an unusable correction stream is an error.
+    pub fn try_new_with_correction(
+        mss: MediaSourceStream<'s>,
+        wvc: MediaSourceStream<'s>,
+        mut opts: FormatOptions,
+    ) -> Result<Self> {
+        // The explicitly provided stream takes precedence over a sidecar.
+        opts.external_data.sidecar = None;
+
+        let mut reader = Self::try_new_main(mss, opts)?;
+        reader.attach_correction(wvc)?;
+        Ok(reader)
+    }
+
+    /// Returns `true` if a `.wvc` correction stream is attached to this reader.
+    pub fn has_correction(&self) -> bool {
+        self.correction.is_some()
+    }
+
+    /// Attach the `.wvc` correction stream `wvc`. Only valid for WavPack v4/v5 streams, and
+    /// only before the first packet is read.
+    fn attach_correction(&mut self, wvc: MediaSourceStream<'s>) -> Result<()> {
+        if !matches!(self.format_version, FormatVersion::V4V5) {
+            return unsupported_error("wavpack: correction streams need a v4/v5 stream");
+        }
+        if self.next_packet_ts != 0 {
+            return unsupported_error("wavpack: the correction stream must be attached up front");
+        }
+
+        match Correction::new(wvc) {
+            Ok(correction) => {
+                self.correction = Some(correction);
+                Ok(())
+            }
+            Err(_) => decode_error("wavpack: no blocks in the correction stream"),
+        }
+    }
+
+    fn try_new_main(mut mss: MediaSourceStream<'s>, mut opts: FormatOptions) -> Result<Self> {
         let original_pos = mss.pos();
         let magic = mss.read_quad_bytes()?;
         mss.seek(std::io::SeekFrom::Start(original_pos))?;
@@ -244,6 +309,7 @@ impl<'s> WavPackReader<'s> {
                 num_channels: wav.num_channels,
                 bytes_per_sample: wav.bytes_per_sample,
             },
+            correction: None,
         })
     }
 
@@ -374,6 +440,7 @@ impl<'s> WavPackReader<'s> {
             next_packet_ts: 0,
             restart_pos: header_pos,
             format_version: FormatVersion::V4V5,
+            correction: None,
         })
     }
 }
@@ -464,14 +531,21 @@ impl FormatReader for WavPackReader<'_> {
         if !self.reader.is_seekable() {
             return seek_error(SeekErrorKind::Unseekable);
         }
+        if self.correction.as_ref().is_some_and(|c| !c.reader.is_seekable()) {
+            return seek_error(SeekErrorKind::Unseekable);
+        }
 
         // No seek index is maintained; restart from the first block and linearly scan
         // forward, rewinding to the start of the block that contains the desired timestamp.
         self.reader.seek(SeekFrom::Start(self.restart_pos))?;
+        if let Some(correction) = self.correction.as_mut() {
+            correction.restart()?;
+        }
         self.next_packet_ts = 0;
 
         loop {
             let block_start = self.reader.pos();
+            let correction_mark = self.correction.as_ref().map(|c| c.mark());
             let saved_next_ts = self.next_packet_ts;
             let pkt = match self.next_packet()? {
                 Some(p) => p,
@@ -480,6 +554,9 @@ impl FormatReader for WavPackReader<'_> {
             let next_ts = pkt.pts.saturating_add(pkt.dur);
             if ts < next_ts {
                 self.reader.seek(SeekFrom::Start(block_start))?;
+                if let (Some(correction), Some(mark)) = (self.correction.as_mut(), correction_mark) {
+                    correction.restore(mark)?;
+                }
                 self.next_packet_ts = saved_next_ts;
                 return Ok(SeekedTo { track_id: 0, actual_ts: pkt.pts, required_ts: ts });
             }
@@ -552,7 +629,7 @@ impl WavPackReader<'_> {
         let mut block_samples: u32 = 0;
 
         loop {
-            let (header, mini) = match read_v4v5_stream_block(&mut self.reader)? {
+            let (header, mini) = match read_v4v5_stream_block(&mut self.reader, self.correction.as_mut())? {
                 Some(v) => v,
                 None => break,
             };
@@ -590,12 +667,23 @@ const MAX_STREAMS_PER_PACKET: usize = 512;
 
 /// Read one physical wvpk block (one stream of a possibly-multichannel "block group")
 /// and serialise it into the per-stream mini-packet the decoder expects:
-///   flags(4) + block_samples(4) + crc(4)
-///   + terms_len(4) + weights_len(4) + samples_len(4) + entropy_len(4)
-///   + hybrid_profile_len(4) + float_info_len(4) + int32_len(4) + wvx_len(4)
-///   followed by the raw sub-block bytes (in that order) then the audio bitstream.
+///
+/// ```text
+/// flags(4) + block_samples(4) + crc(4)
+/// + terms_len(4) + weights_len(4) + samples_len(4) + entropy_len(4)
+/// + hybrid_profile_len(4) + float_info_len(4) + int32_len(4) + wvx_len(4)
+/// + shaping_len(4) + wvc_len(4) + wvc_wvx_len(4) + wvc_crc(4) + ext_flags(4)
+/// ```
+///
+/// followed by the raw sub-block bytes (in that order) then the audio bitstream. The last five
+/// header fields describe the matching block of the `.wvc` correction file, if `correction` is
+/// given and has one (see `serialise_stream_packet`).
+///
 /// Returns `Ok(None)` at a clean end of stream (no more `wvpk` markers found).
-fn read_v4v5_stream_block(reader: &mut MediaSourceStream<'_>) -> Result<Option<(Header, Vec<u8>)>> {
+fn read_v4v5_stream_block(
+    reader: &mut MediaSourceStream<'_>,
+    correction: Option<&mut Correction<'_>>,
+) -> Result<Option<(Header, Vec<u8>)>> {
     if find_next_block(reader, 10000).is_err() {
         return Ok(None);
     }
@@ -609,9 +697,225 @@ fn read_v4v5_stream_block(reader: &mut MediaSourceStream<'_>) -> Result<Option<(
     let sub_blocks_len = (header.ck_size as u64).saturating_sub(24);
     let end_pos = reader.pos().saturating_add(sub_blocks_len);
 
-    let mini = build_stream_packet(reader, header.flags, header.block_samples, header.crc, end_pos)?;
+    let parts = read_block_parts(reader, end_pos)?;
+
+    // Blocks without samples (e.g. a trailing wrapper or tag block) have no correction block.
+    let wvc = match correction {
+        Some(c) if header.block_samples != 0 => c.block_for(&header),
+        _ => None,
+    };
+
+    let mini = serialise_stream_packet(
+        header.flags,
+        header.block_samples,
+        header.crc,
+        &parts,
+        wvc.as_ref(),
+    );
 
     Ok(Some((header, mini)))
+}
+
+// ---------------------------------------------------------------------------
+// `.wvc` correction stream
+// ---------------------------------------------------------------------------
+
+/// One block of a `.wvc` correction file.
+#[derive(Clone)]
+struct WvcBlock {
+    block_index:   u64,
+    block_samples: u32,
+    flags:         u32,
+    /// The CRC of the *lossless* samples of the block.
+    crc:           u32,
+    parts:         BlockParts,
+}
+
+/// The `.wvc` correction stream that accompanies the main (`.wv`) stream.
+struct Correction<'a> {
+    reader: MediaSourceStream<'a>,
+    /// The position of the first correction block, where a scan restarts after a seek.
+    restart_pos: u64,
+    /// The next, not yet consumed, correction block.
+    pending: Option<WvcBlock>,
+    /// The end of the correction stream (or an unreadable block) was reached.
+    done: bool,
+}
+
+/// A saved read position of a `Correction`.
+struct CorrectionMark {
+    pos: u64,
+    pending: Option<WvcBlock>,
+    done: bool,
+}
+
+impl<'a> Correction<'a> {
+    /// Locate the first block of the correction stream.
+    fn new(mut reader: MediaSourceStream<'a>) -> Result<Self> {
+        find_next_block(&mut reader, 10000)?;
+        let restart_pos = reader.pos();
+        Ok(Correction { reader, restart_pos, pending: None, done: false })
+    }
+
+    fn mark(&self) -> CorrectionMark {
+        CorrectionMark { pos: self.reader.pos(), pending: self.pending.clone(), done: self.done }
+    }
+
+    fn restore(&mut self, mark: CorrectionMark) -> Result<()> {
+        self.reader.seek(SeekFrom::Start(mark.pos))?;
+        self.pending = mark.pending;
+        self.done = mark.done;
+        Ok(())
+    }
+
+    fn restart(&mut self) -> Result<()> {
+        self.reader.seek(SeekFrom::Start(self.restart_pos))?;
+        self.pending = None;
+        self.done = false;
+        Ok(())
+    }
+
+    /// Read the next block of the correction stream.
+    fn read_block(&mut self) -> Option<WvcBlock> {
+        find_next_block(&mut self.reader, 10000).ok()?;
+        let header = Header::decode(&mut self.reader).ok()?;
+
+        let sub_blocks_len = (header.ck_size as u64).saturating_sub(24);
+        let end_pos = self.reader.pos().saturating_add(sub_blocks_len);
+        let parts = read_block_parts(&mut self.reader, end_pos).ok()?;
+
+        Some(WvcBlock {
+            block_index: header.get_block_index(),
+            block_samples: header.block_samples,
+            flags: header.flags,
+            crc: header.crc,
+            parts,
+        })
+    }
+
+    /// Find the correction block that matches the main block with header `wv`, reading ahead
+    /// (and discarding stale blocks) as needed. Port of `read_wvc_block()` in open_utils.c.
+    /// `None` means that there is no matching block, and the block is decoded lossy.
+    fn block_for(&mut self, wv: &Header) -> Option<WvcBlock> {
+        loop {
+            if self.pending.is_none() {
+                if self.done {
+                    return None;
+                }
+                match self.read_block() {
+                    Some(block) => self.pending = Some(block),
+                    None => {
+                        self.done = true;
+                        return None;
+                    }
+                }
+            }
+
+            let block = self.pending.as_ref()?;
+            if block.block_samples == 0 {
+                self.pending = None;
+                continue;
+            }
+
+            match match_wvc_header(wv, block) {
+                // A match.
+                0 => return self.pending.take(),
+                // The correction block is from before the main block: skip it.
+                1 => self.pending = None,
+                // The correction block is for a later block: this one has none.
+                _ => return None,
+            }
+        }
+    }
+}
+
+/// Compare the header of a main block to that of a potential matching correction block.
+/// Port of `match_wvc_header()` in open_utils.c:
+///
+///   0 = use the correction block,
+///   1 = bad match; the correction block is stale, try the next one,
+///  -1 = bad match; the correction block is for a later main block.
+fn match_wvc_header(wv: &Header, wvc: &WvcBlock) -> i32 {
+    let wv_index = wv.get_block_index();
+
+    if wv_index == wvc.block_index && wv.block_samples == wvc.block_samples {
+        if wv.flags == wvc.flags {
+            return 0;
+        }
+
+        let position = |flags: u32| -> i32 {
+            let mut p = 0;
+            if flags & FLAG_INITIAL_BLOCK != 0 {
+                p -= 1;
+            }
+            if flags & FLAG_FINAL_BLOCK != 0 {
+                p += 1;
+            }
+            p
+        };
+
+        return if position(wvc.flags) - position(wv.flags) < 0 { 1 } else { -1 };
+    }
+
+    // Block indices are 40-bit: a negative 40-bit difference means the correction block is
+    // the earlier one.
+    if wvc.block_index.wrapping_sub(wv_index) & 0x80_0000_0000 != 0 { 1 } else { -1 }
+}
+
+/// The sub-blocks of one WavPack block that the decoder needs.
+#[derive(Default, Clone)]
+struct BlockParts {
+    terms:   Vec<u8>,
+    weights: Vec<u8>,
+    samples: Vec<u8>,
+    entropy: Vec<u8>,
+    hybrid:  Vec<u8>,
+    float:   Vec<u8>,
+    int32:   Vec<u8>,
+    /// `ID_WVX_BITSTREAM` or `ID_WVX_NEW_BITSTREAM` (see `wvx_new`).
+    wvx:     Vec<u8>,
+    wvx_new: bool,
+    shaping: Vec<u8>,
+    /// `ID_WVC_BITSTREAM`: only in blocks of a `.wvc` file.
+    wvc:     Vec<u8>,
+    audio:   Vec<u8>,
+}
+
+/// Read sub-blocks from `reader` until its position reaches `end_pos`.
+fn read_block_parts<R: ReadBytes>(reader: &mut R, end_pos: u64) -> Result<BlockParts> {
+    let mut parts = BlockParts::default();
+
+    while reader.pos() < end_pos {
+        let sb = decode_sub_block(reader)?;
+        match sb {
+            SubBlock::DecorrelationTerms(d)   => parts.terms   = d,
+            SubBlock::DecorrelationWeights(d) => parts.weights = d,
+            SubBlock::DecorrelationSamples(d) => parts.samples = d,
+            SubBlock::EntropyVariables(d)     => parts.entropy = d,
+            SubBlock::HybridProfile(d)        => parts.hybrid  = d,
+            SubBlock::FloatInfo(d)            => parts.float   = d,
+            SubBlock::Int32Info(d)            => parts.int32   = d,
+            SubBlock::ShapingWeights(d)       => parts.shaping = d,
+            SubBlock::WvBitStream(d)          => parts.audio   = d,
+            SubBlock::WvcBitStream(d)         => parts.wvc     = d,
+            SubBlock::WvxBitStream(d) => {
+                parts.wvx = d;
+                parts.wvx_new = false;
+            }
+            SubBlock::WvxNewBitStream(d) => {
+                parts.wvx = d;
+                parts.wvx_new = true;
+            }
+            SubBlock::DsdBlock(_) => {
+                return symphonia_core::errors::unsupported_error("wavpack: DSD not supported");
+            }
+            // Skip everything else: ChannelInfo (already scanned separately, once, in
+            // `try_new_v4v5`), metadata, checksums, RIFF headers.
+            _ => debug!("v4v5: skipping non-audio sub-block"),
+        }
+    }
+
+    Ok(parts)
 }
 
 /// Read sub-blocks from `reader` until its position reaches `end_pos` and serialise them (see
@@ -623,69 +927,68 @@ fn build_stream_packet<R: ReadBytes>(
     crc: u32,
     end_pos: u64,
 ) -> Result<Vec<u8>> {
-    let mut terms_data:    Vec<u8> = Vec::new();
-    let mut weights_data:  Vec<u8> = Vec::new();
-    let mut samples_data:  Vec<u8> = Vec::new();
-    let mut entropy_data:  Vec<u8> = Vec::new();
-    let mut hybrid_data:   Vec<u8> = Vec::new();
-    let mut float_data:    Vec<u8> = Vec::new();
-    let mut int32_data:    Vec<u8> = Vec::new();
-    let mut wvx_data:      Vec<u8> = Vec::new();
-    let mut audio_data:    Vec<u8> = Vec::new();
+    let parts = read_block_parts(reader, end_pos)?;
+    Ok(serialise_stream_packet(flags, block_samples, crc, &parts, None))
+}
 
-    while reader.pos() < end_pos {
-        let sb = decode_sub_block(reader)?;
-        match sb {
-            SubBlock::DecorrelationTerms(d)   => terms_data   = d,
-            SubBlock::DecorrelationWeights(d) => weights_data = d,
-            SubBlock::DecorrelationSamples(d) => samples_data = d,
-            SubBlock::EntropyVariables(d)     => entropy_data = d,
-            SubBlock::HybridProfile(d)        => hybrid_data  = d,
-            SubBlock::FloatInfo(d)            => float_data   = d,
-            SubBlock::Int32Info(d)            => int32_data   = d,
-            SubBlock::WvBitStream(d)          => audio_data   = d,
-            SubBlock::WvxBitStream(d)         => wvx_data     = d,
-            SubBlock::DsdBlock(_) => {
-                return symphonia_core::errors::unsupported_error("wavpack: DSD not supported");
-            }
-            // Skip everything else: ShapingWeights (only meaningful with a .wvc
-            // correction file, unsupported by this fork — see README), ChannelInfo
-            // (already scanned separately, once, in `try_new_v4v5`), WvcBitStream
-            // (belongs to the sibling .wvc file), metadata, checksums, RIFF headers.
-            _ => debug!("v4v5: skipping non-audio sub-block"),
-        }
+/// Serialise the parts of a block, and of its matching `.wvc` block if there is one, into a
+/// per-stream mini-packet (see `read_v4v5_stream_block` for the layout).
+fn serialise_stream_packet(
+    flags: u32,
+    block_samples: u32,
+    crc: u32,
+    parts: &BlockParts,
+    wvc: Option<&WvcBlock>,
+) -> Vec<u8> {
+    // A correction block without a correction bitstream is of no use.
+    let wvc = wvc.filter(|w| !w.parts.wvc.is_empty());
+    let empty: &[u8] = &[];
+    let (shaping, wvc_data, wvc_wvx) = match wvc {
+        Some(w) => (w.parts.shaping.as_slice(), w.parts.wvc.as_slice(), w.parts.wvx.as_slice()),
+        None => (empty, empty, empty),
+    };
+    let wvc_crc = wvc.map_or(0, |w| w.crc);
+
+    let mut ext_flags = 0u32;
+    if parts.wvx_new {
+        ext_flags |= EXT_WVX_NEW;
+    }
+    if wvc.is_some_and(|w| w.parts.wvx_new) {
+        ext_flags |= EXT_WVC_WVX_NEW;
     }
 
-    let lens: [u32; 8] = [
-        terms_data.len()   as u32,
-        weights_data.len() as u32,
-        samples_data.len() as u32,
-        entropy_data.len() as u32,
-        hybrid_data.len()  as u32,
-        float_data.len()   as u32,
-        int32_data.len()   as u32,
-        wvx_data.len()     as u32,
+    let sections: [&[u8]; 11] = [
+        &parts.terms,
+        &parts.weights,
+        &parts.samples,
+        &parts.entropy,
+        &parts.hybrid,
+        &parts.float,
+        &parts.int32,
+        &parts.wvx,
+        shaping,
+        wvc_data,
+        wvc_wvx,
     ];
 
-    let payload_len: usize = lens.iter().map(|&l| l as usize).sum::<usize>() + audio_data.len();
-    let mut mini: Vec<u8> = Vec::with_capacity(44 + payload_len);
+    let payload_len: usize = sections.iter().map(|s| s.len()).sum::<usize>() + parts.audio.len();
+    let mut mini: Vec<u8> = Vec::with_capacity(STREAM_HDR + payload_len);
     mini.extend_from_slice(&flags.to_le_bytes());
     mini.extend_from_slice(&block_samples.to_le_bytes());
     mini.extend_from_slice(&crc.to_le_bytes());
-    for l in lens {
-        mini.extend_from_slice(&l.to_le_bytes());
+    for s in &sections {
+        mini.extend_from_slice(&(s.len() as u32).to_le_bytes());
     }
-    mini.extend_from_slice(&terms_data);
-    mini.extend_from_slice(&weights_data);
-    mini.extend_from_slice(&samples_data);
-    mini.extend_from_slice(&entropy_data);
-    mini.extend_from_slice(&hybrid_data);
-    mini.extend_from_slice(&float_data);
-    mini.extend_from_slice(&int32_data);
-    mini.extend_from_slice(&wvx_data);
-    mini.extend_from_slice(&audio_data);
+    mini.extend_from_slice(&wvc_crc.to_le_bytes());
+    mini.extend_from_slice(&ext_flags.to_le_bytes());
+    debug_assert_eq!(mini.len(), STREAM_HDR);
 
-    Ok(mini)
+    for s in &sections {
+        mini.extend_from_slice(s);
+    }
+    mini.extend_from_slice(&parts.audio);
+
+    mini
 }
 
 /// `INITIAL_BLOCK` (wavpack.h `0x800`).
@@ -1371,7 +1674,7 @@ mod tests {
         assert_eq!(u32::from_le_bytes(stream[8..12].try_into().unwrap()), 0xdead_beef);
         assert_eq!(stream_lens(stream), [4, 0, 0, 0, 0, 0, 0, 0]);
         // The decorrelation terms, followed by the bitstream.
-        assert_eq!(&stream[44..], &[1, 2, 3, 4, 9, 8, 7, 6, 5, 4]);
+        assert_eq!(&stream[crate::decoder::STREAM_HDR..], &[1, 2, 3, 4, 9, 8, 7, 6, 5, 4]);
     }
 
     #[test]
@@ -1399,7 +1702,7 @@ mod tests {
         let len = u32::from_le_bytes(pkt[8..12].try_into().unwrap()) as usize;
         let stream0 = &pkt[12..12 + len];
         assert_eq!(u32::from_le_bytes(stream0[0..4].try_into().unwrap()), INITIAL);
-        assert_eq!(&stream0[44..], &[1, 2, 3, 4]);
+        assert_eq!(&stream0[crate::decoder::STREAM_HDR..], &[1, 2, 3, 4]);
 
         // All blocks share the number of samples.
         let rest = &pkt[12 + len..];
@@ -1407,7 +1710,7 @@ mod tests {
         let stream1 = &rest[4..4 + len];
         assert_eq!(u32::from_le_bytes(stream1[0..4].try_into().unwrap()), FINAL);
         assert_eq!(u32::from_le_bytes(stream1[4..8].try_into().unwrap()), 1024);
-        assert_eq!(&stream1[44..], &[5, 6]);
+        assert_eq!(&stream1[crate::decoder::STREAM_HDR..], &[5, 6]);
         assert_eq!(rest.len(), 4 + len);
     }
 
@@ -1450,5 +1753,180 @@ mod tests {
         // declared size.
         let mut reader = BufReader::new(&[0x8a, 0xff, 0xff, 0xff]);
         assert!(decode_sub_block(&mut reader).is_err());
+    }
+
+    const SINGLE: u32 = INITIAL | FINAL | 0x1;
+
+    /// A main block header.
+    fn main_header(index: u64, block_samples: u32, flags: u32) -> Header {
+        Header {
+            ck_size: 0,
+            version: 0x410,
+            block_index_u8: (index >> 32) as u8,
+            total_samples_u8: 0,
+            total_samples_u32: 0,
+            block_index_u32: index as u32,
+            block_samples,
+            flags,
+            crc: 0,
+        }
+    }
+
+    /// A complete `.wvc` block: header, a shaping sub-block and a correction bitstream.
+    fn wvc_block(index: u64, block_samples: u32, flags: u32, crc: u32) -> Vec<u8> {
+        let payload = [sub_block(0x07, &[7, 7]), sub_block(0x0b, &[1, 2, 3, 4])].concat();
+
+        let mut block = Vec::new();
+        block.extend(b"wvpk");
+        block.extend((24 + payload.len() as u32).to_le_bytes());
+        block.extend(0x410u16.to_le_bytes());
+        block.push((index >> 32) as u8);
+        block.push(0);
+        block.extend(0u32.to_le_bytes());
+        block.extend((index as u32).to_le_bytes());
+        block.extend(block_samples.to_le_bytes());
+        block.extend(flags.to_le_bytes());
+        block.extend(crc.to_le_bytes());
+        block.extend(payload);
+        block
+    }
+
+    fn correction(blocks: &[Vec<u8>]) -> Correction<'static> {
+        let data = blocks.concat();
+        Correction::new(MediaSourceStream::new(Box::new(std::io::Cursor::new(data)), Default::default()))
+            .unwrap()
+    }
+
+    fn wvc(index: u64, block_samples: u32, flags: u32) -> WvcBlock {
+        WvcBlock { block_index: index, block_samples, flags, crc: 0, parts: BlockParts::default() }
+    }
+
+    #[test]
+    fn verify_wvc_header_matching() {
+        let wv = main_header(1000, 500, SINGLE);
+
+        // Same position and flags: a match.
+        assert_eq!(match_wvc_header(&wv, &wvc(1000, 500, SINGLE)), 0);
+        // An earlier correction block is stale, a later one is for a later block.
+        assert_eq!(match_wvc_header(&wv, &wvc(500, 500, SINGLE)), 1);
+        assert_eq!(match_wvc_header(&wv, &wvc(1500, 500, SINGLE)), -1);
+        // Same index but another length is not the same block either.
+        assert_eq!(match_wvc_header(&wv, &wvc(1000, 400, SINGLE)), -1);
+        // Block indices have 40 bits: an index that wrapped is "earlier".
+        let wv = main_header(5, 500, SINGLE);
+        assert_eq!(match_wvc_header(&wv, &wvc(0xff_ffff_fff0, 500, SINGLE)), 1);
+
+        // The streams of a multichannel group are told apart by their position flags: the
+        // correction block of the first stream (INITIAL) is stale for the last (FINAL).
+        let wv_last = main_header(0, 500, FINAL | 0x1);
+        assert_eq!(match_wvc_header(&wv_last, &wvc(0, 500, INITIAL | 0x1)), 1);
+        let wv_first = main_header(0, 500, INITIAL | 0x1);
+        assert_eq!(match_wvc_header(&wv_first, &wvc(0, 500, FINAL | 0x1)), -1);
+    }
+
+    #[test]
+    fn verify_correction_block_lookup() {
+        let mut c = correction(&[
+            wvc_block(0, 1000, SINGLE, 0xa0),
+            // Blocks without samples carry nothing to correct.
+            wvc_block(1000, 0, SINGLE, 0xdead),
+            wvc_block(1000, 1000, SINGLE, 0xa1),
+            wvc_block(3000, 1000, SINGLE, 0xa3),
+        ]);
+
+        // The first block is matched.
+        let block = c.block_for(&main_header(0, 1000, SINGLE)).unwrap();
+        assert_eq!(block.crc, 0xa0);
+        assert_eq!(block.parts.wvc, [1, 2, 3, 4]);
+        assert_eq!(block.parts.shaping, [7, 7]);
+
+        // The second block is matched; the empty block is skipped.
+        assert_eq!(c.block_for(&main_header(1000, 1000, SINGLE)).unwrap().crc, 0xa1);
+
+        // There is no correction block for the third block; the next one is kept for later.
+        assert!(c.block_for(&main_header(2000, 1000, SINGLE)).is_none());
+        assert_eq!(c.block_for(&main_header(3000, 1000, SINGLE)).unwrap().crc, 0xa3);
+
+        // That was the last one.
+        assert!(c.block_for(&main_header(4000, 1000, SINGLE)).is_none());
+        assert!(c.done);
+
+        // After a restart (a seek) the stream is read from the beginning again.
+        c.restart().unwrap();
+        assert_eq!(c.block_for(&main_header(0, 1000, SINGLE)).unwrap().crc, 0xa0);
+
+        // A mark restores the position of the stream and the block that was read ahead.
+        let mark = c.mark();
+        assert!(c.block_for(&main_header(2000, 1000, SINGLE)).is_none());
+        assert_eq!(c.block_for(&main_header(3000, 1000, SINGLE)).unwrap().crc, 0xa3);
+        c.restore(mark).unwrap();
+        assert_eq!(c.block_for(&main_header(1000, 1000, SINGLE)).unwrap().crc, 0xa1);
+    }
+
+    #[test]
+    fn verify_correction_stream_skips_garbage_and_stale_blocks() {
+        // Junk, then a correction block that is stale for the main block.
+        let mut data = vec![0u8; 13];
+        data.extend(wvc_block(0, 1000, SINGLE, 1));
+        data.extend([0xff; 7]);
+        data.extend(wvc_block(1000, 1000, SINGLE, 2));
+
+        let mut c = correction(&[data]);
+        assert_eq!(c.block_for(&main_header(1000, 1000, SINGLE)).unwrap().crc, 2);
+
+        // A stream without any block cannot be a correction stream.
+        assert!(Correction::new(MediaSourceStream::new(
+            Box::new(std::io::Cursor::new(vec![0u8; 64])),
+            Default::default(),
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn verify_packet_carries_the_correction_block() {
+        let main = BlockParts {
+            terms: vec![1, 2],
+            wvx: vec![9, 9, 9, 9, 8, 8],
+            audio: vec![5, 5, 5, 5],
+            ..Default::default()
+        };
+        let correction = WvcBlock {
+            block_index: 0,
+            block_samples: 10,
+            flags: SINGLE,
+            crc: 0x1234_5678,
+            parts: BlockParts {
+                shaping: vec![7, 7],
+                wvc: vec![1, 2, 3, 4],
+                wvx: vec![6, 6, 6, 6, 6, 6],
+                wvx_new: true,
+                ..Default::default()
+            },
+        };
+
+        let with = serialise_stream_packet(SINGLE, 10, 0xaaaa, &main, Some(&correction));
+        let without = serialise_stream_packet(SINGLE, 10, 0xaaaa, &main, None);
+
+        let field = |p: &[u8], i: usize| u32::from_le_bytes(p[4 * i..4 * i + 4].try_into().unwrap());
+
+        // terms, wvx, shaping, wvc, wvc_wvx
+        assert_eq!([field(&with, 3), field(&with, 10)], [2, 6]);
+        assert_eq!([field(&with, 11), field(&with, 12), field(&with, 13)], [2, 4, 6]);
+        assert_eq!(field(&with, 14), 0x1234_5678);
+        assert_eq!(field(&with, 15), EXT_WVC_WVX_NEW);
+        assert_eq!(
+            &with[STREAM_HDR..],
+            &[1, 2, 9, 9, 9, 9, 8, 8, 7, 7, 1, 2, 3, 4, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5]
+        );
+
+        // Without a correction block the correction fields are empty.
+        assert_eq!([field(&without, 11), field(&without, 12), field(&without, 13)], [0, 0, 0]);
+        assert_eq!([field(&without, 14), field(&without, 15)], [0, 0]);
+        assert_eq!(&without[STREAM_HDR..], &[1, 2, 9, 9, 9, 9, 8, 8, 5, 5, 5, 5]);
+
+        // A correction block that has no correction bitstream is of no use.
+        let mut useless = correction.clone();
+        useless.parts.wvc.clear();
+        assert_eq!(serialise_stream_packet(SINGLE, 10, 0xaaaa, &main, Some(&useless)), without);
     }
 }

@@ -28,6 +28,7 @@ pub(super) enum SubBlock {
     WvBitStream(Vec<u8>),
     WvcBitStream(Vec<u8>),
     WvxBitStream(Vec<u8>),
+    WvxNewBitStream(Vec<u8>),
     ChannelInfo(Vec<u8>),
     DsdBlock(Vec<u8>),
     RiffHeader(Vec<u8>),
@@ -105,6 +106,7 @@ pub(super) fn decode_sub_block<R: ReadBytes>(source: &mut R) -> Result<SubBlock>
         0x2A => SubBlock::NewConfigBlock(data),
         0x2B => SubBlock::ChannelIdentities(data),
         0x2F => SubBlock::BlockChecksum(data),
+        0x2C => SubBlock::WvxNewBitStream(data),
         id => {
             debug!("WavPack: unknown sub-block id: {:#x}", id);
             SubBlock::Unknown(data)

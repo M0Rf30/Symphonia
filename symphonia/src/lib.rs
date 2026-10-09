@@ -189,6 +189,13 @@ pub mod default {
         pub use symphonia_format_riff::WavReader;
         #[cfg(feature = "wavpack")]
         pub use symphonia_codec_wavpack::WavPackReader;
+        /// Attach the `.wvc` correction file next to a hybrid WavPack `.wv` file to
+        /// `FormatOptions` (see `symphonia_codec_wavpack::with_sibling_correction`).
+        #[cfg(feature = "wavpack")]
+        pub use symphonia_codec_wavpack::with_sibling_correction as wavpack_with_sibling_correction;
+        /// The path of the `.wvc` correction file next to a WavPack `.wv` file, if any.
+        #[cfg(feature = "wavpack")]
+        pub use symphonia_codec_wavpack::correction_path as wavpack_correction_path;
 
         #[deprecated = "use `default::formats::MpaReader` instead"]
         #[cfg(any(feature = "mp1", feature = "mp2", feature = "mp3"))]

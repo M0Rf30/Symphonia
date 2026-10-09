@@ -16,9 +16,7 @@
 pub const MONO_FLAG:      u32 = 0x0000_0004;
 pub const HYBRID_FLAG:    u32 = 0x0000_0008;
 pub const JOINT_STEREO:   u32 = 0x0000_0010;
-#[allow(dead_code)] // documents the bit; only meaningful when a .wvc correction file is
-                     // available (unsupported by this fork, see README), so it never
-                     // needs to be checked on the lossy-only decode path.
+pub const CROSS_DECORR:   u32 = 0x0000_0020;
 pub const HYBRID_SHAPE:   u32 = 0x0000_0040;
 pub const FLOAT_DATA:     u32 = 0x0000_0080;
 pub const INT32_DATA:     u32 = 0x0000_0100;
@@ -26,6 +24,9 @@ pub const HYBRID_BITRATE: u32 = 0x0000_0200;
 pub const HYBRID_BALANCE: u32 = 0x0000_0400;
 pub const SHIFT_LSB:      u32 = 13;
 pub const SHIFT_MASK:     u32 = 0x1f << 13;
+pub const MAG_LSB:        u32 = 18;
+pub const MAG_MASK:       u32 = 0x1f << 18;
+pub const NEW_SHAPING:    u32 = 0x2000_0000;
 pub const FALSE_STEREO:   u32 = 0x4000_0000;
 pub const MONO_DATA:      u32 = MONO_FLAG | FALSE_STEREO;
 
@@ -41,8 +42,18 @@ pub const PACKET_MAGIC: &[u8; 4] = b"WV45";
 // `WavPackReader::read_v4v5_stream_block`):
 //   flags(4) + block_samples(4) + crc(4)
 //   + terms_len(4) + weights_len(4) + samples_len(4) + entropy_len(4)
-//   + hybrid_profile_len(4) + float_info_len(4) + int32_len(4) + wvx_len(4) = 44 bytes
-pub const STREAM_HDR: usize = 44;
+//   + hybrid_profile_len(4) + float_info_len(4) + int32_len(4) + wvx_len(4)
+//   + shaping_len(4) + wvc_len(4) + wvc_wvx_len(4) + wvc_crc(4) + ext_flags(4) = 64 bytes
+//
+// `shaping`, `wvc` and `wvc_wvx` come from the matching block of the `.wvc` correction file
+// (all empty without one). `ext_flags` bit 0: `wvx` is an `ID_WVX_NEW_BITSTREAM`; bit 1:
+// `wvc_wvx` is.
+pub const STREAM_HDR: usize = 64;
+
+/// `ext_flags` bit: the main block's extension bitstream is the "new" kind.
+pub const EXT_WVX_NEW: u32 = 1 << 0;
+/// `ext_flags` bit: the correction block's extension bitstream is the "new" kind.
+pub const EXT_WVC_WVX_NEW: u32 = 1 << 1;
 
 // ---------------------------------------------------------------------------
 // Sub-block size limits to guard against malformed streams
@@ -792,24 +803,40 @@ fn get_words_lossless(
 // fast paths — ported from get_word()/get_words_lossless() in read_words.c),
 // but narrows the [low, high) median interval down to `error_limit` via the
 // main bitstream instead of resolving it exactly with read_code(). Without a
-// `.wvc` correction file (unsupported by this fork — see README) there is no
-// second bitstream to refine `mid` into the exact lossless value, so this
-// always produces the lossy approximation, matching `wvunpack` run without
-// its companion `.wvc`.
+// `.wvc` correction bitstream there is no second bitstream to refine `mid` into
+// the exact lossless value, so the result is the lossy approximation, matching
+// `wvunpack` run without its companion `.wvc`. With one, the exact value is read
+// from it and returned as a per-word correction (see `unpack_hybrid_lossless`).
 // ---------------------------------------------------------------------------
 
 const SLS: u32 = 8;
 const SLO: u32 = 1 << (SLS - 1);
 
+/// The result of [`get_words_hybrid`].
+struct HybridWords {
+    /// The (possibly lossy) words, interleaved for stereo.
+    samples: Vec<i32>,
+    /// The per-word correction from the `.wvc` bitstream (same layout as `samples`); empty if
+    /// no correction bitstream was given.
+    corrections: Vec<i32>,
+    /// The number of words that were decoded before the bitstream ended.
+    decoded: u32,
+}
+
+/// Port of `get_word()` in read_words.c, run over a whole block. If `wvc` is given, the
+/// correction bitstream is consumed too (when the `error_limit` of a word is non-zero) and
+/// the resulting correction offsets are returned.
 fn get_words_hybrid(
     bs:            &mut Bits<'_>,
     ws:            &mut WordsState,
     flags:         u32,
     block_samples: u32,
-) -> Option<Vec<i32>> {
+    mut wvc:       Option<&mut Bits<'_>>,
+) -> Option<HybridWords> {
     let is_mono  = (flags & MONO_DATA) != 0;
     let nsamples = if is_mono { block_samples } else { block_samples.saturating_mul(2) };
     let mut buffer = vec![0i32; nsamples as usize];
+    let mut corrections = if wvc.is_some() { vec![0i32; nsamples as usize] } else { Vec::new() };
     let mut csamples: u32 = 0;
 
     while csamples < nsamples {
@@ -922,11 +949,10 @@ fn get_words_hybrid(
         if low > high { high = low; }
 
         let error_limit = ws.c[chan].error_limit;
+        let (mut lo, mut hi) = (low, high);
         let mid = if error_limit == 0 {
             read_code(bs, high - low) + low
         } else {
-            let mut lo = low;
-            let mut hi = high;
             let mut m = (hi + lo + 1) >> 1;
             while hi - lo > error_limit {
                 if bs.getbit() != 0 {
@@ -947,6 +973,16 @@ fn get_words_hybrid(
                 if sign != 0 { !(mid as i32) } else { mid as i32 });
         }
 
+        // The correction bitstream pins down the exact value inside the range that is left
+        // once the main bitstream has been consumed.
+        if error_limit != 0 {
+            if let Some(wvc) = wvc.as_deref_mut() {
+                let value = read_code(wvc, hi - lo) + lo;
+                corrections[csamples as usize] =
+                    if sign != 0 { mid.wrapping_sub(value) } else { value.wrapping_sub(mid) } as i32;
+            }
+        }
+
         if (flags & HYBRID_BITRATE) != 0 {
             let c = &mut ws.c[chan];
             c.slow_level = c.slow_level.wrapping_sub((c.slow_level.wrapping_add(SLO)) >> SLS);
@@ -957,7 +993,7 @@ fn get_words_hybrid(
         csamples += 1;
     }
 
-    Some(buffer)
+    Some(HybridWords { samples: buffer, corrections, decoded: csamples })
 }
 
 // ---------------------------------------------------------------------------
@@ -1140,30 +1176,172 @@ pub fn undo_joint_stereo(buf: &mut [i32], flags: u32) {
     }
 }
 
+/// The "extension" (`ID_WVX_BITSTREAM` / `ID_WVX_NEW_BITSTREAM`) bitstream of a block: the
+/// bits needed to losslessly restore 32-bit float data or integer data wider than 24 bits.
+/// It lives in the `.wv` block for ordinary lossless files and in the `.wvc` block for
+/// hybrid-lossless ones.
+#[derive(Clone, Copy)]
+pub struct WvxInput<'a> {
+    /// The CRC of the restored extended data, stored in the first 4 bytes of the sub-block.
+    pub crc:    u32,
+    /// The bitstream, following the CRC.
+    pub bits:   &'a [u8],
+    /// `ID_WVX_NEW_BITSTREAM`: the bitstream starts with one (integer data) or two (float
+    /// data) 5-bit fields.
+    pub is_new: bool,
+}
+
+impl<'a> WvxInput<'a> {
+    /// Port of `init_wvx_bitstream()` in open_utils.c (validity check and CRC extraction).
+    pub fn parse(raw: &'a [u8], is_new: bool) -> Option<Self> {
+        if raw.len() <= 4 {
+            return None;
+        }
+        let crc = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+        Some(WvxInput { crc, bits: &raw[4..], is_new })
+    }
+}
+
+/// The correction (`ID_WVC_BITSTREAM`) data of a block that comes from the `.wvc` file.
+pub struct WvcInput<'a> {
+    /// The correction bitstream.
+    pub bits:    &'a [u8],
+    /// The CRC of the *lossless* output, from the header of the correction block.
+    pub crc:     u32,
+    /// `ID_SHAPING_WEIGHTS` of the correction block.
+    pub shaping: &'a [u8],
+    /// `ID_WVX_BITSTREAM` of the correction block, if any.
+    pub wvx:     Option<WvxInput<'a>>,
+}
+
+/// Open a `WvxInput` as a bit reader and consume its new-format prefix, returning the reader
+/// and the `(float_min_shifted_zeros, float_max_shifted_ones, int32_max_width)` fields.
+fn open_wvx<'a>(wvx: &WvxInput<'a>, flags: u32) -> (Bits<'a>, i32, i32, u32) {
+    let mut bits = Bits::new(wvx.bits);
+    let (mut min_zeros, mut max_ones, mut max_width) = (0, 0, 0);
+    if wvx.is_new {
+        if (flags & FLOAT_DATA) != 0 {
+            min_zeros = (bits.getbits(5) & 0x1f) as i32;
+            max_ones = (bits.getbits(5) & 0x1f) as i32;
+        }
+        else {
+            max_width = bits.getbits(5) & 0x1f;
+        }
+    }
+    (bits, min_zeros, max_ones, max_width)
+}
+
 /// Final integer fixup: INT32_DATA extra-bit restoration, hybrid-lossy clipping and
 /// the residual precision shift. Not used for `FLOAT_DATA` blocks (see `floats::float_values`).
 /// Port of the (non-float) tail of `fixup_samples()` in unpack.c.
-pub fn fixup_samples(buf: &mut [i32], flags: u32, i32info: &Int32Info) {
-    let is_hybrid_lossy = (flags & HYBRID_FLAG) != 0; // no .wvc support => always "lossy" here
+///
+/// `lossy` is `HYBRID_FLAG` without a correction block. `wvx`, if given, supplies the bits
+/// of a lossless 32-bit integer stream; the CRC of the restored data is returned in that case.
+pub fn fixup_samples(
+    buf: &mut [i32],
+    flags: u32,
+    i32info: &Int32Info,
+    lossy: bool,
+    wvx: Option<&WvxInput<'_>>,
+) -> Option<u32> {
     let mut shift = ((flags & SHIFT_MASK) >> SHIFT_LSB) as i32;
+    let mut crc_x = None;
 
-    // INT32_DATA: restore extra bits (for lossless 32-bit sources)
-    if (flags & INT32_DATA) != 0 && i32info.sent_bits == 0 {
-        let extra = i32info.zeros as i32 + i32info.ones as i32 + i32info.dups as i32;
-        if extra != 0 {
-            for s in buf.iter_mut() {
-                *s <<= i32info.zeros + i32info.ones + i32info.dups;
-                if i32info.ones != 0 {
-                    *s |= ((1i32 << i32info.ones) - 1) << i32info.zeros;
-                }
+    if (flags & INT32_DATA) != 0 {
+        let sent_bits = (i32info.sent_bits & 0x1f) as u32;
+        let mut zeros = (i32info.zeros & 0x1f) as u32;
+        let mut ones = (i32info.ones & 0x1f) as u32;
+        let mut dups = (i32info.dups & 0x1f) as u32;
+        let mask = (1u32 << sent_bits).wrapping_sub(1);
+
+        // Restore the "zeros"/"ones"/"dups" bits of one sample.
+        let restore = |v: i32, zeros: u32, ones: u32, dups: u32| -> i32 {
+            if zeros != 0 {
+                ((v as u32) << zeros) as i32
             }
+            else if ones != 0 {
+                (((v.wrapping_add(1)) as u32) << ones).wrapping_sub(1) as i32
+            }
+            else if dups != 0 {
+                let low = v & 1;
+                (((v.wrapping_add(low)) as u32) << dups).wrapping_sub(low as u32) as i32
+            }
+            else {
+                v
+            }
+        };
+
+        if let Some(wvx) = wvx {
+            let (mut bits, _, _, max_width) = open_wvx(wvx, flags);
+            let mut crc: u32 = 0xffff_ffff;
+
+            for s in buf.iter_mut() {
+                if sent_bits != 0 {
+                    if max_width != 0 {
+                        let pvalue = if *s < 0 { !*s } else { *s } as u32;
+                        let width = count_bits(pvalue) + sent_bits;
+                        let mut bits_to_read = sent_bits as i32;
+
+                        let read = width <= max_width || {
+                            bits_to_read -= (width - max_width) as i32;
+                            bits_to_read > 0
+                        };
+
+                        if read {
+                            let data = bits.getbits(bits_to_read as u32) & ((1u32 << bits_to_read) - 1);
+                            *s = ((((*s as u32) << bits_to_read) | data)
+                                << (sent_bits as i32 - bits_to_read)) as i32;
+                        }
+                        else {
+                            *s = ((*s as u32) << sent_bits) as i32;
+                        }
+                    }
+                    else {
+                        let data = bits.getbits(sent_bits);
+                        *s = (((*s as u32) << sent_bits) | (data & mask)) as i32;
+                    }
+                }
+
+                *s = restore(*s, zeros, ones, dups);
+
+                let v = *s as u32;
+                crc = crc
+                    .wrapping_mul(9)
+                    .wrapping_add((v & 0xffff).wrapping_mul(3))
+                    .wrapping_add((v >> 16) & 0xffff);
+            }
+
+            crc_x = Some(crc);
+        }
+        else if sent_bits == 0 && (zeros + ones + dups) != 0 {
+            while lossy && (flags & 3) == 3 && shift < 8 {
+                if zeros != 0 {
+                    zeros -= 1;
+                }
+                else if ones != 0 {
+                    ones -= 1;
+                }
+                else if dups != 0 {
+                    dups -= 1;
+                }
+                else {
+                    break;
+                }
+                shift += 1;
+            }
+
+            for s in buf.iter_mut() {
+                *s = restore(*s, zeros, ones, dups);
+            }
+        }
+        else {
+            shift += (zeros + sent_bits + ones + dups) as i32;
         }
     }
 
-    shift &= 0x1f;
-    let shift = shift as u32;
+    let shift = (shift & 0x1f) as u32;
 
-    if is_hybrid_lossy {
+    if lossy {
         // Clip to the original (pre-shift) sample range, then restore precision. Port of
         // the `lossy_flag` branch of `fixup_samples()` in unpack.c.
         let (min_value, max_value): (i32, i32) = match flags & 3 {
@@ -1189,12 +1367,396 @@ pub fn fixup_samples(buf: &mut [i32], flags: u32, i32info: &Int32Info) {
             *s = ((*s as u32) << shift) as i32;
         }
     }
+
+    crc_x
+}
+
+// ---------------------------------------------------------------------------
+// Hybrid-lossless decoding (main bitstream + .wvc correction bitstream)
+// ---------------------------------------------------------------------------
+
+/// Noise-shaping state of a hybrid block (`wps->dc` in wavpack_local.h), restored from
+/// `ID_SHAPING_WEIGHTS`.
+#[derive(Default, Clone, Copy)]
+pub struct ShapingState {
+    pub acc:   [i32; 2],
+    pub delta: [i32; 2],
+    pub error: [i32; 2],
+}
+
+/// Port of `read_shaping_info()` in decorr_utils.c. Returns `false` for a malformed sub-block.
+pub fn parse_shaping_info(data: &[u8], flags: u32, dc: &mut ShapingState) -> bool {
+    let is_mono = (flags & MONO_DATA) != 0;
+
+    if data.len() == 2 {
+        dc.acc[0] = ((restore_weight(data[0] as i8) as u32) << 16) as i32;
+        dc.acc[1] = ((restore_weight(data[1] as i8) as u32) << 16) as i32;
+        return true;
+    }
+
+    if data.len() >= if is_mono { 4 } else { 8 } {
+        let r = |off: usize| wp_exp2s(i16::from_le_bytes([data[off], data[off + 1]]) as i32);
+
+        dc.error[0] = r(0);
+        dc.acc[0] = r(2);
+        let mut off = 4;
+
+        if !is_mono {
+            dc.error[1] = r(4);
+            dc.acc[1] = r(6);
+            off = 8;
+        }
+
+        if data.len() == if is_mono { 6 } else { 12 } {
+            dc.delta[0] = r(off);
+            if !is_mono {
+                dc.delta[1] = r(off + 2);
+            }
+        }
+
+        return true;
+    }
+
+    false
+}
+
+/// One step of noise shaping for channel `ch` (the shared tail of the hybrid-lossless loops in
+/// `unpack_samples()`): updates `dc.error[ch]` and returns the shaping offset `temp`.
+#[inline(always)]
+fn shaping_step(dc: &mut ShapingState, ch: usize, flags: u32, correction: i32) -> i32 {
+    dc.acc[ch] = dc.acc[ch].wrapping_add(dc.delta[ch]);
+    let shaping_weight = dc.acc[ch] >> 16;
+    let mut temp = apply_weight(shaping_weight, dc.error[ch]).wrapping_neg();
+
+    if (flags & NEW_SHAPING) != 0 && shaping_weight < 0 && temp != 0 {
+        if temp == dc.error[ch] {
+            temp = if temp < 0 { temp + 1 } else { temp - 1 };
+        }
+        dc.error[ch] = temp.wrapping_sub(correction);
+    }
+    else {
+        dc.error[ch] = correction.wrapping_neg();
+    }
+
+    temp
+}
+
+/// Reconstruct the lossless samples of a hybrid block from its main bitstream, correction
+/// bitstream and the decorrelation passes. Port of the two "hybrid lossless" branches of
+/// `unpack_samples()` in unpack.c (which interleave entropy decoding with the passes; the
+/// entropy decoder is independent of the passes, so decoding all words up front is
+/// equivalent).
+///
+/// Returns the samples (before the final shift) and the CRC computed over them, or `None` if
+/// a bitstream ended early or a sample is implausibly large (the reference "mutes" the block
+/// in those cases).
+fn unpack_hybrid_lossless(
+    flags: u32,
+    block_samples: u32,
+    passes: &mut [DecorrPass],
+    ws: &mut WordsState,
+    audio: &[u8],
+    wvc: &WvcInput<'_>,
+) -> Option<(Vec<i32>, u32)> {
+    let is_mono = (flags & MONO_DATA) != 0;
+    let n = block_samples as usize;
+
+    let mut dc = ShapingState::default();
+    if !wvc.shaping.is_empty() {
+        parse_shaping_info(wvc.shaping, flags, &mut dc);
+    }
+
+    let mut bs = Bits::new(audio);
+    let mut wvc_bs = Bits::new(wvc.bits);
+    let words = get_words_hybrid(&mut bs, ws, flags, block_samples, Some(&mut wvc_bs))?;
+    let nsamples = if is_mono { n } else { n * 2 };
+    if words.decoded as usize != nsamples {
+        return None;
+    }
+    let (words, corr) = (words.samples, words.corrections);
+
+    let mag = (flags & MAG_MASK) >> MAG_LSB;
+    let mute_limit: i64 = (1i64 << mag) + 2;
+    let mut crc: u32 = 0xffff_ffff;
+    let mut out: Vec<i32> = Vec::with_capacity(nsamples);
+    let mut m = 0usize;
+
+    if is_mono {
+        for i in 0..n {
+            let mut read_word = words[i];
+            let correction = corr[i];
+
+            for p in passes.iter_mut() {
+                let sam;
+                let k;
+                if p.term > MAX_TERM as i32 {
+                    sam = if (p.term & 1) != 0 {
+                        p.samples_a[0].wrapping_mul(2).wrapping_sub(p.samples_a[1])
+                    }
+                    else {
+                        p.samples_a[0].wrapping_mul(3).wrapping_sub(p.samples_a[1]) >> 1
+                    };
+                    p.samples_a[1] = p.samples_a[0];
+                    k = 0;
+                }
+                else {
+                    sam = p.samples_a[m];
+                    k = (m + p.term as usize) & (MAX_TERM - 1);
+                }
+
+                let temp = apply_weight(p.weight_a, sam).wrapping_add(read_word);
+                update_weight(&mut p.weight_a, p.delta, sam, read_word);
+                read_word = temp;
+                p.samples_a[k] = temp;
+            }
+
+            m = (m + 1) & (MAX_TERM - 1);
+
+            if (flags & HYBRID_SHAPE) != 0 {
+                let temp = shaping_step(&mut dc, 0, flags, correction);
+                read_word = read_word.wrapping_add(correction).wrapping_sub(temp);
+            }
+            else {
+                read_word = read_word.wrapping_add(correction);
+            }
+
+            crc = crc.wrapping_add(crc << 1).wrapping_add(read_word as u32);
+
+            if (read_word as i64).abs() > mute_limit {
+                return None;
+            }
+            out.push(read_word);
+        }
+    }
+    else {
+        for i in 0..n {
+            let mut left = words[i * 2];
+            let mut right = words[i * 2 + 1];
+            let correction = [corr[i * 2], corr[i * 2 + 1]];
+            let (mut left_c, mut right_c) = (0i32, 0i32);
+
+            if (flags & CROSS_DECORR) != 0 {
+                left_c = left.wrapping_add(correction[0]);
+                right_c = right.wrapping_add(correction[1]);
+
+                for p in passes.iter() {
+                    if p.term > 0 {
+                        let (sam_a, sam_b);
+                        if p.term > MAX_TERM as i32 {
+                            if (p.term & 1) != 0 {
+                                sam_a = p.samples_a[0].wrapping_mul(2).wrapping_sub(p.samples_a[1]);
+                                sam_b = p.samples_b[0].wrapping_mul(2).wrapping_sub(p.samples_b[1]);
+                            }
+                            else {
+                                sam_a = p.samples_a[0].wrapping_mul(3).wrapping_sub(p.samples_a[1]) >> 1;
+                                sam_b = p.samples_b[0].wrapping_mul(3).wrapping_sub(p.samples_b[1]) >> 1;
+                            }
+                        }
+                        else {
+                            sam_a = p.samples_a[m];
+                            sam_b = p.samples_b[m];
+                        }
+
+                        left_c = left_c.wrapping_add(apply_weight(p.weight_a, sam_a));
+                        right_c = right_c.wrapping_add(apply_weight(p.weight_b, sam_b));
+                    }
+                    else if p.term == -1 {
+                        left_c = left_c.wrapping_add(apply_weight(p.weight_a, p.samples_a[0]));
+                        right_c = right_c.wrapping_add(apply_weight(p.weight_b, left_c));
+                    }
+                    else {
+                        right_c = right_c.wrapping_add(apply_weight(p.weight_b, p.samples_b[0]));
+
+                        if p.term == -3 {
+                            left_c = left_c.wrapping_add(apply_weight(p.weight_a, p.samples_a[0]));
+                        }
+                        else {
+                            left_c = left_c.wrapping_add(apply_weight(p.weight_a, right_c));
+                        }
+                    }
+                }
+
+                if (flags & JOINT_STEREO) != 0 {
+                    right_c = right_c.wrapping_sub(left_c >> 1);
+                    left_c = left_c.wrapping_add(right_c);
+                }
+            }
+
+            for p in passes.iter_mut() {
+                if p.term > 0 {
+                    let (sam_a, sam_b, k);
+                    if p.term > MAX_TERM as i32 {
+                        if (p.term & 1) != 0 {
+                            sam_a = p.samples_a[0].wrapping_mul(2).wrapping_sub(p.samples_a[1]);
+                            sam_b = p.samples_b[0].wrapping_mul(2).wrapping_sub(p.samples_b[1]);
+                        }
+                        else {
+                            sam_a = p.samples_a[0].wrapping_mul(3).wrapping_sub(p.samples_a[1]) >> 1;
+                            sam_b = p.samples_b[0].wrapping_mul(3).wrapping_sub(p.samples_b[1]) >> 1;
+                        }
+                        p.samples_a[1] = p.samples_a[0];
+                        p.samples_b[1] = p.samples_b[0];
+                        k = 0;
+                    }
+                    else {
+                        sam_a = p.samples_a[m];
+                        sam_b = p.samples_b[m];
+                        k = (m + p.term as usize) & (MAX_TERM - 1);
+                    }
+
+                    let left2 = apply_weight(p.weight_a, sam_a).wrapping_add(left);
+                    let right2 = apply_weight(p.weight_b, sam_b).wrapping_add(right);
+
+                    update_weight(&mut p.weight_a, p.delta, sam_a, left);
+                    update_weight(&mut p.weight_b, p.delta, sam_b, right);
+
+                    left = left2;
+                    right = right2;
+                    p.samples_a[k] = left;
+                    p.samples_b[k] = right;
+                }
+                else if p.term == -1 {
+                    let left2 = left.wrapping_add(apply_weight(p.weight_a, p.samples_a[0]));
+                    update_weight_clip(&mut p.weight_a, p.delta, p.samples_a[0], left);
+                    left = left2;
+                    let right2 = right.wrapping_add(apply_weight(p.weight_b, left2));
+                    update_weight_clip(&mut p.weight_b, p.delta, left2, right);
+                    right = right2;
+                    p.samples_a[0] = right;
+                }
+                else {
+                    let mut right2 = right.wrapping_add(apply_weight(p.weight_b, p.samples_b[0]));
+                    update_weight_clip(&mut p.weight_b, p.delta, p.samples_b[0], right);
+                    right = right2;
+
+                    if p.term == -3 {
+                        right2 = p.samples_a[0];
+                        p.samples_a[0] = right;
+                    }
+
+                    let left2 = left.wrapping_add(apply_weight(p.weight_a, right2));
+                    update_weight_clip(&mut p.weight_a, p.delta, right2, left);
+                    left = left2;
+                    p.samples_b[0] = left;
+                }
+            }
+
+            m = (m + 1) & (MAX_TERM - 1);
+
+            if (flags & CROSS_DECORR) == 0 {
+                left_c = left.wrapping_add(correction[0]);
+                right_c = right.wrapping_add(correction[1]);
+
+                if (flags & JOINT_STEREO) != 0 {
+                    right_c = right_c.wrapping_sub(left_c >> 1);
+                    left_c = left_c.wrapping_add(right_c);
+                }
+            }
+
+            if (flags & JOINT_STEREO) != 0 {
+                right = right.wrapping_sub(left >> 1);
+                left = left.wrapping_add(right);
+            }
+
+            if (flags & HYBRID_SHAPE) != 0 {
+                let c0 = left_c.wrapping_sub(left);
+                let temp = shaping_step(&mut dc, 0, flags, c0);
+                left = left_c.wrapping_sub(temp);
+
+                let c1 = right_c.wrapping_sub(right);
+                let temp = shaping_step(&mut dc, 1, flags, c1);
+                right = right_c.wrapping_sub(temp);
+            }
+            else {
+                left = left_c;
+                right = right_c;
+            }
+
+            if (left as i64).abs() > mute_limit || (right as i64).abs() > mute_limit {
+                return None;
+            }
+
+            crc = crc
+                .wrapping_add(crc << 3)
+                .wrapping_add((left as u32) << 1)
+                .wrapping_add(left as u32)
+                .wrapping_add(right as u32);
+            out.push(left);
+            out.push(right);
+        }
+    }
+
+    Some((out, crc))
+}
+
+/// Hybrid-lossless decode of one block: samples plus the check of both CRCs. `None` means the
+/// correction data does not reproduce the block (corrupt, truncated or mismatched `.wvc`).
+#[allow(clippy::too_many_arguments)]
+fn unpack_with_correction(
+    flags: u32,
+    block_samples: u32,
+    passes: &mut [DecorrPass],
+    ws: &mut WordsState,
+    i32info: &Int32Info,
+    float_info: Option<&super::floats::FloatInfo>,
+    main_wvx: Option<WvxInput<'_>>,
+    audio: &[u8],
+    wvc: &WvcInput<'_>,
+) -> Option<Vec<i32>> {
+    let (mut buf, crc) = unpack_hybrid_lossless(flags, block_samples, passes, ws, audio, wvc)?;
+
+    if crc != wvc.crc {
+        wp_trace!("[wvc] CRC mismatch: computed {:08x}, expected {:08x}", crc, wvc.crc);
+        return None;
+    }
+
+    // The extension bits come from the correction block, or from the main block for ordinary
+    // lossless data.
+    let wvx = wvc.wvx.or(main_wvx);
+
+    let crc_x = if (flags & FLOAT_DATA) != 0 {
+        let info = float_info.copied().unwrap_or_default();
+        match &wvx {
+            Some(wvx) => {
+                let (mut bits, min_zeros, max_ones, _) = open_wvx(wvx, flags);
+                let info = super::floats::FloatInfo {
+                    min_shifted_zeros: min_zeros,
+                    max_shifted_ones: max_ones,
+                    ..info
+                };
+                super::floats::float_values(&mut buf, &info, Some(&mut bits))
+            }
+            None => {
+                super::floats::float_values(&mut buf, &info, None);
+                None
+            }
+        }
+    }
+    else {
+        fixup_samples(&mut buf, flags, i32info, false, wvx.as_ref())
+    };
+
+    if let (Some(crc_x), Some(wvx)) = (crc_x, &wvx) {
+        if crc_x != wvx.crc {
+            wp_trace!("[wvc] WVX CRC mismatch: computed {:08x}, expected {:08x}", crc_x, wvx.crc);
+            return None;
+        }
+    }
+
+    Some(buf)
 }
 
 // ---------------------------------------------------------------------------
 // Main entry point: decode one v4/v5 block
 // ---------------------------------------------------------------------------
 
+/// Decode one v4/v5 block.
+///
+/// If `wvc` (the matching block of the `.wvc` correction file) is given and the block is a
+/// hybrid block, the lossless samples are reconstructed and verified against the CRC of the
+/// correction block. Should that fail, the block is decoded from the main bitstream alone
+/// (i.e. the lossy approximation) rather than being muted.
+#[allow(clippy::too_many_arguments)]
 pub fn unpack_samples_v4v5(
     flags:         u32,
     block_samples: u32,
@@ -1202,7 +1764,8 @@ pub fn unpack_samples_v4v5(
     ws:            &mut WordsState,
     i32info:       &Int32Info,
     float_info:    Option<&super::floats::FloatInfo>,
-    wvx:           &[u8],
+    wvx:           Option<WvxInput<'_>>,
+    wvc:           Option<&WvcInput<'_>>,
     audio:         &[u8],
 ) -> Option<Vec<i32>> {
     // WavPack's own encoder caps block size at 131072 samples (`--blocksize`); reject
@@ -1213,11 +1776,26 @@ pub fn unpack_samples_v4v5(
         return None;
     }
 
+    if let Some(wvc) = wvc.filter(|_| (flags & HYBRID_FLAG) != 0) {
+        let saved_passes = passes.to_vec();
+        let saved_ws = ws.clone();
+
+        if let Some(buf) = unpack_with_correction(
+            flags, block_samples, passes, ws, i32info, float_info, wvx, audio, wvc,
+        ) {
+            return Some(buf);
+        }
+
+        log::warn!("wavpack: correction block does not match, decoding the lossy block only");
+        passes.clone_from_slice(&saved_passes);
+        *ws = saved_ws;
+    }
+
     let is_mono = (flags & MONO_DATA) != 0;
     let mut bs  = Bits::new(audio);
 
     let mut buf = if (flags & HYBRID_FLAG) != 0 {
-        get_words_hybrid(&mut bs, ws, flags, block_samples)?
+        get_words_hybrid(&mut bs, ws, flags, block_samples, None)?.samples
     } else {
         get_words_lossless(&mut bs, ws, flags, block_samples)?
     };
@@ -1234,19 +1812,24 @@ pub fn unpack_samples_v4v5(
     undo_joint_stereo(&mut buf, flags);
 
     if (flags & FLOAT_DATA) != 0 {
-        wp_trace!("[float] wvx_len={} float_info_present={}", wvx.len(), float_info.is_some());
+        wp_trace!("[float] wvx_present={} float_info_present={}", wvx.is_some(), float_info.is_some());
         let info = float_info.copied().unwrap_or_default();
-        // The WVX "extension" bitstream carries a 4-byte CRC prefix (unused here; the
-        // decoder never fails hard on a CRC mismatch, matching the hybrid-lossy path
-        // which has no CRC at all) before the actual bit-packed correction data.
-        if wvx.len() > 4 {
-            let mut wvx_bits = Bits::new(&wvx[4..]);
-            super::floats::float_values(&mut buf, &info, Some(&mut wvx_bits));
-        } else {
-            super::floats::float_values(&mut buf, &info, None);
+        match &wvx {
+            Some(wvx) => {
+                let (mut bits, min_zeros, max_ones, _) = open_wvx(wvx, flags);
+                let info = super::floats::FloatInfo {
+                    min_shifted_zeros: min_zeros,
+                    max_shifted_ones: max_ones,
+                    ..info
+                };
+                super::floats::float_values(&mut buf, &info, Some(&mut bits));
+            }
+            None => {
+                super::floats::float_values(&mut buf, &info, None);
+            }
         }
     } else {
-        fixup_samples(&mut buf, flags, i32info);
+        fixup_samples(&mut buf, flags, i32info, (flags & HYBRID_FLAG) != 0, wvx.as_ref());
     }
 
     Some(buf)
