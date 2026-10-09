@@ -113,14 +113,14 @@ impl MatroskaTicks {
         self.0
     }
 
-    /// Convert `self` into Track ticks using the track timebase.
+    /// Convert `self` into Track ticks using the track timebase, rounding down.
     #[inline]
     pub fn into_track_ticks(self, track_time_base: TimeBase) -> TrackTicks {
         // The timebase may have been reduced so it is not possible to assume a 1_000_000_000
         // denominator.
-        let factor = (1_000_000_000 * u64::from(track_time_base.numer.get()))
-            / u64::from(track_time_base.denom.get());
-        TrackTicks(self.0 / factor)
+        let ticks = u128::from(self.0) * u128::from(track_time_base.denom.get())
+            / (1_000_000_000 * u128::from(track_time_base.numer.get()));
+        TrackTicks(u64::try_from(ticks).unwrap_or(u64::MAX))
     }
 
     /// Convert `self` (true nanoseconds) directly into a sample count at `sample_rate`,
@@ -133,6 +133,24 @@ impl MatroskaTicks {
     pub fn into_samples(self, sample_rate: u32) -> u64 {
         ((u128::from(self.0) * u128::from(sample_rate) + 500_000_000) / 1_000_000_000) as u64
     }
+}
+
+/// Convert a (signed) number of nanoseconds into ticks of the timebase, rounding to the nearest
+/// tick. Returns `None` if the result cannot be represented.
+pub(crate) fn nanos_to_ticks(nanos: i128, time_base: TimeBase) -> Option<i64> {
+    let num = nanos.checked_mul(i128::from(time_base.denom.get()))?;
+    let den = 1_000_000_000 * i128::from(time_base.numer.get());
+
+    // Round half away from zero.
+    let ticks = if num >= 0 { (num + den / 2) / den } else { -((-num + den / 2) / den) };
+
+    i64::try_from(ticks).ok()
+}
+
+/// Convert a (signed) number of ticks of the timebase into nanoseconds, rounding down.
+pub(crate) fn ticks_to_nanos(ticks: i64, time_base: TimeBase) -> i128 {
+    (i128::from(ticks) * 1_000_000_000 * i128::from(time_base.numer.get()))
+        .div_euclid(i128::from(time_base.denom.get()))
 }
 
 impl From<u64> for MatroskaTicks {
@@ -175,6 +193,14 @@ impl From<NonZeroU64> for NonZeroMatroskaTicks {
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SignedMatroskaTicks(i64);
 
+impl SignedMatroskaTicks {
+    /// Get the underlying value.
+    #[inline]
+    pub const fn get(self) -> i64 {
+        self.0
+    }
+}
+
 impl From<i64> for SignedMatroskaTicks {
     #[inline]
     fn from(value: i64) -> Self {
@@ -194,15 +220,6 @@ impl SegmentTicks {
     #[inline]
     pub const fn get(self) -> u64 {
         self.0
-    }
-
-    /// Convert `self` into Track ticks using the track's timestamp scale.
-    #[inline]
-    pub fn into_track_ticks(self, track_timestamp_scale: f64) -> TrackTicks {
-        if track_timestamp_scale == 1.0 {
-            return TrackTicks(self.0);
-        }
-        TrackTicks((self.0 as f64 * track_timestamp_scale).round() as u64)
     }
 }
 
@@ -253,24 +270,10 @@ impl TrackTicks {
         self.0
     }
 
-    /// Try to convert into signed Track ticks.
-    #[inline]
-    pub fn try_into_signed(self) -> Option<SignedTrackTicks> {
-        self.0.try_into().map(SignedTrackTicks).ok()
-    }
-
     /// Convert into a `Duration`.
     #[inline]
     pub fn into_dur(self) -> Duration {
         Duration::new(self.0)
-    }
-
-    /// Convert `self` into a sample count at `sample_rate`, given the track's timebase.
-    #[inline]
-    pub fn into_samples(self, track_time_base: TimeBase, sample_rate: u32) -> u64 {
-        let numer = u128::from(track_time_base.numer.get());
-        let denom = u128::from(track_time_base.denom.get());
-        ((u128::from(self.0) * numer * u128::from(sample_rate) + denom / 2) / denom) as u64
     }
 }
 
@@ -307,31 +310,10 @@ impl SignedTrackTicks {
         Timestamp::new(self.0)
     }
 
-    /// Add the provided signed track ticks to `self`, returning `None` if an overflow occurred.
-    #[inline]
-    pub fn checked_add(self, other: Self) -> Option<Self> {
-        self.0.checked_add(other.0).map(SignedTrackTicks)
-    }
-
     /// Add the provided track ticks to `self`, returning `None` if an overflow occurred.
     #[inline]
     pub fn checked_add_unsigned(self, other: TrackTicks) -> Option<Self> {
         self.0.checked_add_unsigned(other.0).map(SignedTrackTicks)
-    }
-
-    /// Subtract the provided track ticks to `self`, returning `None` if an overflow occurred.
-    #[inline]
-    pub fn checked_sub_unsigned(self, other: TrackTicks) -> Option<Self> {
-        self.0.checked_sub_unsigned(other.0).map(SignedTrackTicks)
-    }
-
-    /// Try to convert Segment ticks to Matroska ticks using the track timebase.
-    #[inline]
-    pub fn try_into_matroska_ticks(self, track_time_base: TimeBase) -> Option<MatroskaTicks> {
-        if self.0.is_negative() {
-            return None;
-        }
-        (self.0 as u64).checked_mul(u64::from(track_time_base.numer.get())).map(MatroskaTicks)
     }
 }
 
@@ -1801,7 +1783,9 @@ impl ChaptersElement {
 
 #[derive(Debug)]
 pub(crate) struct EditionEntryElement {
-    pub(crate) uid: NonZeroU64,
+    /// The edition UID. Mandatory per the specification, but optional here: some muxers
+    /// (notably ffmpeg) omit it. Without a UID, no per-target tags can refer to the edition.
+    pub(crate) uid: Option<NonZeroU64>,
     pub(crate) is_hidden: bool,
     pub(crate) is_default: bool,
     #[allow(dead_code)]
@@ -1824,7 +1808,7 @@ impl EbmlElement<MkvSchema> for EditionEntryElement {
         while let Some(header) = it.next_header()? {
             match header.element_type() {
                 MkvElement::EditionUid => {
-                    // Mandatory element. Must not be 0.
+                    // Non-mandatory element in practice. Must not be 0 if present.
                     let val = NonZeroU64::new(it.read_u64_no_default()?)
                         .ok_or(EbmlError::ElementError("mkv: invalid (0) edition uid"))?;
 
@@ -1853,7 +1837,7 @@ impl EbmlElement<MkvSchema> for EditionEntryElement {
         }
 
         Ok(Self {
-            uid: uid.ok_or(EbmlError::ElementError("mkv: missing edition uid"))?,
+            uid,
             is_hidden,
             is_default,
             is_ordered,
@@ -1865,16 +1849,19 @@ impl EbmlElement<MkvSchema> for EditionEntryElement {
 
 impl EditionEntryElement {
     pub(crate) fn get_target_uids(&self, target_tags: &mut TargetTagsMap) {
-        // Append edition UID.
-        target_tags.insert(TargetUid::Edition(self.uid.get()), Default::default());
+        // Append edition UID, if the edition has one.
+        if let Some(uid) = self.uid {
+            target_tags.insert(TargetUid::Edition(uid.get()), Default::default());
+        }
         // Append chapter UIDs.
         self.chapters.iter().for_each(|chapter| chapter.get_target_uids(target_tags));
     }
 
     pub(crate) fn into_chapter_group(self, target_tags: &mut TargetTagsMap) -> ChapterGroup {
         // Take the vector of tags associated with this edition, if any.
-        let mut tags = target_tags
-            .remove(&TargetUid::Edition(self.uid.get()))
+        let mut tags = self
+            .uid
+            .and_then(|uid| target_tags.remove(&TargetUid::Edition(uid.get())))
             .unwrap_or_else(|| Vec::with_capacity(self.display.len()));
 
         // Edition title tags.

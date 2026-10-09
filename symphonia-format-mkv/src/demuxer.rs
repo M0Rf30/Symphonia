@@ -15,11 +15,14 @@ use symphonia_core::formats::prelude::*;
 use symphonia_core::formats::probe::{ProbeFormatData, ProbeableFormat, Score, Scoreable};
 use symphonia_core::formats::well_known::FORMAT_ID_MKV;
 use symphonia_core::io::*;
-use symphonia_core::meta::{Metadata, MetadataBuilder, MetadataLog, StandardTag, Tag};
+use symphonia_core::meta::{
+    Metadata, MetadataBuilder, MetadataLog, StandardTag, StandardVisualKey, Tag, Visual,
+};
 use symphonia_core::support_format;
 use symphonia_core::units::TimeBase;
 
 use log::{info, warn};
+use symphonia_metadata::utils::images::try_get_image_info;
 
 use crate::codecs::make_track_codec_params;
 use crate::ebml::{EbmlElementInfo, EbmlError, EbmlIterator, EbmlSchema, ReadEbml};
@@ -29,10 +32,75 @@ use crate::segment::{
     AttachmentsElement, BlockGroupElement, ChaptersElement, CuesElement, EbmlHeaderElement,
     InfoElement, MKV_METADATA_INFO, MatroskaTicks, NonZeroMatroskaTicks, SeekHeadElement,
     SegmentTicks, SignedTrackTicks, TagsElement, TargetTagsMap, TrackTicks, TracksElement,
+    nanos_to_ticks, ticks_to_nanos,
 };
 
 const MKV_FORMAT_INFO: FormatInfo =
     FormatInfo { format: FORMAT_ID_MKV, short_name: "matroska", long_name: "Matroska / WebM" };
+
+/// Get the default seek pre-roll of a codec.
+///
+/// Decoders of codecs with overlapping transforms and/or inter-frame dependencies (the bit
+/// reservoir of MPEG audio, the lapped transforms of AAC and Vorbis) need to decode a number of
+/// frames preceding the seek target before their output is correct. Only Opus is required to
+/// signal this to the demuxer (`SeekPreRoll`), so muxers do not write it for other codecs.
+fn default_seek_pre_roll(codec_id: &str) -> MatroskaTicks {
+    const MILLIS: u64 = 1_000_000;
+
+    match codec_id {
+        id if id.starts_with("A_MPEG/L") || id.starts_with("A_AAC") || id == "A_VORBIS" => {
+            MatroskaTicks::from(200 * MILLIS)
+        }
+        _ => MatroskaTicks::from(0),
+    }
+}
+
+/// Create a media-level `Visual` for an image attachment (e.g., cover art), if the attachment
+/// is an image.
+fn make_attachment_visual(attachment: &Attachment) -> Option<Visual> {
+    let Attachment::File(file) = attachment
+    else {
+        return None;
+    };
+
+    let image_info = try_get_image_info(&file.data);
+
+    // The attachment must either be recognized as an image, or declared as one.
+    let declared_image = file.media_type.as_deref().is_some_and(|media_type| {
+        media_type.get(..6).is_some_and(|prefix| prefix.eq_ignore_ascii_case("image/"))
+    });
+
+    if image_info.is_none() && !declared_image {
+        return None;
+    }
+
+    // The Matroska specification names cover art "cover", "small_cover", "cover_land", or
+    // "small_cover_land" (with any image extension).
+    let name = file.name.to_ascii_lowercase();
+    let stem = name.rsplit_once('.').map_or(name.as_str(), |(stem, _)| stem);
+
+    let usage = if stem.contains("cover") || stem.contains("front") {
+        Some(StandardVisualKey::FrontCover)
+    }
+    else if stem.contains("back") {
+        Some(StandardVisualKey::BackCover)
+    }
+    else {
+        None
+    };
+
+    Some(Visual {
+        media_type: image_info
+            .as_ref()
+            .map(|info| info.media_type.clone())
+            .or_else(|| file.media_type.clone()),
+        dimensions: image_info.as_ref().map(|info| info.dimensions),
+        color_mode: image_info.as_ref().map(|info| info.color_mode),
+        usage,
+        tags: Default::default(),
+        data: file.data.clone(),
+    })
+}
 
 pub struct TrackState {
     /// The Matroska track number (Symphonia's track ID).
@@ -41,8 +109,10 @@ pub struct TrackState {
     pub(crate) default_frame_duration: Option<NonZeroMatroskaTicks>,
     /// The codec delay.
     pub(crate) codec_delay: MatroskaTicks,
-    /// The track's timebase.
+    /// The track's timebase. For audio tracks this is always the reciprocal of the sample rate.
     pub(crate) track_time_base: TimeBase,
+    /// The segment's timestamp scale (the number of nanoseconds in a Segment tick).
+    pub(crate) timestamp_scale: u64,
     /// The track's timestamp scale.
     pub(crate) track_timestamp_scale: f64,
     /// The amount of lead-in (in Matroska ticks) a decoder needs to fully re-converge its
@@ -50,14 +120,82 @@ pub struct TrackState {
     /// `SeekPreRoll`). Mandatory for Opus per RFC 7845 section 4.6 (>= 80ms/3840 samples).
     pub(crate) seek_pre_roll: MatroskaTicks,
     /// The track's sample rate, if known (audio tracks only). Used to convert `codec_delay`
-    /// into an exact sample count for gapless trimming, bypassing the (millisecond-granularity)
-    /// Track tick domain.
-    sample_rate: Option<u32>,
-    /// The number of leading decoded samples still to be reported as `trim_start` to account
-    /// for `codec_delay` (mirrors `symphonia-format-ogg`'s Opus `pre_skip` discard tracking).
-    /// Reaches (and stays at) zero once the mandatory start trim has been fully accounted for;
-    /// never reset by a seek -- this only ever applies once, at the true start of the track.
-    remaining_codec_delay_samples: u64,
+    /// and `DiscardPadding` into an exact sample count for gapless trimming.
+    pub(crate) sample_rate: Option<u32>,
+    /// The codec delay in samples (exact).
+    codec_delay_samples: u64,
+    /// The number of bytes in a frame of audio, if the track is PCM audio.
+    pcm_frame_bytes: Option<NonZero<u32>>,
+    /// The maximum difference, in Track ticks, between the timestamp of a block and its expected
+    /// timestamp for the timestamps to be considered equal. This is the precision of the
+    /// timestamp of a block.
+    pts_tolerance: u64,
+    /// The grid of expected timestamps for blocks, if the track has a constant frame duration.
+    grid: Option<PtsGrid>,
+}
+
+/// A grid of the timestamps at which the blocks of a track are expected to start.
+#[derive(Copy, Clone, Debug)]
+struct PtsGrid {
+    /// The timestamp of the first block of the track in Track ticks.
+    anchor: i64,
+    /// The duration of a block in Track ticks. Never 0.
+    step: u64,
+}
+
+impl TrackState {
+    /// Get the number of leading decoded samples of a frame with timestamp `pts` and duration
+    /// `dur` that must be discarded to account for the codec delay.
+    fn codec_delay_trim(&self, pts: SignedTrackTicks, dur: TrackTicks) -> u64 {
+        if self.sample_rate.is_none() || self.codec_delay_samples == 0 || pts.get() >= 0 {
+            return 0;
+        }
+
+        // The timestamp of a frame is its timestamp in the block minus the codec delay. Therefore,
+        // for the frames in the first `codec_delay` of the stream, which are the frames that have
+        // negative timestamps, the number of samples to discard is exactly the number of samples
+        // until the true start of the stream (timestamp 0). Note the timebase of an audio track is
+        // the reciprocal of the sample rate so ticks and samples are interchangeable.
+        let remaining = pts.get().unsigned_abs().min(self.codec_delay_samples);
+
+        // The frame cannot be trimmed by more than its duration, if the duration is known.
+        match dur.get() {
+            0 => remaining,
+            dur_samples => remaining.min(dur_samples),
+        }
+    }
+
+    /// Get the duration of a block of PCM audio of `len` bytes.
+    pub(crate) fn pcm_duration(&self, len: usize) -> Option<TrackTicks> {
+        self.pcm_frame_bytes.map(|bytes| TrackTicks::from((len as u64) / u64::from(bytes.get())))
+    }
+
+    /// Snap the timestamp of a block to the track's timestamp grid, if the track has one, and the
+    /// timestamp is close to a grid line.
+    ///
+    /// The timestamps of blocks are only as precise as the segment's timestamp scale (usually
+    /// 1ms). However, the blocks of audio tracks with a constant frame duration (e.g., MP3, AAC,
+    /// Opus, FLAC, PCM) start at exact multiples of the frame duration (in samples) from the
+    /// start of the track. This recovers the exact, sample accurate, timestamp of a block.
+    pub(crate) fn snap_pts(&self, pts: SignedTrackTicks) -> SignedTrackTicks {
+        match &self.grid {
+            Some(grid) => {
+                let step = i128::from(grid.step);
+                let rel = i128::from(pts.get()) - i128::from(grid.anchor);
+                let snapped = (rel + step / 2).div_euclid(step) * step;
+
+                if snapped.abs_diff(rel) <= u128::from(self.pts_tolerance) {
+                    i64::try_from(i128::from(grid.anchor) + snapped)
+                        .map(SignedTrackTicks::from)
+                        .unwrap_or(pts)
+                }
+                else {
+                    pts
+                }
+            }
+            None => pts,
+        }
+    }
 }
 
 /// Matroska (MKV) and WebM demultiplexer.
@@ -75,6 +213,12 @@ pub struct MkvReader<'s> {
     cues: Option<CuesElement>,
     current_cluster: Option<ClusterState>,
     frames: VecDeque<Frame>,
+    /// For each track, the timestamp at which the previous packet read from the track ended.
+    last_pts_end: HashMap<u32, i64>,
+    /// The position of the first Cluster relative to the start of the Segment, if known.
+    first_cluster_pos: Option<u64>,
+    /// If the media source is seekable.
+    is_seekable: bool,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -301,6 +445,22 @@ impl<'s> MkvReader<'s> {
             }
         }
 
+        // Process attachments element.
+        let attachments = attachments
+            .map(|attachments| attachments.into_attachments(&mut per_target_tags))
+            .unwrap_or_default();
+
+        // Image attachments (i.e., cover art) are also exposed as media-level visuals in the
+        // (first) metadata revision.
+        let visuals: Vec<Visual> = attachments.iter().filter_map(make_attachment_visual).collect();
+
+        if !visuals.is_empty() {
+            if revisions.is_empty() {
+                revisions.push(MetadataBuilder::new(MKV_METADATA_INFO).build());
+            }
+            revisions[0].media.visuals.extend(visuals);
+        }
+
         for rev in revisions {
             metadata.push(rev);
         }
@@ -309,11 +469,6 @@ impl<'s> MkvReader<'s> {
         let chapters = chapters
             .map(|chapters| chapters.into_chapter_group(&mut per_target_tags))
             .unwrap_or(opts.external_data.chapters);
-
-        // Process attachments element.
-        let attachments = attachments
-            .map(|attachments| attachments.into_attachments(&mut per_target_tags))
-            .unwrap_or_default();
 
         // Should TimeBase use a u64/u64 rational?
         // Reduce the timebase to reduce the chance of overflows later.
@@ -329,17 +484,50 @@ impl<'s> MkvReader<'s> {
         let mut track_states = HashMap::new();
 
         for track in segment_tracks.tracks {
-            // The track's timebase is scaled by the track timestamp scale.
-            let track_time_base = time_base
-                .scale(track.track_timestamp_scale)
-                .ok_or(Error::DecodeError("mkv: track timebase is invalid"))?;
-
             // Extract the sample rate (if this is an audio track) before `track` is consumed by
-            // `make_track_codec_params` below, and use it to convert the mandatory `codec_delay`
-            // gapless-trim into an exact sample count up front.
-            let sample_rate = track.audio.as_ref().map(|audio| audio.sampling_frequency.round() as u32);
-            let remaining_codec_delay_samples =
+            // `make_track_codec_params` below. It is used to convert the mandatory `codec_delay`
+            // and `DiscardPadding` gapless-trims into exact sample counts.
+            let sample_rate = track
+                .audio
+                .as_ref()
+                .map(|audio| {
+                    // Opus is always decoded at 48kHz, regardless of the sampling frequency of
+                    // the track which describes the rate of the original source.
+                    if track.codec_id == "A_OPUS" {
+                        48_000
+                    }
+                    else {
+                        audio.sampling_frequency.round() as u32
+                    }
+                })
+                .and_then(NonZero::new);
+
+            // The timebase of an audio track is the reciprocal of its sample rate (like all other
+            // containers), such that the timestamps, durations, and trims of packets are
+            // expressed in frames (as required of `Packet`), and are not limited to the
+            // granularity of the segment's timestamp scale (usually 1ms). Otherwise, the track's
+            // timebase is the timebase of the segment, scaled by the track timestamp scale.
+            let track_time_base = match sample_rate {
+                Some(rate) => TimeBase::new(NonZero::new(1).expect("1 is non-zero"), rate),
+                None => time_base
+                    .scale(track.track_timestamp_scale)
+                    .ok_or(Error::DecodeError("mkv: track timebase is invalid"))?,
+            };
+
+            let sample_rate = sample_rate.map(NonZero::get);
+
+            let codec_delay_samples =
                 sample_rate.map(|sr| track.codec_delay.into_samples(sr)).unwrap_or(0);
+
+            // The number of bytes in a frame of PCM audio.
+            let pcm_frame_bytes = match (&track.audio, track.codec_id.starts_with("A_PCM/")) {
+                (Some(audio), true) => audio
+                    .bit_depth
+                    .and_then(|bits| bits.get().div_ceil(8).checked_mul(audio.channels.get()))
+                    .and_then(|bytes| u32::try_from(bytes).ok())
+                    .and_then(NonZero::new),
+                _ => None,
+            };
 
             // Create the track state.
             let state = TrackState {
@@ -349,10 +537,24 @@ impl<'s> MkvReader<'s> {
                 default_frame_duration: track.default_duration,
                 codec_delay: track.codec_delay,
                 track_time_base,
+                timestamp_scale: info.timestamp_scale.get(),
                 track_timestamp_scale: track.track_timestamp_scale,
-                seek_pre_roll: track.seek_pre_roll,
+                seek_pre_roll: if track.seek_pre_roll.get() > 0 {
+                    track.seek_pre_roll
+                }
+                else {
+                    default_seek_pre_roll(&track.codec_id)
+                },
+                pts_tolerance: nanos_to_ticks(
+                    i128::from(info.timestamp_scale.get()),
+                    track_time_base,
+                )
+                .map(|ticks| ticks.unsigned_abs().saturating_add(1))
+                .unwrap_or(0),
+                grid: None,
                 sample_rate,
-                remaining_codec_delay_samples,
+                codec_delay_samples,
+                pcm_frame_bytes,
             };
 
             // Create the track.
@@ -368,6 +570,10 @@ impl<'s> MkvReader<'s> {
             }
 
             tr.with_flags(track.flags);
+
+            if state.codec_delay_samples > 0 {
+                tr.with_delay(u32::try_from(state.codec_delay_samples).unwrap_or(u32::MAX));
+            }
 
             if let Some(codec_params) = make_track_codec_params(track)? {
                 tr.with_codec_params(codec_params);
@@ -386,7 +592,9 @@ impl<'s> MkvReader<'s> {
             media_info.with_duration(Duration::new(duration.get().round() as u64));
         }
 
-        Ok(Self {
+        let first_cluster_pos = current_cluster.map(|cluster| cluster.start);
+
+        let mut reader = Self {
             iter: it,
             media_info,
             tracks,
@@ -396,8 +604,153 @@ impl<'s> MkvReader<'s> {
             metadata,
             cues,
             current_cluster,
+            first_cluster_pos,
+            is_seekable,
             frames: VecDeque::new(),
-        })
+            last_pts_end: HashMap::new(),
+        };
+
+        reader.prime_pts_grids()?;
+
+        Ok(reader)
+    }
+
+    /// For each audio track with a constant frame duration, learn the grid of timestamps at which
+    /// its blocks start (see `TrackState::snap_pts`) from the first block of the track.
+    ///
+    /// Reads the first few blocks of the stream, then rewinds to the first cluster. Does nothing
+    /// if the stream is not seekable.
+    fn prime_pts_grids(&mut self) -> Result<()> {
+        // Maximum number of elements to read looking for the first block of all audio tracks.
+        const MAX_ELEMENTS: usize = 256;
+
+        if !self.is_seekable {
+            return Ok(());
+        }
+
+        let num_audio_tracks =
+            self.track_states.values().filter(|state| state.sample_rate.is_some()).count();
+
+        if num_audio_tracks == 0 {
+            return Ok(());
+        }
+        // The timestamp and duration of the first frame of each track.
+        let mut first_frames = HashMap::new();
+
+        for _ in 0..MAX_ELEMENTS {
+            for frame in self.frames.drain(..) {
+                let is_audio = self
+                    .track_states
+                    .get(&frame.track_num)
+                    .is_some_and(|state| state.sample_rate.is_some());
+
+                if is_audio {
+                    first_frames
+                        .entry(frame.track_num)
+                        .or_insert((frame.pts.get(), frame.dur.get()));
+                }
+            }
+
+            if first_frames.len() >= num_audio_tracks {
+                break;
+            }
+
+            // If the stream cannot be read (or has ended), do the best with what has been read.
+            if !matches!(self.next_element(), Ok(true)) {
+                break;
+            }
+        }
+
+        self.rewind_to_first_cluster()?;
+
+        for (track_num, (anchor, dur)) in first_frames {
+            let Some(state) = self.track_states.get_mut(&track_num)
+            else {
+                continue;
+            };
+
+            if state.sample_rate.is_none() {
+                continue;
+            }
+
+            // The frame duration is the default frame duration, if the track has one. PCM audio
+            // has no default frame duration, but the size of its blocks is constant.
+            let step = match state.default_frame_duration {
+                Some(default_dur) => {
+                    nanos_to_ticks(i128::from(default_dur.get()), state.track_time_base)
+                        .map(i64::unsigned_abs)
+                }
+                None if state.pcm_frame_bytes.is_some() => Some(dur),
+                None => None,
+            };
+
+            if let Some(step) = step.filter(|&step| step > 0) {
+                state.grid = Some(PtsGrid { anchor, step });
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Discard all queued frames and reposition the iterator to the start of the first Cluster.
+    fn rewind_to_first_cluster(&mut self) -> Result<()> {
+        // Ascend back to the segment element.
+        self.iter.pop_elements_upto(MkvElement::Segment)?;
+        // Seek to the first cluster (or, if it is not known, the start of the segment).
+        self.iter.seek_to_child(self.first_cluster_pos.unwrap_or(0))?;
+
+        self.frames.clear();
+        self.current_cluster = None;
+        Ok(())
+    }
+
+    /// Discard all queued frames and reposition the iterator to the cluster of a cue point.
+    fn seek_to_cue(&mut self, cluster_pos: u64, cluster_rel_pos: Option<u64>) -> Result<()> {
+        // Ascend back to the segment element.
+        self.iter.pop_elements_upto(MkvElement::Segment)?;
+
+        // Seek to the specific cluster element.
+        self.iter.seek_to_child(cluster_pos)?;
+
+        self.frames.clear();
+        self.current_cluster = None;
+
+        // Resume iteration.
+        let start = match self.iter.next_header()? {
+            // The seeked element is a cluster.
+            Some(header) if header.element_type() == MkvElement::Cluster => header.pos(),
+            // The seeked element is not a cluster or there were no more elements at the cue
+            // position. The cue point was malformed.
+            _ => return seek_error(SeekErrorKind::Unseekable),
+        };
+
+        // Descend into the cluster element.
+        self.iter.push_element()?;
+
+        // Do not trust the cue's timestamp to be the timestamp of the cluster (a cue point carries
+        // the timestamp of the referenced block, not the cluster's). Read the actual cluster
+        // timestamp.
+        self.current_cluster = Some(ClusterState { timestamp: None, start });
+
+        while self.current_cluster.is_some_and(|cluster| cluster.timestamp.is_none())
+            && self.frames.is_empty()
+        {
+            if !self.next_element()? {
+                break;
+            }
+        }
+
+        // If a cluster relative position is available, and it is ahead of the current position,
+        // seek to the exact simple block or block group element.
+        if let (Some(cluster_rel_pos), Some(cluster)) = (cluster_rel_pos, self.iter.parent()) {
+            if cluster.element_type() == MkvElement::Cluster
+                && self.iter.pos() <= cluster.data_pos().saturating_add(cluster_rel_pos)
+            {
+                self.iter.seek_to_child(cluster_rel_pos)?;
+            }
+        }
+
+        Ok(())
     }
 
     fn seek_track_by_ts_forward(
@@ -406,26 +759,36 @@ impl<'s> MkvReader<'s> {
         target_ts: Timestamp,
         required_ts: Timestamp,
     ) -> Result<SeekedTo> {
-        let actual_ts = 'out: loop {
-            // Skip frames from the buffer until the given timestamp
-            while let Some(frame) = self.frames.front() {
-                let next_frame_pts = frame
-                    .pts
-                    .into_ts()
-                    .checked_add(frame.dur.into_dur())
-                    .ok_or(Error::SeekError(SeekErrorKind::OutOfRange))?;
+        let actual_ts = loop {
+            // Frames of other tracks are of no interest.
+            self.frames.retain(|frame| frame.track_num == track_id);
 
-                if next_frame_pts >= target_ts && frame.track_num == track_id {
-                    break 'out frame.pts.into_ts();
-                }
-                else {
-                    self.frames.pop_front();
-                }
+            // The frame to seek to is the last frame that starts at, or before, the target. Any
+            // frame that is followed by another frame that also starts at, or before, the target
+            // is skipped.
+            while self.frames.len() >= 2 && self.frames[1].pts.into_ts() <= target_ts {
+                self.frames.pop_front();
+            }
+
+            if self.frames.len() >= 2 {
+                break self.frames[0].pts.into_ts();
             }
 
             if !self.next_element()? {
-                // There are no more elements.
-                return Err(Error::SeekError(SeekErrorKind::OutOfRange));
+                // There are no more elements. The remaining frame, if any, is the last frame of
+                // the track and is only a valid seek target if it contains the target.
+                if let Some(frame) = self.frames.front() {
+                    let end = frame
+                        .pts
+                        .into_ts()
+                        .checked_add(frame.dur.into_dur())
+                        .ok_or(Error::SeekError(SeekErrorKind::OutOfRange))?;
+
+                    if end >= target_ts {
+                        break frame.pts.into_ts();
+                    }
+                }
+                return seek_error(SeekErrorKind::OutOfRange);
             }
         };
 
@@ -438,23 +801,32 @@ impl<'s> MkvReader<'s> {
         tb: TimeBase,
         ts: Timestamp,
     ) -> Result<SeekedTo> {
-        // Save the iterator and cluster states to restore in-case of and error.
+        // Save the iterator, cluster, and frame queue states to restore in-case of and error.
         let iter_state = self.iter.save_state();
         let cluster_state = self.current_cluster;
+        let frames = std::mem::take(&mut self.frames);
 
         match self.seek_track_by_ts(id, tb, ts) {
             Err(err) => {
-                // Restore saved iterator and cluster states.
+                // Restore saved iterator, cluster, and frame queue states.
                 self.iter.restore_state(iter_state)?;
                 self.current_cluster = cluster_state;
+                self.frames = frames;
                 Err(err)
             }
-            value => value,
+            Ok(seeked) => {
+                // The first packet read after a seek has no predecessor.
+                self.last_pts_end.clear();
+                Ok(seeked)
+            }
         }
     }
 
     fn seek_track_by_ts(&mut self, id: u32, tb: TimeBase, ts: Timestamp) -> Result<SeekedTo> {
         log::debug!("seeking track_id={id} to ts={ts}");
+
+        let state =
+            self.track_states.get(&id).ok_or(Error::SeekError(SeekErrorKind::InvalidTrack))?;
 
         // Matroska/WebM signals a codec-specific `SeekPreRoll` (in Matroska ticks). RFC 7845
         // section 4.6 mandates at least 80ms/3840 samples for Opus: after a `reset`, the decoder
@@ -464,79 +836,94 @@ impl<'s> MkvReader<'s> {
         // on an earlier packet; `actual_ts` in the returned `SeekedTo` will be <= `required_ts`
         // and the caller is expected to decode-and-discard the difference — the same contract
         // `symphonia-format-ogg` uses for Vorbis's/Opus's own pre-roll via `max_rap_period`.
-        let pre_roll = self.track_states.get(&id).map(|s| s.seek_pre_roll).unwrap_or_default();
-        let target_ts = ts.saturating_sub(pre_roll.into_track_ticks(tb).into_dur());
+        let target_ts = ts.saturating_sub(state.seek_pre_roll.into_track_ticks(tb).into_dur());
 
-        // If cues exist, seek to the nearest cue point.
+        // Cue points carry the raw timestamp of the block they reference, whereas the timestamps
+        // of frames (and therefore the seek target) are shifted back by the codec delay. Shift the
+        // target forward again when searching for cue points, and convert it from Track ticks to
+        // Segment ticks (the unit of cue point timestamps).
+        let nanos =
+            ticks_to_nanos(target_ts.get(), tb).saturating_add(i128::from(state.codec_delay.get()));
+
+        let cue_ts = if nanos < 0 {
+            0
+        }
+        else if state.track_timestamp_scale == 1.0 {
+            u64::try_from(nanos / i128::from(state.timestamp_scale)).unwrap_or(u64::MAX)
+        }
+        else {
+            (nanos as f64 / (state.timestamp_scale as f64 * state.track_timestamp_scale)).floor()
+                as u64
+        };
+
+        // Find the candidate cue points (in descending order of preference): all cue points of the
+        // track that are at, or before, the target.
+        let mut candidates = Vec::new();
+
         if let Some(cues) = &self.cues {
-            let mut target_cue_point = None;
+            // If the track has no cue points at all, fallback to using all cue points.
+            let track_has_cues =
+                cues.points.iter().any(|point| point.positions.track.get() == u64::from(id));
 
-            // Cue points store timestamps in Matroska ticks while the timestamp being seeked to is
-            // in signed Track ticks. Convert to unsigned Matroska ticks for iterating the cue
-            // points, clamping the (possibly pre-roll-negative) target to zero: cue points only
-            // contain unsigned Matroska ticks, and a target before the start of the stream just
-            // means "seek as close to the start as possible".
-            let cue_ts = SignedTrackTicks::from(target_ts.max(Timestamp::ZERO))
-                .try_into_matroska_ticks(tb)
-                .ok_or(Error::SeekError(SeekErrorKind::OutOfRange))?;
-
-            for cue_point in &cues.points {
-                if cue_point.time > cue_ts {
-                    break;
-                }
-                target_cue_point = Some(cue_point);
-            }
-
-            let target_cue_point =
-                target_cue_point.ok_or(Error::SeekError(SeekErrorKind::OutOfRange))?;
-
-            log::debug!(
-                "found cue point: track_id={}, ts={}, seg_pos={}",
-                target_cue_point.positions.track.get(),
-                target_cue_point.time,
-                target_cue_point.positions.cluster_pos
+            candidates.extend(
+                cues.points
+                    .iter()
+                    .take_while(|point| point.time.get() <= cue_ts)
+                    .filter(|point| !track_has_cues || point.positions.track.get() == u64::from(id))
+                    .map(|point| (point.positions.cluster_pos, point.positions.cluster_rel_pos)),
             );
+        }
 
-            // Ascend back to the segment element.
-            self.iter.pop_elements_upto(MkvElement::Segment)?;
+        log::debug!("found {} candidate cue points", candidates.len());
 
-            // Seek to the specific cluster element.
-            self.iter.seek_to_child(target_cue_point.positions.cluster_pos)?;
+        // The timestamp of a cue point may not be exactly that of the first frame it refers to, so
+        // the frame found by the forward scan may be after the target. Fallback to earlier cue
+        // points in such a case.
+        const MAX_CUE_ATTEMPTS: usize = 4;
 
-            // Resume iteration.
-            let cluster = match self.iter.next_header()? {
-                // The seeked element is a cluster.
-                Some(header) if header.element_type() == MkvElement::Cluster => header,
-                // The seeked element is not a cluster or there were no more elements at the cue
-                // position. The cue point was malformed.
-                _ => return seek_error(SeekErrorKind::Unseekable),
-            };
+        let mut seeked = None;
 
-            // The cue point's timestamp is already in Segment ticks (see `CuePointElement::time`'s
-            // own doc comment), unlike `codec_delay`/`seek_pre_roll` which are true nanoseconds --
-            // wrap it directly rather than running it back through `into_segment_ticks` (which
-            // expects nanoseconds and would massively under-scale an already-Segment-ticks value).
-            let timestamp = SegmentTicks::from(target_cue_point.time.get());
+        for &(cluster_pos, cluster_rel_pos) in candidates.iter().rev().take(MAX_CUE_ATTEMPTS) {
+            self.seek_to_cue(cluster_pos, cluster_rel_pos)?;
 
-            // Update the current cluster metadata.
-            self.current_cluster =
-                Some(ClusterState { timestamp: Some(timestamp), start: cluster.pos() });
+            let attempt = self.seek_track_by_ts_forward(id, target_ts, ts)?;
+            let is_early = attempt.actual_ts <= target_ts;
+            seeked = Some(attempt);
 
-            // Descend into the cluster element.
-            self.iter.push_element()?;
-
-            // If a cluster relative position is available, seek to the exact simple block or
-            // block group element.
-            if let Some(cluster_rel_pos) = target_cue_point.positions.cluster_rel_pos {
-                self.iter.seek_to_child(cluster_rel_pos)?;
+            if is_early {
+                break;
             }
         }
 
-        // Seek to exact block.
+        if let Some(seeked) = seeked {
+            return Ok(seeked);
+        }
+
+        // There were no usable cue points. If the stream is seekable, scan from the first cluster.
+        // Otherwise, it is only possible to scan forward from the current position.
+        if self.is_seekable {
+            self.rewind_to_first_cluster()?;
+        }
+
         self.seek_track_by_ts_forward(id, target_ts, ts)
     }
 
     fn next_element(&mut self) -> Result<bool> {
+        match self.read_next_element() {
+            // The stream ended inside an element of unknown size (e.g., live streams): the end of
+            // the stream is the end of the element and not an error.
+            Err(Error::IoError(err))
+                if err.kind() == std::io::ErrorKind::UnexpectedEof
+                    && self.iter.has_unknown_size_ancestor() =>
+            {
+                log::debug!("end of stream reached inside an element of unknown size");
+                Ok(false)
+            }
+            result => result,
+        }
+    }
+
+    fn read_next_element(&mut self) -> Result<bool> {
         match self.iter.next_header()? {
             None => {
                 // The EBML iterator has consumed all child elements at the current level of the
@@ -550,6 +937,11 @@ impl<'s> MkvReader<'s> {
                         // The parent was a cluster element. Reset the cluster state.
                         self.current_cluster = None;
                     }
+                    Some(parent) if parent.element_type() == MkvElement::Segment => {
+                        // The parent was the segment element. The media has ended. Do not ascend
+                        // out of the segment element so that seeking within it remains possible.
+                        return Ok(false);
+                    }
                     _ => (),
                 }
 
@@ -561,7 +953,7 @@ impl<'s> MkvReader<'s> {
                     // Cluster element.
                     MkvElement::Cluster => {
                         self.current_cluster =
-                            Some(ClusterState { timestamp: None, start: child.data_pos() });
+                            Some(ClusterState { timestamp: None, start: child.pos() });
 
                         // Descend into the cluster.
                         self.iter.push_element()?;
@@ -591,12 +983,12 @@ impl<'s> MkvReader<'s> {
                             return Ok(true);
                         };
 
-                        // Get block data and duration.
-                        let (data, duration) = match block_type {
-                            MkvElement::SimpleBlock => (self.iter.read_binary()?, None),
+                        // Get block data, duration, and discard padding.
+                        let (data, duration, discard_padding) = match block_type {
+                            MkvElement::SimpleBlock => (self.iter.read_binary()?, None, None),
                             MkvElement::BlockGroup => {
                                 let group = self.iter.read_master_element::<BlockGroupElement>()?;
-                                (group.data, group.duration)
+                                (group.data, group.duration, group.discard_padding)
                             }
                             _ => unreachable!(),
                         };
@@ -605,6 +997,7 @@ impl<'s> MkvReader<'s> {
                         if !extract_frames(
                             &data,
                             duration,
+                            discard_padding,
                             cluster_ts,
                             &self.track_states,
                             &mut self.frames,
@@ -709,28 +1102,60 @@ impl FormatReader for MkvReader<'_> {
     fn next_packet(&mut self) -> Result<Option<Packet>> {
         loop {
             if let Some(frame) = self.frames.pop_front() {
-                let mut packet =
-                    Packet::new(frame.track_num, frame.pts.into_ts(), frame.dur.into_dur(), frame.data);
+                let mut pts = frame.pts;
+                let mut dur = frame.dur.get();
 
-                // RFC 7845-section-4.2-equivalent gapless trim: `codec_delay` priming samples
-                // are still present in the decoded output and must be discarded, mirroring
-                // `symphonia-format-ogg`'s Opus `pre_skip` handling. `frame.pts` is already
-                // shifted by `codec_delay` (see `calculate_block_pts`), so it's negative exactly
-                // for frames still within the delay region -- guarding on that additionally
-                // prevents ever mis-trimming a packet reached by seeking past the delay region
-                // (`remaining_codec_delay_samples` is only ever consumed by sequential decode
-                // from the true start of the track).
-                if frame.pts.get() < 0 {
-                    if let Some(state) = self.track_states.get_mut(&frame.track_num) {
-                        if state.remaining_codec_delay_samples > 0 {
-                            let sample_rate = state.sample_rate.unwrap_or(0);
-                            let dur_samples =
-                                TrackTicks::from(packet.dur.get()).into_samples(state.track_time_base, sample_rate);
-                            let trim = state.remaining_codec_delay_samples.min(dur_samples);
-                            packet.trim_start = Duration::new(trim);
-                            state.remaining_codec_delay_samples -= trim;
+                // Samples to be discarded from the start of the packet: first, any negative
+                // `DiscardPadding` of the block.
+                let mut trim_start = frame.trim_start;
+
+                if let Some(state) = self.track_states.get(&frame.track_num) {
+                    // Block timestamps are only as precise as the segment's timestamp scale
+                    // (usually 1ms). If a packet starts where the previous one of the track ended,
+                    // to within the precision of the timestamp, then it is contiguous. Use the end
+                    // of the previous packet as its start so that the timeline of audio tracks
+                    // is sample accurate.
+                    if state.sample_rate.is_some() {
+                        if let Some(&end) = self.last_pts_end.get(&frame.track_num) {
+                            if end.abs_diff(pts.get()) <= state.pts_tolerance {
+                                pts = SignedTrackTicks::from(end);
+                            }
                         }
                     }
+
+                    // Second, the RFC 7845-section-4.2-equivalent gapless trim: `codec_delay`
+                    // priming samples are still present in the decoded output and must be
+                    // discarded, mirroring `symphonia-format-ogg`'s Opus `pre_skip` handling.
+                    // The timestamp is already shifted by `codec_delay` (see
+                    // `calculate_block_pts`), so it is negative exactly for frames still within
+                    // the delay region.
+                    //
+                    // This is computed from the packet's timestamp alone, and not from a running
+                    // counter, so that the exact same trim is applied to the start of the stream
+                    // no matter how many times (or after which seeks) it is reached.
+                    let delay_trim = state.codec_delay_trim(pts, frame.dur);
+
+                    trim_start = trim_start.saturating_add(delay_trim);
+                    // The duration of a packet only includes the frames that are not trimmed.
+                    dur = dur.saturating_sub(delay_trim);
+                }
+
+                let pts = pts.get();
+
+                let mut packet = Packet::new(
+                    frame.track_num,
+                    Timestamp::new(pts),
+                    Duration::new(dur),
+                    frame.data,
+                );
+
+                packet.trim_start = Duration::new(trim_start);
+                packet.trim_end = Duration::new(frame.trim_end);
+
+                // The next packet is expected to start where the decoded frames of this packet
+                // end.
+                if let Some(end) = pts.checked_add_unsigned(packet.block_dur().get()) {
+                    self.last_pts_end.insert(frame.track_num, end);
                 }
 
                 return Ok(Some(packet));

@@ -85,7 +85,17 @@ fn make_audio_codec_params(
         codec_params.with_bits_per_sample(bits.get() as u32);
     }
 
-    if let Some(codec_private) = track.codec_private {
+    // Matroska WavPack blocks have their `wvpk` headers stripped. The WavPack decoder relies on
+    // the 2-byte version number that the Matroska spec mandates in CodecPrivate to recognise
+    // this packet flavour, so make sure it is always present (default: 4.16, the version
+    // written by libwavpack, for the muxers that omit it).
+    let codec_private = match (id, track.codec_private) {
+        (CODEC_ID_WAVPACK, Some(extra)) if extra.len() == 2 => Some(extra),
+        (CODEC_ID_WAVPACK, _) => Some(Box::from([0x10u8, 0x04])),
+        (_, codec_private) => codec_private,
+    };
+
+    if let Some(codec_private) = codec_private {
         let extra_data = match id {
             CODEC_ID_VORBIS => vorbis_extra_data_from_codec_private(&codec_private)?,
             CODEC_ID_FLAC => flac_extra_data_from_codec_private(&codec_private)?,

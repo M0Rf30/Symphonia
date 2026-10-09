@@ -331,6 +331,12 @@ impl<R: ReadEbml, S: EbmlSchema> EbmlIterator<R, S> {
         self.stack.len() as u8
     }
 
+    /// Returns true if the parent element or any of its ancestors has an unknown size. The end of
+    /// such an element is only signalled by the start of a new element, or the end of the stream.
+    pub(crate) fn has_unknown_size_ancestor(&self) -> bool {
+        self.stack.iter().any(|ancestor| ancestor.size().is_none())
+    }
+
     /// If the current element is a master element, descends iteration into the element.
     pub(crate) fn push_element(&mut self) -> Result<()> {
         // Do not exceed the maximum depth allowed by the schema.
