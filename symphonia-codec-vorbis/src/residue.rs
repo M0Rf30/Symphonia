@@ -186,9 +186,9 @@ impl Residue {
                     let ch1 = iter.next().expect("residue_channels.count() == 2");
 
                     // Get references to the channels.
-                    let (a, b) = channels.split_at_mut(ch0).1.split_at_mut(ch1);
+                    let (a, b) = channels.split_at_mut(ch1);
 
-                    (&mut a[0], &mut b[0])
+                    (&mut a[ch0], &mut b[0])
                 };
 
                 // Deinterleave.
@@ -377,7 +377,8 @@ impl Residue {
                             code,
                             parts_per_classword,
                             self.setup.residue_classifications as u32,
-                            &mut self.part_classes[part_first + i * parts_to_read..],
+                            &mut self.part_classes
+                                [part_first + i * parts_to_read..(i + 1) * parts_to_read],
                         );
                     }
                 }

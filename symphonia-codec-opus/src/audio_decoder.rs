@@ -18,24 +18,23 @@
 //! layouts. Family 0 (mono/stereo) is handled by [`crate::multistream::MultistreamDecoder`]
 //! itself via an implicit identity mapping.
 //!
-//! For channel counts > 2, this decoder uses [`Channels::Discrete`] rather than
-//! [`Channels::Positioned`] for the output [`AudioSpec`]: [`crate::multistream::MultistreamDecoder::decode`]
-//! already scatters channels into RFC 7845 "Vorbis channel order" (i.e. output channel index `c`
-//! already has the semantic role RFC 7845 assigns it for the given channel count), and
-//! `Discrete(n)` guarantees plane `c` corresponds to output index `c` with no dependency on
-//! `Position`'s bit-value ordering happening to match that convention.
+//! For mapping family 1 with 3 to 8 channels the output [`AudioSpec`] is
+//! [`Channels::Positioned`] (the RFC 7845 layout), and the "Vorbis channel order" produced by
+//! [`crate::multistream::MultistreamDecoder::decode`] is reordered so plane `p` holds the channel
+//! at the `p`-th set `Position` bit, exactly as the Vorbis decoder does. Families 2 and 255 are
+//! exposed as `Discrete(n)` channels in mapping-table order.
 //!
 //! # Pre-roll
 //!
-//! Per RFC 7845 section 4.3, Opus decoders need audio *before* a seek target to "warm up" state
-//! (SILK LPC history, CELT MDCT overlap, the post-filter) -- 80 ms is the RFC's recommended
-//! pre-roll. Neither `symphonia-format-ogg` nor `symphonia-format-mkv` currently seek back by any
-//! pre-roll margin or signal one to the decoder (`FormatReader::seek` seeks to the target packet
-//! directly); [`Self::reset`] resets decoder state cleanly on any discontinuity, but the first
-//! `80` ms of post-seek output will not be bit-exact with a non-seeking decode until fresh
-//! decoder state has "warmed up" on its own (typically inaudible, but not a guarantee). Fixing
-//! this precisely requires the demuxer to rewind and re-decode (discarding) a pre-roll window,
-//! which is out of scope here -- flagged for the format-reader owners.
+//! Per RFC 7845 section 4.3, an Opus decoder needs audio *before* a seek target to "warm up"
+//! its state (SILK LPC history, CELT MDCT overlap, the post-filter, and the CELT inter-frame
+//! energy prediction). `symphonia-format-ogg` and `symphonia-format-mkv` seek back by the
+//! recommended 80 ms pre-roll, and the caller decodes and discards the audio up to the requested
+//! timestamp after calling [`Self::reset`]. Output after exactly 80 ms is close to, but not
+//! bit-exact with, a continuous decode: the decoder state is identical to libopus' (decoding a
+//! stream from a cold start matches libopus exactly), and the CELT energy predictor converges
+//! geometrically (about 6 dB of SNR per 20 ms frame), reaching bit-exactness after a few hundred
+//! milliseconds.
 
 use symphonia_core::audio::{AsGenericAudioBufferRef, AudioBuffer, AudioSpec, Channels, GenericAudioBufferRef, Position};
 use symphonia_core::codecs::CodecInfo;
@@ -54,6 +53,51 @@ use crate::multistream::MultistreamDecoder;
 /// 48 kHz), regardless of channel/stream count. C: `Fs/25*3`.
 const MAX_OPUS_FRAME_SAMPLES: usize = 5760;
 
+/// Returns the positioned layout, and the plane index of each Vorbis-ordered channel, for a
+/// mapping family 1 stream with `channels` (3..=8) channels (RFC 7845 section 5.1.1.2).
+fn vorbis_layout(channels: u8) -> (Position, &'static [usize]) {
+    use Position as P;
+
+    match channels {
+        3 => (P::FRONT_LEFT | P::FRONT_CENTER | P::FRONT_RIGHT, &[0, 2, 1]),
+        4 => (P::FRONT_LEFT | P::FRONT_RIGHT | P::REAR_LEFT | P::REAR_RIGHT, &[0, 1, 2, 3]),
+        5 => (
+            P::FRONT_LEFT | P::FRONT_CENTER | P::FRONT_RIGHT | P::REAR_LEFT | P::REAR_RIGHT,
+            &[0, 2, 1, 3, 4],
+        ),
+        6 => (
+            P::FRONT_LEFT
+                | P::FRONT_CENTER
+                | P::FRONT_RIGHT
+                | P::REAR_LEFT
+                | P::REAR_RIGHT
+                | P::LFE1,
+            &[0, 2, 1, 4, 5, 3],
+        ),
+        7 => (
+            P::FRONT_LEFT
+                | P::FRONT_CENTER
+                | P::FRONT_RIGHT
+                | P::SIDE_LEFT
+                | P::SIDE_RIGHT
+                | P::REAR_CENTER
+                | P::LFE1,
+            &[0, 2, 1, 5, 6, 4, 3],
+        ),
+        _ => (
+            P::FRONT_LEFT
+                | P::FRONT_CENTER
+                | P::FRONT_RIGHT
+                | P::SIDE_LEFT
+                | P::SIDE_RIGHT
+                | P::REAR_LEFT
+                | P::REAR_RIGHT
+                | P::LFE1,
+            &[0, 2, 1, 6, 7, 4, 5, 3],
+        ),
+    }
+}
+
 /// Opus decoder, implementing Symphonia's [`AudioDecoder`] trait over
 /// [`crate::multistream::MultistreamDecoder`].
 pub struct OpusAudioDecoder {
@@ -61,6 +105,8 @@ pub struct OpusAudioDecoder {
     params: AudioCodecParameters,
     decoder: MultistreamDecoder,
     channels: u8,
+    /// `plane_map[decoded_channel]` is the audio buffer plane the channel is written to.
+    plane_map: Vec<usize>,
     /// Interleaved scratch buffer for one packet's decode output, reused across calls.
     scratch: Vec<f32>,
     buf: AudioBuffer<f32>,
@@ -92,14 +138,26 @@ impl OpusAudioDecoder {
 
         // Decoding always happens at 48 kHz regardless of the header's informational
         // `input_sample_rate`.
-        let channels = if head.channel_count == 1 {
-            Channels::Positioned(Position::FRONT_LEFT)
-        }
-        else if head.channel_count == 2 {
-            Channels::Positioned(Position::FRONT_LEFT | Position::FRONT_RIGHT)
-        }
-        else {
-            Channels::Discrete(head.channel_count as u16)
+        //
+        // Mapping family 1 (Vorbis channel order) with 3..=8 channels is presented with the
+        // positioned layout implied by RFC 7845 section 5.1.1.2, and the decoded channels are
+        // reordered into the audio buffer's plane order (ascending `Position` bit order) so
+        // the data agrees with the `AudioSpec`. All other layouts (families 2 and 255, whose
+        // channels have no defined speaker positions) are exposed as `Discrete` channels in
+        // table order.
+        let (channels, plane_map) = match (head.mapping.family, head.channel_count) {
+            (0 | 1, 1) => (Channels::Positioned(Position::FRONT_LEFT), vec![0]),
+            (0 | 1, 2) => {
+                (Channels::Positioned(Position::FRONT_LEFT | Position::FRONT_RIGHT), vec![0, 1])
+            }
+            (1, 3..=8) => {
+                let (positions, map) = vorbis_layout(head.channel_count);
+                (Channels::Positioned(positions), map.to_vec())
+            }
+            _ => (
+                Channels::Discrete(u16::from(head.channel_count)),
+                (0..usize::from(head.channel_count)).collect(),
+            ),
         };
         let spec = AudioSpec::new(48_000, channels);
 
@@ -108,6 +166,7 @@ impl OpusAudioDecoder {
             params: params.clone(),
             decoder,
             channels: head.channel_count,
+            plane_map,
             scratch: vec![0f32; MAX_OPUS_FRAME_SAMPLES * head.channel_count as usize],
             buf: AudioBuffer::new(spec, MAX_OPUS_FRAME_SAMPLES),
         })
@@ -123,9 +182,10 @@ impl OpusAudioDecoder {
 
         self.buf.clear();
         let scratch = &self.scratch;
+        let plane_map = &self.plane_map;
         self.buf.render_with(Some(n), |i, planes| {
-            for (c, plane) in planes.iter_mut().enumerate() {
-                plane[i] = scratch[i * ch + c];
+            for (c, &p) in plane_map.iter().enumerate() {
+                planes[p][i] = scratch[i * ch + c];
             }
             Ok(())
         })?;

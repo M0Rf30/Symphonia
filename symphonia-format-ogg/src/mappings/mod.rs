@@ -59,6 +59,13 @@ pub trait Mapper: Send + Sync {
     /// If the stream is not ready then the track may be incomplete.
     fn track_mut(&mut self) -> &mut Track;
 
+    /// Soft-reset the mapper after seeking to the very first bitstream page of the logical
+    /// stream. Codecs that signal a start-of-stream discard (e.g. Opus pre-skip) must re-arm it
+    /// here since, unlike for any other seek, the stream really does start over.
+    fn reset_at_start(&mut self) {
+        self.reset();
+    }
+
     /// Convert an absolute granular position to a timestamp.
     fn absgp_to_ts(&self, absgp: u64) -> Timestamp {
         Timestamp::from(absgp as i64)

@@ -80,6 +80,16 @@ impl LogicalStream {
         self.mapper.reset();
     }
 
+    /// Reset the logical stream before reading `first_page_seq` after a seek. If that page is the
+    /// first page of the codec bitstream, the mapper is told that the stream starts over.
+    pub fn reset_for_seek(&mut self, first_page_seq: u32) {
+        self.reset();
+
+        if self.start_bound.is_some_and(|b| b.seq == first_page_seq) {
+            self.mapper.reset_at_start();
+        }
+    }
+
     /// Returns true if the stream is ready.
     pub fn is_ready(&self) -> bool {
         self.mapper.is_ready()
