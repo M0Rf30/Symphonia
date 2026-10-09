@@ -1040,6 +1040,20 @@ impl ProgramConfig {
     }
 }
 
+/// The highest core sample rate of a stream that is assumed to use SBR if it is not signalled.
+pub const MAX_IMPLICIT_SBR_CORE_RATE: u32 = 32_000;
+
+/// The maximum number of `raw_data_block()`s examined to find SBR (and parametric stereo).
+pub const MAX_IMPLICIT_SBR_PROBE_BLOCKS: usize = 8;
+
+/// Returns true if the audio specific config describes a stream that may carry implicit SBR.
+pub fn may_have_implicit_sbr(asc: &AudioSpecificConfig) -> bool {
+    !asc.sbr_present
+        && asc.object_type == AudioObjectType::Lc
+        && asc.samples == 1024
+        && asc.sample_rate <= MAX_IMPLICIT_SBR_CORE_RATE
+}
+
 /// The maximum number of frames [`aac_seek_start_frame`] starts decoding before the target.
 pub const AAC_SEEK_MAX_PREROLL_FRAMES: u64 = 56;
 

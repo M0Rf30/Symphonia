@@ -21,17 +21,16 @@ use symphonia_core::packet::Packet;
 use symphonia_core::units::{Duration, Timestamp};
 
 use symphonia_common::mpeg::audio::{
-    AudioObjectType, AudioSpecificConfig, Mpeg4AudioSampleRate, ProgramConfig,
+    AudioSpecificConfig, Mpeg4AudioSampleRate, ProgramConfig,
     get_mpeg4_audio_sample_rate_by_index,
 };
 
 use crate::AacDecoder;
 
-/// The highest core sample rate of a stream that is assumed to use SBR if it is not signalled.
-pub(crate) const MAX_IMPLICIT_SBR_CORE_RATE: u32 = 32_000;
-
-/// The maximum number of `raw_data_block()`s examined to find SBR (and parametric stereo).
-pub(crate) const MAX_PROBE_BLOCKS: usize = 8;
+pub(crate) use symphonia_common::mpeg::audio::may_have_implicit_sbr;
+pub(crate) use symphonia_common::mpeg::audio::{
+    MAX_IMPLICIT_SBR_CORE_RATE, MAX_IMPLICIT_SBR_PROBE_BLOCKS as MAX_PROBE_BLOCKS,
+};
 
 /// The number of samples per frame of AAC-LC.
 const SAMPLES_PER_FRAME: u64 = 1024;
@@ -43,14 +42,6 @@ pub(crate) struct ImplicitExtensions {
     pub sbr: bool,
     /// The stream carries parametric stereo data, so a mono core has a stereo output.
     pub ps: bool,
-}
-
-/// Returns true if the audio specific config describes a stream that may carry implicit SBR.
-pub(crate) fn may_have_implicit_sbr(asc: &AudioSpecificConfig) -> bool {
-    !asc.sbr_present
-        && asc.object_type == AudioObjectType::Lc
-        && asc.samples == SAMPLES_PER_FRAME as usize
-        && asc.sample_rate <= MAX_IMPLICIT_SBR_CORE_RATE
 }
 
 /// Looks for SBR and parametric stereo in the `raw_data_block()`s `blocks` of the stream whose
@@ -102,6 +93,29 @@ pub(crate) fn detect<'a>(
     }
 
     found
+}
+
+/// Looks for implicit SBR (and parametric stereo) in the `raw_data_block()`s `blocks` of a stream
+/// whose audio specific config is `asc`.
+///
+/// This is the detector the elementary stream parsers of the transport stream and Flash Video
+/// readers are given (`symphonia_common::mpeg::es::ImplicitSbrDetector`). Returns the audio
+/// specific config that signals the extension explicitly, or `None` if the stream may not have
+/// implicit SBR, or none was found.
+pub fn detect_implicit_sbr(asc: &[u8], blocks: &[&[u8]]) -> Option<Box<[u8]>> {
+    let config = AudioSpecificConfig::read(asc).ok()?;
+
+    if !may_have_implicit_sbr(&config) {
+        return None;
+    }
+
+    let ext = detect(asc, config.sample_rate, blocks.iter().copied());
+
+    if !ext.sbr {
+        return None;
+    }
+
+    with_explicit_sbr(asc, config.sample_rate.saturating_mul(2), ext.ps)
 }
 
 /// A MSB-first bit writer.
@@ -311,6 +325,7 @@ pub(crate) fn with_explicit_sbr(asc: &[u8], out_rate: u32, ps: bool) -> Option<B
 #[cfg(test)]
 mod tests {
     use super::*;
+    use symphonia_common::mpeg::audio::AudioObjectType;
 
     #[test]
     fn plain_asc_is_aac_lc() {

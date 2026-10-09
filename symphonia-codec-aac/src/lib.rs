@@ -23,6 +23,7 @@ mod implicit_sbr;
 mod loas;
 
 pub use aac::AacDecoder;
+pub use implicit_sbr::detect_implicit_sbr;
 pub use adif::AdifReader;
 pub use adts::AdtsReader;
 pub use loas::LoasReader;

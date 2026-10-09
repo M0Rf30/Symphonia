@@ -14,13 +14,13 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+symphonia-codec-aac = { version = "0.6.1", path = "../symphonia-codec-aac" }
 log = { workspace = true }
 symphonia-common = { version = "0.6.1", path = "../symphonia-common" }
 symphonia-core = { version = "0.6.1", path = "../symphonia-core" }
 
 [dev-dependencies]
 symphonia-bundle-mp3 = { version = "0.6.1", path = "../symphonia-bundle-mp3" }
-symphonia-codec-aac = { version = "0.6.1", path = "../symphonia-codec-aac" }
 symphonia-codec-opus = { version = "0.6.1", path = "../symphonia-codec-opus" }
 symphonia-format-ogg = { version = "0.6.1", path = "../symphonia-format-ogg" }
 

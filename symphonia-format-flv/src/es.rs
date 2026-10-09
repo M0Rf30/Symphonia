@@ -10,17 +10,25 @@
 
 use std::collections::VecDeque;
 
-use symphonia_common::mpeg::audio::{AudioSpecificConfig, get_audio_codec_profile};
-use symphonia_common::mpeg::es::{EsFrame, EsInfo, EsParser, aac_seek_target};
+use symphonia_codec_aac::detect_implicit_sbr;
+use symphonia_common::mpeg::audio::{
+    AudioSpecificConfig, MAX_IMPLICIT_SBR_PROBE_BLOCKS, may_have_implicit_sbr,
+};
+use symphonia_common::mpeg::es::{AacTimeline, EsFrame, EsInfo, EsParser, aac_es_info};
 use symphonia_core::codecs::audio::AudioCodecParameters;
-use symphonia_core::codecs::audio::well_known::CODEC_ID_AAC;
 use symphonia_core::errors::{Error, Result, decode_error};
 
 /// AAC raw data blocks, with the codec configuration from the audio specific config.
+///
+/// Like the AAC readers, the stream info describes the decoded output and the timeline is in
+/// decoded frames. A stream of AAC-LC whose config cannot signal SBR may be HE-AAC: its first
+/// blocks are looked at before the stream info is known (see [`detect_implicit_sbr`]).
 pub struct RawAacEs {
-    info: EsInfo,
-    sbr: bool,
-    frame_len: u64,
+    asc_bytes: Box<[u8]>,
+    info: Option<EsInfo>,
+    timeline: AacTimeline,
+    /// True if the stream info waits for the first blocks to look for implicit SBR.
+    detecting: bool,
     pending: VecDeque<EsFrame>,
     pushed: u64,
 }
@@ -34,32 +42,55 @@ impl RawAacEs {
 
         let asc = AudioSpecificConfig::read(asc_bytes)?;
 
-        let core_rate = Some(asc.sample_rate)
-            .filter(|&r| r > 0)
-            .ok_or(Error::DecodeError("flv: invalid aac sample rate"))?;
-
-        let mut params = AudioCodecParameters::new();
-
-        params
-            .for_codec(CODEC_ID_AAC)
-            .with_sample_rate(asc.output_sample_rate())
-            .with_extra_data(asc_bytes.into());
-
-        if let Some(channels) = asc.output_channels() {
-            params.with_channels(channels);
+        if asc.sample_rate == 0 {
+            return Err(Error::DecodeError("flv: invalid aac sample rate"));
         }
 
-        if let Some(profile) = get_audio_codec_profile(&asc) {
-            params.with_profile(profile);
-        }
+        let detecting = may_have_implicit_sbr(&asc);
 
         Ok(RawAacEs {
-            info: EsInfo { params, rate: core_rate },
-            sbr: asc.sbr_present || asc.sample_rate <= 32_000,
-            frame_len: asc.samples.max(1) as u64,
+            asc_bytes: asc_bytes.into(),
+            info: (!detecting).then(|| aac_es_info(&asc, asc_bytes)),
+            timeline: AacTimeline::from_config(&asc),
+            detecting,
             pending: VecDeque::new(),
             pushed: 0,
         })
+    }
+
+    /// Determine the stream info from the first blocks. Returns false if more are required.
+    fn finish_detection(&mut self, flush: bool) -> bool {
+        if self.pending.len() < MAX_IMPLICIT_SBR_PROBE_BLOCKS && !flush {
+            return false;
+        }
+
+        let blocks: Vec<&[u8]> = self
+            .pending
+            .iter()
+            .take(MAX_IMPLICIT_SBR_PROBE_BLOCKS)
+            .map(|frame| &frame.data[..])
+            .collect();
+
+        let explicit = detect_implicit_sbr(&self.asc_bytes, &blocks);
+
+        let (asc, bytes) = match explicit {
+            Some(bytes) => (AudioSpecificConfig::read(&bytes).ok(), Some(bytes)),
+            None => (None, None),
+        };
+
+        let (asc, bytes) = match (asc, bytes) {
+            (Some(asc), Some(bytes)) => (asc, bytes),
+            // The config is known to be valid.
+            _ => match AudioSpecificConfig::read(&self.asc_bytes) {
+                Ok(asc) => (asc, self.asc_bytes.clone()),
+                Err(_) => return false,
+            },
+        };
+
+        self.timeline = AacTimeline::from_config(&asc);
+        self.info = Some(aac_es_info(&asc, &bytes));
+        self.detecting = false;
+        true
     }
 }
 
@@ -72,15 +103,21 @@ impl EsParser for RawAacEs {
             self.pending.push_back(EsFrame {
                 start,
                 data: data.into(),
-                dur: self.frame_len,
+                dur: 0,
                 trim_start: 0,
                 trim_end: 0,
             });
         }
     }
 
-    fn next_frame(&mut self, _flush: bool) -> Option<EsFrame> {
-        self.pending.pop_front()
+    fn next_frame(&mut self, flush: bool) -> Option<EsFrame> {
+        if self.detecting && !self.finish_detection(flush) {
+            return None;
+        }
+
+        let mut frame = self.pending.pop_front()?;
+        frame.dur = self.timeline.frame_dur();
+        Some(frame)
     }
 
     fn clear(&mut self) {
@@ -88,25 +125,26 @@ impl EsParser for RawAacEs {
     }
 
     fn info(&self) -> Option<&EsInfo> {
-        Some(&self.info)
+        self.info.as_ref()
     }
 
     fn seek_start_ts(&self, target: i64) -> i64 {
-        aac_seek_target(target, self.sbr)
+        self.timeline.seek_target(target)
     }
 
     fn fresh(&self) -> Box<dyn EsParser> {
         Box::new(RawAacEs {
+            asc_bytes: self.asc_bytes.clone(),
             info: self.info.clone(),
-            sbr: self.sbr,
-            frame_len: self.frame_len,
+            timeline: self.timeline,
+            detecting: self.detecting,
             pending: VecDeque::new(),
             pushed: 0,
         })
     }
 
     fn frame_grid(&self) -> u64 {
-        self.frame_len
+        self.timeline.frame_dur()
     }
 }
 

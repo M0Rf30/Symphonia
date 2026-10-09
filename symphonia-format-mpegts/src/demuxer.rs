@@ -8,6 +8,7 @@
 use std::collections::VecDeque;
 use std::io::{ErrorKind, Seek, SeekFrom};
 
+use symphonia_codec_aac::detect_implicit_sbr;
 use symphonia_common::mpeg::es::{AdtsEs, EsParser, EsTrack, LatmEs, MpaEs, OpusEs};
 use symphonia_common::mpeg::pes::{
     PTS_MODULUS, PesHeader, parse_pes_header, pts_delta, unwrap_pts,
@@ -288,9 +289,9 @@ fn make_parser(stream: &PmtStream) -> Option<Box<dyn EsParser>> {
         // MPEG-1 and MPEG-2 audio.
         0x03 | 0x04 => Some(Box::new(MpaEs::new())),
         // AAC with ADTS.
-        0x0f => Some(Box::new(AdtsEs::new())),
+        0x0f => Some(Box::new(AdtsEs::with_detector(detect_implicit_sbr))),
         // AAC with LATM (LOAS).
-        0x11 => Some(Box::new(LatmEs::new())),
+        0x11 => Some(Box::new(LatmEs::with_detector(detect_implicit_sbr))),
         // PES private data: Opus is identified by its registration descriptor or its extension
         // descriptor.
         0x06 if d.registration == Some(*b"Opus") || d.opus_channel_config.is_some() => {

@@ -121,11 +121,12 @@ fn aac_in_flv_matches_isomp4_reader() {
         let mut native = IsoMp4Reader::try_new(open_file(&path), FormatOptions::default()).unwrap();
         let params = audio_params(&native, 0);
         let asc = params.extra_data.clone().unwrap();
-        // The timeline of FLV (and the AAC decoder's frames) is in units of the core sample rate
-        // of the stream, which is half that of the output of the SBR streams, which is the time
-        // base of the packets of ISO MP4.
-        let mp4_rate = u64::from(native.tracks()[0].time_base.unwrap().denom.get());
-        let rate = if name.contains("heaac") { mp4_rate / 2 } else { mp4_rate };
+        // The timeline of FLV is in decoded frames, like that of ISO MP4: at the output rate of
+        // the stream, twice the core rate of the SBR streams (the time stamps of the tags are in
+        // time, so those are in core frames).
+        let rate = u64::from(native.tracks()[0].time_base.unwrap().denom.get());
+        let ratio = if name.contains("heaac") { 2 } else { 1 };
+        let core_rate = rate / ratio;
         let want = read_all(&mut native);
 
         let mut mux = FlvMux::new();
@@ -133,8 +134,8 @@ fn aac_in_flv_matches_isomp4_reader() {
         mux.aac(0, 0, &asc);
 
         for (i, p) in want.iter().enumerate() {
-            mux.video(ms(i as u64 * 1024, rate), 100);
-            mux.aac(ms(i as u64 * 1024, rate), 1, &p.data);
+            mux.video(ms(i as u64 * 1024, core_rate), 100);
+            mux.aac(ms(i as u64 * 1024, core_rate), 1, &p.data);
         }
 
         let out = mux.out;
@@ -144,20 +145,20 @@ fn aac_in_flv_matches_isomp4_reader() {
 
         for (i, (g, w)) in got.iter().zip(&want).enumerate() {
             assert_eq!(g.data, w.data, "{name} packet {i}");
-            assert_eq!(g.dur.get(), 1024, "{name} packet {i}");
-            assert_eq!(g.pts.get(), i as i64 * 1024, "{name} packet {i}");
+            assert_eq!(g.dur.get(), 1024 * ratio, "{name} packet {i}");
+            assert_eq!(g.pts.get(), (i as u64 * 1024 * ratio) as i64, "{name} packet {i}");
         }
 
         let track = reader.tracks()[0].clone();
         assert_eq!(u64::from(track.time_base.unwrap().denom.get()), rate);
-        assert_eq!(track.duration.unwrap().get(), want.len() as u64 * 1024);
+        assert_eq!(track.duration.unwrap().get(), want.len() as u64 * 1024 * ratio);
 
         let rparams = audio_params(&reader, 0);
         assert_eq!(rparams.extra_data, params.extra_data);
         assert_eq!(rparams.sample_rate, params.sample_rate);
 
         // Seeks reproduce a continuous decode, including HE-AAC.
-        let n = want.len() as i64 * 1024;
+        let n = want.len() as i64 * 1024 * ratio as i64;
         check_seeks(
             || Box::new(open(out.clone())),
             0,

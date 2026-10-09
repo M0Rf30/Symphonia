@@ -21,14 +21,92 @@ use symphonia_core::units::{Duration, Timestamp};
 use super::audio::latm::{StreamMuxConfig, read_audio_mux_element};
 use super::audio::mpa::{self, MpaFramer};
 use super::audio::{
-    AAC_SEEK_MAX_PREROLL_FRAMES, Mpeg4AudioChannels, Mpeg4AudioSampleRate, aac_seek_start_frame,
+    AAC_SEEK_MAX_PREROLL_FRAMES, AudioSpecificConfig,
+    MAX_IMPLICIT_SBR_PROBE_BLOCKS, Mpeg4AudioChannels, Mpeg4AudioSampleRate, aac_overlap_frames,
+    aac_sbr_phase_period, aac_seek_start_frame, aac_seek_start_frame_with_period,
     get_audio_codec_profile, get_mpeg4_audio_channels_by_config_index,
-    get_mpeg4_audio_sample_rate_by_index,
+    get_mpeg4_audio_sample_rate_by_index, may_have_implicit_sbr,
 };
 use super::timeline::Timeline;
 
 /// The number of samples in an AAC frame.
 const AAC_FRAME_SAMPLES: u64 = 1024;
+
+/// Looks for implicit SBR (and parametric stereo) in the `raw_data_block()`s `blocks` of an AAC-LC
+/// stream with the audio specific config `asc`, which cannot signal them. Returns the audio specific
+/// config that signals the extension explicitly if it is found.
+///
+/// Detecting it requires decoding the blocks, so it is provided by the AAC codec crate
+/// (`symphonia_codec_aac::detect_implicit_sbr`), which this crate cannot depend on.
+pub type ImplicitSbrDetector = fn(asc: &[u8], blocks: &[&[u8]]) -> Option<Box<[u8]>>;
+
+/// The timeline and seek parameters of an AAC stream. Like the readers of the AAC crate, the
+/// timeline of the readers is in decoded frames (at the output sample rate of the stream, which is
+/// twice the core rate if the stream has SBR).
+#[derive(Copy, Clone, Debug)]
+pub struct AacTimeline {
+    frame_dur: u64,
+    sbr: bool,
+    overlap: u64,
+    period: u64,
+}
+
+impl Default for AacTimeline {
+    /// The timeline of AAC-LC without SBR.
+    fn default() -> Self {
+        AacTimeline { frame_dur: AAC_FRAME_SAMPLES, sbr: false, overlap: 1, period: 16 }
+    }
+}
+
+impl AacTimeline {
+    /// The timeline of the stream with the audio specific config `asc`.
+    pub fn from_config(asc: &AudioSpecificConfig) -> Self {
+        let ratio = u64::from(asc.output_sample_rate() / asc.sample_rate.max(1)).max(1);
+
+        AacTimeline {
+            frame_dur: (asc.samples as u64).max(1) * ratio,
+            sbr: asc.sbr_present,
+            overlap: aac_overlap_frames(asc.object_type),
+            period: aac_sbr_phase_period(asc),
+        }
+    }
+
+    /// The duration of a frame (access unit) in decoded frames.
+    pub fn frame_dur(&self) -> u64 {
+        self.frame_dur
+    }
+
+    /// Given a timestamp to seek to, get the timestamp to start decoding at, so that a decoder
+    /// will reproduce a continuous decode from the timestamp onwards.
+    pub fn seek_target(&self, target: i64) -> i64 {
+        let frame = u64::try_from(target).unwrap_or(0) / self.frame_dur;
+        let start =
+            aac_seek_start_frame_with_period(frame, self.sbr, self.overlap, self.period).min(frame);
+        (start * self.frame_dur) as i64
+    }
+}
+
+/// The stream information of an AAC stream with the audio specific config `asc`, whose bytes are
+/// `extra_data`: the codec parameters describe the decoded output, and the timeline is in decoded
+/// frames.
+pub fn aac_es_info(asc: &AudioSpecificConfig, extra_data: &[u8]) -> EsInfo {
+    let mut params = AudioCodecParameters::new();
+
+    params
+        .for_codec(CODEC_ID_AAC)
+        .with_sample_rate(asc.output_sample_rate())
+        .with_extra_data(extra_data.into());
+
+    if let Some(channels) = asc.output_channels() {
+        params.with_channels(channels);
+    }
+
+    if let Some(profile) = get_audio_codec_profile(asc) {
+        params.with_profile(profile);
+    }
+
+    EsInfo { params, rate: asc.output_sample_rate() }
+}
 
 /// The pre-roll, in samples at 48 kHz, of an Opus stream (RFC 7845 §4.6: at least 80 ms).
 const OPUS_SEEK_PREROLL: i64 = 80 * 48;
@@ -174,6 +252,10 @@ impl EsParser for MpaEs {
 struct AdtsHeader {
     rate: u32,
     channel_config: u32,
+    /// The index of the sampling frequency.
+    sf_index: u32,
+    /// The audio object type.
+    profile: u32,
     frame_len: usize,
     header_len: usize,
 }
@@ -188,7 +270,10 @@ impl AdtsHeader {
 
         let header_len = if b[1] & 1 == 0 { 9 } else { Self::SIZE_NO_CRC };
 
-        let rate = match get_mpeg4_audio_sample_rate_by_index(u32::from(b[2] >> 2) & 0xf) {
+        let sf_index = u32::from(b[2] >> 2) & 0xf;
+        let profile = u32::from(b[2] >> 6) + 1;
+
+        let rate = match get_mpeg4_audio_sample_rate_by_index(sf_index) {
             Mpeg4AudioSampleRate::SampleRate(rate) => rate,
             _ => return None,
         };
@@ -209,7 +294,7 @@ impl AdtsHeader {
             return None;
         }
 
-        Some(AdtsHeader { rate, channel_config, frame_len, header_len })
+        Some(AdtsHeader { rate, channel_config, sf_index, profile, frame_len, header_len })
     }
 
     fn is_compatible(&self, other: &AdtsHeader) -> bool {
@@ -224,11 +309,51 @@ pub struct AdtsEs {
     base: u64,
     locked: Option<AdtsHeader>,
     info: Option<EsInfo>,
+    timeline: AacTimeline,
+    detector: Option<ImplicitSbrDetector>,
 }
 
 impl AdtsEs {
     pub fn new() -> Self {
         Default::default()
+    }
+
+    /// Create a parser that looks for implicit SBR (HE-AAC), which ADTS cannot signal, with
+    /// `detector`.
+    pub fn with_detector(detector: ImplicitSbrDetector) -> Self {
+        AdtsEs { detector: Some(detector), ..Default::default() }
+    }
+
+    /// The plain audio specific config of an AAC-LC stream with the parameters of the header.
+    fn plain_asc(hdr: &AdtsHeader) -> Box<[u8]> {
+        // The object type (5 bits, AAC-LC), sampling frequency index (4), channel configuration
+        // (4), and GASpecificConfig (3 bits, all clear).
+        let bits = (2u32 << 11) | (hdr.sf_index << 7) | (hdr.channel_config << 3);
+        bits.to_be_bytes()[2..].into()
+    }
+
+    /// The `raw_data_block()`s of the (up to) `MAX_IMPLICIT_SBR_PROBE_BLOCKS` frames from the
+    /// offset `i` of the buffer.
+    fn lookahead(&self, mut i: usize, hdr: &AdtsHeader) -> Vec<&[u8]> {
+        let mut blocks = Vec::new();
+
+        while blocks.len() < MAX_IMPLICIT_SBR_PROBE_BLOCKS {
+            let Some(next) = self.buf.get(i..).and_then(AdtsHeader::parse)
+            else {
+                break;
+            };
+
+            let end = i + next.frame_len;
+
+            if !hdr.is_compatible(&next) || end > self.buf.len() {
+                break;
+            }
+
+            blocks.push(&self.buf[i + next.header_len..end]);
+            i = end;
+        }
+
+        blocks
     }
 }
 
@@ -289,6 +414,28 @@ impl EsParser for AdtsEs {
 
         match found {
             Some((i, hdr, end)) => {
+                // HE-AAC cannot be signalled in ADTS: look for SBR and parametric stereo in the
+                // first frames, which are waited for.
+                let mut explicit = None;
+
+                if self.info.is_none() && hdr.profile == 2 {
+                    if let Some(detector) = self.detector {
+                        let plain = Self::plain_asc(&hdr);
+                        let may = AudioSpecificConfig::read(&plain)
+                            .is_ok_and(|asc| may_have_implicit_sbr(&asc));
+
+                        if may {
+                            let blocks = self.lookahead(i, &hdr);
+
+                            if blocks.len() < MAX_IMPLICIT_SBR_PROBE_BLOCKS && !flush {
+                                return None;
+                            }
+
+                            explicit = detector(&plain, &blocks);
+                        }
+                    }
+                }
+
                 let data = self.buf[i + hdr.header_len..end].to_vec().into_boxed_slice();
                 let start = self.base + i as u64;
                 self.buf.drain(..end);
@@ -302,15 +449,35 @@ impl EsParser for AdtsEs {
                             _ => return None,
                         };
 
-                    let mut params = AudioCodecParameters::new();
-                    params
-                        .for_codec(CODEC_ID_AAC)
-                        .with_sample_rate(hdr.rate)
-                        .with_channels(channels);
-                    self.info = Some(EsInfo { params, rate: hdr.rate });
+                    let sbr_asc = explicit.and_then(|extra_data| {
+                        let asc = AudioSpecificConfig::read(&extra_data).ok()?;
+                        Some((asc, extra_data))
+                    });
+
+                    match sbr_asc {
+                        Some((asc, extra_data)) => {
+                            self.timeline = AacTimeline::from_config(&asc);
+                            self.info = Some(aac_es_info(&asc, &extra_data));
+                        }
+                        None => {
+                            let mut params = AudioCodecParameters::new();
+                            params
+                                .for_codec(CODEC_ID_AAC)
+                                .with_sample_rate(hdr.rate)
+                                .with_channels(channels);
+                            self.timeline = AacTimeline::default();
+                            self.info = Some(EsInfo { params, rate: hdr.rate });
+                        }
+                    }
                 }
 
-                Some(EsFrame { start, data, dur: AAC_FRAME_SAMPLES, trim_start: 0, trim_end: 0 })
+                Some(EsFrame {
+                    start,
+                    data,
+                    dur: self.timeline.frame_dur(),
+                    trim_start: 0,
+                    trim_end: 0,
+                })
             }
             None => {
                 self.buf.drain(..i);
@@ -331,17 +498,20 @@ impl EsParser for AdtsEs {
     }
 
     fn seek_start_ts(&self, target: i64) -> i64 {
-        // ADTS can only signal SBR implicitly: assume it is used at the rates it is possible.
-        let sbr = self.info.as_ref().is_some_and(|i| i.rate <= 32_000);
-        aac_seek_target(target, sbr)
+        self.timeline.seek_target(target)
     }
 
     fn fresh(&self) -> Box<dyn EsParser> {
-        Box::new(AdtsEs::new())
+        // The stream has been probed: the parser does not look for SBR again.
+        Box::new(AdtsEs {
+            info: self.info.clone(),
+            timeline: self.timeline,
+            ..Default::default()
+        })
     }
 
     fn frame_grid(&self) -> u64 {
-        AAC_FRAME_SAMPLES
+        self.timeline.frame_dur()
     }
 }
 
@@ -372,7 +542,8 @@ pub struct LatmEs {
     config: Option<StreamMuxConfig>,
     pending: VecDeque<EsFrame>,
     info: Option<EsInfo>,
-    sbr: bool,
+    timeline: AacTimeline,
+    detector: Option<ImplicitSbrDetector>,
     /// The frames received before the stream mux config, which may be decoded using the config
     /// once it is found.
     early: Vec<(u64, Vec<u8>)>,
@@ -384,6 +555,50 @@ const LATM_MAX_EARLY_FRAMES: usize = 32;
 impl LatmEs {
     pub fn new() -> Self {
         Default::default()
+    }
+
+    /// Create a parser that looks for implicit SBR (HE-AAC with a plain AAC-LC config) with
+    /// `detector`.
+    pub fn with_detector(detector: ImplicitSbrDetector) -> Self {
+        LatmEs { detector: Some(detector), ..Default::default() }
+    }
+
+    /// Determine the stream info once the stream mux config is known (and, if the stream may have
+    /// implicit SBR, the first frames). Returns false if more frames are required.
+    fn finish_info(&mut self, flush: bool) -> bool {
+        let Some(config) = &self.config
+        else {
+            return false;
+        };
+
+        let mut asc = config.asc.clone();
+        let mut extra_data = config.extra_data.clone();
+
+        if let Some(detector) = self.detector {
+            if may_have_implicit_sbr(&asc) {
+                if self.pending.len() < MAX_IMPLICIT_SBR_PROBE_BLOCKS && !flush {
+                    return false;
+                }
+
+                let blocks: Vec<&[u8]> = self
+                    .pending
+                    .iter()
+                    .take(MAX_IMPLICIT_SBR_PROBE_BLOCKS)
+                    .map(|frame| &frame.data[..])
+                    .collect();
+
+                if let Some(explicit) = detector(&extra_data, &blocks) {
+                    if let Ok(explicit_asc) = AudioSpecificConfig::read(&explicit) {
+                        asc = explicit_asc;
+                        extra_data = explicit;
+                    }
+                }
+            }
+        }
+
+        self.timeline = AacTimeline::from_config(&asc);
+        self.info = Some(aac_es_info(&asc, &extra_data));
+        true
     }
 
     fn loas_len(b: &[u8]) -> Option<usize> {
@@ -404,8 +619,16 @@ impl EsParser for LatmEs {
 
     fn next_frame(&mut self, flush: bool) -> Option<EsFrame> {
         loop {
-            if let Some(frame) = self.pending.pop_front() {
-                return Some(frame);
+            // The frames wait for the stream info, which gives their duration.
+            if self.info.is_none() && self.config.is_some() {
+                self.finish_info(flush);
+            }
+
+            if self.info.is_some() {
+                if let Some(mut frame) = self.pending.pop_front() {
+                    frame.dur = self.timeline.frame_dur();
+                    return Some(frame);
+                }
             }
 
             let mut i = 0;
@@ -466,35 +689,15 @@ impl EsParser for LatmEs {
                         continue;
                     }
 
-                    if self.info.is_none() {
-                        if let Some(config) = &self.config {
-                            let mut params = AudioCodecParameters::new();
-                            params
-                                .for_codec(CODEC_ID_AAC)
-                                .with_sample_rate(config.asc.output_sample_rate())
-                                .with_extra_data(config.extra_data.clone());
-
-                            if let Some(channels) = config.asc.output_channels() {
-                                params.with_channels(channels);
-                            }
-
-                            if let Some(profile) = get_audio_codec_profile(&config.asc) {
-                                params.with_profile(profile);
-                            }
-
-                            self.sbr = config.asc.sbr_present || config.asc.sample_rate <= 32_000;
-                            self.info = Some(EsInfo { params, rate: config.asc.sample_rate });
-                        }
-                    }
-
-                    // The frames before the config, that are complete, use the config.
+                    // The frames before the config, that are complete, use the config. The
+                    // durations are set when they are returned.
                     for (early_start, early) in std::mem::take(&mut self.early) {
                         if let Ok(payloads) = read_audio_mux_element(&early, &mut self.config) {
                             for data in payloads {
                                 self.pending.push_back(EsFrame {
                                     start: early_start,
                                     data,
-                                    dur: AAC_FRAME_SAMPLES,
+                                    dur: 0,
                                     trim_start: 0,
                                     trim_end: 0,
                                 });
@@ -506,7 +709,7 @@ impl EsParser for LatmEs {
                         self.pending.push_back(EsFrame {
                             start,
                             data,
-                            dur: AAC_FRAME_SAMPLES,
+                            dur: 0,
                             trim_start: 0,
                             trim_end: 0,
                         });
@@ -515,6 +718,13 @@ impl EsParser for LatmEs {
                 None => {
                     self.buf.drain(..i);
                     self.base += i as u64;
+
+                    // The end of the stream: the stream info is determined from the frames there
+                    // are.
+                    if flush && self.info.is_none() && self.finish_info(true) {
+                        continue;
+                    }
+
                     return None;
                 }
             }
@@ -534,17 +744,20 @@ impl EsParser for LatmEs {
     }
 
     fn seek_start_ts(&self, target: i64) -> i64 {
-        aac_seek_target(target, self.sbr)
+        self.timeline.seek_target(target)
     }
 
     fn fresh(&self) -> Box<dyn EsParser> {
+        // The stream has been probed: the parser does not look for SBR again.
         let mut es = LatmEs::new();
         es.config = self.config.clone();
+        es.info = self.info.clone();
+        es.timeline = self.timeline;
         Box::new(es)
     }
 
     fn frame_grid(&self) -> u64 {
-        AAC_FRAME_SAMPLES
+        self.timeline.frame_dur()
     }
 }
 
