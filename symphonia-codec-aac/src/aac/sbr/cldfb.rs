@@ -33,6 +33,7 @@ use super::error::{SbrError as Error, SbrResult as Result};
 use super::qmf::Complex;
 
 use core::f64::consts::{FRAC_1_SQRT_2, PI};
+use std::sync::LazyLock;
 
 /// The number of the prototype filter taps per band.
 const TAPS_PER_BAND: usize = 5;
@@ -51,42 +52,107 @@ const ANALYSIS_GAIN: f64 = 4.0;
 /// output amplitude as in the QMF synthesis of ordinary SBR.
 const SYNTHESIS_GAIN: f64 = 1.0 / 32.0;
 
-/// A pair of the type IV discrete cosine and sine transforms of length `l`:
-/// `X[k] = Σ x[n]·cos(π/l·(n + 1/2)·(k + 1/2))` (and with `sin`).
-#[derive(Debug, Clone)]
-struct TransformIv {
+/// The kernels of the type IV discrete cosine and sine transforms of length `l`:
+/// `cos(π/l·(n + 1/2)·(k + 1/2))` (and with `sin`), in `[n][k]` order so that one input value
+/// accumulates into all the outputs at once (every output still sums over `n` in order).
+#[derive(Debug)]
+struct TransformTables {
     l: usize,
     cos: Vec<f64>,
     sin: Vec<f64>,
 }
 
-impl TransformIv {
+impl TransformTables {
     fn new(l: usize) -> Self {
-        let mut cos = Vec::with_capacity(l * l);
-        let mut sin = Vec::with_capacity(l * l);
+        let mut cos = vec![0.0; l * l];
+        let mut sin = vec![0.0; l * l];
         for k in 0..l {
             for n in 0..l {
                 let arg = PI / l as f64 * (n as f64 + 0.5) * (k as f64 + 0.5);
-                cos.push(arg.cos());
-                sin.push(arg.sin());
+                cos[n * l + k] = arg.cos();
+                sin[n * l + k] = arg.sin();
             }
         }
-        TransformIv { l, cos, sin }
+        TransformTables { l, cos, sin }
     }
+}
 
-    fn dct(&self, x: &[f64], out: &mut [f64]) {
-        for (k, o) in out.iter_mut().enumerate().take(self.l) {
-            let row = &self.cos[k * self.l..(k + 1) * self.l];
-            *o = row.iter().zip(x).map(|(c, x)| c * x).sum();
+/// A pair of the type IV discrete cosine and sine transforms of length `l`:
+/// `X[k] = Σ x[n]·cos(π/l·(n + 1/2)·(k + 1/2))` (and with `sin`). The kernels are shared.
+#[derive(Debug, Clone)]
+struct TransformIv {
+    tables: &'static TransformTables,
+}
+
+impl TransformIv {
+    fn new(l: usize) -> Self {
+        static T32: LazyLock<TransformTables> = LazyLock::new(|| TransformTables::new(32));
+        static T64: LazyLock<TransformTables> = LazyLock::new(|| TransformTables::new(64));
+        match l {
+            32 => TransformIv { tables: &T32 },
+            64 => TransformIv { tables: &T64 },
+            _ => unreachable!("the CLDFB has 32 or 64 bands"),
         }
     }
 
-    fn dst(&self, x: &[f64], out: &mut [f64]) {
-        for (k, o) in out.iter_mut().enumerate().take(self.l) {
-            let row = &self.sin[k * self.l..(k + 1) * self.l];
-            *o = row.iter().zip(x).map(|(s, x)| s * x).sum();
+    /// Both transforms: the cosine transform of `xc` and the sine transform of `xs`.
+    fn dct_dst(&self, xc: &[f64], xs: &[f64], oc: &mut [f64], os: &mut [f64]) {
+        let l = self.tables.l;
+        let (oc, os) = (&mut oc[..l], &mut os[..l]);
+        // The sum of an iterator of floats starts at -0.0.
+        oc.fill(-0.0);
+        os.fill(-0.0);
+        for n in 0..l {
+            let (c, s) = (xc[n], xs[n]);
+            let rc = &self.tables.cos[n * l..(n + 1) * l];
+            let rs = &self.tables.sin[n * l..(n + 1) * l];
+            for k in 0..l {
+                oc[k] += rc[k] * c;
+                os[k] += rs[k] * s;
+            }
         }
     }
+}
+
+/// The prototype filter of the analysis bank by tap: `[p][k] = CLDFB_320[5k + p]`.
+fn analysis_taps() -> &'static [f64] {
+    static TAPS: LazyLock<Vec<f64>> = LazyLock::new(|| {
+        let mut t = vec![0.0; 320];
+        for k in 0..64 {
+            for p in 0..TAPS_PER_BAND {
+                t[64 * p + k] = CLDFB_320[TAPS_PER_BAND * k + p];
+            }
+        }
+        t
+    });
+    &TAPS
+}
+
+/// The polyphase prototype filter of a synthesis bank with `l` bands by tap and band:
+/// `p1[t·l + m] = table[5m + t]` and `p2[t·l + m] = table[half + 5m + t]`.
+#[derive(Debug)]
+struct SynthesisTaps {
+    p1: Vec<f64>,
+    p2: Vec<f64>,
+}
+
+fn synthesis_taps(l: usize) -> &'static SynthesisTaps {
+    fn build(l: usize) -> SynthesisTaps {
+        let table: &[f64] = if l == 64 { &CLDFB_640 } else { &CLDFB_320 };
+        let half = table.len() / 2;
+        let mut p1 = vec![0.0; TAPS_PER_BAND * l];
+        let mut p2 = vec![0.0; TAPS_PER_BAND * l];
+        for m in 0..l {
+            for t in 0..TAPS_PER_BAND {
+                p1[t * l + m] = table[TAPS_PER_BAND * m + t];
+                p2[t * l + m] = table[half + TAPS_PER_BAND * m + t];
+            }
+        }
+        SynthesisTaps { p1, p2 }
+    }
+    static T32: LazyLock<SynthesisTaps> = LazyLock::new(|| build(32));
+    static T64: LazyLock<SynthesisTaps> = LazyLock::new(|| build(64));
+    if l == 64 { &T64 } else { &T32 }
 }
 
 /// The 32 band CLDFB analysis bank of one channel.
@@ -124,11 +190,18 @@ impl CldfbAnalysis {
         self.state[320 - L..].copy_from_slice(samples);
 
         // The prototype filter, in the order of the transform input: `u[2L - 1 - k]`.
+        let taps = analysis_taps();
+        let mut acc = [-0.0f64; 2 * L];
+        for p in 0..TAPS_PER_BAND {
+            let c = &taps[2 * L * p..2 * L * (p + 1)];
+            let x = &self.state[2 * L * p..2 * L * (p + 1)];
+            for k in 0..2 * L {
+                acc[k] += c[k] * x[k];
+            }
+        }
         let mut u = [0.0f64; 2 * L];
         for k in 0..2 * L {
-            let c = &CLDFB_320[TAPS_PER_BAND * k..TAPS_PER_BAND * (k + 1)];
-            let acc: f64 = c.iter().enumerate().map(|(p, c)| c * self.state[2 * L * p + k]).sum();
-            u[2 * L - 1 - k] = acc;
+            u[2 * L - 1 - k] = acc[k];
         }
 
         // The folding into the inputs of the cosine and sine transforms.
@@ -143,8 +216,7 @@ impl CldfbAnalysis {
 
         let mut tre = [0.0f64; L];
         let mut tim = [0.0f64; L];
-        self.transform.dct(&re, &mut tre);
-        self.transform.dst(&im, &mut tim);
+        self.transform.dct_dst(&re, &im, &mut tre, &mut tim);
 
         // The phase rotation.
         let mut out = [Complex::default(); L];
@@ -209,8 +281,7 @@ impl CldfbSynthesis {
 
         let mut tre = [0.0f64; 64];
         let mut tim = [0.0f64; 64];
-        self.transform.dct(&re[..l], &mut tre);
-        self.transform.dst(&im[..l], &mut tim);
+        self.transform.dct_dst(&re[..l], &im[..l], &mut tre, &mut tim);
 
         // The unfolding.
         for i in 0..l / 2 {
@@ -222,31 +293,45 @@ impl CldfbSynthesis {
             tim[i] = -(r2 + i2) / 2.0;
         }
 
-        // The prototype filter, in the polyphase form.
-        let table: &[f64] = if l == 64 { &CLDFB_640 } else { &CLDFB_320 };
-        let half = table.len() / 2;
+        // The prototype filter, in the polyphase form. The state is by tap and band, so that the
+        // bands (`m = l - 1 - j`) are filtered at once.
+        let taps = synthesis_taps(l);
+
+        let mut rre = [0.0f64; 64];
+        let mut rim = [0.0f64; 64];
+        for m in 0..l {
+            rre[m] = tre[l - 1 - m];
+            rim[m] = tim[l - 1 - m];
+        }
+        let (rre, rim) = (&rre[..l], &rim[..l]);
 
         let start = out.len();
         out.resize(start + l, 0.0);
+        let out = &mut out[start..];
 
-        for j in (0..l).rev() {
-            let m = l - 1 - j;
-            let p1 = &table[TAPS_PER_BAND * m..TAPS_PER_BAND * (m + 1)];
-            let p2 = &table[half + TAPS_PER_BAND * m..half + TAPS_PER_BAND * (m + 1)];
-            let sta = &mut self.state[9 * m..9 * (m + 1)];
-            let (re, im) = (tre[j], tim[j]);
+        let s = &mut self.state[..9 * l];
 
-            out[start + j] = (sta[0] + p2[4] * re) * SYNTHESIS_GAIN;
+        for m in 0..l {
+            out[l - 1 - m] = (s[m] + taps.p2[4 * l + m] * rre[m]) * SYNTHESIS_GAIN;
+        }
 
-            sta[0] = sta[1] + p1[4] * im;
-            sta[1] = sta[2] + p2[3] * re;
-            sta[2] = sta[3] + p1[3] * im;
-            sta[3] = sta[4] + p2[2] * re;
-            sta[4] = sta[5] + p1[2] * im;
-            sta[5] = sta[6] + p2[1] * re;
-            sta[6] = sta[7] + p1[1] * im;
-            sta[7] = sta[8] + p2[0] * re;
-            sta[8] = p1[0] * im;
+        // `sta[t] = sta[t + 1] + coefficient·x`, with `p1·im` for even `t` and `p2·re` for odd.
+        for t in 0..8 {
+            let (head, tail) = s.split_at_mut((t + 1) * l);
+            let dst = &mut head[t * l..];
+            let src = &tail[..l];
+            let (coef, x) = if t % 2 == 0 {
+                (&taps.p1[(4 - t / 2) * l..(5 - t / 2) * l], rim)
+            }
+            else {
+                (&taps.p2[(4 - t / 2 - 1) * l..(5 - t / 2 - 1) * l], rre)
+            };
+            for m in 0..l {
+                dst[m] = src[m] + coef[m] * x[m];
+            }
+        }
+        for m in 0..l {
+            s[8 * l + m] = taps.p1[m] * rim[m];
         }
 
         Ok(())
