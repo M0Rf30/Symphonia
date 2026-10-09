@@ -4,6 +4,10 @@
 
 OGG demuxer for Project Symphonia.
 
+With the `writer` cargo feature the crate also provides a minimal, codec-agnostic Ogg page
+writer (`symphonia_format_ogg::writer`, RFC 3533): lacing, page splitting, granule positions,
+BOS/EOS flags and page CRC.
+
 > [!NOTE]
 > This crate is part of Symphonia. Please use the [`symphonia`](https://crates.io/crates/symphonia) crate instead of this one directly.
 
