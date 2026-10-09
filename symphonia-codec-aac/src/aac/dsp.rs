@@ -32,42 +32,202 @@ pub fn delay_len(aot: AudioObjectType) -> usize {
     }
 }
 
-/// An IMDCT of any (even) number of spectral samples, computed directly from its definition. It
-/// has the same definition and scaling as [`Imdct`].
-struct ImdctDirect {
-    n: usize,
-    /// `scale * cos(pi / n * (i + (n + 1) / 2) * (k + 1 / 2))` for the output `i` and input `k`.
-    table: Vec<f32>,
+/// A complex number.
+#[derive(Clone, Copy, Default)]
+struct Cpx {
+    re: f64,
+    im: f64,
 }
 
-impl ImdctDirect {
-    fn new(n: usize, scale: f64) -> Self {
-        let mut table = Vec::with_capacity(2 * n * n);
-
-        for i in 0..2 * n {
-            for k in 0..n {
-                let arg = std::f64::consts::PI / n as f64
-                    * (i as f64 + (n as f64 + 1.0) / 2.0)
-                    * (k as f64 + 0.5);
-                table.push((scale * arg.cos()) as f32);
-            }
+impl Cpx {
+    #[inline(always)]
+    fn mul(self, other: Cpx) -> Cpx {
+        Cpx {
+            re: self.re * other.re - self.im * other.im,
+            im: self.re * other.im + self.im * other.re,
         }
-
-        ImdctDirect { n, table }
     }
 
-    fn imdct(&self, spec: &[f32], out: &mut [f32]) {
-        for (row, out) in self.table.chunks_exact(self.n).zip(out.iter_mut()) {
-            *out = row.iter().zip(spec).map(|(c, x)| c * x).sum();
+    #[inline(always)]
+    fn add(self, other: Cpx) -> Cpx {
+        Cpx { re: self.re + other.re, im: self.im + other.im }
+    }
+}
+
+/// A forward FFT of any size, by decimation in time with a radix of each prime factor of the size.
+struct MixedFft {
+    n: usize,
+    /// `exp(-2 pi i j / n)`
+    twiddle: Vec<Cpx>,
+    /// The scratch for the radix butterflies, as long as the largest prime factor of `n`.
+    tmp: Vec<Cpx>,
+}
+
+impl MixedFft {
+    fn new(n: usize) -> Self {
+        let twiddle = (0..n)
+            .map(|j| {
+                let arg = -2.0 * std::f64::consts::PI * j as f64 / n as f64;
+                Cpx { re: arg.cos(), im: arg.sin() }
+            })
+            .collect();
+
+        // The largest prime factor of n.
+        let (mut rest, mut largest, mut factor) = (n, 1, 2);
+
+        while rest > 1 {
+            while rest % factor == 0 {
+                rest /= factor;
+                largest = factor;
+            }
+            factor += 1;
+        }
+
+        MixedFft { n, twiddle, tmp: vec![Cpx::default(); largest] }
+    }
+
+    /// The smallest prime factor of `n`.
+    fn smallest_factor(n: usize) -> usize {
+        (2..).find(|f| n % f == 0 || f * f > n).map_or(n, |f| if n % f == 0 { f } else { n })
+    }
+
+    fn process(&mut self, x: &[Cpx], out: &mut [Cpx]) {
+        Self::recurse(&self.twiddle, self.n, &mut self.tmp, x, 1, self.n, out);
+    }
+
+    fn recurse(
+        twiddle: &[Cpx],
+        total: usize,
+        tmp: &mut [Cpx],
+        x: &[Cpx],
+        stride: usize,
+        n: usize,
+        out: &mut [Cpx],
+    ) {
+        if n == 1 {
+            out[0] = x[0];
+            return;
+        }
+
+        let p = Self::smallest_factor(n);
+        let m = n / p;
+
+        for r in 0..p {
+            Self::recurse(
+                twiddle,
+                total,
+                tmp,
+                &x[r * stride..],
+                stride * p,
+                m,
+                &mut out[r * m..(r + 1) * m],
+            );
+        }
+
+        // The twiddle factors W_n^j and W_p^j are those of the full transform with a step.
+        let step_n = total / n;
+        let step_p = total / p;
+
+        for k in 0..m {
+            for r in 0..p {
+                tmp[r] = out[r * m + k].mul(twiddle[(r * k * step_n) % total]);
+            }
+
+            for q in 0..p {
+                let mut sum = tmp[0];
+
+                for r in 1..p {
+                    sum = sum.add(tmp[r].mul(twiddle[((r * q) % p) * step_p]));
+                }
+
+                out[k + q * m] = sum;
+            }
+        }
+    }
+}
+
+/// An IMDCT of any (even) number of spectral samples, with the same definition and scaling as
+/// [`Imdct`]: through a DCT-IV, which is computed with an FFT of half the size.
+struct ImdctAny {
+    n: usize,
+    scale: f64,
+    /// `exp(-i pi (j + 1/8) / n)`, the twiddle factor before and after the FFT.
+    twiddle: Vec<Cpx>,
+    fft: MixedFft,
+    input: Vec<Cpx>,
+    output: Vec<Cpx>,
+    /// The DCT-IV of the spectrum.
+    dct: Vec<f64>,
+}
+
+impl ImdctAny {
+    fn new(n: usize, scale: f64) -> Self {
+        assert!(n >= 2 && n % 2 == 0);
+
+        let half = n / 2;
+
+        let twiddle = (0..half)
+            .map(|j| {
+                let arg = -std::f64::consts::PI * (j as f64 + 0.125) / n as f64;
+                Cpx { re: arg.cos(), im: arg.sin() }
+            })
+            .collect();
+
+        ImdctAny {
+            n,
+            scale,
+            twiddle,
+            fft: MixedFft::new(half),
+            input: vec![Cpx::default(); half],
+            output: vec![Cpx::default(); half],
+            dct: vec![0.0; n],
+        }
+    }
+
+    fn imdct(&mut self, spec: &[f32], out: &mut [f32]) {
+        let n = self.n;
+        let half = n / 2;
+
+        // The DCT-IV, `sum(spec[k] cos(pi / n (m + 1/2) (k + 1/2)))` for each `m`, from the FFT
+        // of half the size of a combination of the even and reversed odd samples.
+        for j in 0..half {
+            let c = Cpx { re: f64::from(spec[2 * j]), im: f64::from(spec[n - 1 - 2 * j]) };
+            self.input[j] = c.mul(self.twiddle[j]);
+        }
+
+        self.fft.process(&self.input, &mut self.output);
+
+        for k in 0..half {
+            let d = self.output[k].mul(self.twiddle[k]);
+            self.dct[2 * k] = d.re;
+            self.dct[n - 1 - 2 * k] = -d.im;
+        }
+
+        // The IMDCT is the DCT-IV, unfolded to twice the length: the sample `i` of the output is
+        // the DCT-IV extended with even symmetry at `n`, and odd symmetry at `2 n`, at `i + n / 2`.
+        for (i, o) in out.iter_mut().enumerate().take(2 * n) {
+            let m = i + half;
+
+            let v = if m < n {
+                self.dct[m]
+            }
+            else if m < 2 * n {
+                -self.dct[2 * n - 1 - m]
+            }
+            else {
+                -self.dct[m - 2 * n]
+            };
+
+            *o = (self.scale * v) as f32;
         }
     }
 }
 
 /// The IMDCT of the low delay filterbanks: a power-of-2 number of spectral samples (512) uses the
-/// FFT based one.
+/// IMDCT of the core library, others (480) the one of any size.
 enum LdImdct {
     Fft(Imdct),
-    Direct(ImdctDirect),
+    Any(ImdctAny),
 }
 
 impl LdImdct {
@@ -76,14 +236,14 @@ impl LdImdct {
             LdImdct::Fft(Imdct::new_scaled(n, scale))
         }
         else {
-            LdImdct::Direct(ImdctDirect::new(n, scale))
+            LdImdct::Any(ImdctAny::new(n, scale))
         }
     }
 
     fn imdct(&mut self, spec: &[f32], out: &mut [f32]) {
         match self {
             LdImdct::Fft(imdct) => imdct.imdct(spec, out),
-            LdImdct::Direct(imdct) => imdct.imdct(spec, out),
+            LdImdct::Any(imdct) => imdct.imdct(spec, out),
         }
     }
 }
@@ -117,10 +277,6 @@ pub struct Dsp {
 }
 
 impl Dsp {
-    pub fn new() -> Self {
-        Self::new_for(AudioObjectType::Lc, 1024)
-    }
-
     /// Create the filterbanks for an audio object type with the frame length `frame_len`.
     pub fn new_for(aot: AudioObjectType, frame_len: usize) -> Self {
         let ld = match aot {
@@ -398,30 +554,62 @@ mod tests {
     }
 
     #[test]
-    fn direct_imdct_is_the_imdct() {
-        let n = 512;
-        let spec = spectrum(n, 7);
+    fn imdct_of_any_size_is_the_imdct() {
+        for n in [512, 64] {
+            let spec = spectrum(n, 7);
 
-        let mut fast = vec![0.0; 2 * n];
-        Imdct::new_scaled(n, 1.0 / (2 * n) as f64).imdct(&spec, &mut fast);
+            let mut fast = vec![0.0; 2 * n];
+            Imdct::new_scaled(n, 1.0 / (2 * n) as f64).imdct(&spec, &mut fast);
 
-        let mut direct = vec![0.0; 2 * n];
-        ImdctDirect::new(n, 1.0 / (2 * n) as f64).imdct(&spec, &mut direct);
+            let mut any = vec![0.0; 2 * n];
+            ImdctAny::new(n, 1.0 / (2 * n) as f64).imdct(&spec, &mut any);
 
-        for (a, b) in fast.iter().zip(&direct) {
-            assert!((a - b).abs() < 1e-5, "{a} vs {b}");
+            for (a, b) in fast.iter().zip(&any) {
+                assert!((a - b).abs() < 1e-6, "n={n}: {a} vs {b}");
+            }
         }
     }
 
     #[test]
-    fn direct_imdct_of_480_follows_the_definition() {
-        let n = 480;
+    fn imdct_of_any_size_follows_the_definition() {
+        // Sizes with prime factors other than 2: the sizes of AAC LD and ELD, and others.
+        for n in [480, 240, 60, 30, 14, 2] {
+            check_imdct_definition(n);
+        }
+    }
+
+    #[test]
+    fn mixed_fft_is_a_dft() {
+        for n in [1, 2, 3, 5, 7, 12, 30, 120, 240] {
+            let x: Vec<Cpx> = spectrum(2 * n, 3)
+                .chunks_exact(2)
+                .map(|c| Cpx { re: f64::from(c[0]), im: f64::from(c[1]) })
+                .collect();
+
+            let mut out = vec![Cpx::default(); n];
+            MixedFft::new(n).process(&x, &mut out);
+
+            for (k, o) in out.iter().enumerate() {
+                let (mut re, mut im) = (0.0, 0.0);
+
+                for (j, v) in x.iter().enumerate() {
+                    let arg = -2.0 * std::f64::consts::PI * (j * k) as f64 / n as f64;
+                    re += v.re * arg.cos() - v.im * arg.sin();
+                    im += v.re * arg.sin() + v.im * arg.cos();
+                }
+
+                assert!((o.re - re).abs() < 1e-9 && (o.im - im).abs() < 1e-9, "n={n} k={k}");
+            }
+        }
+    }
+
+    fn check_imdct_definition(n: usize) {
         let spec = spectrum(n, 11);
 
         let mut out = vec![0.0; 2 * n];
-        ImdctDirect::new(n, 1.0).imdct(&spec, &mut out);
+        ImdctAny::new(n, 1.0).imdct(&spec, &mut out);
 
-        for i in [0, 1, 239, 240, 479, 480, 700, 959] {
+        for i in (0..2 * n).step_by((n / 7).max(1)).chain([2 * n - 1]) {
             let expected: f64 = spec
                 .iter()
                 .enumerate()

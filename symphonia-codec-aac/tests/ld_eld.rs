@@ -148,6 +148,7 @@ fn compare(
     (10.0 * (signal / noise.max(1e-9)).log10(), max_diff)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_fixture(
     bin: &[u8],
     s16: &[u8],
@@ -591,7 +592,7 @@ fn loas_stream(asc: &[u8], asc_bits: usize, aus: &[Vec<u8>]) -> Vec<u8> {
 #[test]
 fn loas_streams_of_ld_and_eld_have_the_frame_length_and_overlap() {
     use symphonia_codec_aac::LoasReader;
-    use symphonia_core::formats::{FormatReader, SeekMode, SeekTo};
+    use symphonia_core::formats::{SeekMode, SeekTo};
 
     // (fixture, the number of bits of the audio specific config)
     for (name, bin, asc_bits, overlap) in [
