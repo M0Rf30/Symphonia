@@ -83,6 +83,72 @@ pub struct WavPackReader<'a> {
     format_version: FormatVersion,
     /// The `.wvc` correction stream of a hybrid file, if one is attached.
     correction: Option<Correction<'a>>,
+    /// Sparse, bounded index of the packet positions seen so far, built as packets are read.
+    index: SeekIndex,
+}
+
+/// The maximum number of entries of a `SeekIndex`.
+const MAX_INDEX_ENTRIES: usize = 4096;
+
+/// A packet position: the timestamp and the stream positions to resume reading from.
+#[derive(Clone, Copy)]
+struct IndexEntry {
+    ts: i64,
+    /// The position in the main stream.
+    pos: u64,
+    /// The position in the correction stream (0 if there is none).
+    wvc_pos: u64,
+}
+
+/// A sparse index of packet positions in ascending timestamp order, so a seek does not have to
+/// rescan the stream from its start. Entries are added while packets are read (including during
+/// the scan of a seek, which extends the index towards the target). The memory is bounded: when
+/// `MAX_INDEX_ENTRIES` is reached every other entry is dropped and the spacing is doubled.
+struct SeekIndex {
+    entries: Vec<IndexEntry>,
+    /// The minimum timestamp distance between two entries.
+    min_gap: i64,
+}
+
+impl SeekIndex {
+    fn new() -> Self {
+        SeekIndex { entries: Vec::new(), min_gap: 1 }
+    }
+
+    /// Returns `true` if a packet starting at `ts` should be indexed.
+    fn wants(&self, ts: i64) -> bool {
+        match self.entries.last() {
+            Some(last) => ts >= last.ts.saturating_add(self.min_gap),
+            None => true,
+        }
+    }
+
+    fn insert(&mut self, entry: IndexEntry) {
+        if !self.wants(entry.ts) {
+            return;
+        }
+        if self.entries.len() >= MAX_INDEX_ENTRIES {
+            let span = entry.ts - self.entries[0].ts;
+            let avg_gap = span / self.entries.len() as i64;
+            let mut keep = false;
+            self.entries.retain(|_| {
+                keep = !keep;
+                keep
+            });
+            self.min_gap = self.min_gap.saturating_mul(2).max(avg_gap.saturating_mul(2));
+            // The spacing may have grown beyond the new entry.
+            if !self.wants(entry.ts) {
+                return;
+            }
+        }
+        self.entries.push(entry);
+    }
+
+    /// The last entry that starts at or before `ts`.
+    fn find(&self, ts: i64) -> Option<IndexEntry> {
+        let n = self.entries.partition_point(|e| e.ts <= ts);
+        n.checked_sub(1).map(|i| self.entries[i])
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -305,6 +371,7 @@ impl<'s> WavPackReader<'s> {
             chapters: None,
             next_packet_ts: 0,
             restart_pos: data_start_pos,
+            index: SeekIndex::new(),
             format_version: FormatVersion::V3 {
                 num_channels: wav.num_channels,
                 bytes_per_sample: wav.bytes_per_sample,
@@ -439,6 +506,7 @@ impl<'s> WavPackReader<'s> {
             chapters: None,
             next_packet_ts: 0,
             restart_pos: header_pos,
+            index: SeekIndex::new(),
             format_version: FormatVersion::V4V5,
             correction: None,
         })
@@ -484,13 +552,29 @@ impl FormatReader for WavPackReader<'_> {
         if self.tracks.is_empty() {
             return decode_error("wavpack: no tracks");
         }
-        match &self.format_version {
+        let ts = self.next_packet_ts;
+        let wanted = self.index.wants(ts);
+        let entry = IndexEntry {
+            ts,
+            pos: self.reader.pos(),
+            wvc_pos: if wanted {
+                self.correction.as_ref().map_or(0, |c| c.resume_pos())
+            }
+            else {
+                0
+            },
+        };
+        let pkt = match &self.format_version {
             FormatVersion::V3 { num_channels, bytes_per_sample } => {
                 let (ch, bps) = (*num_channels, *bytes_per_sample);
                 self.next_packet_v3(ch, bps)
             }
             FormatVersion::V4V5 => self.next_packet_v4v5(),
+        }?;
+        if wanted && pkt.is_some() {
+            self.index.insert(entry);
         }
+        Ok(pkt)
     }
 
     fn metadata(&mut self) -> Metadata<'_> {
@@ -535,13 +619,25 @@ impl FormatReader for WavPackReader<'_> {
             return seek_error(SeekErrorKind::Unseekable);
         }
 
-        // No seek index is maintained; restart from the first block and linearly scan
-        // forward, rewinding to the start of the block that contains the desired timestamp.
-        self.reader.seek(SeekFrom::Start(self.restart_pos))?;
-        if let Some(correction) = self.correction.as_mut() {
-            correction.restart()?;
+        // Start from the closest indexed packet at or before the target (or the first block),
+        // and scan forward, rewinding to the start of the block that contains the desired
+        // timestamp. The scan extends the index.
+        match self.index.find(ts.get()) {
+            Some(e) => {
+                self.reader.seek(SeekFrom::Start(e.pos))?;
+                if let Some(correction) = self.correction.as_mut() {
+                    correction.restart_at(e.wvc_pos)?;
+                }
+                self.next_packet_ts = e.ts;
+            }
+            None => {
+                self.reader.seek(SeekFrom::Start(self.restart_pos))?;
+                if let Some(correction) = self.correction.as_mut() {
+                    correction.restart()?;
+                }
+                self.next_packet_ts = 0;
+            }
         }
-        self.next_packet_ts = 0;
 
         loop {
             let block_start = self.reader.pos();
@@ -738,6 +834,8 @@ struct Correction<'a> {
     restart_pos: u64,
     /// The next, not yet consumed, correction block.
     pending: Option<WvcBlock>,
+    /// The position in the stream where `pending` starts.
+    pending_pos: u64,
     /// The end of the correction stream (or an unreadable block) was reached.
     done: bool,
 }
@@ -746,6 +844,7 @@ struct Correction<'a> {
 struct CorrectionMark {
     pos: u64,
     pending: Option<WvcBlock>,
+    pending_pos: u64,
     done: bool,
 }
 
@@ -754,25 +853,42 @@ impl<'a> Correction<'a> {
     fn new(mut reader: MediaSourceStream<'a>) -> Result<Self> {
         find_next_block(&mut reader, 10000)?;
         let restart_pos = reader.pos();
-        Ok(Correction { reader, restart_pos, pending: None, done: false })
+        Ok(Correction { reader, restart_pos, pending: None, pending_pos: 0, done: false })
     }
 
     fn mark(&self) -> CorrectionMark {
-        CorrectionMark { pos: self.reader.pos(), pending: self.pending.clone(), done: self.done }
+        CorrectionMark {
+            pos: self.reader.pos(),
+            pending: self.pending.clone(),
+            pending_pos: self.pending_pos,
+            done: self.done,
+        }
     }
 
     fn restore(&mut self, mark: CorrectionMark) -> Result<()> {
         self.reader.seek(SeekFrom::Start(mark.pos))?;
         self.pending = mark.pending;
+        self.pending_pos = mark.pending_pos;
         self.done = mark.done;
         Ok(())
     }
 
     fn restart(&mut self) -> Result<()> {
-        self.reader.seek(SeekFrom::Start(self.restart_pos))?;
+        self.restart_at(self.restart_pos)
+    }
+
+    /// Resume reading at `pos`, a position returned by `resume_pos`.
+    fn restart_at(&mut self, pos: u64) -> Result<()> {
+        self.reader.seek(SeekFrom::Start(pos))?;
         self.pending = None;
         self.done = false;
         Ok(())
+    }
+
+    /// The position from which reading resumes with the same blocks left to match: the start of
+    /// the block read ahead (if any), otherwise the current position.
+    fn resume_pos(&self) -> u64 {
+        if self.pending.is_some() { self.pending_pos } else { self.reader.pos() }
     }
 
     /// Read the next block of the correction stream.
@@ -799,11 +915,15 @@ impl<'a> Correction<'a> {
     fn block_for(&mut self, wv: &Header) -> Option<WvcBlock> {
         loop {
             if self.pending.is_none() {
+                let start = self.reader.pos();
                 if self.done {
                     return None;
                 }
                 match self.read_block() {
-                    Some(block) => self.pending = Some(block),
+                    Some(block) => {
+                        self.pending = Some(block);
+                        self.pending_pos = start;
+                    }
                     None => {
                         self.done = true;
                         return None;
@@ -1756,6 +1876,30 @@ mod tests {
     }
 
     const SINGLE: u32 = INITIAL | FINAL | 0x1;
+
+    #[test]
+    fn verify_seek_index_is_bounded_and_sorted() {
+        let mut index = SeekIndex::new();
+        for i in 0..(MAX_INDEX_ENTRIES as i64 * 50) {
+            index.insert(IndexEntry { ts: i * 1000, pos: i as u64, wvc_pos: 0 });
+            assert!(index.entries.len() <= MAX_INDEX_ENTRIES);
+        }
+        assert!(index.entries.windows(2).all(|w| w[0].ts + index.min_gap / 2 <= w[1].ts));
+        assert_eq!(index.entries[0].ts, 0);
+
+        // The entry found is the last one at or before the timestamp.
+        let target = 123_456_789;
+        let e = index.find(target).unwrap();
+        assert!(e.ts <= target);
+        let next = index.entries.iter().find(|n| n.ts > target).unwrap();
+        assert!(next.ts > target && next.ts > e.ts);
+        assert!(index.find(-1).is_none());
+
+        // Entries are never inserted out of order (e.g. while rescanning after a seek).
+        let len = index.entries.len();
+        index.insert(IndexEntry { ts: 5, pos: 0, wvc_pos: 0 });
+        assert_eq!(index.entries.len(), len);
+    }
 
     /// A main block header.
     fn main_header(index: u64, block_samples: u32, flags: u32) -> Header {
