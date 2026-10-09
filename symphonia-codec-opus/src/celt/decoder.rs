@@ -228,6 +228,27 @@ impl CeltDecoder {
         let downsample = self.downsample as usize;
         let nd = n / downsample;
         let stride = self.decode_mem_stride();
+        if cc == 2 && downsample == 1 {
+            // Two independent recursive filters: run them in the same loop so their dependency
+            // chains overlap. Each channel performs exactly the same operations as below.
+            let (m0, m1) = (self.preemph_mem[0], self.preemph_mem[1]);
+            let (mut m0, mut m1) = (m0, m1);
+            let base0 = DECODE_BUFFER_SIZE - n;
+            let base1 = stride + DECODE_BUFFER_SIZE - n;
+            let src0 = &self.decode_mem[base0..base0 + n];
+            let src1 = &self.decode_mem[base1..base1 + n];
+            for ((o, &a), &b) in out[..2 * n].chunks_exact_mut(2).zip(src0).zip(src1) {
+                let t0 = a + m0;
+                m0 = PREEMPH_COEF0 * t0;
+                o[0] = t0 * SCALEOUT;
+                let t1 = b + m1;
+                m1 = PREEMPH_COEF0 * t1;
+                o[1] = t1 * SCALEOUT;
+            }
+            self.preemph_mem[0] = m0;
+            self.preemph_mem[1] = m1;
+            return;
+        }
         for c in 0..cc {
             let mut m = self.preemph_mem[c];
             let base = c * stride + (DECODE_BUFFER_SIZE - n);

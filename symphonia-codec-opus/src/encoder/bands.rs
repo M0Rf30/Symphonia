@@ -179,19 +179,27 @@ pub(crate) fn spreading_decision(
     }
 }
 
+/// Number of lanes the pulse search tests per block (see [`op_pvq_search`]).
+const SEARCH_BLOCK: usize = 8;
+
 /// C: `op_pvq_search_c` (float build). Finds the integer vector `iy` with `k` pulses that best
-/// matches the direction of `x`. `x` is overwritten (sign removed).
-fn op_pvq_search(x: &mut [f32], iy: &mut [i32], k: i32, n: usize) {
-    let mut y = [0f32; MAX_BAND_N];
-    let mut signx = [false; MAX_BAND_N];
-    let y = &mut y[..n];
+/// matches the direction of `x`. `x` is overwritten (sign removed). `CAP` is the capacity of the
+/// stack scratch buffers (>= `n`); [`alg_quant`] picks the smallest that fits so small bands do
+/// not pay for clearing a full-frame-sized buffer.
+fn op_pvq_search<const CAP: usize>(x: &mut [f32], iy: &mut [i32], k: i32, n: usize) {
+    debug_assert!(n <= CAP);
+    let mut y_buf = [0f32; CAP];
+    let mut signx_buf = [false; CAP];
+    let y = &mut y_buf[..n];
+    let signx = &mut signx_buf[..n];
+    let x = &mut x[..n];
+    let iy = &mut iy[..n];
 
     // Get rid of the sign.
     for j in 0..n {
         signx[j] = x[j] < 0.0;
         x[j] = x[j].abs();
         iy[j] = 0;
-        y[j] = 0.0;
     }
 
     let mut xy = 0.0f32;
@@ -200,12 +208,12 @@ fn op_pvq_search(x: &mut [f32], iy: &mut [i32], k: i32, n: usize) {
 
     // Do a pre-search by projecting on the pyramid.
     if k > (n as i32 >> 1) {
-        let mut sum: f32 = x[..n].iter().sum();
+        let mut sum: f32 = x.iter().sum();
         // If X is too small (or not finite), just replace it with a pulse at 0. 64 is an
         // approximation of infinity here.
         if !(sum > EPSILON && sum < 64.0) {
             x[0] = 1.0;
-            for v in x[1..n].iter_mut() {
+            for v in x[1..].iter_mut() {
                 *v = 0.0;
             }
             sum = 1.0;
@@ -213,12 +221,15 @@ fn op_pvq_search(x: &mut [f32], iy: &mut [i32], k: i32, n: usize) {
         // Using K+e with e < 1 guarantees we cannot get more than K pulses.
         let rcp = (k as f32 + 0.8) * (1.0 / sum);
         for j in 0..n {
-            iy[j] = (rcp * x[j]).floor() as i32;
-            y[j] = iy[j] as f32;
-            yy += y[j] * y[j];
-            xy += x[j] * y[j];
-            y[j] *= 2.0;
-            pulses_left -= iy[j];
+            // `rcp * x[j]` is finite and non-negative here (`x` was made non-negative above and
+            // `sum` is bounded), so truncation equals `floor`.
+            let q = (rcp * x[j]) as i32;
+            iy[j] = q;
+            let yj = q as f32;
+            yy += yj * yj;
+            xy += x[j] * yj;
+            y[j] = yj * 2.0;
+            pulses_left -= q;
         }
     }
     debug_assert!(pulses_left >= 0);
@@ -241,7 +252,38 @@ fn op_pvq_search(x: &mut [f32], iy: &mut [i32], k: i32, n: usize) {
         let ryy = yy + y[0];
         let mut best_num = rxy * rxy;
         let mut best_den = ryy;
-        for j in 1..n {
+
+        // The sequential scan updates `best_*` rarely, so test a whole block of candidates
+        // against the current best with branch-free (vectorisable) arithmetic and fall back to
+        // the exact scalar scan only for blocks that contain an improvement. Candidates are
+        // evaluated with the same expressions in the same order as the plain loop, and `best_*`
+        // cannot change before the first improving candidate, so the result is identical.
+        let mut j = 1usize;
+        while j + SEARCH_BLOCK <= n {
+            let xb = &x[j..j + SEARCH_BLOCK];
+            let yb = &y[j..j + SEARCH_BLOCK];
+            let mut any = false;
+            for l in 0..SEARCH_BLOCK {
+                let rxy = xy + xb[l];
+                let ryy = yy + yb[l];
+                let num = rxy * rxy;
+                any |= best_den * num > ryy * best_num;
+            }
+            if any {
+                for l in 0..SEARCH_BLOCK {
+                    let rxy = xy + xb[l];
+                    let ryy = yy + yb[l];
+                    let num = rxy * rxy;
+                    if best_den * num > ryy * best_num {
+                        best_den = ryy;
+                        best_num = num;
+                        best_id = j + l;
+                    }
+                }
+            }
+            j += SEARCH_BLOCK;
+        }
+        while j < n {
             let rxy = xy + x[j];
             let ryy = yy + y[j];
             let num = rxy * rxy;
@@ -251,6 +293,7 @@ fn op_pvq_search(x: &mut [f32], iy: &mut [i32], k: i32, n: usize) {
                 best_num = num;
                 best_id = j;
             }
+            j += 1;
         }
         xy += x[best_id];
         yy += y[best_id];
@@ -266,14 +309,31 @@ fn op_pvq_search(x: &mut [f32], iy: &mut [i32], k: i32, n: usize) {
     }
 }
 
+/// [`alg_quant`] with a `CAP`-sized pulse-vector scratch buffer.
+fn alg_quant_cap<const CAP: usize>(
+    x: &mut [f32],
+    n: i32,
+    k: i32,
+    spread: i32,
+    blocks: i32,
+    enc: &mut RangeEncoder,
+) {
+    let mut iy = [0i32; CAP];
+    let iy = &mut iy[..n as usize];
+    exp_rotation(x, n, 1, blocks, k, spread);
+    op_pvq_search::<CAP>(x, iy, k, n as usize);
+    encode_pulses(iy, n, k, enc);
+}
+
 /// C: `alg_quant` without resynthesis: PVQ-encodes the `n`-dimensional band `x` with `k` pulses.
 fn alg_quant(x: &mut [f32], n: i32, k: i32, spread: i32, blocks: i32, enc: &mut RangeEncoder) {
     debug_assert!(k > 0 && n > 1 && n as usize <= MAX_BAND_N);
-    let mut iy = [0i32; MAX_BAND_N];
-    let iy = &mut iy[..n as usize];
-    exp_rotation(x, n, 1, blocks, k, spread);
-    op_pvq_search(x, iy, k, n as usize);
-    encode_pulses(iy, n, k, enc);
+    match n as usize {
+        0..=16 => alg_quant_cap::<16>(x, n, k, spread, blocks, enc),
+        17..=48 => alg_quant_cap::<48>(x, n, k, spread, blocks, enc),
+        49..=160 => alg_quant_cap::<160>(x, n, k, spread, blocks, enc),
+        _ => alg_quant_cap::<MAX_BAND_N>(x, n, k, spread, blocks, enc),
+    }
 }
 
 /// C: `intensity_stereo` (float build): downmixes `x`/`y` into `x` weighted by the channel
@@ -759,7 +819,7 @@ mod tests {
             }
             let mut iy = vec![0i32; n];
             let mut xs = x.clone();
-            op_pvq_search(&mut xs, &mut iy, k, n);
+            op_pvq_search::<MAX_BAND_N>(&mut xs, &mut iy, k, n);
             assert_eq!(iy.iter().map(|v| v.abs()).sum::<i32>(), k, "n={n} k={k}");
             // Signs follow the input.
             for j in 0..n {
@@ -780,10 +840,10 @@ mod tests {
     fn pvq_search_handles_degenerate_input() {
         let mut x = vec![0.0f32; 8];
         let mut iy = vec![0i32; 8];
-        op_pvq_search(&mut x, &mut iy, 6, 8);
+        op_pvq_search::<MAX_BAND_N>(&mut x, &mut iy, 6, 8);
         assert_eq!(iy.iter().map(|v| v.abs()).sum::<i32>(), 6);
         let mut x = vec![f32::NAN; 8];
-        op_pvq_search(&mut x, &mut iy, 3, 8);
+        op_pvq_search::<MAX_BAND_N>(&mut x, &mut iy, 3, 8);
         assert_eq!(iy.iter().map(|v| v.abs()).sum::<i32>(), 3);
     }
 

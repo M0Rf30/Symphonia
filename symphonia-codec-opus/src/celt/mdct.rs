@@ -383,49 +383,51 @@ impl MdctLookup {
         let base = overlap / 2;
 
         // Pre-rotate, storing directly in bit-reversed order (C swaps real/imag because an FFT,
-        // not an IFFT, is used).
+        // not an IFFT, is used) into a stack buffer that the FFT then works on in place.
+        let mut scratch = [Complex { r: 0.0, i: 0.0 }; FftState::MAX_NFFT];
+        let cbuf = &mut scratch[..n4];
         {
+            let t_re = &trig[..n4];
+            let t_im = &trig[n4..2 * n4];
             let mut xp1 = 0usize;
             let mut xp2 = stride * (n2 - 1);
-            for i in 0..n4 {
+            for (i, (&t0, &t1)) in t_re.iter().zip(t_im).enumerate() {
                 let rev = st.bitrev_at(i) as usize;
                 let x1 = input[xp1];
                 let x2 = input[xp2];
-                let yr = x2 * trig[i] + x1 * trig[n4 + i];
-                let yi = x1 * trig[i] - x2 * trig[n4 + i];
-                out[base + 2 * rev + 1] = yr;
-                out[base + 2 * rev] = yi;
+                let yr = x2 * t0 + x1 * t1;
+                let yi = x1 * t0 - x2 * t1;
+                cbuf[rev] = Complex { r: yi, i: yr };
                 xp1 += 2 * stride;
                 xp2 = xp2.wrapping_sub(2 * stride);
             }
         }
 
-        st.fft_impl_interleaved(&mut out[base..base + n2]);
+        st.fft_impl(cbuf);
 
-        // Post-rotate and de-shuffle from both ends of the buffer at once, in place.
+        // Post-rotate and de-shuffle from both ends of the buffer at once. C does this in place
+        // on `out`; reading the FFT result from the stack buffer instead gives the same values.
         {
-            let mut yp0 = base;
-            let mut yp1 = base + n2 - 2;
+            let out = &mut out[base..base + n2];
             for i in 0..(n4 + 1) / 2 {
-                let re = out[yp0 + 1];
-                let im = out[yp0];
+                let k2 = n4 - 1 - i;
+                let re = cbuf[i].i;
+                let im = cbuf[i].r;
+                let re2 = cbuf[k2].i;
+                let im2 = cbuf[k2].r;
                 let t0 = trig[i];
                 let t1 = trig[n4 + i];
                 let yr = re * t0 + im * t1;
                 let yi = re * t1 - im * t0;
-                let re2 = out[yp1 + 1];
-                let im2 = out[yp1];
-                out[yp0] = yr;
-                out[yp1 + 1] = yi;
+                out[2 * i] = yr;
+                out[2 * k2 + 1] = yi;
 
                 let t0 = trig[n4 - i - 1];
                 let t1 = trig[n2 - i - 1];
                 let yr = re2 * t0 + im2 * t1;
                 let yi = re2 * t1 - im2 * t0;
-                out[yp1] = yr;
-                out[yp0 + 1] = yi;
-                yp0 += 2;
-                yp1 -= 2;
+                out[2 * k2] = yr;
+                out[2 * i + 1] = yi;
             }
         }
 
@@ -448,18 +450,36 @@ impl MdctLookup {
         }
     }
 
-    /// C: `clt_mdct_forward_c`, needed only by round-trip unit tests (CELT decode never calls
-    /// the forward transform). `in_` is trashed, matching the C calling convention. Not on the
-    /// decode hot path, so heap-allocated scratch buffers are acceptable here.
+    /// C: `clt_mdct_forward_c` (used by the encoder and the round-trip unit tests; CELT decode
+    /// never calls the forward transform). `in_` is trashed, matching the C calling convention.
+    /// Scratch space lives on the stack, sized for the transform at hand.
     pub fn forward(&self, in_: &mut [f32], out: &mut [f32], window: &[f32], overlap: i32, shift: i32) {
+        match shift {
+            0 => self.forward_impl::<960, 480>(in_, out, window, overlap, shift),
+            1 => self.forward_impl::<480, 240>(in_, out, window, overlap, shift),
+            2 => self.forward_impl::<240, 120>(in_, out, window, overlap, shift),
+            _ => self.forward_impl::<120, 60>(in_, out, window, overlap, shift),
+        }
+    }
+
+    fn forward_impl<const N2: usize, const N4: usize>(
+        &self,
+        in_: &mut [f32],
+        out: &mut [f32],
+        window: &[f32],
+        overlap: i32,
+        shift: i32,
+    ) {
         let (n, trig) = self.trig_for_shift(shift);
         let n2 = n >> 1;
         let n4 = n >> 2;
+        debug_assert!(n2 == N2 && n4 == N4);
         let overlap = overlap as usize;
         let st = self.kfft[shift as usize];
         let scale = st.scale();
 
-        let mut f = vec![0f32; n2];
+        let mut f_buf = [0f32; N2];
+        let f = &mut f_buf[..];
         // Window, shuffle, fold: consider the input as four blocks [a, b, c, d].
         {
             let half_overlap = overlap / 2;
@@ -507,27 +527,35 @@ impl MdctLookup {
         }
 
         // Pre-rotation.
-        let mut f2 = vec![Complex::default(); n4];
-        for i in 0..n4 {
-            let t0 = trig[i];
-            let t1 = trig[n4 + i];
-            let re = f[2 * i];
-            let im = f[2 * i + 1];
-            let yr = re * t0 - im * t1;
-            let yi = im * t0 + re * t1;
-            let rev = st.bitrev_at(i) as usize;
-            f2[rev] = Complex { r: yr * scale, i: yi * scale };
+        let mut f2_buf = [Complex::default(); N4];
+        let f2 = &mut f2_buf[..];
+        {
+            let t_re = &trig[..N4];
+            let t_im = &trig[N4..2 * N4];
+            for (i, (pair, (&t0, &t1))) in f.chunks_exact(2).zip(t_re.iter().zip(t_im)).enumerate() {
+                let re = pair[0];
+                let im = pair[1];
+                let yr = re * t0 - im * t1;
+                let yi = im * t0 + re * t1;
+                let rev = st.bitrev_at(i) as usize;
+                f2[rev] = Complex { r: yr * scale, i: yi * scale };
+            }
         }
 
-        st.fft_impl(&mut f2);
+        st.fft_impl(f2);
 
         // Post-rotate. C: `yp1 = out` (stride=1, advancing by 2 each iter => even indices
         // `2*i`), `yp2 = out+(N2-1)` (decrementing by 2 each iter => odd indices `N2-1-2*i`).
-        for i in 0..n4 {
-            let yr = f2[i].i * trig[n4 + i] - f2[i].r * trig[i];
-            let yi = f2[i].r * trig[n4 + i] + f2[i].i * trig[i];
-            out[2 * i] = yr;
-            out[n2 - 1 - 2 * i] = yi;
+        {
+            let t_re = &trig[..N4];
+            let t_im = &trig[N4..2 * N4];
+            let out = &mut out[..N2];
+            for (i, (c, (&t0, &t1))) in f2.iter().zip(t_re.iter().zip(t_im)).enumerate() {
+                let yr = c.i * t1 - c.r * t0;
+                let yi = c.r * t1 + c.i * t0;
+                out[2 * i] = yr;
+                out[N2 - 1 - 2 * i] = yi;
+            }
         }
     }
 }

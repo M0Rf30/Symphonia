@@ -483,9 +483,12 @@ pub(crate) fn dynalloc_analysis(
     const LSB_DEPTH: i32 = 24;
     let nb = m.nb_ebands as usize;
     let e_bands = m.e_bands;
-    let mut follower = vec![0.0f32; channels * nb];
-    let mut noise_floor = vec![0.0f32; nb];
-    let mut band_log_e3 = vec![0.0f32; nb];
+    let mut follower_buf = [0.0f32; 42];
+    let follower = &mut follower_buf[..channels * nb];
+    let mut noise_floor_buf = [0.0f32; 21];
+    let noise_floor = &mut noise_floor_buf[..nb];
+    let mut band_log_e3_buf = [0.0f32; 21];
+    let band_log_e3 = &mut band_log_e3_buf[..nb];
     let mut tot_boost = 0i32;
     offsets[..nb].fill(0);
 
@@ -504,8 +507,10 @@ pub(crate) fn dynalloc_analysis(
     {
         // A really simple masking model, to avoid taking completely masked bands into account
         // when computing the spreading decision.
-        let mut mask = vec![0.0f32; nb];
-        let mut sig = vec![0.0f32; nb];
+        let mut mask_buf = [0.0f32; 21];
+        let mask = &mut mask_buf[..nb];
+        let mut sig_buf = [0.0f32; 21];
+        let sig = &mut sig_buf[..nb];
         for i in 0..end {
             mask[i] = band_log_e[i] - noise_floor[i];
         }

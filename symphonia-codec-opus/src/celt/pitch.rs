@@ -15,8 +15,8 @@ use crate::celt::lpc::{celt_autocorr, celt_lpc};
 /// C: `celt_inner_prod_c`.
 pub(crate) fn celt_inner_prod(x: &[f32], y: &[f32], n: usize) -> f32 {
     let mut sum = 0.0f32;
-    for i in 0..n {
-        sum += x[i] * y[i];
+    for (&a, &b) in x[..n].iter().zip(&y[..n]) {
+        sum += a * b;
     }
     sum
 }
@@ -25,17 +25,43 @@ pub(crate) fn celt_inner_prod(x: &[f32], y: &[f32], n: usize) -> f32 {
 pub(crate) fn dual_inner_prod(x: &[f32], y01: &[f32], y02: &[f32], n: usize) -> (f32, f32) {
     let mut xy1 = 0.0f32;
     let mut xy2 = 0.0f32;
-    for i in 0..n {
-        xy1 += x[i] * y01[i];
-        xy2 += x[i] * y02[i];
+    for ((&a, &b), &c) in x[..n].iter().zip(&y01[..n]).zip(&y02[..n]) {
+        xy1 += a * b;
+        xy2 += a * c;
     }
     (xy1, xy2)
 }
 
 /// C: `celt_pitch_xcorr_c` (float build: plain cross-correlation, no `maxcorr` tracking).
+///
+/// Like libopus' `xcorr_kernel`, four consecutive lags are accumulated together; every lag still
+/// sums its products in increasing sample order, so each result is identical to a plain
+/// [`celt_inner_prod`] over that lag.
 pub(crate) fn celt_pitch_xcorr(x: &[f32], y: &[f32], xcorr: &mut [f32], len: usize, max_pitch: usize) {
-    for i in 0..max_pitch {
+    let x = &x[..len];
+    let mut i = 0usize;
+    while i + 4 <= max_pitch {
+        let y0 = &y[i..i + len];
+        let y1 = &y[i + 1..i + 1 + len];
+        let y2 = &y[i + 2..i + 2 + len];
+        let y3 = &y[i + 3..i + 3 + len];
+        let (mut s0, mut s1, mut s2, mut s3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+        for j in 0..len {
+            let xj = x[j];
+            s0 += xj * y0[j];
+            s1 += xj * y1[j];
+            s2 += xj * y2[j];
+            s3 += xj * y3[j];
+        }
+        xcorr[i] = s0;
+        xcorr[i + 1] = s1;
+        xcorr[i + 2] = s2;
+        xcorr[i + 3] = s3;
+        i += 4;
+    }
+    while i < max_pitch {
         xcorr[i] = celt_inner_prod(x, &y[i..], len);
+        i += 1;
     }
 }
 

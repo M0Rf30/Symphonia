@@ -194,13 +194,16 @@ impl CeltEncoder {
         else {
             (1usize, FRAME_SIZE, mode.max_lm - LM)
         };
-        let mut win = vec![0f32; nn + overlap];
-        let mut tmp = vec![0f32; nn];
+        let mut win_buf = [0f32; FRAME_SIZE + 120];
+        let mut tmp_buf = [0f32; FRAME_SIZE];
+        debug_assert!(overlap <= 120);
+        let win = &mut win_buf[..nn + overlap];
+        let tmp = &mut tmp_buf[..nn];
         for c in 0..self.cfg.channels {
             for bi in 0..b {
                 let off = c * (FRAME_SIZE + overlap) + bi * nn;
                 win.copy_from_slice(&input[off..off + nn + overlap]);
-                MDCT_LOOKUP_960.forward(&mut win, &mut tmp, mode.window, mode.overlap, shift);
+                MDCT_LOOKUP_960.forward(win, tmp, mode.window, mode.overlap, shift);
                 // Interleave the sub-frames while doing the MDCTs.
                 for (k, &v) in tmp.iter().enumerate() {
                     out[bi + c * nn * b + k * b] = v;
@@ -339,15 +342,18 @@ impl CeltEncoder {
         }
 
         let mut freq = vec![0f32; cc * n];
-        let mut band_e = vec![0f32; cc * nb];
-        let mut band_log_e = vec![0f32; cc * nb];
-        let mut band_log_e2 = vec![0f32; cc * nb];
+        let mut band_e_buf = [0f32; 42];
+        let band_e = &mut band_e_buf[..cc * nb];
+        let mut band_log_e_buf = [0f32; 42];
+        let band_log_e = &mut band_log_e_buf[..cc * nb];
+        let mut band_log_e2_buf = [0f32; 42];
+        let band_log_e2 = &mut band_log_e2_buf[..cc * nb];
 
         let second_mdct = short_blocks && cfg.complexity >= 8;
         if second_mdct {
             self.compute_mdcts(false, &input, &mut freq);
-            compute_band_energies(mode, &freq, &mut band_e, eff_end, ci, LM);
-            amp2_log2(mode, eff_end, end, &band_e, &mut band_log_e2, ci);
+            compute_band_energies(mode, &freq, &mut *band_e, eff_end, ci, LM);
+            amp2_log2(mode, eff_end, end, &band_e, &mut *band_log_e2, ci);
             for c in 0..cc {
                 for i in 0..end as usize {
                     band_log_e2[nb * c + i] += 0.5 * LM as f32;
@@ -355,8 +361,8 @@ impl CeltEncoder {
             }
         }
         self.compute_mdcts(short_blocks, &input, &mut freq);
-        compute_band_energies(mode, &freq, &mut band_e, eff_end, ci, LM);
-        amp2_log2(mode, eff_end, end, &band_e, &mut band_log_e, ci);
+        compute_band_energies(mode, &freq, &mut *band_e, eff_end, ci, LM);
+        amp2_log2(mode, eff_end, end, &band_e, &mut *band_log_e, ci);
 
         // Temporal VBR.
         let temporal_vbr = {
@@ -396,8 +402,8 @@ impl CeltEncoder {
             is_transient = true;
             short_blocks = true;
             self.compute_mdcts(true, &input, &mut freq);
-            compute_band_energies(mode, &freq, &mut band_e, eff_end, ci, LM);
-            amp2_log2(mode, eff_end, end, &band_e, &mut band_log_e, ci);
+            compute_band_energies(mode, &freq, &mut *band_e, eff_end, ci, LM);
+            amp2_log2(mode, eff_end, end, &band_e, &mut *band_log_e, ci);
             // Compensate for the scaling of short vs long MDCTs.
             for c in 0..cc {
                 for i in 0..end as usize {
@@ -417,9 +423,12 @@ impl CeltEncoder {
 
         let enable_tf_analysis = effective_bytes >= 15 * ci && cfg.complexity >= 2;
 
-        let mut offsets = vec![0i32; nb];
-        let mut importance = vec![0i32; nb];
-        let mut spread_weight = vec![0i32; nb];
+        let mut offsets_buf = [0i32; 21];
+        let offsets = &mut offsets_buf[..nb];
+        let mut importance_buf = [0i32; 21];
+        let importance = &mut importance_buf[..nb];
+        let mut spread_weight_buf = [0i32; 21];
+        let spread_weight = &mut spread_weight_buf[..nb];
         let dyn_alloc = dynalloc_analysis(
             mode,
             &band_log_e,
@@ -427,17 +436,18 @@ impl CeltEncoder {
             start as usize,
             end as usize,
             cc,
-            &mut offsets,
+            &mut *offsets,
             is_transient,
             cfg.vbr,
             cfg.constrained_vbr,
             LM,
             effective_bytes,
-            &mut importance,
-            &mut spread_weight,
+            &mut *importance,
+            &mut *spread_weight,
         );
 
-        let mut tf_res = vec![0i32; nb];
+        let mut tf_res_buf = [0i32; 21];
+        let tf_res = &mut tf_res_buf[..nb];
         let tf_select;
         if enable_tf_analysis {
             let lambda = 80.max(20480 / effective_bytes + 2);
@@ -445,7 +455,7 @@ impl CeltEncoder {
                 mode,
                 eff_end as usize,
                 is_transient,
-                &mut tf_res,
+                &mut *tf_res,
                 lambda,
                 &x,
                 n,
@@ -465,7 +475,8 @@ impl CeltEncoder {
             tf_select = 0;
         }
 
-        let mut error = vec![0f32; cc * nb];
+        let mut error_buf = [0f32; 42];
+        let error = &mut error_buf[..cc * nb];
         for c in 0..cc {
             for i in start as usize..end as usize {
                 // When the energy is stable, slightly bias energy quantisation towards the
@@ -485,7 +496,7 @@ impl CeltEncoder {
             &band_log_e,
             &mut self.old_band_e,
             total_bits as u32,
-            &mut error,
+            &mut *error,
             &mut enc,
             ci,
             LM as usize,
@@ -495,7 +506,15 @@ impl CeltEncoder {
             cfg.complexity >= 4,
         );
 
-        tf_encode(start as usize, end as usize, is_transient, &mut tf_res, LM, tf_select, &mut enc);
+        tf_encode(
+            start as usize,
+            end as usize,
+            is_transient,
+            &mut *tf_res,
+            LM,
+            tf_select,
+            &mut enc,
+        );
 
         if enc.tell() + 4 <= total_bits {
             if short_blocks || cfg.complexity < 3 || nb_available_bytes < 10 * ci {
@@ -520,8 +539,9 @@ impl CeltEncoder {
             self.spread_decision = SPREAD_NORMAL;
         }
 
-        let mut cap = vec![0i32; nb];
-        init_caps(mode, &mut cap, LM, ci);
+        let mut cap_buf = [0i32; 21];
+        let cap = &mut cap_buf[..nb];
+        init_caps(mode, &mut *cap, LM, ci);
 
         let mut dynalloc_logp = 6i32;
         let total_bits_frac = total_bits << BITRES;
@@ -666,9 +686,12 @@ impl CeltEncoder {
         }
 
         // Bit allocation.
-        let mut fine_quant = vec![0i32; nb];
-        let mut pulses = vec![0i32; nb];
-        let mut fine_priority = vec![0i32; nb];
+        let mut fine_quant_buf = [0i32; 21];
+        let fine_quant = &mut fine_quant_buf[..nb];
+        let mut pulses_buf = [0i32; 21];
+        let pulses = &mut pulses_buf[..nb];
+        let mut fine_priority_buf = [0i32; 21];
+        let fine_priority = &mut fine_priority_buf[..nb];
 
         // bits = packet size - where we are - safety.
         let mut bits = ((nb_compressed_bytes * 8) << BITRES) - enc.tell_frac() - 1;
@@ -695,9 +718,9 @@ impl CeltEncoder {
                 LM,
                 ci,
                 &mut coder,
-                &mut pulses,
-                &mut fine_quant,
-                &mut fine_priority,
+                &mut *pulses,
+                &mut *fine_quant,
+                &mut *fine_priority,
             )
         };
         self.intensity = alloc.intensity;
@@ -715,7 +738,7 @@ impl CeltEncoder {
             start,
             end,
             &mut self.old_band_e,
-            &mut error,
+            &mut *error,
             &fine_quant,
             &mut enc,
             ci,
@@ -757,7 +780,7 @@ impl CeltEncoder {
             start,
             end,
             &mut self.old_band_e,
-            &mut error,
+            &mut *error,
             &fine_quant,
             &fine_priority,
             nb_compressed_bytes * 8 - enc.tell(),
