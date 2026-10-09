@@ -241,7 +241,8 @@ pub(crate) fn build_asc(
 /// (hierarchically, ISO/IEC 14496-3 §1.6.2.1) SBR with the output sample rate `out_rate`, and
 /// parametric stereo if `ps` is true.
 ///
-/// Returns `None` if `asc` is not that of an AAC-LC stream.
+/// Returns `None` if `asc` is not that of an AAC-LC stream, or has a channel layout that is a
+/// program config element with fields that this does not preserve (the core coder delay).
 pub(crate) fn with_explicit_sbr(asc: &[u8], out_rate: u32, ps: bool) -> Option<Box<[u8]>> {
     let mut bs = BitReaderLtr::new(asc);
 
@@ -258,9 +259,25 @@ pub(crate) fn with_explicit_sbr(asc: &[u8], out_rate: u32, ps: bool) -> Option<B
     let escaped_rate = if sf_index == 15 { Some(bs.read_bits_leq32(24).ok()?) } else { None };
     let channel_config = bs.read_bits_leq32(4).ok()?;
 
-    // The byte alignment of a program config element depends on its position.
+    // The byte alignment of a program config element depends on its position in the config, which
+    // the hierarchical signalling moves: write the config again.
     if channel_config == 0 {
-        return None;
+        // frameLengthFlag, dependsOnCoreCoder, and extensionFlag are all clear.
+        if bs.read_bits_leq32(3).ok()? != 0 {
+            return None;
+        }
+
+        let pce = ProgramConfig::read(&mut bs).ok()?;
+
+        let core_rate = match escaped_rate {
+            Some(rate) => rate,
+            None => match get_mpeg4_audio_sample_rate_by_index(sf_index) {
+                Mpeg4AudioSampleRate::SampleRate(rate) => rate,
+                _ => return None,
+            },
+        };
+
+        return Some(build_asc(2, core_rate, 0, Some(&pce), Some((out_rate, ps))));
     }
 
     let mut bw = BitWriter::default();
@@ -318,6 +335,40 @@ mod tests {
         assert!(!asc.ps_present);
         assert_eq!(asc.output_sample_rate(), 44_100);
         assert_eq!(asc.output_channels().map(|c| c.count()), Some(2));
+    }
+
+    #[test]
+    fn explicit_sbr_asc_keeps_the_program_config() {
+        // The byte alignment of the program config element moves with the hierarchical signalling,
+        // which a 5.1 layout with a long program config makes sure to be observed.
+        let pce = ProgramConfig {
+            front_is_cpe: vec![false, true],
+            back_is_cpe: vec![true],
+            num_lfe: 1,
+            ..stereo_pce()
+        };
+
+        for (rate, ps) in [(44_100, false), (48_000, false)] {
+            let plain = build_asc(2, rate / 2, 0, Some(&pce), None);
+            let asc =
+                AudioSpecificConfig::read(&with_explicit_sbr(&plain, rate, ps).unwrap()).unwrap();
+
+            assert!(asc.sbr_present);
+            assert_eq!(asc.sample_rate, rate / 2);
+            assert_eq!(asc.output_sample_rate(), rate);
+            assert_eq!(asc.channels, Some(layouts_5p1()));
+            assert_eq!(
+                asc.channel_elements,
+                AudioSpecificConfig::read(&plain).unwrap().channel_elements
+            );
+        }
+
+        // A stereo layout with a program config.
+        let plain = build_asc(2, 22_050, 0, Some(&stereo_pce()), None);
+        let asc =
+            AudioSpecificConfig::read(&with_explicit_sbr(&plain, 44_100, false).unwrap()).unwrap();
+        assert_eq!(asc.channels, Some(symphonia_core::audio::layouts::CHANNEL_LAYOUT_STEREO));
+        assert_eq!(asc.output_sample_rate(), 44_100);
     }
 
     #[test]

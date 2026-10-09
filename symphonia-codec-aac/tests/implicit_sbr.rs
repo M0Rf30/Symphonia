@@ -34,6 +34,13 @@ impl BitWriter {
             self.n_bits += 1;
         }
     }
+
+    /// Pad with zero bits to the next byte boundary.
+    fn align(&mut self) {
+        while self.n_bits % 8 != 0 {
+            self.put(0, 1);
+        }
+    }
 }
 
 fn mss_of(data: &[u8]) -> MediaSourceStream<'static> {
@@ -178,8 +185,10 @@ fn adts_decode_with_detected_sbr_equals_lazy_detection() {
 }
 
 /// Builds a LOAS stream (audioMuxVersion 0, one raw data block per frame) of AAC-LC at 22.05 kHz
-/// that does not signal SBR, carrying the raw data blocks.
-fn loas_stream_22k(channel_config: u32, blocks: &[Vec<u8>]) -> Vec<u8> {
+/// that does not signal SBR, carrying the raw data blocks. `channel_config` is the channel
+/// configuration of the audio specific config, or 0 for the channel layout of a program config
+/// with front elements `front` (`true` for a channel pair element).
+fn loas_stream_22k(channel_config: u32, front: &[bool], blocks: &[Vec<u8>]) -> Vec<u8> {
     let mut stream = vec![];
 
     for (i, block) in blocks.iter().enumerate() {
@@ -194,11 +203,34 @@ fn loas_stream_22k(channel_config: u32, blocks: &[Vec<u8>]) -> Vec<u8> {
             bw.put(0, 6); // numSubFrames
             bw.put(0, 4); // numProgram - 1
             bw.put(0, 3); // numLayer - 1
-            // AudioSpecificConfig: AAC-LC, 22.05 kHz.
+            // AudioSpecificConfig: AAC-LC, 22.05 kHz. It starts at a byte boundary of the frame.
             bw.put(2, 5);
             bw.put(7, 4);
             bw.put(channel_config, 4);
             bw.put(0, 3);
+
+            if channel_config == 0 {
+                // program_config_element(): front elements only, no mixdown, no comment.
+                bw.put(0, 4); // element_instance_tag
+                bw.put(1, 2); // object_type: AAC-LC
+                bw.put(7, 4); // sampling_frequency_index
+                bw.put(front.len() as u32, 4);
+                bw.put(0, 4); // num_side_channel_elements
+                bw.put(0, 4); // num_back_channel_elements
+                bw.put(0, 2); // num_lfe_channel_elements
+                bw.put(0, 3); // num_assoc_data_elements
+                bw.put(0, 4); // num_valid_cc_elements
+                bw.put(0, 3); // mixdown flags
+
+                for (tag, &is_cpe) in front.iter().enumerate() {
+                    bw.put(u32::from(is_cpe), 1);
+                    bw.put(tag as u32, 4);
+                }
+
+                bw.align(); // relative to the start of the audio specific config
+                bw.put(0, 8); // comment_field_bytes
+            }
+
             bw.put(0, 3); // frameLengthType
             bw.put(0xff, 8); // latmBufferFullness
             bw.put(0, 1); // otherDataPresent
@@ -243,7 +275,7 @@ fn loas_reports_implicit_sbr_and_ps_in_params_and_timeline() {
         let adts = AdtsReader::try_probe_new(mss_of(data), Default::default()).unwrap();
         let (_, adts_params) = track_params(adts.as_ref());
 
-        let stream = loas_stream_22k(channel_config, &blocks);
+        let stream = loas_stream_22k(channel_config, &[], &blocks);
         let mut reader = LoasReader::try_probe_new(mss_of(&stream), Default::default()).unwrap();
         let (track, params) = track_params(reader.as_ref());
 
@@ -272,9 +304,48 @@ fn loas_reports_implicit_sbr_and_ps_in_params_and_timeline() {
     }
 }
 
+/// The same as for a predefined channel configuration, when the channel layout is that of a
+/// program config element (channel configuration 0): the explicit signalling of the SBR that is
+/// detected has to rewrite the program config, whose byte alignment moves.
+#[test]
+fn loas_with_a_program_config_reports_implicit_sbr_and_ps() {
+    for (name, data, front, channels) in [
+        ("he-aac v1 stereo", HE_AAC_V1_STEREO, vec![true], 2),
+        ("he-aac v1 mono", HE_AAC_V1_MONO, vec![false], 1),
+        ("he-aac v2", HE_AAC_V2, vec![false], 2),
+    ] {
+        let blocks = blocks_of(data);
+
+        let adts = AdtsReader::try_probe_new(mss_of(data), Default::default()).unwrap();
+        let (_, adts_params) = track_params(adts.as_ref());
+
+        let stream = loas_stream_22k(0, &front, &blocks);
+        let mut reader = LoasReader::try_probe_new(mss_of(&stream), Default::default()).unwrap();
+        let (track, params) = track_params(reader.as_ref());
+
+        assert_eq!(params.sample_rate, Some(44_100), "{name}");
+        assert_eq!(params.channels.as_ref().map(|c| c.count()), Some(channels), "{name}");
+        assert_eq!(track.time_base.map(|tb| tb.denom.get()), Some(44_100), "{name}");
+
+        let packets = read_packets(reader.as_mut());
+        assert_eq!(packets.len(), blocks.len(), "{name}");
+        assert!(packets.iter().all(|(_, dur, _)| *dur == 2048), "{name}");
+
+        let mut decoder = AacDecoder::try_new(&params, &AudioDecoderOptions::default()).unwrap();
+        let (formats, from_loas) = decode_packets(&mut decoder, &packets);
+        assert!(formats.iter().all(|&f| f == (44_100, channels, 2048)), "{name}");
+
+        let mut decoder =
+            AacDecoder::try_new(&adts_params, &AudioDecoderOptions::default()).unwrap();
+        let (_, from_adts) = decode_packets(&mut decoder, &packets);
+
+        assert_eq!(from_loas, from_adts, "{name}");
+    }
+}
+
 #[test]
 fn loas_without_sbr_keeps_the_core_rate_and_timeline() {
-    let stream = loas_stream_22k(1, &blocks_of(AAC_LC_22K_MONO));
+    let stream = loas_stream_22k(1, &[], &blocks_of(AAC_LC_22K_MONO));
     let mut reader = LoasReader::try_probe_new(mss_of(&stream), Default::default()).unwrap();
     let (track, params) = track_params(reader.as_ref());
 
