@@ -510,6 +510,99 @@ fn opus_family_255_and_2() {
     }
 }
 
+/// Mapping family 3 (RFC 8486 ambisonics with a demixing matrix): probed, decoded to discrete
+/// ambisonic channels, and equal to libopus' projection decoder (`opus_projection_decode_float`,
+/// the golden frames of `symphonia-codec-opus/tests/data`, which start at frame 1920 of the
+/// decoder output, i.e. 1920 - pre-skip of the timeline).
+#[test]
+fn opus_family3_ambisonics() {
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../symphonia-codec-opus/tests/data");
+
+    for (name, channels) in [("foa", 4usize), ("o2", 9), ("o3", 16)] {
+        let path = data.join(format!("family3_{name}.opus"));
+
+        let format = open(&path);
+        let track = format.default_track(TrackType::Audio).unwrap();
+        let params = track.codec_params.as_ref().unwrap().audio().unwrap();
+        assert_eq!(params.channels, Some(Channels::Discrete(channels as u16)));
+        assert_eq!(track.delay, Some(312));
+
+        let (pcm, got_channels) = decode_all(&path);
+        assert_eq!(got_channels, channels);
+        let frames = pcm.len() / channels;
+        assert_eq!(track.num_frames, Some(frames as u64));
+
+        let golden: Vec<f32> = std::fs::read(data.join(format!("family3_{name}.golden.f32")))
+            .unwrap()
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
+        let start = (1920 - 312) * channels;
+        let got = &pcm[start..start + golden.len()];
+        let max_err = got.iter().zip(&golden).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+        println!("family 3 {name}: {channels} channels, {frames} frames, max error {max_err:e}");
+        assert!(max_err < 1e-6, "{name}: max error {max_err}");
+    }
+}
+
+/// Seeks in the externally generated Opus samples (`RMPD_SAMPLES`): the 8192 frames after the
+/// requested position are compared to a continuous decode. CELT streams are bit-identical; SILK
+/// speech converges to a continuous decode only as far as libopus' own cold start does, which is
+/// reported (`opus_speech_mono_16`, loud wideband speech, never converges).
+#[test]
+fn external_opus_seek_convergence() {
+    let Ok(dir) = std::env::var("RMPD_SAMPLES")
+    else {
+        eprintln!("RMPD_SAMPLES not set; skipping");
+        return;
+    };
+
+    // (file, minimum SNR in dB)
+    let files = [
+        ("opus_music_128", 100.0),
+        ("opus_ffm_celt_fb", 100.0),
+        ("opus_ffm_fd10", 100.0),
+        ("opus_ffm_fd60", 100.0),
+        ("opus_ffm_hybrid_swb", 100.0),
+        ("opus_speech_mono_8", 35.0),
+        ("opus_ffm_silk_wb", 35.0),
+        ("opus_speech_mono_16", 35.0),
+    ];
+
+    for (name, min_snr) in files {
+        let path = Path::new(&dir).join("opus").join(format!("{name}.opus"));
+        if !path.exists() {
+            eprintln!("{name} missing; skipping");
+            continue;
+        }
+
+        let (full, channels) = decode_all(&path);
+        let mut format = open(&path);
+        let mut decoder = make_decoder(format.as_ref());
+        let total = full.len() / channels;
+
+        for fraction in [0.25, 0.5, 0.9] {
+            let required = (total as f64 * fraction) as usize;
+            let secs = required as f64 / 48_000.0;
+            let seeked = format
+                .seek(
+                    SeekMode::Accurate,
+                    SeekTo::Time { time: Time::try_from_secs_f64(secs).unwrap(), track_id: None },
+                )
+                .expect("seek failed");
+            decoder.reset();
+            let required = seeked.required_ts.get();
+            let (first, got) =
+                read_after_seek(format.as_mut(), decoder.as_mut(), required, 8192, channels);
+            assert_eq!(first, Some(required));
+            let n = (8192 * channels).min(full.len() - required as usize * channels);
+            let snr = snr_db(&full[required as usize * channels..][..n], &got[..n]);
+            println!("{name} @ {fraction}: SNR vs continuous decode = {snr:.1} dB");
+            assert!(snr > min_snr, "{name} @ {fraction}: SNR {snr:.1} dB");
+        }
+    }
+}
+
 /// Decoding a cut stream from a cold decoder is identical to libopus (including the warm-up
 /// frames), i.e. the difference of a seek with an 80 ms pre-roll to a continuous decode is
 /// inherent to the format (CELT energy prediction converges geometrically).

@@ -249,13 +249,19 @@ fn random_mapping(rng: &mut Rng) -> RandHead {
         .collect();
     RandHead {
         channel_count,
-        mapping: ChannelMapping { family: 1, stream_count, coupled_count, table },
+        mapping: ChannelMapping { family: 1, stream_count, coupled_count, table, demixing_matrix: Vec::new() },
         output_gain: rng.next_u32() as i16,
     }
 }
 
 fn family0(channels: u8) -> ChannelMapping {
-    ChannelMapping { family: 0, stream_count: 1, coupled_count: (channels == 2) as u8, table: Vec::new() }
+    ChannelMapping {
+        family: 0,
+        stream_count: 1,
+        coupled_count: (channels == 2) as u8,
+        table: Vec::new(),
+        demixing_matrix: Vec::new(),
+    }
 }
 
 fn fuzz_multistream(rng: &mut Rng, pkt: &[u8], seed: u64) {

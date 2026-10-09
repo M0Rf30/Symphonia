@@ -21,8 +21,11 @@
 //! For mapping family 1 with 3 to 8 channels the output [`AudioSpec`] is
 //! [`Channels::Positioned`] (the RFC 7845 layout), and the "Vorbis channel order" produced by
 //! [`crate::multistream::MultistreamDecoder::decode`] is reordered so plane `p` holds the channel
-//! at the `p`-th set `Position` bit, exactly as the Vorbis decoder does. Families 2 and 255 are
-//! exposed as `Discrete(n)` channels in mapping-table order.
+//! at the `p`-th set `Position` bit, exactly as the Vorbis decoder does. Families 2 and
+//! 255 are exposed as `Discrete(n)` channels in mapping-table order. Family 3 (RFC 8486
+//! ambisonics with a demixing matrix, libopus' projection decoder) is exposed as `Discrete(n)`
+//! ambisonic channels (ACN order, SN3D normalization) after the `OpusHead`'s demixing matrix has
+//! been applied.
 //!
 //! # Output level
 //!

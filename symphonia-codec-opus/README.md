@@ -12,11 +12,14 @@ license.
 
 * All three Opus coding modes: SILK (speech), CELT (music/low-latency), and Hybrid.
 * Multistream/multichannel decoding (`OpusMultistream`), including surround mappings
-  (e.g. 5.1) via RFC 7845 channel-order scatter.
+  (e.g. 5.1) via RFC 7845 channel-order scatter, and ambisonics with a demixing matrix
+  (mapping family 3, RFC 8486, libopus' projection decoder).
 * Packet loss concealment (PLC) and forward error correction (FEC) redundancy decoding.
 * Gapless playback support (RFC 7845 `pre_skip`/Matroska `CodecDelay`, handled by the format
-  readers in `symphonia-format-ogg`/`symphonia-format-mkv`) and seek pre-roll (RFC 7845 section
-  4.6 / Matroska `SeekPreRoll`).
+  readers in `symphonia-format-ogg`/`symphonia-format-mkv`) and seek pre-roll: 1.5 s for CELT-only
+  streams (bit-identical to a continuous decode afterwards), 10 s for streams with SILK/Hybrid
+  packets (SILK's fixed-point state may never fully converge after a seek, as in `libopus`
+  itself); longer than the 80 ms of RFC 7845 section 4.6 / Matroska `SeekPreRoll`.
 * Conformant against all 12 RFC 8251 test vectors (final range coder state and PCM output,
   mono and stereo) and cross-checked against `libopus` on real-world Ogg/WebM content (SILK
   bit-exact; CELT/Hybrid within audible-transparency SNR of `libopus`).

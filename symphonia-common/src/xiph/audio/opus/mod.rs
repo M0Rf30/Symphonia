@@ -96,9 +96,10 @@ impl OpusHead {
         // The next byte indicates the channel mapping. Most of these values are reserved.
         let channel_mapping = reader.read_byte()?;
 
-        // Families 2 (ambisonics, RFC 8486) and 255 (undefined) have no defined speaker positions.
+        // Families 2 and 3 (ambisonics, RFC 8486; family 3 additionally carries a demixing
+        // matrix that the decoder applies) and 255 (undefined) have no defined speaker positions.
         // The channels are presented as discrete channels in mapping table order.
-        if channel_mapping == 2 || channel_mapping == 255 {
+        if channel_mapping == 2 || channel_mapping == 3 || channel_mapping == 255 {
             return Ok(Self {
                 version,
                 channels: Channels::Discrete(u16::from(channel_count)),
@@ -193,8 +194,8 @@ mod tests {
     }
 
     #[test]
-    fn family_255_and_2_are_discrete() {
-        for (ch, family) in [(3, 255), (11, 255), (16, 2)] {
+    fn family_255_2_and_3_are_discrete() {
+        for (ch, family) in [(3, 255), (11, 255), (16, 2), (4, 3), (16, 3)] {
             let buf = head(ch, family);
             let h = OpusHead::read(&mut BufReader::new(&buf), 15).unwrap();
             assert_eq!(h.channels, Channels::Discrete(u16::from(ch)));
