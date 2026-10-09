@@ -175,7 +175,8 @@ impl Track {
         }
     }
 
-    fn to_bytes(&self) -> Vec<u8> {
+    /// The track entry.
+    fn entry(&self) -> Vec<u8> {
         let mut audio = vec![float(&[0xb5], self.sample_rate), uint(&[0x9f], self.channels)];
 
         if let Some(bits) = self.bit_depth {
@@ -203,12 +204,28 @@ impl Track {
             entry.push(el(&[0x63, 0xa2], private));
         }
 
-        el(ID_TRACKS, &el(&[0xae], &entry.concat()))
+        el(&[0xae], &entry.concat())
     }
 }
 
-/// A block (of track 1).
+/// The entry of a subtitle track, track 2.
+fn subtitle_entry() -> Vec<u8> {
+    el(
+        &[0xae],
+        &[
+            uint(&[0xd7], 2),
+            uint(&[0x73, 0xc5], 2),
+            uint(&[0x83], 0x11),
+            string(&[0x86], "S_TEXT/UTF8"),
+        ]
+        .concat(),
+    )
+}
+
+/// A block (of track 1, unless specified otherwise).
 struct Block {
+    /// The track number.
+    track: u8,
     /// The absolute timestamp of the block in milliseconds.
     ts: i64,
     /// The length of the block's data. The first byte of the data is the index of the block.
@@ -217,11 +234,18 @@ struct Block {
     duration: Option<u64>,
     /// The discard padding of the block in nanoseconds. Forces a block group.
     padding: Option<i64>,
+    /// The data of the block. If not set, `len` bytes of the index of the block.
+    data: Option<Vec<u8>>,
 }
 
 impl Block {
     fn new(ts: i64, len: usize) -> Self {
-        Block { ts, len, duration: None, padding: None }
+        Block { track: 1, ts, len, duration: None, padding: None, data: None }
+    }
+
+    /// A block with the given data.
+    fn with_data(ts: i64, data: Vec<u8>) -> Self {
+        Block { track: 1, ts, len: data.len(), duration: None, padding: None, data: Some(data) }
     }
 }
 
@@ -245,11 +269,18 @@ struct File {
     cues: Vec<Cue>,
     /// If the segment and clusters have an unknown size.
     live: bool,
+    /// If the file has a subtitle track, track 2, in addition to the audio track.
+    subtitles: bool,
 }
 
 impl File {
     fn to_bytes(&self, track: &Track) -> Vec<u8> {
-        let mut head = [info(), track.to_bytes()].concat();
+        let mut entries = track.entry();
+        if self.subtitles {
+            entries.extend(subtitle_entry());
+        }
+
+        let mut head = [info(), el(ID_TRACKS, &entries)].concat();
         head.extend(self.head.concat());
 
         // Build the clusters. Track the offset of each block within its cluster.
@@ -265,11 +296,11 @@ impl File {
                 offsets.push(data.len());
 
                 let rel = (blk.ts - cluster_ts) as i16;
-                let mut payload = vec![0x81, (rel >> 8) as u8, rel as u8];
+                let mut payload = vec![0x80 | blk.track, (rel >> 8) as u8, rel as u8];
 
                 if blk.duration.is_some() || blk.padding.is_some() {
                     payload.push(0x00);
-                    payload.extend(vec![index; blk.len]);
+                    payload.extend(blk.data.clone().unwrap_or_else(|| vec![index; blk.len]));
 
                     let mut group = vec![el(&[0xa1], &payload)];
                     if let Some(dur) = blk.duration {
@@ -282,7 +313,7 @@ impl File {
                 }
                 else {
                     payload.push(0x80);
-                    payload.extend(vec![index; blk.len]);
+                    payload.extend(blk.data.clone().unwrap_or_else(|| vec![index; blk.len]));
                     data.extend(el(&[0xa3], &payload));
                 }
 
@@ -539,7 +570,7 @@ fn lossless_block_timestamps_are_sample_exact() {
     let blocks = (0..10i64)
         .map(|i| {
             let ts = (i * 4096 * 1000 + 22050) / 44100;
-            Block { ts, len: 100, duration: Some(93), padding: None }
+            Block { track: 1, ts, len: 100, duration: Some(93), padding: None, data: None }
         })
         .collect();
     file.clusters.push((0, blocks));
@@ -573,9 +604,16 @@ fn opus_file() -> File {
     let mut file = File::default();
 
     let mut blocks: Vec<Block> =
-        [0, 21, 41, 61, 81].iter().map(|&ts| Block::new(ts, 100)).collect();
+        [0, 21, 41, 61, 81].iter().map(|&ts| Block::with_data(ts, opus_20ms_packet(0))).collect();
 
-    blocks.push(Block { ts: 101, len: 100, duration: Some(7), padding: Some(13_500_000) });
+    blocks.push(Block {
+        track: 1,
+        ts: 101,
+        len: 100,
+        duration: Some(7),
+        padding: Some(13_500_000),
+        data: Some(opus_20ms_packet(5)),
+    });
 
     file.clusters.push((0, blocks));
     file
@@ -617,7 +655,8 @@ fn opus_seek_backs_off_by_the_seek_pre_roll() {
     let mut file = File::default();
 
     // 100 packets of 20ms with exact timestamps.
-    file.clusters.push((0, (0..100).map(|i| Block::new(i * 20, 100)).collect()));
+    file.clusters
+        .push((0, (0..100).map(|i| Block::with_data(i * 20, opus_20ms_packet(i as u8))).collect()));
 
     let mut reader = open(file.to_bytes(&Track::opus()));
 
@@ -627,7 +666,7 @@ fn opus_seek_backs_off_by_the_seek_pre_roll() {
     // The last packet that starts before 48000 - 3840 = 44160 (the packet that starts at
     // 920ms - 6.5ms = 43848 samples).
     assert_eq!(seeked.actual_ts.get(), 920 * 48 - 312);
-    assert_eq!(reader.next_packet().unwrap().unwrap().data[0], 46);
+    assert_eq!(reader.next_packet().unwrap().unwrap().data[1], 46);
 }
 
 #[test]
@@ -757,4 +796,564 @@ fn common_tag_names_map_to_standard_tags() {
     assert!(has(StandardTag::ReplayGainAlbumPeak(arc("0.99"))));
     assert!(has(StandardTag::MusicBrainzTrackId(arc("abc"))));
     assert!(has(StandardTag::MusicBrainzAlbumId(arc("def"))));
+}
+
+/// A 100 byte Opus packet of one 20ms CELT frame, tagged with `tag` in its second byte.
+fn opus_20ms_packet(tag: u8) -> Vec<u8> {
+    opus_packet(0x98, tag)
+}
+
+/// A 100 byte Opus packet with the TOC byte `toc`, tagged with `tag` in its second byte.
+fn opus_packet(toc: u8, tag: u8) -> Vec<u8> {
+    let mut data = vec![toc, tag];
+    data.resize(100, 0);
+    data
+}
+
+// Exact timelines.
+
+/// A pseudo-random number generator.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 >> 33
+    }
+}
+
+/// A little-endian bit writer, as used by the Vorbis setup header.
+#[derive(Default)]
+struct Bits {
+    bytes: Vec<u8>,
+    len: usize,
+}
+
+impl Bits {
+    fn put(&mut self, mut value: u64, bits: usize) {
+        for _ in 0..bits {
+            if self.len % 8 == 0 {
+                self.bytes.push(0);
+            }
+            *self.bytes.last_mut().unwrap() |= ((value & 1) as u8) << (self.len % 8);
+            value >>= 1;
+            self.len += 1;
+        }
+    }
+}
+
+/// The Xiph laced `CodecPrivate` of a stereo, 44.1kHz Vorbis track with block sizes of 256 and
+/// 2048 and two modes: the first selects the short block, the second the long block. The setup
+/// header is the smallest one possible (a single codebook, floor, residue, and mapping).
+fn vorbis_codec_private() -> Vec<u8> {
+    let mut ident = vec![1];
+    ident.extend(b"vorbis");
+    ident.extend(0u32.to_le_bytes());
+    ident.push(2);
+    ident.extend(44100u32.to_le_bytes());
+    ident.extend([0u8; 12]);
+    ident.push(8 | (11 << 4));
+    ident.push(1);
+    assert_eq!(ident.len(), 30);
+
+    let mut comment = vec![3];
+    comment.extend(b"vorbis");
+    comment.extend(0u32.to_le_bytes());
+    comment.extend(0u32.to_le_bytes());
+    comment.push(1);
+
+    let mut w = Bits::default();
+    // One codebook with one entry of one dimension.
+    w.put(0, 8);
+    w.put(0x564342, 24);
+    w.put(1, 16);
+    w.put(1, 24);
+    w.put(0, 2);
+    w.put(0, 5);
+    w.put(0, 4);
+    // One time domain transform.
+    w.put(0, 6);
+    w.put(0, 16);
+    // One floor of type 1, without partitions.
+    w.put(0, 6);
+    w.put(1, 16);
+    w.put(0, 5);
+    w.put(0, 2);
+    w.put(0, 4);
+    // One residue of type 0 with one class and no books.
+    w.put(0, 6);
+    w.put(0, 16);
+    w.put(0, 72);
+    w.put(0, 6);
+    w.put(0, 8);
+    w.put(0, 4);
+    // One mapping with one submap and no coupling.
+    w.put(0, 6);
+    w.put(0, 16);
+    w.put(0, 2);
+    w.put(0, 2);
+    w.put(0, 24);
+    // Two modes.
+    w.put(1, 6);
+    for block_flag in [0, 1] {
+        w.put(block_flag, 1);
+        w.put(0, 40);
+    }
+    // Framing.
+    w.put(1, 1);
+
+    let mut setup = vec![5];
+    setup.extend(b"vorbis");
+    setup.extend(w.bytes);
+
+    let mut private = vec![2, ident.len() as u8, comment.len() as u8];
+    private.extend(ident);
+    private.extend(comment);
+    private.extend(setup);
+    private
+}
+
+fn vorbis_track() -> Track {
+    Track {
+        codec: "A_VORBIS",
+        sample_rate: 44100.0,
+        channels: 2,
+        bit_depth: None,
+        codec_delay: 0,
+        seek_pre_roll: 0,
+        default_duration: None,
+        codec_private: Some(vorbis_codec_private()),
+    }
+}
+
+/// The packets of a stream, and their exact timeline.
+struct Model {
+    /// The timestamp, in frames, at which each packet starts, as it is presented by the demuxer.
+    pts: Vec<i64>,
+    /// The duration, in frames, of each packet, as presented by the demuxer (without the frames
+    /// that are to be discarded).
+    dur: Vec<u64>,
+    /// The number of frames at the start of each packet that are to be discarded.
+    trim_start: Vec<u64>,
+}
+
+/// Create a Vorbis stream of `n` packets with random block sizes, with timestamps rounded to the
+/// millisecond as a muxer does. Every `cue_every` blocks are indexed by a cue point (if
+/// non-zero).
+fn vorbis_stream(n: usize, cue_every: usize) -> (File, Model) {
+    let mut rng = Lcg(7);
+
+    // The block size of each packet: 256 or 2048 (1/4 of the packets are long, but runs of long
+    // and short packets are common).
+    let mut is_long = false;
+    let long: Vec<bool> = (0..n)
+        .map(|_| {
+            if rng.next() % 3 == 0 {
+                is_long = !is_long;
+            }
+            is_long
+        })
+        .collect();
+
+    let size = |i: usize| if long[i] { 2048u64 } else { 256 };
+
+    let mut model = Model { pts: Vec::new(), dur: Vec::new(), trim_start: Vec::new() };
+
+    // The first packet decodes to nothing, its frames are all discarded. The audio starts with the
+    // second packet, at 0.
+    model.pts.push(-(size(0) as i64) / 2);
+    model.dur.push(0);
+    model.trim_start.push(size(0) / 2);
+
+    for i in 1..n {
+        let prev_end = model.pts[i - 1] + (model.dur[i - 1] + model.trim_start[i - 1]) as i64;
+        model.pts.push(prev_end);
+        model.dur.push(size(i - 1) / 4 + size(i) / 4);
+        model.trim_start.push(0);
+    }
+
+    // Timestamps in milliseconds are rounded.
+    let millis = |pts: i64| (pts * 1000 + 22050).div_euclid(44100);
+
+    let mut file = File::default();
+    let mut cues = Vec::new();
+
+    for (c, chunk) in (0..n).collect::<Vec<_>>().chunks(100).enumerate() {
+        let blocks: Vec<Block> = chunk
+            .iter()
+            .map(|&i| {
+                // The packet type bit is 0, followed by the mode number, and anything.
+                let data = vec![u8::from(long[i]) << 1, (i % 251) as u8, 0xaa, 0x55];
+                Block::with_data(millis(model.pts[i]), data)
+            })
+            .collect();
+
+        for (b, block) in blocks.iter().enumerate() {
+            if cue_every != 0 && (c * 100 + b) % cue_every == 0 {
+                cues.push(Cue { time: block.ts.max(0) as u64, cluster: c, block: b, track: 1 });
+            }
+        }
+
+        file.clusters.push((blocks[0].ts.max(0), blocks));
+    }
+
+    file.cues = cues;
+    (file, model)
+}
+
+fn seek_ts(reader: &mut MkvReader<'_>, ts: i64) -> Result<SeekedTo, symphonia_core::errors::Error> {
+    reader.seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(ts), track_id: 1 })
+}
+
+/// Check the timeline presented by the demuxer is the model's.
+fn assert_timeline(packets: &[Packet], model: &Model, first: usize) {
+    for (i, packet) in packets.iter().enumerate() {
+        let k = first + i;
+        assert_eq!(packet.pts.get(), model.pts[k], "pts of packet {k}");
+        assert_eq!(packet.dur.get(), model.dur[k], "dur of packet {k}");
+        assert_eq!(packet.trim_start.get(), model.trim_start[k], "trim_start of packet {k}");
+        assert_eq!(packet.trim_end.get(), 0);
+    }
+}
+
+/// The index of the last packet that starts at, or before, `ts`. Or the first packet.
+fn packet_at(model: &Model, ts: i64) -> usize {
+    model.pts.partition_point(|&pts| pts <= ts).saturating_sub(1)
+}
+
+#[test]
+fn vorbis_timeline_of_an_unseekable_stream_is_sample_exact() {
+    let (file, model) = vorbis_stream(1500, 10);
+    let bytes = file.to_bytes(&vorbis_track());
+
+    let source = symphonia_core::io::ReadOnlySource::new(Cursor::new(bytes));
+    let mss = MediaSourceStream::new(Box::new(source), MediaSourceStreamOptions::default());
+    let mut reader = MkvReader::try_new(mss, FormatOptions::default()).expect("file should open");
+
+    let packets = read_all(&mut reader);
+    assert_eq!(packets.len(), 1500);
+    assert_timeline(&packets, &model, 0);
+}
+
+#[test]
+fn vorbis_seeks_in_a_file_with_other_tracks_are_sample_exact() {
+    let (mut file, model) = vorbis_stream(1500, 10);
+    file.subtitles = true;
+
+    // A subtitle block after every 5th Vorbis block.
+    for (_, blocks) in &mut file.clusters {
+        let mut with_subtitles = Vec::new();
+
+        for (i, block) in std::mem::take(blocks).into_iter().enumerate() {
+            let ts = block.ts;
+            with_subtitles.push(block);
+
+            if i % 5 == 4 {
+                let mut subtitle = Block::with_data(ts, vec![0x41; 200]);
+                subtitle.track = 2;
+                with_subtitles.push(subtitle);
+            }
+        }
+
+        *blocks = with_subtitles;
+    }
+
+    // The cue points no longer refer to the right blocks.
+    file.cues.clear();
+
+    let mut reader = open(file.to_bytes(&vorbis_track()));
+    let mut rng = Lcg(17);
+    let end = model.pts[1499] + model.dur[1499] as i64;
+
+    for _ in 0..100 {
+        let target = (rng.next() % end as u64) as i64;
+        let seeked = seek_ts(&mut reader, target).expect("seek should succeed");
+
+        let expected = packet_at(&model, target - 8820);
+        assert_eq!(seeked.actual_ts.get(), model.pts[expected], "target {target}");
+
+        // The first packet of the audio track is next, and the timeline continues from it.
+        let packets: Vec<Packet> = (0..30)
+            .map_while(|_| reader.next_packet().unwrap())
+            .filter(|packet| packet.track_id == 1)
+            .collect();
+
+        assert_timeline(&packets, &model, expected);
+    }
+}
+
+#[test]
+fn vorbis_timeline_is_sample_exact() {
+    let (file, model) = vorbis_stream(1500, 0);
+    let mut reader = open(file.to_bytes(&vorbis_track()));
+
+    // Many packets do not start at a whole millisecond.
+    assert!(model.pts.iter().any(|pts| pts * 1000 % 44100 > 1000));
+
+    let packets = read_all(&mut reader);
+    assert_eq!(packets.len(), 1500);
+    assert_timeline(&packets, &model, 0);
+
+    // The audio starts at 0.
+    assert_eq!(packets[1].pts.get(), 0);
+}
+
+#[test]
+fn vorbis_timeline_starts_at_0_when_the_first_packet_is_timestamped_0() {
+    let (mut file, model) = vorbis_stream(300, 0);
+
+    // As mkvmerge: the first packet is timestamped 0.
+    file.clusters[0].1[0].ts = 0;
+
+    let mut reader = open(file.to_bytes(&vorbis_track()));
+    let packets = read_all(&mut reader);
+
+    assert_timeline(&packets, &model, 0);
+}
+
+#[test]
+fn vorbis_timeline_is_anchored_again_after_a_gap() {
+    let (mut file, model) = vorbis_stream(300, 0);
+
+    // Remove the blocks 100 to 149.
+    file.clusters[1].1.drain(..50);
+
+    let mut reader = open(file.to_bytes(&vorbis_track()));
+    let packets = read_all(&mut reader);
+    assert_eq!(packets.len(), 250);
+
+    assert_timeline(&packets[..100], &model, 0);
+
+    // The first packet after the gap is timestamped to the millisecond.
+    let offset = packets[100].pts.get() - model.pts[150];
+    assert!(offset.abs() <= 22, "the first packet after the gap is {offset} frames off");
+
+    // The packets are as long as the decoder, which overlaps the packet before the gap with the
+    // one after it, makes them, and follow each other.
+    for (i, pair) in packets.windows(2).enumerate().skip(100) {
+        assert_eq!(pair[1].pts, pair[0].pts.saturating_add(pair[0].block_dur()));
+        assert_eq!(pair[1].dur.get(), model.dur[i + 51], "dur of packet {}", i + 1);
+    }
+}
+
+#[test]
+fn vorbis_timeline_of_a_stream_not_starting_at_0_is_anchored_to_the_first_block() {
+    let (mut file, model) = vorbis_stream(300, 0);
+
+    // Shift all blocks by 10s.
+    for (cluster_ts, blocks) in &mut file.clusters {
+        *cluster_ts += 10_000;
+        for block in blocks {
+            block.ts += 10_000;
+        }
+    }
+
+    let mut reader = open(file.to_bytes(&vorbis_track()));
+    let packets = read_all(&mut reader);
+
+    // The first packet is timestamped to the millisecond. The rest is exact.
+    assert!((packets[0].pts.get() - (441_000 + model.pts[0])).abs() <= 45);
+    for pair in packets.windows(2) {
+        assert_eq!(pair[1].pts, pair[0].pts.saturating_add(pair[0].block_dur()));
+    }
+}
+
+fn check_vorbis_seeks(cue_every: usize) {
+    let (file, model) = vorbis_stream(1500, cue_every);
+    let mut reader = open(file.to_bytes(&vorbis_track()));
+
+    let end = model.pts[1499] + model.dur[1499] as i64;
+    let mut rng = Lcg(99);
+
+    let mut targets = vec![0, 1, 127, 128, 129, 8819, 8820, 8821, end - 1, end - 5000, 44100];
+    targets.extend((0..300).map(|_| (rng.next() % end as u64) as i64));
+
+    for target in targets {
+        let seeked = seek_ts(&mut reader, target).expect("seek should succeed");
+        assert_eq!(seeked.required_ts.get(), target);
+
+        // The default seek pre-roll of Vorbis is 200ms: 8820 frames. The landing packet is the
+        // last one at or before that, to the frame.
+        let expected = packet_at(&model, target - 8820);
+        assert_eq!(seeked.actual_ts.get(), model.pts[expected], "target {target}");
+
+        // The packets read afterwards have an exact timeline, whose durations depend on the
+        // blocks before them.
+        let packets: Vec<Packet> = (0..20).map_while(|_| reader.next_packet().unwrap()).collect();
+        assert_timeline(&packets, &model, expected);
+
+        assert!(model.pts[expected] <= target.max(0));
+    }
+
+    // A seek by time is also exact: 7.5s is 330750 frames.
+    let seeked = seek_time(&mut reader, 7500).unwrap();
+    assert_eq!(seeked.required_ts.get(), 330750);
+    assert_eq!(seeked.actual_ts.get(), model.pts[packet_at(&model, 330750 - 8820)]);
+
+    // Reading to the end after a seek continues the timeline.
+    let packets = read_all(&mut reader);
+    let first = packet_at(&model, 330750 - 8820);
+    assert_timeline(&packets[..], &model, first);
+}
+
+#[test]
+fn vorbis_seeks_with_cues_are_sample_exact() {
+    check_vorbis_seeks(10);
+}
+
+#[test]
+fn vorbis_seeks_without_cues_are_sample_exact() {
+    check_vorbis_seeks(0);
+}
+
+#[test]
+fn vorbis_seeks_with_sparse_cues_are_sample_exact() {
+    check_vorbis_seeks(250);
+}
+
+/// The TOC byte, and the duration in frames, of Opus packets.
+const OPUS_PACKETS: [(u8, u64); 8] = [
+    (0x80, 120),
+    (0x88, 240),
+    (0x90, 480),
+    (0x98, 960),
+    (0x10, 1920),
+    (0x18, 2880),
+    (0x99, 1920),
+    (0x68, 960),
+];
+
+/// An Opus stream without a default duration, of packets of varying durations.
+fn opus_stream(n: usize, cue_every: usize) -> (File, Model) {
+    let mut rng = Lcg(3);
+    let mut kinds: Vec<usize> = (0..n).map(|_| (rng.next() % 8) as usize).collect();
+
+    // The first packet must be longer than the pre-skip.
+    kinds[0] = 3;
+
+    let mut model = Model { pts: Vec::new(), dur: Vec::new(), trim_start: Vec::new() };
+    let mut pts = -312i64;
+
+    for &kind in &kinds {
+        let dur = OPUS_PACKETS[kind].1;
+        model.pts.push(pts);
+        model.dur.push(dur);
+        pts += dur as i64;
+    }
+
+    // The 312 frames of pre-skip are trimmed from the first packet.
+    model.dur[0] -= 312;
+    model.trim_start.push(312);
+    model.trim_start.extend(std::iter::repeat_n(0, n - 1));
+
+    // The timestamp of a block is the start of its frames in milliseconds, rounded, plus the
+    // codec delay.
+    let millis = |pts: i64| ((pts + 312) * 1000 + 24000).div_euclid(48000);
+
+    let mut file = File::default();
+    let mut cues = Vec::new();
+
+    for (c, chunk) in (0..n).collect::<Vec<_>>().chunks(100).enumerate() {
+        let blocks: Vec<Block> = chunk
+            .iter()
+            .map(|&i| {
+                Block::with_data(
+                    millis(model.pts[i]),
+                    opus_packet(OPUS_PACKETS[kinds[i]].0, i as u8),
+                )
+            })
+            .collect();
+
+        for (b, block) in blocks.iter().enumerate() {
+            if cue_every != 0 && (c * 100 + b) % cue_every == 0 {
+                cues.push(Cue { time: block.ts as u64, cluster: c, block: b, track: 1 });
+            }
+        }
+
+        file.clusters.push((blocks[0].ts, blocks));
+    }
+
+    file.cues = cues;
+    (file, model)
+}
+
+fn opus_track_without_default_duration() -> Track {
+    Track { default_duration: None, ..Track::opus() }
+}
+
+// The packets of the model have no padding, and the model's duration of the first packet is
+// that of its packet less the delay.
+#[test]
+fn opus_timeline_of_varying_packets_is_sample_exact() {
+    let (file, model) = opus_stream(1000, 0);
+    let mut reader = open(file.to_bytes(&opus_track_without_default_duration()));
+
+    let packets = read_all(&mut reader);
+    assert_eq!(packets.len(), 1000);
+
+    for (i, packet) in packets.iter().enumerate() {
+        assert_eq!(packet.pts.get(), model.pts[i], "pts of packet {i}");
+        assert_eq!(packet.dur.get(), model.dur[i], "dur of packet {i}");
+        assert_eq!(packet.trim_start.get(), model.trim_start[i], "trim_start of packet {i}");
+    }
+}
+
+#[test]
+fn opus_seeks_in_varying_packets_are_sample_exact() {
+    for cue_every in [0, 7, 100] {
+        let (file, model) = opus_stream(1000, cue_every);
+        let mut reader = open(file.to_bytes(&opus_track_without_default_duration()));
+
+        let end = model.pts[999] + model.dur[999] as i64;
+        let mut rng = Lcg(5);
+
+        let mut targets = vec![0, 1, 311, 312, 3839, 3840, 3841, end];
+        targets.extend((0..200).map(|_| (rng.next() % end as u64) as i64));
+
+        for target in targets {
+            let seeked = seek_ts(&mut reader, target).expect("seek should succeed");
+            assert_eq!(seeked.required_ts.get(), target);
+
+            // The seek pre-roll is 80ms: 3840 frames.
+            let expected = packet_at(&model, target - 3840);
+            assert_eq!(seeked.actual_ts.get(), model.pts[expected], "target {target}");
+
+            let packets: Vec<Packet> =
+                (0..20).map_while(|_| reader.next_packet().unwrap()).collect();
+
+            for (i, packet) in packets.iter().enumerate() {
+                let k = expected + i;
+                assert_eq!(packet.pts.get(), model.pts[k], "pts of packet {k}");
+                assert_eq!(packet.dur.get(), model.dur[k], "dur of packet {k}");
+            }
+        }
+    }
+}
+
+#[test]
+fn opus_timeline_is_anchored_again_after_a_gap() {
+    let (mut file, model) = opus_stream(300, 0);
+
+    // Remove the blocks 100 to 149 from the second cluster.
+    file.clusters[1].1.drain(..50);
+
+    let mut reader = open(file.to_bytes(&opus_track_without_default_duration()));
+    let packets = read_all(&mut reader);
+    assert_eq!(packets.len(), 250);
+
+    // The timeline before the gap is exact.
+    assert_eq!(packets[0].pts.get(), model.pts[0]);
+    for (i, packet) in packets[..100].iter().enumerate() {
+        assert_eq!(packet.pts.get(), model.pts[i]);
+    }
+
+    // The gap in the timeline is that of the missing packets, to the precision of the timestamp of
+    // the first block after the gap (0.5ms: 24 frames), and exact after that.
+    let offset = packets[100].pts.get() - model.pts[150];
+    assert!(offset.abs() <= 24, "the first packet after the gap is {offset} frames off");
+
+    for (i, packet) in packets.iter().enumerate().skip(100) {
+        assert_eq!(packet.pts.get() - model.pts[i + 50], offset, "pts of packet {i}");
+        assert_eq!(packet.dur.get(), model.dur[i + 50]);
+    }
 }

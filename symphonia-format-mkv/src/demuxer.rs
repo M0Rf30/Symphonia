@@ -25,7 +25,9 @@ use log::{info, warn};
 use symphonia_metadata::utils::images::try_get_image_info;
 
 use crate::codecs::make_track_codec_params;
-use crate::ebml::{EbmlElementInfo, EbmlError, EbmlIterator, EbmlSchema, ReadEbml};
+use crate::ebml::{
+    EbmlElementInfo, EbmlError, EbmlIterator, EbmlSchema, ReadEbml, read_unsigned_vint,
+};
 use crate::lacing::{Frame, extract_frames};
 use crate::schema::{MkvElement, MkvSchema};
 use crate::segment::{
@@ -34,6 +36,7 @@ use crate::segment::{
     SegmentTicks, SignedTrackTicks, TagsElement, TargetTagsMap, TrackTicks, TracksElement,
     nanos_to_ticks, ticks_to_nanos,
 };
+use crate::timeline::{Cursor, PacketDurations};
 
 const MKV_FORMAT_INFO: FormatInfo =
     FormatInfo { format: FORMAT_ID_MKV, short_name: "matroska", long_name: "Matroska / WebM" };
@@ -173,6 +176,9 @@ pub struct TrackState {
     pts_tolerance: u64,
     /// The grid of expected timestamps for blocks, if the track has a constant frame duration.
     grid: Option<PtsGrid>,
+    /// The parser of packet durations, if the codec carries the duration of a packet in the
+    /// packet (Vorbis, Opus). Used to compute an exact timeline.
+    exact: Option<PacketDurations>,
 }
 
 /// A grid of the timestamps at which the blocks of a track are expected to start.
@@ -189,6 +195,12 @@ impl TrackState {
     /// `dur` that must be discarded to account for the codec delay.
     fn codec_delay_trim(&self, pts: SignedTrackTicks, dur: TrackTicks) -> u64 {
         if self.sample_rate.is_none() || self.codec_delay_samples == 0 || pts.get() >= 0 {
+            return 0;
+        }
+
+        // The delay of a Vorbis stream is the frames the decoder discards from the first packet.
+        // They are already trimmed from it, and are not decoded from the packets after it.
+        if self.exact.as_ref().is_some_and(PacketDurations::discards_delay) {
             return 0;
         }
 
@@ -252,6 +264,12 @@ impl TrackState {
             _ => dur,
         }
     }
+
+    /// If the exact position of a block can only be known by scanning the stream (see
+    /// `MkvReader::ensure_timeline_index`).
+    fn needs_timeline_index(&self) -> bool {
+        self.exact.is_some()
+    }
 }
 
 /// Matroska (MKV) and WebM demultiplexer.
@@ -271,6 +289,16 @@ pub struct MkvReader<'s> {
     frames: VecDeque<Frame>,
     /// For each track, the timestamp at which the previous packet read from the track ended.
     last_pts_end: HashMap<u32, i64>,
+    /// For each track with an exact timeline, the position and state of the next packet that is
+    /// read from the track. Not present after a jump in the stream.
+    cursors: HashMap<u32, Cursor>,
+    /// For each track with an exact timeline, the cursor at the start of every block of the
+    /// track (sorted by the position of the block in the stream). Built by the first seek.
+    timeline_index: HashMap<u32, Vec<(u64, Cursor)>>,
+    /// If the stream has been scanned to build the timeline index.
+    timeline_indexed: bool,
+    /// If the stream is being scanned to build the timeline index.
+    indexing: bool,
     /// The position of the first Cluster relative to the start of the Segment, if known.
     first_cluster_pos: Option<u64>,
     /// If the media source is seekable.
@@ -590,6 +618,11 @@ impl<'s> MkvReader<'s> {
             let fixed_block_samples =
                 fixed_block_samples(&track.codec_id, track.codec_private.as_deref());
 
+            // The codecs whose packets carry their duration have an exact timeline.
+            let exact = sample_rate.and_then(|_| {
+                PacketDurations::new(&track.codec_id, track.codec_private.as_deref())
+            });
+
             // Create the track state.
             let state = TrackState {
                 // TODO: This should be 64-bit, but track IDs are 32-bit.
@@ -613,6 +646,7 @@ impl<'s> MkvReader<'s> {
                 .map(|ticks| ticks.unsigned_abs().saturating_add(1))
                 .unwrap_or(0),
                 grid: None,
+                exact,
                 sample_rate,
                 codec_delay_samples,
                 pcm_frame_bytes,
@@ -670,8 +704,13 @@ impl<'s> MkvReader<'s> {
             is_seekable,
             frames: VecDeque::new(),
             last_pts_end: HashMap::new(),
+            cursors: HashMap::new(),
+            timeline_index: HashMap::new(),
+            timeline_indexed: false,
+            indexing: false,
         };
 
+        reader.reset_cursors_to_start();
         reader.prime_pts_grids()?;
 
         Ok(reader)
@@ -731,7 +770,9 @@ impl<'s> MkvReader<'s> {
                 continue;
             };
 
-            if state.sample_rate.is_none() {
+            // The blocks of a track with an exact timeline are not expected to be on a grid: the
+            // duration of the packets varies, and a default duration is only an approximation.
+            if state.sample_rate.is_none() || state.exact.is_some() {
                 continue;
             }
 
@@ -762,6 +803,7 @@ impl<'s> MkvReader<'s> {
         self.iter.seek_to_child(self.first_cluster_pos.unwrap_or(0))?;
 
         self.frames.clear();
+        self.reset_cursors_to_start();
         self.current_cluster = None;
         Ok(())
     }
@@ -775,6 +817,7 @@ impl<'s> MkvReader<'s> {
         self.iter.seek_to_child(cluster_pos)?;
 
         self.frames.clear();
+        self.cursors.clear();
         self.current_cluster = None;
 
         // Resume iteration.
@@ -811,6 +854,9 @@ impl<'s> MkvReader<'s> {
                 self.iter.seek_to_child(cluster_rel_pos)?;
             }
         }
+
+        // The position in the stream is no longer known.
+        self.cursors.clear();
 
         Ok(())
     }
@@ -867,6 +913,7 @@ impl<'s> MkvReader<'s> {
         let iter_state = self.iter.save_state();
         let cluster_state = self.current_cluster;
         let frames = std::mem::take(&mut self.frames);
+        let cursors = self.cursors.clone();
 
         match self.seek_track_by_ts(id, tb, ts) {
             Err(err) => {
@@ -874,6 +921,7 @@ impl<'s> MkvReader<'s> {
                 self.iter.restore_state(iter_state)?;
                 self.current_cluster = cluster_state;
                 self.frames = frames;
+                self.cursors = cursors;
                 Err(err)
             }
             Ok(seeked) => {
@@ -886,6 +934,8 @@ impl<'s> MkvReader<'s> {
 
     fn seek_track_by_ts(&mut self, id: u32, tb: TimeBase, ts: Timestamp) -> Result<SeekedTo> {
         log::debug!("seeking track_id={id} to ts={ts}");
+
+        self.ensure_timeline_index(id)?;
 
         let state =
             self.track_states.get(&id).ok_or(Error::SeekError(SeekErrorKind::InvalidTrack))?;
@@ -993,6 +1043,192 @@ impl<'s> MkvReader<'s> {
         self.seek_track_by_ts_forward(id, target_ts, ts)
     }
 
+    /// Peek at the track number of the current simple block, and return true if the track has an
+    /// exact timeline. If the track cannot be determined, returns true.
+    fn is_block_of_timeline_track(&mut self) -> bool {
+        let mut head = [0u8; 8];
+
+        let Ok(len) = self.iter.peek_binary(&mut head)
+        else {
+            return true;
+        };
+
+        match read_unsigned_vint(&mut BufReader::new(&head[..len])) {
+            Ok(track_num) => u32::try_from(track_num)
+                .ok()
+                .and_then(|track_num| self.track_states.get(&track_num))
+                .is_none_or(|state| state.exact.is_some()),
+            Err(_) => true,
+        }
+    }
+
+    /// Reset the timelines of all tracks that have one to the start of the stream.
+    fn reset_cursors_to_start(&mut self) {
+        self.cursors.clear();
+
+        for (&track_num, state) in &self.track_states {
+            if state.exact.is_some() {
+                self.cursors.insert(track_num, Cursor::START);
+            }
+        }
+    }
+
+    /// Scan the stream once to record the exact position of every block of the tracks that have
+    /// an exact timeline, if a track needs it.
+    ///
+    /// The exact position of a Vorbis packet is the sum of the durations of all the packets before
+    /// it, so it cannot be known after a jump to a random position in the stream (e.g., by a
+    /// cue point) without having read everything before. The timestamp of the block, being only
+    /// precise to the timestamp scale, cannot be used to recover it. The index is used to resume
+    /// the exact timeline at the first block read after a jump.
+    fn ensure_timeline_index(&mut self, track_id: u32) -> Result<()> {
+        if self.timeline_indexed || !self.is_seekable {
+            return Ok(());
+        }
+
+        if !self.track_states.get(&track_id).is_some_and(TrackState::needs_timeline_index) {
+            return Ok(());
+        }
+
+        // Only attempt to scan the stream once.
+        self.timeline_indexed = true;
+
+        log::debug!("scanning the stream to index the timeline");
+
+        let iter_state = self.iter.save_state();
+        let cluster = self.current_cluster;
+        let frames = std::mem::take(&mut self.frames);
+        let cursors = std::mem::take(&mut self.cursors);
+
+        self.timeline_index.clear();
+        self.indexing = true;
+
+        let scan = self.rewind_to_first_cluster().and_then(|_| {
+            while self.next_element()? {
+                // Only the effect of reading the elements on the timeline is of interest.
+                self.frames.clear();
+            }
+            Ok(())
+        });
+
+        self.indexing = false;
+
+        if let Err(err) = scan {
+            // The part of the stream that was scanned is still indexed.
+            warn!("failed to scan the stream to index the timeline ({err})");
+        }
+
+        // Return to where the stream was.
+        self.iter.restore_state(iter_state)?;
+        self.current_cluster = cluster;
+        self.frames = frames;
+        self.cursors = cursors;
+        Ok(())
+    }
+
+    /// Give the frames of a block, that was just read at `block_pos` and starts at index
+    /// `first_frame` of the frame queue, their exact timestamps and durations if their track has
+    /// an exact timeline.
+    fn apply_exact_timeline(&mut self, block_pos: u64, first_frame: usize) {
+        let Some(track_num) = self.frames.get(first_frame).map(|frame| frame.track_num)
+        else {
+            return;
+        };
+
+        let Some(state) = self.track_states.get(&track_num)
+        else {
+            return;
+        };
+
+        let Some(exact) = state.exact.as_ref()
+        else {
+            return;
+        };
+
+        let tolerance = state.pts_tolerance;
+
+        // Resume from the previous block of the track, or, after a jump, from the index.
+        let mut cursor = self.cursors.remove(&track_num).unwrap_or_else(|| {
+            self.timeline_index
+                .get(&track_num)
+                .and_then(|index| {
+                    index.binary_search_by_key(&block_pos, |entry| entry.0).ok().map(|i| index[i].1)
+                })
+                .unwrap_or(Cursor::UNKNOWN)
+        });
+
+        // The timestamp of a block is only precise to the timestamp scale, but a block that does
+        // not start where the timeline is by more than that means the timeline was broken (e.g.,
+        // by missing blocks). Anchor it to the block again.
+        let block_pts = self.frames[first_frame].pts.get();
+        let max_gap = tolerance.saturating_add(exact.timestamp_slack());
+
+        if cursor.next_pts.is_some_and(|next| next.abs_diff(block_pts) > max_gap) {
+            log::debug!("timeline of track {track_num} is not contiguous, re-anchoring");
+            cursor.next_pts = None;
+        }
+        else if cursor.approx {
+            // The position of the block is only a guess. The timestamp of the block is not.
+            cursor.next_pts = None;
+        }
+        cursor.approx = false;
+
+        if self.indexing {
+            self.timeline_index.entry(track_num).or_default().push((block_pos, cursor));
+        }
+
+        for frame in self.frames.iter_mut().skip(first_frame) {
+            if frame.track_num != track_num {
+                continue;
+            }
+
+            let Some(timing) = exact.advance(&mut cursor.prev, &frame.data)
+            else {
+                continue;
+            };
+
+            let pts = match cursor.next_pts {
+                Some(next) => next,
+                None => {
+                    let block_pts = frame.pts.get();
+
+                    if timing.is_start {
+                        // The first packet of a Vorbis stream decodes to nothing; the audio starts
+                        // with the second. A stream that starts at 0 either timestamps the first
+                        // packet with the time its audio would have started at had it been
+                        // decoded (ffmpeg), or with 0 (mkvmerge). In both cases, the audio
+                        // starts at 0 exactly, and not only to within the timestamp scale.
+                        let lead = i64::try_from(timing.lead).unwrap_or(0);
+
+                        if block_pts.abs_diff(-lead) <= tolerance
+                            || block_pts.abs_diff(0) <= tolerance
+                        {
+                            -lead
+                        }
+                        else {
+                            block_pts
+                        }
+                    }
+                    else {
+                        block_pts
+                    }
+                }
+            };
+
+            frame.pts = SignedTrackTicks::from(pts);
+            frame.trim_start = frame.trim_start.saturating_add(timing.lead);
+            frame.dur = TrackTicks::from(
+                timing.dur.saturating_sub(frame.trim_start).saturating_sub(frame.trim_end),
+            );
+
+            // The next packet starts where the decoded frames of this packet end.
+            cursor.next_pts = Some(pts.saturating_add_unsigned(timing.dur));
+            cursor.approx = timing.approx;
+        }
+
+        self.cursors.insert(track_num, cursor);
+    }
+
     fn next_element(&mut self) -> Result<bool> {
         match self.read_next_element() {
             // The stream ended inside an element of unknown size (e.g., live streams): the end of
@@ -1034,6 +1270,8 @@ impl<'s> MkvReader<'s> {
                 self.iter.pop_element()?;
             }
             Some(child) => {
+                let child_pos = child.pos();
+
                 match child.element_type() {
                     // Cluster element.
                     MkvElement::Cluster => {
@@ -1054,6 +1292,16 @@ impl<'s> MkvReader<'s> {
                         }
                     }
                     block_type @ (MkvElement::SimpleBlock | MkvElement::BlockGroup) => {
+                        // When scanning the stream, there is no need to read the blocks of tracks
+                        // without a timeline (e.g., video).
+                        if self.indexing
+                            && block_type == MkvElement::SimpleBlock
+                            && !self.is_block_of_timeline_track()
+                        {
+                            self.iter.skip_data()?;
+                            return Ok(true);
+                        }
+
                         // Get the current cluster information.
                         let Some(cluster) = self.current_cluster.as_ref()
                         else {
@@ -1078,6 +1326,8 @@ impl<'s> MkvReader<'s> {
                             _ => unreachable!(),
                         };
 
+                        let first_frame = self.frames.len();
+
                         // Extract frames.
                         if !extract_frames(
                             &data,
@@ -1090,6 +1340,7 @@ impl<'s> MkvReader<'s> {
                             warn!("pts for block is too large");
                             return Ok(false);
                         }
+                        self.apply_exact_timeline(child_pos, first_frame);
                     }
                     // All other elements.
                     other => {

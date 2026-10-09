@@ -882,6 +882,29 @@ impl<R: ReadEbml, S: EbmlSchema> EbmlIterator<R, S> {
         }
     }
 
+    /// Copy up to the first `buf.len()` bytes of the data carried by a binary element into a
+    /// provided byte slice, without consuming them. Returns the number of bytes copied.
+    pub(crate) fn peek_binary(&mut self, buf: &mut [u8]) -> Result<usize> {
+        let element = self.current_or_err()?;
+
+        match element.element_info {
+            Some(info) => match info.data_type() {
+                EbmlDataType::Master => Err(EbmlError::ExpectedNonMasterElement),
+                EbmlDataType::Binary => {
+                    let size = element.data_size.ok_or(EbmlError::UnknownElementDataSize)?;
+                    let len = buf.len().min(usize::try_from(size).unwrap_or(usize::MAX));
+
+                    let pos = self.reader.pos();
+                    self.reader.read_buf_exact(&mut buf[..len])?;
+                    self.reader.seek_buffered(pos);
+                    Ok(len)
+                }
+                _ => Err(EbmlError::UnexpectedElementDataType),
+            },
+            _ => Err(EbmlError::UnknownElement),
+        }
+    }
+
     /// Get the current element or return an error if there is no current element.
     #[inline]
     fn current_or_err(&self) -> Result<&EbmlElementHeader<S>> {
