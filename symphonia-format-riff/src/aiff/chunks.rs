@@ -444,7 +444,8 @@ impl ParseChunk for TextChunk {
 
         let std_tag = match &tag {
             b"NAME" => StandardTag::TrackTitle(value.clone()),
-            b"AUTH" => StandardTag::Encoder(value.clone()),
+            // The author chunk is the artist of the work.
+            b"AUTH" => StandardTag::Artist(value.clone()),
             b"(c) " => StandardTag::Copyright(value.clone()),
             b"ANNO" => StandardTag::Comment(value.clone()),
             _ => unreachable!(),
@@ -549,7 +550,15 @@ fn read_pascal_string<B: ReadBytes>(reader: &mut B) -> Result<String> {
 
 fn decode_string(data: &[u8]) -> String {
     // Stop at a null-terminator. Control character usage is undefined in AIFF, so preserve them.
-    text::decode_iso8859_1_lossy(data).take_while(text::filter::not_null).collect()
+    let data = data.split(|&b| b == 0).next().unwrap_or_default();
+
+    // The AIFF specification defines text as ASCII, but modern taggers (e.g., ffmpeg) write UTF-8.
+    // Latin-1 text is not valid UTF-8 in practice, so try UTF-8 first and only fall back to Latin-1
+    // if the text is not valid UTF-8.
+    match str::from_utf8(data) {
+        Ok(text) => text.to_string(),
+        Err(_) => text::decode_iso8859_1_lossy(data).collect(),
+    }
 }
 
 fn map_aiff_channel_count(count: u16) -> Result<Channels> {
@@ -563,4 +572,50 @@ fn map_aiff_channel_count(count: u16) -> Result<Channels> {
         _ => Channels::Discrete(count),
     };
     Ok(channels)
+}
+
+#[cfg(test)]
+mod tests {
+    use symphonia_core::io::BufReader;
+
+    use super::*;
+
+    #[test]
+    fn text_is_decoded_as_utf8_with_latin1_fallback() {
+        // UTF-8, as written by modern taggers.
+        assert_eq!(
+            decode_string("T\u{e9}st T\u{ed}tle \u{65e5}\u{672c}".as_bytes()),
+            "T\u{e9}st T\u{ed}tle \u{65e5}\u{672c}"
+        );
+        // Not valid UTF-8, so Latin-1.
+        assert_eq!(decode_string(b"T\xe9st"), "T\u{e9}st");
+        // Terminated at the first NUL.
+        assert_eq!(decode_string(b"abc\0def"), "abc");
+        assert_eq!(decode_string(b""), "");
+    }
+
+    #[test]
+    fn text_chunks_map_to_standard_tags() {
+        let cases: [([u8; 4], &[u8]); 4] = [
+            (*b"NAME", "T\u{e9}st".as_bytes()),
+            (*b"AUTH", b"An Artist"),
+            (*b"(c) ", b"(c) 2016"),
+            (*b"ANNO", b"A comment"),
+        ];
+
+        for (tag, text) in cases {
+            let mut reader = BufReader::new(text);
+            let chunk = TextChunk::parse(&mut reader, tag, text.len() as u32).unwrap();
+
+            let value = str::from_utf8(text).unwrap();
+
+            match (&tag, chunk.tag.std.as_ref().unwrap()) {
+                (b"NAME", StandardTag::TrackTitle(v))
+                | (b"AUTH", StandardTag::Artist(v))
+                | (b"(c) ", StandardTag::Copyright(v))
+                | (b"ANNO", StandardTag::Comment(v)) => assert_eq!(v.as_str(), value),
+                (tag, std) => panic!("unexpected standard tag for {tag:?}: {std:?}"),
+            }
+        }
+    }
 }
