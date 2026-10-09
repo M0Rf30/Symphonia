@@ -6,7 +6,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #![warn(rust_2018_idioms)]
-#![allow(unsafe_code)] // Allow for SIMD optimizations
+#![forbid(unsafe_code)]
 
 // Public modules for benchmarking
 pub mod bitstream;
