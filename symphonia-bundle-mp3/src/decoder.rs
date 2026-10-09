@@ -85,7 +85,10 @@ impl MpaDecoder {
     fn decode_inner(&mut self, packet: &PacketRef<'_>) -> Result<()> {
         let mut reader = packet.as_buf_reader();
 
-        let header = header::read_frame_header(&mut reader)?;
+        // The packet always contains exactly one frame, so its length is also the length of a
+        // free-format frame.
+        let header =
+            header::parse_frame_header_packet(header::sync_frame(&mut reader)?, packet.data.len())?;
 
         // The packet should be the size stated in the header.
         if header.frame_size != reader.bytes_available() as usize {

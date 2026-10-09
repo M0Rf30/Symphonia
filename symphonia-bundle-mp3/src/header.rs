@@ -99,7 +99,19 @@ pub fn sync_frame<B: ReadBytes>(reader: &mut B) -> Result<u32> {
     Ok(sync)
 }
 
+/// Parse a MPEG audio frame header word.
+///
+/// Frames with the "free" bit-rate (bit-rate index 0) can only be parsed with
+/// `parse_frame_header_free`, since their size is not described by the header.
 pub fn parse_frame_header(header: u32) -> Result<FrameHeader> {
+    parse_frame_header_free(header, None)
+}
+
+/// Parse a MPEG audio frame header word using, if the frame uses the "free" bit-rate, the length in
+/// bytes of a free-format frame *without padding* and *including* the 4-byte header.
+///
+/// The free-format frame length is ignored for frames that do not use the free bit-rate.
+pub fn parse_frame_header_free(header: u32, free_len: Option<usize>) -> Result<FrameHeader> {
     // The MPEG audio header is structured as follows:
     //
     // 0b1111_1111 0b111v_vlly 0brrrr_hhpx 0bmmmm_coee
@@ -122,10 +134,20 @@ pub fn parse_frame_header(header: u32) -> Result<FrameHeader> {
         _ => return decode_error("mpa: invalid MPEG layer"),
     };
 
+    // For free-format frames, the bitrate is not known from the header and is instead derived from
+    // the frame length below.
+    let mut is_free = false;
+
     let bitrate = match ((header & 0xf000) >> 12, version, layer) {
         // "Free" bit-rate. Note, this is NOT variable bit-rate and is not a mandatory feature of
-        // MP3 decoders.
-        (0b0000, _, _) => return unsupported_error("mpa: free bit-rate is not supported"),
+        // MP3 decoders. The size of the frame must be provided by the caller.
+        (0b0000, _, _) => match free_len {
+            Some(_) => {
+                is_free = true;
+                0
+            }
+            None => return unsupported_error("mpa: free bit-rate is not supported"),
+        },
         // Invalid bit-rate.
         (0b1111, _, _) => return decode_error("mpa: invalid bit-rate"),
         // MPEG 1 bit-rates.
@@ -173,7 +195,7 @@ pub fn parse_frame_header(header: u32) -> Result<FrameHeader> {
 
     // Some layer 2 channel and bit-rate combinations are not allowed. Check that the frame does not
     // use them.
-    if layer == MpegLayer::Layer2 {
+    if layer == MpegLayer::Layer2 && !is_free {
         if channel_mode == ChannelMode::Mono {
             if bitrate == 224_000 || bitrate == 256_000 || bitrate == 320_000 || bitrate == 384_000
             {
@@ -212,11 +234,27 @@ pub fn parse_frame_header(header: u32) -> Result<FrameHeader> {
         _ => 1,
     };
 
-    // Calculate the total frame size in number of slots.
-    let frame_size_slots = (factor * bitrate / sample_rate) as usize + usize::from(has_padding);
+    // Calculate the total frame size in bytes, including the header.
+    let (bitrate, frame_len) = match free_len {
+        // For a free-format frame, the length without padding is provided. The bit-rate is derived
+        // from it for informational purposes.
+        Some(len) if is_free => {
+            let slots = (len / slot_size) as u64;
+            let bitrate = (slots * u64::from(sample_rate) / u64::from(factor)) as u32;
+            (bitrate, len + usize::from(has_padding) * slot_size)
+        }
+        // Otherwise, the header specifies the total frame size in slots.
+        _ => {
+            let slots = (factor * bitrate / sample_rate) as usize + usize::from(has_padding);
+            (bitrate, slots * slot_size)
+        }
+    };
 
     // Calculate the frame size in bytes, excluding the header.
-    let frame_size = (frame_size_slots * slot_size) - 4;
+    let frame_size = match frame_len.checked_sub(MPEG_HEADER_LEN) {
+        Some(size) => size,
+        None => return decode_error("mpa: invalid free-format frame length"),
+    };
 
     Ok(FrameHeader {
         version,
@@ -232,6 +270,99 @@ pub fn parse_frame_header(header: u32) -> Result<FrameHeader> {
         has_crc,
         frame_size,
     })
+}
+
+/// The number of bytes in a "slot" for the provided frame header word.
+#[inline]
+fn slot_size(header: u32) -> usize {
+    // Layer 1 is encoded as 0b11. Layer 1 slots are 4 bytes, all others 1 byte.
+    if (header >> 17) & 0x3 == 0x3 { 4 } else { 1 }
+}
+
+/// Parse the header word of a packet that contains a complete frame of `packet_len` bytes
+/// (including the header). Unlike `parse_frame_header`, this also supports free-format frames since
+/// the frame length is known from the packet.
+pub fn parse_frame_header_packet(header: u32, packet_len: usize) -> Result<FrameHeader> {
+    // The length of the frame without padding.
+    let padding = if header & 0x200 != 0 { slot_size(header) } else { 0 };
+    parse_frame_header_free(header, Some(packet_len.saturating_sub(padding)))
+}
+
+/// Mask of the bits in a frame header word that must remain constant between all frames of a
+/// free-format stream: the sync word, version, layer, bit-rate index (zero), and sample rate.
+const FREE_FORMAT_HEADER_MASK: u32 = 0xfffe_fc00;
+
+/// Determine the length of free-format frames (excluding padding, including the 4-byte header).
+///
+/// The length of free-format frames is not stated by the frame header, so it must be found by
+/// searching for the next frame header. `buf` must start with the header of a free-format frame
+/// and contain at least one full frame, preferably a few more.
+pub fn find_free_format_len(buf: &[u8]) -> Option<usize> {
+    const MIN_LEN: usize = 24;
+
+    let word_at = |pos: usize| -> Option<u32> {
+        buf.get(pos..pos + MPEG_HEADER_LEN).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    };
+
+    let first = word_at(0)?;
+
+    // The first header must be a free-format header.
+    if !is_frame_header_word_synced(first) || !check_header(first) || (first >> 12) & 0xf != 0 {
+        return None;
+    }
+
+    let slot = slot_size(first);
+    let padded = |word: u32| if word & 0x200 != 0 { slot } else { 0 };
+    let is_same = |word: u32| (word & FREE_FORMAT_HEADER_MASK) == (first & FREE_FORMAT_HEADER_MASK);
+
+    // Search for the next frame header. The first frame is `pos` bytes long.
+    for pos in MIN_LEN..=MAX_MPEG_FRAME_SIZE.min(buf.len().saturating_sub(MPEG_HEADER_LEN)) {
+        // Layer 1 frames are always a multiple of the slot size long.
+        if pos % slot != 0 {
+            continue;
+        }
+
+        let second = match word_at(pos) {
+            Some(word) if is_same(word) => word,
+            _ => continue,
+        };
+
+        // The length of the frame without padding.
+        let base = match pos.checked_sub(padded(first)) {
+            Some(base) if base >= MIN_LEN => base,
+            _ => continue,
+        };
+
+        // The candidate length is good if the following frame headers (if they are in the buffer)
+        // also land where expected. Two successive frames must match, if available.
+        let mut next = pos;
+        let mut word = second;
+        let mut n_checked = 0;
+
+        let ok = loop {
+            if n_checked == 2 {
+                break true;
+            }
+
+            next += base + padded(word);
+
+            match word_at(next) {
+                Some(w) if is_same(w) => {
+                    word = w;
+                    n_checked += 1;
+                }
+                // Out of data to verify any further.
+                None => break true,
+                Some(_) => break false,
+            }
+        };
+
+        if ok {
+            return Some(base);
+        }
+    }
+
+    None
 }
 
 /// Synchronize the stream to the start of the next MPEG audio frame header, then read and return
