@@ -8,7 +8,7 @@
 use symphonia_core::codecs::CodecParameters;
 use symphonia_core::support_format;
 
-use symphonia_core::codecs::audio::well_known::CODEC_ID_AAC;
+use symphonia_core::codecs::audio::well_known::{CODEC_ID_AAC, CODEC_ID_ALAC, CODEC_ID_FLAC};
 use symphonia_core::errors::{
     Error, Result, SeekErrorKind, decode_error, seek_error, unsupported_error,
 };
@@ -238,6 +238,72 @@ fn derive_gapless_from_elst(
     let padding = u32::try_from(padding).ok()?;
 
     Some(GaplessInfo { delay, padding })
+}
+
+/// Gets if the decoder of a track outputs exactly the number of frames that is signalled in the
+/// bitstream of each packet, regardless of the duration in the sample table.
+fn decoder_signals_frame_count(params: &Option<CodecParameters>) -> bool {
+    match params {
+        Some(CodecParameters::Audio(audio)) => {
+            audio.codec == CODEC_ID_ALAC || audio.codec == CODEC_ID_FLAC
+        }
+        _ => false,
+    }
+}
+
+/// Gets the duration of the full block of frames a packet decodes to. This is the nominal sample
+/// duration of the sample table if the packet is a shortened (final) one and the decoder does not
+/// signal the number of frames in the bitstream, otherwise it is the duration of the packet.
+fn nominal_packet_dur(
+    signals_frame_count: bool,
+    stts_nominal: Option<u64>,
+    dur: Duration,
+) -> Duration {
+    if signals_frame_count {
+        return dur;
+    }
+
+    stts_nominal.filter(|&nominal| nominal > dur.get()).map(Duration::new).unwrap_or(dur)
+}
+
+#[cfg(test)]
+mod packet_dur_tests {
+    use super::{decoder_signals_frame_count, nominal_packet_dur};
+    use symphonia_core::codecs::CodecParameters;
+    use symphonia_core::codecs::audio::AudioCodecParameters;
+    use symphonia_core::codecs::audio::well_known::{CODEC_ID_AAC, CODEC_ID_ALAC, CODEC_ID_FLAC};
+    use symphonia_core::units::Duration;
+
+    fn params(codec: symphonia_core::codecs::audio::AudioCodecId) -> Option<CodecParameters> {
+        let mut audio = AudioCodecParameters::new();
+        audio.for_codec(codec);
+        Some(CodecParameters::Audio(audio))
+    }
+
+    #[test]
+    fn shortened_final_packet_of_fixed_size_codec_is_trimmed_to_the_nominal_duration() {
+        // An AAC decoder outputs 1024 frames for a packet with a duration of 568.
+        let signals = decoder_signals_frame_count(&params(CODEC_ID_AAC));
+        assert!(!signals);
+        assert_eq!(nominal_packet_dur(signals, Some(1024), Duration::new(568)).get(), 1024);
+        assert_eq!(nominal_packet_dur(signals, Some(1024), Duration::new(1024)).get(), 1024);
+    }
+
+    #[test]
+    fn shortened_final_packet_of_self_describing_codec_is_not_trimmed() {
+        // ALAC and FLAC decoders output exactly the shortened number of frames; the nominal
+        // duration must not be used or the tail would be trimmed twice.
+        for codec in [CODEC_ID_ALAC, CODEC_ID_FLAC] {
+            let signals = decoder_signals_frame_count(&params(codec));
+            assert!(signals);
+            assert_eq!(nominal_packet_dur(signals, Some(4096), Duration::new(4088)).get(), 4088);
+        }
+    }
+
+    #[test]
+    fn missing_codec_parameters_are_not_self_describing() {
+        assert!(!decoder_signals_frame_count(&None));
+    }
 }
 
 #[cfg(test)]
@@ -965,17 +1031,23 @@ impl FormatReader for IsoMp4Reader<'_> {
         // difference must be trimmed. Fixed-frame-size codecs (a prerequisite of the
         // `is_audio_frame_accurate` gate used to populate `delay`/`padding`) always emit
         // `nominal` samples per packet except for this potentially-shortened final entry.
-        let nominal_dur = self.moov.traks[next_sample_info.track_num]
+        //
+        // Codecs that signal the number of frames of every packet in the bitstream (ALAC, FLAC)
+        // already output only the shortened number of frames, so there is nothing to trim.
+        let stts_nominal = self.moov.traks[next_sample_info.track_num]
             .mdia
             .minf
             .stbl
             .stts
             .entries
             .first()
-            .map(|entry| u64::from(entry.sample_delta))
-            .filter(|&nominal| nominal > next_sample_info.dur.get())
-            .map(Duration::new)
-            .unwrap_or(next_sample_info.dur);
+            .map(|entry| u64::from(entry.sample_delta));
+
+        let nominal_dur = nominal_packet_dur(
+            decoder_signals_frame_count(&track.codec_params),
+            stts_nominal,
+            next_sample_info.dur,
+        );
 
         // Without delay or padding, only a shortened final sample of a track with a known number
         // of frames needs to be trimmed.
