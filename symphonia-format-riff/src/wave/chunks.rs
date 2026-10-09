@@ -6,19 +6,20 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use std::fmt;
+use std::io::{Seek, SeekFrom};
 
 use symphonia_core::audio::AmbisonicBFormat;
 use symphonia_core::audio::{ChannelLabel, Channels, Position};
 use symphonia_core::codecs::audio::AudioCodecId;
 use symphonia_core::codecs::audio::well_known::{
-    CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_MS, CODEC_ID_MP3, CODEC_ID_PCM_ALAW, CODEC_ID_PCM_F32LE,
-    CODEC_ID_PCM_F64LE, CODEC_ID_PCM_MULAW, CODEC_ID_PCM_S16LE, CODEC_ID_PCM_S24LE,
-    CODEC_ID_PCM_S32LE, CODEC_ID_PCM_U8,
+    CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_MS, CODEC_ID_MP2, CODEC_ID_MP3, CODEC_ID_PCM_ALAW,
+    CODEC_ID_PCM_F32LE, CODEC_ID_PCM_F64LE, CODEC_ID_PCM_MULAW, CODEC_ID_PCM_S16LE,
+    CODEC_ID_PCM_S24LE, CODEC_ID_PCM_S32LE, CODEC_ID_PCM_U8,
 };
 use symphonia_core::errors::{Error, Result, decode_error, unsupported_error};
 use symphonia_core::formats::Track;
-use symphonia_core::io::{MediaSourceStream, ReadBytes};
-use symphonia_core::meta::{MetadataBuilder, MetadataRevision};
+use symphonia_core::io::{MediaSource, MediaSourceStream, ReadBytes, ScopedStream};
+use symphonia_core::meta::{MetadataBuilder, MetadataLog, MetadataRevision};
 
 use symphonia_metadata::embedded::riff;
 
@@ -401,6 +402,7 @@ impl WaveFormatChunk {
         reader: &mut B,
         num_channels: u16,
         len: u32,
+        codec: AudioCodecId,
     ) -> Result<FormatData> {
         // The fmt chunk carries a WAVEFORMATEX header followed by an MPEGLAYER3WAVEFORMAT
         // extension (cbSize, then wID/fdwFlags/nBlockSize/nFramesPerBlock/nCodecDelay). None of the
@@ -412,7 +414,7 @@ impl WaveFormatChunk {
         }
 
         let channels = map_wave_channel_count(num_channels)?;
-        Ok(FormatData::Mpeg(FormatMpeg { codec: CODEC_ID_MP3, channels }))
+        Ok(FormatData::Mpeg(FormatMpeg { codec, channels }))
     }
 
     pub(crate) fn packet_info(&self) -> Result<PacketInfo> {
@@ -451,6 +453,7 @@ impl ParseChunk for WaveFormatChunk {
         const WAVE_FORMAT_ALAW: u16 = 0x0006;
         const WAVE_FORMAT_MULAW: u16 = 0x0007;
         const WAVE_FORMAT_ADPCM_IMA: u16 = 0x0011;
+        const WAVE_FORMAT_MPEG: u16 = 0x0050;
         const WAVE_FORMAT_MPEGLAYER3: u16 = 0x0055;
         const WAVE_FORMAT_EXTENSIBLE: u16 = 0xfffe;
 
@@ -490,7 +493,9 @@ impl ParseChunk for WaveFormatChunk {
                 CODEC_ID_ADPCM_IMA_WAV,
             ),
             // The MPEG-1 Audio Layer III (MP3) Format.
-            WAVE_FORMAT_MPEGLAYER3 => Self::read_mpeg_fmt(reader, num_channels, len),
+            WAVE_FORMAT_MPEGLAYER3 => Self::read_mpeg_fmt(reader, num_channels, len, CODEC_ID_MP3),
+            // The MPEG-1 Audio Layer I/II Format.
+            WAVE_FORMAT_MPEG => Self::read_mpeg_fmt(reader, num_channels, len, CODEC_ID_MP2),
             // Unsupported format.
             _ => return unsupported_error("wav: unsupported wave format"),
         }?;
@@ -626,7 +631,14 @@ pub struct InfoChunk {
 
 impl ParseChunk for InfoChunk {
     fn parse<B: ReadBytes>(reader: &mut B, tag: [u8; 4], len: u32) -> Result<InfoChunk> {
-        // TODO: Apply limit.
+        // INFO strings are short. Don't allocate for an excessively long one, skip it instead.
+        const MAX_INFO_LEN: u32 = 1024 * 1024;
+
+        if len > MAX_INFO_LEN {
+            reader.ignore_bytes(u64::from(len))?;
+            return Ok(InfoChunk { tag, buf: Box::new([]) });
+        }
+
         let buf = reader.read_boxed_slice_exact(len as usize)?;
         Ok(InfoChunk { tag, buf })
     }
@@ -705,6 +717,7 @@ pub enum RiffWaveChunks {
     Fact(ChunkParser<FactChunk>),
     Data(ChunkParser<DataChunk>),
     Ds64(ChunkParser<Ds64Chunk>),
+    Id3(ChunkParser<Id3Chunk>),
 }
 
 macro_rules! parser {
@@ -721,6 +734,7 @@ impl ParseChunkTag for RiffWaveChunks {
             b"fact" => parser!(RiffWaveChunks::Fact, FactChunk, tag, len),
             b"data" => parser!(RiffWaveChunks::Data, DataChunk, tag, len),
             b"ds64" => parser!(RiffWaveChunks::Ds64, Ds64Chunk, tag, len),
+            b"id3 " | b"ID3 " => parser!(RiffWaveChunks::Id3, Id3Chunk, tag, len),
             _ => None,
         }
     }
@@ -758,6 +772,218 @@ pub fn read_info_chunk(source: &mut MediaSourceStream<'_>, len: u32) -> Result<M
     list.finish(source)?;
 
     Ok(builder.build())
+}
+
+/// Chunks that may follow the data chunk and are of interest. All other chunks are skipped.
+pub enum RiffTrailingChunks {
+    List(ChunkParser<ListChunk>),
+    Id3(ChunkParser<Id3Chunk>),
+}
+
+impl ParseChunkTag for RiffTrailingChunks {
+    fn parse_tag(tag: [u8; 4], len: u32) -> Option<Self> {
+        match &tag {
+            b"LIST" => parser!(RiffTrailingChunks::List, ListChunk, tag, len),
+            b"id3 " | b"ID3 " => parser!(RiffTrailingChunks::Id3, Id3Chunk, tag, len),
+            _ => None,
+        }
+    }
+}
+
+/// Reads the metadata chunks that follow the data chunk, which many taggers write there, and
+/// appends them to `metadata`. The data chunk is at `[data_start_pos, data_end_pos)`.
+///
+/// This requires seeking. If the source is not seekable, nothing is read. Any malformed chunk
+/// following the data chunk ends the search without an error since the audio is still playable.
+/// The position of the stream is restored to `data_start_pos` before returning.
+pub fn read_trailing_metadata(
+    source: &mut MediaSourceStream<'_>,
+    data_start_pos: u64,
+    data_end_pos: u64,
+    metadata: &mut MetadataLog,
+) -> Result<()> {
+    /// The maximum number of chunks that will be inspected.
+    const MAX_CHUNKS: usize = 32;
+    /// The maximum length of an INFO list that will be read.
+    const MAX_INFO_LIST_LEN: u32 = 1024 * 1024;
+
+    if !source.is_seekable() {
+        return Ok(());
+    }
+
+    // The data chunk is padded to an even length.
+    let next_chunk_pos = data_end_pos.saturating_add((data_end_pos - data_start_pos) & 0x1);
+
+    // Nothing follows the data chunk.
+    if source.byte_len().is_some_and(|byte_len| next_chunk_pos.saturating_add(8) > byte_len) {
+        return Ok(());
+    }
+
+    if source.seek(SeekFrom::Start(next_chunk_pos)).is_ok() {
+        // The RIFF chunk length is not used to bound the search since it is frequently not
+        // updated when a tagger appends a chunk.
+        let mut chunks = ChunksReader::<RiffTrailingChunks>::new(None, ByteOrder::LittleEndian);
+
+        for _ in 0..MAX_CHUNKS {
+            let chunk = match chunks.next(source) {
+                Ok(Some(chunk)) => chunk,
+                _ => break,
+            };
+
+            let revision = match chunk {
+                RiffTrailingChunks::List(list) => {
+                    let Ok(list) = list.parse(source)
+                    else {
+                        break;
+                    };
+
+                    // Only INFO lists are supported.
+                    if &list.form != b"INFO" {
+                        if list.skip(source).is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+
+                    if list.len > MAX_INFO_LIST_LEN {
+                        break;
+                    }
+
+                    read_info_chunk(source, list.len).ok()
+                }
+                RiffTrailingChunks::Id3(id3) => id3.parse(source).ok().map(|id3| id3.metadata),
+            };
+
+            match revision {
+                Some(revision) => metadata.push(revision),
+                None => break,
+            }
+        }
+    }
+
+    // Return to the start of the audio data.
+    source.seek(SeekFrom::Start(data_start_pos))?;
+
+    Ok(())
+}
+
+pub struct Id3Chunk {
+    pub metadata: MetadataRevision,
+}
+
+impl ParseChunk for Id3Chunk {
+    fn parse<B: ReadBytes>(reader: &mut B, _tag: [u8; 4], len: u32) -> Result<Self> {
+        // The tag must not be read past the end of the chunk.
+        let mut reader = ScopedStream::new(reader, u64::from(len));
+
+        let mut side_data = Vec::new();
+        let metadata = riff::read_riff_id3_chunk(&mut reader, &mut side_data)?;
+
+        // Skip any unread data in the chunk (e.g., padding).
+        reader.ignore()?;
+
+        Ok(Id3Chunk { metadata })
+    }
+}
+
+/// The last 12 bytes of the GUID of the Wave64 "riff" chunk.
+pub const W64_RIFF_GUID_TAIL: [u8; 12] =
+    [0x2e, 0x91, 0xcf, 0x11, 0xa5, 0xd6, 0x28, 0xdb, 0x04, 0xc1, 0x00, 0x00];
+
+/// The last 12 bytes of the GUIDs of the Wave64 "wave", "fmt ", "data", etc. chunks.
+const W64_CHUNK_GUID_TAIL: [u8; 12] =
+    [0xf3, 0xac, 0xd3, 0x11, 0x8c, 0xd1, 0x00, 0xc0, 0x4f, 0x8e, 0xdb, 0x8a];
+
+/// The size, in bytes, of a Wave64 chunk header (a 16-byte GUID and a 64-bit size).
+const W64_CHUNK_HEADER_LEN: u64 = 24;
+
+/// Reads the remainder of the Wave64 file header, after the first four bytes of the "riff" GUID
+/// that identify the file.
+pub fn read_w64_header<B: ReadBytes>(reader: &mut B) -> Result<()> {
+    let mut guid_tail = [0u8; 12];
+    reader.read_buf_exact(&mut guid_tail)?;
+
+    if guid_tail != W64_RIFF_GUID_TAIL {
+        return unsupported_error("wav: invalid w64 riff guid");
+    }
+
+    // The size of the file, including this header.
+    let _file_len = reader.read_u64()?;
+
+    // The form is identified by the GUID of the "wave" chunk.
+    let mut form = [0u8; 16];
+    reader.read_buf_exact(&mut form)?;
+
+    if form[..4] != *b"wave" || form[4..] != W64_CHUNK_GUID_TAIL {
+        return unsupported_error("wav: w64 form is not wave");
+    }
+
+    Ok(())
+}
+
+/// `W64ChunksReader` reads the chunks of a Sony Wave64 file, and maps them to the same chunk
+/// parsers as those of a RIFF/WAVE file.
+///
+/// Wave64 is structured like RIFF, but chunks are identified by 16-byte GUIDs, chunk sizes are
+/// 64-bit and include the chunk header, and chunks are padded to a multiple of 8 bytes. Only the
+/// `fmt ` and `data` chunks are used.
+pub struct W64ChunksReader {
+    /// The number of padding bytes after the previous chunk.
+    pad: u64,
+}
+
+impl W64ChunksReader {
+    pub fn new() -> Self {
+        W64ChunksReader { pad: 0 }
+    }
+
+    /// Reads chunk headers until a chunk of interest is found. Returns the chunk parser and the
+    /// length of the chunk's payload. The length of the payload of a `data` chunk may exceed the
+    /// maximum 32-bit length, in which case the length given to the chunk parser is `u32::MAX`.
+    pub fn next<B: ReadBytes>(&mut self, reader: &mut B) -> Result<Option<(RiffWaveChunks, u64)>> {
+        loop {
+            if self.pad > 0 {
+                reader.ignore_bytes(self.pad)?;
+                self.pad = 0;
+            }
+
+            let mut guid = [0u8; 16];
+            reader.read_buf_exact(&mut guid)?;
+
+            let chunk_len = reader.read_u64()?;
+
+            // The chunk length includes the chunk header.
+            let Some(payload_len) = chunk_len.checked_sub(W64_CHUNK_HEADER_LEN)
+            else {
+                return decode_error("wav: invalid w64 chunk length");
+            };
+
+            self.pad = payload_len.wrapping_neg() & 0x7;
+
+            let tag = [guid[0], guid[1], guid[2], guid[3]];
+
+            let chunk = if guid[4..] == W64_CHUNK_GUID_TAIL {
+                match &tag {
+                    b"data" => {
+                        let len = u32::try_from(payload_len).unwrap_or(u32::MAX);
+                        RiffWaveChunks::parse_tag(tag, len)
+                    }
+                    b"fmt " => u32::try_from(payload_len)
+                        .ok()
+                        .and_then(|len| RiffWaveChunks::parse_tag(tag, len)),
+                    _ => None,
+                }
+            }
+            else {
+                None
+            };
+
+            match chunk {
+                Some(chunk) => return Ok(Some((chunk, payload_len))),
+                None => reader.ignore_bytes(payload_len)?,
+            }
+        }
+    }
 }
 
 /// Corrects a WAVE channel mask that doesn't is not valid for the stated number of channels.

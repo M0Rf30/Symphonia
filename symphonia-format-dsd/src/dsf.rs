@@ -53,6 +53,8 @@ impl DsfFormatChunk {
         if self.format_version != 1 { return unsupported_error("dsf: bad version"); }
         if self.format_id != 0 { return unsupported_error("dsf: bad format id"); }
         if self.channel_count < 1 || self.channel_count > 6 { return decode_error("dsf: bad channels"); }
+        if self.sample_rate == 0 { return decode_error("dsf: bad sample rate"); }
+        if self.block_size_per_channel == 0 { return decode_error("dsf: bad block size"); }
         if self.bits_per_sample != 1 && self.bits_per_sample != 8 { return decode_error("dsf: bad bps"); }
         Ok(())
     }
@@ -97,7 +99,7 @@ impl<'s> DsfReader<'s> {
         let mut metadata_log = MetadataLog::default();
         let data = DsfDataChunk::read(&mut source)?;
         let data_start_pos = source.pos();
-        let data_end_pos = data_start_pos + data.data_size;
+        let data_end_pos = data_start_pos.saturating_add(data.data_size);
 
         if header.metadata_pointer != 0 && header.metadata_pointer >= data_end_pos && source.is_seekable() {
             source.seek(SeekFrom::Start(header.metadata_pointer))?;
@@ -158,30 +160,50 @@ impl FormatReader for DsfReader<'_> {
         let to_read = (self.block_size_per_channel as u64 * channels).min(self.data_end_pos - self.current_pos);
         let mut frames = (to_read * 8) / channels;
         frames = frames.min(self.sample_count - frame_pos);
-        let buf = self.reader.read_boxed_slice_exact(to_read as usize)?;
+        let mut buf = self.reader.read_boxed_slice_exact(to_read as usize)?;
         self.current_pos += to_read;
+
+        // The final block of each channel is zero-padded to the block size. Discard the padding,
+        // keeping the planar layout (the data of each channel is contiguous): only the bytes of
+        // each channel that hold the `frames` remaining DSD samples (8 per byte) are kept.
+        let stride = (to_read / channels) as usize;
+        let bytes_per_channel = frames.div_ceil(8) as usize;
+        if bytes_per_channel < stride {
+            let mut trimmed = Vec::with_capacity(bytes_per_channel * channels as usize);
+            for plane in buf.chunks_exact(stride) {
+                trimmed.extend_from_slice(&plane[..bytes_per_channel]);
+            }
+            buf = trimmed.into_boxed_slice();
+        }
         Ok(Some(PacketBuilder::new().track_id(0).pts(Timestamp::new(frame_pos as i64))
             .dur(Duration::new(frames)).data(buf).build()))
     }
     fn metadata(&mut self) -> Metadata<'_> { self.metadata.metadata() }
     fn tracks(&self) -> &[Track] { &self.tracks }
     fn seek(&mut self, _mode: SeekMode, to: SeekTo) -> Result<SeekedTo> {
-        let required_frame = match to {
-            SeekTo::Timestamp { ts, .. } => ts.get() as u64,
+        let required_ts = match to {
+            SeekTo::Timestamp { ts, .. } => ts,
             SeekTo::Time { time, .. } => {
                 let tb = self.tracks[0].time_base
                     .ok_or(symphonia_core::errors::Error::SeekError(SeekErrorKind::Unseekable))?;
-                tb.calc_timestamp(time).unwrap_or(Timestamp::ZERO).get() as u64
+                tb.calc_timestamp(time).unwrap_or(Timestamp::ZERO)
             }
         };
+        if required_ts.is_negative() { return seek_error(SeekErrorKind::OutOfRange); }
+        let required_frame = required_ts.get() as u64;
         let frames_per_block = self.block_size_per_channel as u64 * 8;
         let block_idx = required_frame / frames_per_block;
-        let seek_pos = self.data_start_pos + block_idx * (self.block_size_per_channel as u64 * self.channel_count as u64);
-        if seek_pos >= self.data_end_pos { return seek_error(SeekErrorKind::OutOfRange); }
+        let seek_pos = block_idx
+            .checked_mul(self.block_size_per_channel as u64 * self.channel_count as u64)
+            .and_then(|offset| self.data_start_pos.checked_add(offset));
+        let seek_pos = match seek_pos {
+            Some(seek_pos) if seek_pos < self.data_end_pos => seek_pos,
+            _ => return seek_error(SeekErrorKind::OutOfRange),
+        };
         self.reader.seek(SeekFrom::Start(seek_pos))?;
         self.current_pos = seek_pos;
         let actual_frame = block_idx * frames_per_block;
-        Ok(SeekedTo { track_id: 0, required_ts: Timestamp::new(actual_frame as i64), actual_ts: Timestamp::new(actual_frame as i64) })
+        Ok(SeekedTo { track_id: 0, required_ts, actual_ts: Timestamp::new(actual_frame as i64) })
     }
     fn into_inner<'a>(self: Box<Self>) -> MediaSourceStream<'a> where Self: 'a { self.reader }
 }

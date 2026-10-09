@@ -19,7 +19,7 @@ use symphonia_core::meta::well_known::METADATA_ID_WAVE;
 use symphonia_core::meta::{Metadata, MetadataInfo, MetadataLog};
 use symphonia_core::support_format;
 
-use log::{debug, error};
+use log::{debug, error, warn};
 
 use crate::common::{
     ByteOrder, ChunksReader, FormatData, PacketInfo, append_data_params, append_format_params,
@@ -34,6 +34,11 @@ const WAVE_STREAM_MARKER: [u8; 4] = *b"RIFF";
 /// RF64 is a 64-bit extension of RIFF, with "RF64" as the stream marker.
 /// Reference: EBU Tech 3306 - MBWF / RF64: An extended File Format for Audio.
 const RF64_STREAM_MARKER: [u8; 4] = *b"RF64";
+/// BW64 (ITU-R BS.2088) is the successor to RF64 and is handled identically.
+const BW64_STREAM_MARKER: [u8; 4] = *b"BW64";
+/// Sony Wave64 files begin with the GUID of the "riff" chunk. The first four bytes of the GUID are
+/// the ASCII characters "riff" (lower-case).
+const W64_STREAM_MARKER: [u8; 4] = *b"riff";
 /// A possible RIFF form is "wave".
 const WAVE_RIFF_FORM: [u8; 4] = *b"WAVE";
 
@@ -75,17 +80,13 @@ pub struct WavReader<'s> {
     is_mpeg: bool,
     /// Running presentation timestamp (in samples) for the next MPEG packet.
     mpeg_ts: u64,
-    /// Sampling rate of the MPEG elementary stream (0 if `is_mpeg` is false or unknown).
-    mpeg_sample_rate: u32,
-    /// Average bytes/second of the MPEG elementary stream, used for coarse seeking and duration
-    /// estimation when neither a `fact` chunk nor ds64 sample count is available (0 if `is_mpeg`
-    /// is false or unknown).
-    mpeg_bytes_per_sec: u64,
     /// Number of PCM samples per MPEG frame (0 if `is_mpeg` is false or unknown). Used to convert
-    /// a seek target directly into a frame index, so coarse seeking lands on (or very near) an
-    /// actual frame boundary instead of an arbitrary byte offset that may fall in the middle of a
-    /// frame's body.
+    /// a seek target directly into a frame index.
     mpeg_samples_per_frame: u64,
+    /// Byte offset, relative to the start of the data chunk, of every MPEG frame. MPEG frames are
+    /// variable-length, so this index is the only way to seek to an exact frame. It is built
+    /// lazily on the first seek (which requires scanning the entire data chunk).
+    mpeg_frame_index: Option<Vec<u64>>,
 }
 
 impl<'s> WavReader<'s> {
@@ -93,36 +94,50 @@ impl<'s> WavReader<'s> {
         // A Wave file is one large RIFF chunk, with the actual meta and audio data contained in
         // nested chunks. Therefore, the file starts with a RIFF chunk header (chunk ID & size).
 
-        // The top-level chunk has the RIFF or RF64 chunk ID. This is also the file marker.
+        // The top-level chunk has the RIFF, RF64, BW64, or (Sony Wave64) "riff" chunk ID. This is
+        // also the file marker.
         let marker = mss.read_quad_bytes()?;
 
-        let is_rf64 = match marker {
-            WAVE_STREAM_MARKER => false,
-            RF64_STREAM_MARKER => true,
-            _ => return unsupported_error("wav: missing riff/rf64 stream marker"),
+        let (is_rf64, is_w64) = match marker {
+            WAVE_STREAM_MARKER => (false, false),
+            // BW64 (ITU-R BS.2088) is the successor to RF64 and uses the same ds64 mechanism.
+            RF64_STREAM_MARKER | BW64_STREAM_MARKER => (true, false),
+            W64_STREAM_MARKER => (false, true),
+            _ => return unsupported_error("wav: missing riff/rf64/bw64/w64 stream marker"),
         };
 
-        // The length of the top-level RIFF chunk. Must be atleast 4 bytes.
-        // For RF64 files, this is 0xFFFFFFFF and the actual size is in the ds64 chunk.
-        let riff_len = mss.read_u32()?;
+        let mut w64_chunks = None;
 
-        if riff_len < 4 && riff_len != u32::MAX {
-            return decode_error("wav: invalid riff length");
+        let riff_data_len = if is_w64 {
+            // Sony Wave64 is structurally RIFF, but chunk IDs are 16-byte GUIDs, chunk lengths are
+            // 64-bit, and chunks are aligned to 8 bytes.
+            read_w64_header(&mut mss)?;
+            w64_chunks = Some(W64ChunksReader::new());
+            None
         }
+        else {
+            // The length of the top-level RIFF chunk. Must be atleast 4 bytes.
+            // For RF64 files, this is 0xFFFFFFFF and the actual size is in the ds64 chunk.
+            let riff_len = mss.read_u32()?;
 
-        // The form type. Only the WAVE form is supported.
-        let riff_form = mss.read_quad_bytes()?;
+            if riff_len < 4 && riff_len != u32::MAX {
+                return decode_error("wav: invalid riff length");
+            }
 
-        if riff_form != WAVE_RIFF_FORM {
-            error!("riff form is not wave ({})", String::from_utf8_lossy(&riff_form));
+            // The form type. Only the WAVE form is supported.
+            let riff_form = mss.read_quad_bytes()?;
 
-            return unsupported_error("wav: riff form is not wave");
-        }
+            if riff_form != WAVE_RIFF_FORM {
+                error!("riff form is not wave ({})", String::from_utf8_lossy(&riff_form));
 
-        // When ffmpeg encodes wave to stdout the riff (parent) and data (child) chunk lengths are
-        // (2^32)-1 since the size is not known ahead of time. For RF64 files, the riff length is
-        // also 0xFFFFFFFF.
-        let riff_data_len = if riff_len < u32::MAX { Some(riff_len - 4) } else { None };
+                return unsupported_error("wav: riff form is not wave");
+            }
+
+            // When ffmpeg encodes wave to stdout the riff (parent) and data (child) chunk lengths
+            // are (2^32)-1 since the size is not known ahead of time. For RF64 files, the riff
+            // length is also 0xFFFFFFFF.
+            if riff_len < u32::MAX { Some(riff_len - 4) } else { None }
+        };
 
         let mut riff_chunks =
             ChunksReader::<RiffWaveChunks>::new(riff_data_len, ByteOrder::LittleEndian);
@@ -138,7 +153,22 @@ impl<'s> WavReader<'s> {
         let mut rf64_sizes = Rf64Sizes::default();
 
         loop {
-            let chunk = riff_chunks.next(&mut mss)?;
+            let chunk = match &mut w64_chunks {
+                Some(w64_chunks) => {
+                    let chunk = w64_chunks.next(&mut mss)?;
+
+                    // A Wave64 data chunk has a 64-bit length. Treat a length too large for the 32-bit
+                    // field like an RF64 data chunk: the true length is carried out-of-band.
+                    if let Some((RiffWaveChunks::Data(_), len)) = &chunk {
+                        if *len >= u64::from(u32::MAX) {
+                            rf64_sizes.data_size = Some(*len);
+                        }
+                    }
+
+                    chunk.map(|(chunk, _)| chunk)
+                }
+                None => riff_chunks.next(&mut mss)?,
+            };
 
             // The last chunk should always be a data chunk, if it is not, then the stream is
             // unsupported.
@@ -202,6 +232,18 @@ impl<'s> WavReader<'s> {
                         _ => list.skip(&mut mss)?,
                     }
                 }
+                RiffWaveChunks::Id3(id3) => {
+                    let chunk_end_pos = mss.pos() + u64::from(id3.len);
+
+                    // A malformed ID3 tag is not fatal. Skip the chunk.
+                    match id3.parse(&mut mss) {
+                        Ok(id3) => metadata.push(id3.metadata),
+                        Err(err) => {
+                            warn!("failed to read id3 chunk: {err}");
+                            mss.ignore_bytes(chunk_end_pos.saturating_sub(mss.pos()))?;
+                        }
+                    }
+                }
                 RiffWaveChunks::Data(dat) => {
                     let data = dat.parse(&mut mss)?;
 
@@ -218,10 +260,23 @@ impl<'s> WavReader<'s> {
 
                     let data_end_pos = data_len.and_then(|len| data_start_pos.checked_add(len));
 
+                    // Metadata chunks are commonly written after the data chunk by taggers. If the
+                    // source is seekable, look for them now, then return to the start of the data.
+                    // Not possible for Wave64 (no support for the chunks), or if the length of the
+                    // data chunk is unknown.
+                    if let (Some(data_end_pos), false) = (data_end_pos, is_w64) {
+                        read_trailing_metadata(
+                            &mut mss,
+                            data_start_pos,
+                            data_end_pos,
+                            &mut metadata,
+                        )?;
+                    }
+
                     // For MPEG audio the elementary stream is authoritative for the exact codec
                     // (Layer I/II/III) and sample rate, so refine the codec parameters from the
                     // first frame, then rewind so the first packet is read in full. Also derive
-                    // the average bytes/second used for duration estimation and coarse seeking:
+                    // the average bytes/second used for duration estimation:
                     // prefer the format chunk's stated average, falling back to the first frame's
                     // own bit-rate if that field is absent or zero.
                     let mut mpeg_sample_rate = 0u32;
@@ -237,7 +292,8 @@ impl<'s> WavReader<'s> {
                             mpeg_samples_per_frame = first.samples_per_frame;
                             mpeg_bytes_per_sec = if mpeg_avg_bytes_per_sec > 0 {
                                 u64::from(mpeg_avg_bytes_per_sec)
-                            } else {
+                            }
+                            else {
                                 u64::from(first.bitrate) / 8
                             };
                         }
@@ -249,7 +305,8 @@ impl<'s> WavReader<'s> {
 
                     track.with_codec_params(CodecParameters::Audio(codec_params));
 
-                    let Some(packet_info) = packet_info else {
+                    let Some(packet_info) = packet_info
+                    else {
                         return decode_error("wav: missing format chunk");
                     };
 
@@ -264,14 +321,17 @@ impl<'s> WavReader<'s> {
                         if is_mpeg {
                             let num_frames = if let Some(sample_count) = rf64_sizes.sample_count {
                                 Some(sample_count)
-                            } else if let Some(fact) = &fact {
+                            }
+                            else if let Some(fact) = &fact {
                                 Some(u64::from(fact.num_frames))
-                            } else if mpeg_bytes_per_sec > 0 && mpeg_sample_rate > 0 {
+                            }
+                            else if mpeg_bytes_per_sec > 0 && mpeg_sample_rate > 0 {
                                 Some(
                                     data_len.saturating_mul(u64::from(mpeg_sample_rate))
                                         / mpeg_bytes_per_sec,
                                 )
-                            } else {
+                            }
+                            else {
                                 mpeg::estimate_num_frames(
                                     &mut mss,
                                     data_start_pos,
@@ -283,7 +343,8 @@ impl<'s> WavReader<'s> {
                                 track.with_num_frames(num_frames);
                                 track.with_duration(Duration::from(num_frames));
                             }
-                        } else {
+                        }
+                        else {
                             append_data_params(&mut track, data_len, &packet_info);
 
                             // For RF64 files, prefer the sample count from ds64 over the computed
@@ -291,7 +352,8 @@ impl<'s> WavReader<'s> {
                             // Applied after append_data_params so the authoritative value wins.
                             if let Some(sample_count) = rf64_sizes.sample_count {
                                 track.with_num_frames(sample_count);
-                            } else if let Some(fact) = &fact {
+                            }
+                            else if let Some(fact) = &fact {
                                 append_fact_params(&mut track, fact);
                             }
                         }
@@ -309,69 +371,51 @@ impl<'s> WavReader<'s> {
                         data_end_pos,
                         is_mpeg,
                         mpeg_ts: 0,
-                        mpeg_sample_rate,
-                        mpeg_bytes_per_sec,
                         mpeg_samples_per_frame,
+                        mpeg_frame_index: None,
                     });
                 }
             }
         }
     }
 
-    /// Seeks an MPEG-in-WAVE track to the MPEG frame closest to `required_ts`. A coarse byte
-    /// offset is estimated from the average byte rate, then the reader resynchronises to the
-    /// next valid MPEG frame header from there and reports that frame's (aligned) timestamp.
+    /// Seeks an MPEG-in-WAVE track to the MPEG frame containing `required_ts`.
+    ///
+    /// MPEG audio frames are variable-length (padding, VBR), so a byte offset can't be calculated
+    /// from a timestamp without accumulating error. Instead, on the first seek, the frames of the
+    /// whole data chunk are indexed, and the seek is then to the exact byte offset of the frame.
     fn seek_mpeg(&mut self, required_ts: Timestamp) -> Result<SeekedTo> {
-        if self.mpeg_bytes_per_sec == 0 || self.mpeg_sample_rate == 0 || self.mpeg_samples_per_frame == 0
-        {
+        if self.mpeg_samples_per_frame == 0 || !self.reader.is_seekable() {
             return seek_error(SeekErrorKind::Unseekable);
         }
-
-        if !self.reader.is_seekable() {
-            return seek_error(SeekErrorKind::Unseekable);
-        }
-
-        let data_end_pos = self.data_end_pos.unwrap_or(u64::MAX);
 
         debug!("seeking mpeg-in-wave to ts={required_ts}");
 
-        // Assume a constant frame size (in both samples and bytes) and convert the desired
-        // timestamp directly into a frame index. Landing on a presumed frame boundary (rather
-        // than an arbitrary interpolated byte offset) avoids scanning through the middle of a
-        // frame's body, where a run of high-entropy bytes can occasionally look like a false
-        // sync.
-        let per_frame = self.mpeg_samples_per_frame;
-        let frame_len =
-            (self.mpeg_bytes_per_sec * per_frame / u64::from(self.mpeg_sample_rate)).max(1);
-        let frame_index = (required_ts.get() as u64) / per_frame;
+        if self.mpeg_frame_index.is_none() {
+            self.reader.seek(SeekFrom::Start(self.data_start_pos))?;
 
-        let seek_pos = self
-            .data_start_pos
-            .saturating_add(frame_index.saturating_mul(frame_len))
-            .min(data_end_pos);
+            let index = mpeg::scan_frame_offsets(
+                &mut self.reader,
+                self.data_start_pos,
+                self.data_end_pos.unwrap_or(u64::MAX),
+            )?;
 
-        self.reader.seek(SeekFrom::Start(seek_pos))?;
+            self.mpeg_frame_index = Some(index);
+        }
 
-        // Resynchronise to the next valid MPEG frame header from the estimated position. Use the
-        // stricter, verified resync (not the plain frame reader used by `next_packet`) since we
-        // may be landing in the middle of a frame body, where a false sync is possible.
-        let Some((format, frame)) = mpeg::seek_sync_frame(&mut self.reader, data_end_pos)? else {
+        let index = self.mpeg_frame_index.as_deref().unwrap_or_default();
+
+        // Frames are all the same codec so all have the same number of samples.
+        let frame_index = (required_ts.get() as u64) / self.mpeg_samples_per_frame;
+
+        let Some(frame_offset) = usize::try_from(frame_index).ok().and_then(|i| index.get(i))
+        else {
             return seek_error(SeekErrorKind::OutOfRange);
         };
 
-        // The byte offset of the frame's header (the frame has just been fully consumed).
-        let frame_start_pos = self.reader.pos() - frame.len() as u64;
+        self.reader.seek(SeekFrom::Start(self.data_start_pos + frame_offset))?;
 
-        // Rewind so the resynced frame is read again, in full, as the first post-seek packet.
-        self.reader.seek_buffered_rev(frame.len());
-
-        // Recover the landed frame's index from its byte offset using the *same* assumed frame
-        // length used above (rather than re-deriving it via sample-rate/byte-rate arithmetic),
-        // so that a frame found exactly where expected reports back exactly the timestamp that
-        // was targeted, without compounding additional rounding error.
-        let landed_offset = frame_start_pos.saturating_sub(self.data_start_pos);
-        let landed_frame_index = landed_offset / frame_len;
-        let aligned_ts = landed_frame_index.saturating_mul(format.samples_per_frame.max(1));
+        let aligned_ts = frame_index * self.mpeg_samples_per_frame;
 
         let actual_ts = Timestamp::try_from(aligned_ts)
             .map_err(|_| Error::SeekError(SeekErrorKind::OutOfRange))?;
@@ -390,13 +434,33 @@ impl<'s> WavReader<'s> {
 
 impl Scoreable for WavReader<'_> {
     fn score(mut src: ScopedStream<&mut MediaSourceStream<'_>>) -> Result<Score> {
-        // Perform simple scoring by testing that the RIFF/RF64 stream marker and RIFF form are
-        // both valid for WAVE.
+        // Perform simple scoring by testing that the RIFF/RF64/BW64 stream marker and RIFF form
+        // are both valid for WAVE.
         let marker = src.read_quad_bytes()?;
+
+        // A Wave64 file starts with the "riff" chunk GUID, and the "wave" chunk GUID follows the
+        // 64-bit length.
+        if marker == W64_STREAM_MARKER {
+            let mut guid_tail = [0u8; 12];
+            src.read_buf_exact(&mut guid_tail)?;
+            src.ignore_bytes(8)?;
+            let mut form = [0u8; 4];
+            src.read_buf_exact(&mut form)?;
+
+            return if guid_tail == W64_RIFF_GUID_TAIL && form == *b"wave" {
+                Ok(Score::Supported(255))
+            }
+            else {
+                Ok(Score::Unsupported)
+            };
+        }
+
         src.ignore_bytes(4)?;
         let riff_form = src.read_quad_bytes()?;
 
-        let is_valid_marker = marker == WAVE_STREAM_MARKER || marker == RF64_STREAM_MARKER;
+        let is_valid_marker = marker == WAVE_STREAM_MARKER
+            || marker == RF64_STREAM_MARKER
+            || marker == BW64_STREAM_MARKER;
 
         if !is_valid_marker || riff_form != WAVE_RIFF_FORM {
             return Ok(Score::Unsupported);
@@ -429,6 +493,20 @@ impl ProbeableFormat<'_> for WavReader<'_> {
                 &["wav", "wave", "rf64"],
                 &["audio/vnd.wave", "audio/x-wav", "audio/wav", "audio/wave"],
                 &[b"RF64"]
+            ),
+            // BW64 (ITU-R BS.2088), the successor to RF64
+            support_format!(
+                WAVE_FORMAT_INFO,
+                &["wav", "wave", "bw64"],
+                &["audio/vnd.wave", "audio/x-wav", "audio/wav", "audio/wave"],
+                &[b"BW64"]
+            ),
+            // Sony Wave64 (the GUID of the "riff" chunk)
+            support_format!(
+                WAVE_FORMAT_INFO,
+                &["w64"],
+                &["audio/x-w64", "audio/x-wav", "audio/wav"],
+                &[b"riff"]
             ),
         ]
     }
@@ -523,9 +601,9 @@ impl FormatReader for WavReader<'_> {
         // the same timestamps regardless if the stream was seeked or not.
         let actual_ts = self.packet_info.get_actual_ts(required_ts);
 
-        // Calculate the absolute byte offset of the desired audio frame.
-        let seek_pos =
-            self.data_start_pos + (actual_ts.get() as u64 * self.packet_info.block_size.get());
+        // Calculate the absolute byte offset of the block containing the desired audio frame. The
+        // offset is in whole blocks (not frames), which differ for block-based codecs (ADPCM).
+        let seek_pos = self.data_start_pos + self.packet_info.get_data_pos_at(actual_ts);
 
         // If the reader supports seeking we can seek directly to the frame's offset wherever it may
         // be.
@@ -923,7 +1001,11 @@ mod tests {
 
     /// Encodes a CBR MP3-in-WAV file with `ffmpeg`, returning its bytes, or `None` if `ffmpeg` is
     /// not available or the encode failed (the caller should skip the test in that case).
-    fn make_ffmpeg_mp3_in_wav(duration_secs: u32, sample_rate: u32, bitrate_kbps: u32) -> Option<Vec<u8>> {
+    fn make_ffmpeg_mp3_in_wav(
+        duration_secs: u32,
+        sample_rate: u32,
+        bitrate_kbps: u32,
+    ) -> Option<Vec<u8>> {
         let mut path = std::env::temp_dir();
         path.push(format!(
             "symphonia-riff-mpeg-test-{}-{}-{}-{}.wav",
@@ -1011,5 +1093,511 @@ mod tests {
         let past_end = Time::try_new(i64::from(DURATION_SECS) + 10, 0).unwrap();
         let result = reader.seek(SeekMode::Coarse, SeekTo::Time { time: past_end, track_id: None });
         assert!(result.is_err(), "seeking past the end of the track should return an error");
+    }
+
+    // -- Helpers -------------------------------------------------------------------------------
+
+    fn open_wav(bytes: Vec<u8>) -> Result<WavReader<'static>> {
+        let mss = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
+        WavReader::try_new(mss, FormatOptions::default())
+    }
+
+    /// Opens a stream that is not seekable.
+    fn open_wav_unseekable(bytes: Vec<u8>) -> Result<WavReader<'static>> {
+        let mss = MediaSourceStream::new(
+            Box::new(ReadOnlySource::new(Cursor::new(bytes))),
+            Default::default(),
+        );
+        WavReader::try_new(mss, FormatOptions::default())
+    }
+
+    fn chunk(tag: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(tag);
+        out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        out.extend_from_slice(payload);
+        if payload.len() & 1 == 1 {
+            out.push(0);
+        }
+        out
+    }
+
+    fn pcm16_mono_fmt() -> Vec<u8> {
+        let mut fmt = Vec::new();
+        fmt.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        fmt.extend_from_slice(&1u16.to_le_bytes()); // mono
+        fmt.extend_from_slice(&8000u32.to_le_bytes());
+        fmt.extend_from_slice(&16000u32.to_le_bytes());
+        fmt.extend_from_slice(&2u16.to_le_bytes());
+        fmt.extend_from_slice(&16u16.to_le_bytes());
+        fmt
+    }
+
+    /// Wraps chunks in a RIFF/WAVE form.
+    fn riff_wave(riff_len: Option<u32>, chunks: &[Vec<u8>]) -> Vec<u8> {
+        let body: Vec<u8> = chunks.iter().flatten().copied().collect();
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&riff_len.unwrap_or(4 + body.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"WAVE");
+        out.extend_from_slice(&body);
+        out
+    }
+
+    fn read_all_packets(reader: &mut WavReader<'_>) -> Vec<Packet> {
+        let mut packets = Vec::new();
+        while let Some(packet) = reader.next_packet().expect("no error before the end of stream") {
+            packets.push(packet);
+        }
+        packets
+    }
+
+    /// Gets all the tags, as (key, value), from all the metadata revisions.
+    fn all_tags(reader: &mut WavReader<'_>) -> Vec<(String, String)> {
+        let mut tags = Vec::new();
+        let mut metadata = reader.metadata();
+
+        loop {
+            if let Some(revision) = metadata.current() {
+                for tag in &revision.media.tags {
+                    tags.push((tag.raw.key.clone(), tag.raw.value.to_string()));
+                }
+            }
+            if metadata.pop().is_none() {
+                break;
+            }
+        }
+        tags
+    }
+
+    /// A minimal ID3v2.4 tag with a TIT2 (title) frame.
+    fn id3v2_tag(title: &str) -> Vec<u8> {
+        let frame_len = 1 + title.len();
+        let mut tag = Vec::new();
+        tag.extend_from_slice(b"ID3\x04\x00\x00");
+        tag.extend_from_slice(&[0, 0, 0, (10 + frame_len) as u8]); // Syncsafe size.
+        tag.extend_from_slice(b"TIT2");
+        tag.extend_from_slice(&[0, 0, 0, frame_len as u8]); // Syncsafe size.
+        tag.extend_from_slice(&[0, 0]); // Flags.
+        tag.push(3); // UTF-8.
+        tag.extend_from_slice(title.as_bytes());
+        tag
+    }
+
+    // -- Seeking in block-based (ADPCM) formats ------------------------------------------------
+
+    /// Creates an ADPCM WAVE file of `num_blocks` blocks of `block_align` bytes. The bytes of the
+    /// `n`th block are all equal to `n`.
+    fn adpcm_wav(format_tag: u16, block_align: u16, num_blocks: usize) -> Vec<u8> {
+        let mut fmt = Vec::new();
+        fmt.extend_from_slice(&format_tag.to_le_bytes());
+        fmt.extend_from_slice(&1u16.to_le_bytes()); // Mono.
+        fmt.extend_from_slice(&8000u32.to_le_bytes());
+        fmt.extend_from_slice(&4000u32.to_le_bytes());
+        fmt.extend_from_slice(&block_align.to_le_bytes());
+        fmt.extend_from_slice(&4u16.to_le_bytes()); // 4 bits per sample.
+
+        if format_tag == 0x0011 {
+            // IMA: cbSize = 2, samples per block.
+            fmt.extend_from_slice(&2u16.to_le_bytes());
+            fmt.extend_from_slice(&505u16.to_le_bytes());
+        }
+        else {
+            // MS: cbSize = 32, samples per block, 7 coefficient pairs.
+            fmt.extend_from_slice(&32u16.to_le_bytes());
+            fmt.extend_from_slice(&500u16.to_le_bytes());
+            fmt.extend_from_slice(&7u16.to_le_bytes());
+            fmt.extend_from_slice(&[0u8; 28]);
+        }
+
+        let data: Vec<u8> =
+            (0..num_blocks).flat_map(|n| vec![n as u8; usize::from(block_align)]).collect();
+
+        riff_wave(None, &[chunk(b"fmt ", &fmt), chunk(b"data", &data)])
+    }
+
+    #[test]
+    fn adpcm_seek_lands_on_block_boundary() {
+        // (format tag, block align, frames per block)
+        for (format_tag, block_align, frames_per_block) in
+            [(0x0011u16, 256u16, 505u64), (0x0002, 256, 500)]
+        {
+            let mut reader = open_wav(adpcm_wav(format_tag, block_align, 12)).unwrap();
+
+            // Packets are made of 2 blocks.
+            let frames_per_packet = 2 * frames_per_block;
+
+            let packets = read_all_packets(&mut reader);
+            assert_eq!(packets.len(), 6);
+            assert_eq!(packets[3].pts.get() as u64, 3 * frames_per_packet);
+
+            for target_packet in [0u64, 1, 3, 5] {
+                let required_ts = Timestamp::new((target_packet * frames_per_packet + 17) as i64);
+
+                let seeked = reader
+                    .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: required_ts, track_id: 0 })
+                    .unwrap();
+
+                assert_eq!(seeked.actual_ts.get() as u64, target_packet * frames_per_packet);
+
+                // The next packet is the one that was seeked to, not the end of the stream.
+                let packet = reader.next_packet().unwrap().expect("packet after seek");
+                assert_eq!(packet.pts, seeked.actual_ts);
+                assert_eq!(packet.data[0] as u64, 2 * target_packet);
+                assert_eq!(packet.data.len(), 2 * usize::from(block_align));
+            }
+        }
+    }
+
+    // -- Streams with an unknown length --------------------------------------------------------
+
+    #[test]
+    fn stream_of_unknown_length_ends_without_error() {
+        // Both the RIFF and data chunk lengths are 0xFFFFFFFF, as written by ffmpeg when writing
+        // to a pipe. The stream ends part way through a frame.
+        let data: Vec<u8> = (0..3 * 1152 * 2 + 100 * 2 + 1).map(|i| i as u8).collect();
+
+        for seekable in [true, false] {
+            let mut payload = Vec::new();
+            payload.extend_from_slice(b"data");
+            payload.extend_from_slice(&u32::MAX.to_le_bytes());
+            payload.extend_from_slice(&data);
+
+            let bytes = riff_wave(Some(u32::MAX), &[chunk(b"fmt ", &pcm16_mono_fmt()), payload]);
+
+            let mut reader =
+                if seekable { open_wav(bytes) } else { open_wav_unseekable(bytes) }.unwrap();
+
+            assert_eq!(reader.tracks[0].num_frames, None);
+
+            let packets = read_all_packets(&mut reader);
+
+            let frames: u64 = packets.iter().map(|p| p.dur.get()).sum();
+            assert_eq!(frames, 3 * 1152 + 100);
+
+            // Packets contain only whole frames, and no audio is dropped or duplicated.
+            let bytes: Vec<u8> = packets.iter().flat_map(|p| p.data.iter().copied()).collect();
+            assert_eq!(&bytes[..], &data[..bytes.len()]);
+
+            // The end of the stream remains the end of the stream.
+            assert!(reader.next_packet().unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn truncated_data_chunk_ends_without_error() {
+        // The data chunk claims 1000 frames, but there are only 300.
+        let data = vec![7u8; 600];
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"data");
+        payload.extend_from_slice(&2000u32.to_le_bytes());
+        payload.extend_from_slice(&data);
+
+        let mut reader =
+            open_wav(riff_wave(Some(u32::MAX), &[chunk(b"fmt ", &pcm16_mono_fmt()), payload]))
+                .unwrap();
+
+        let frames: u64 = read_all_packets(&mut reader).iter().map(|p| p.dur.get()).sum();
+        assert_eq!(frames, 300);
+    }
+
+    // -- Metadata after the data chunk ---------------------------------------------------------
+
+    fn tagged_wav_after_data(odd_data_len: bool) -> (Vec<u8>, Vec<u8>) {
+        let data: Vec<u8> = (0..200 + usize::from(odd_data_len)).map(|i| i as u8).collect();
+
+        let mut info = Vec::new();
+        info.extend_from_slice(b"INFO");
+        info.extend_from_slice(&chunk(b"INAM", b"Title After\0"));
+        info.extend_from_slice(&chunk(b"IART", b"Artist After\0"));
+
+        // The RIFF length is deliberately stale: it only covers the chunks up to the data chunk.
+        let fmt = chunk(b"fmt ", &pcm16_mono_fmt());
+        let data_chunk = chunk(b"data", &data);
+        let riff_len = 4 + fmt.len() + data_chunk.len();
+
+        let file = riff_wave(
+            Some(riff_len as u32),
+            &[fmt, data_chunk, chunk(b"LIST", &info), chunk(b"id3 ", &id3v2_tag("Id3 Title"))],
+        );
+
+        (file, data)
+    }
+
+    #[test]
+    fn info_and_id3_chunks_after_data_are_read() {
+        for odd_data_len in [false, true] {
+            let (file, data) = tagged_wav_after_data(odd_data_len);
+
+            let mut reader = open_wav(file).unwrap();
+
+            let tags = all_tags(&mut reader);
+            assert!(tags.contains(&("INAM".into(), "Title After".into())), "{tags:?}");
+            assert!(tags.contains(&("IART".into(), "Artist After".into())), "{tags:?}");
+            assert!(tags.contains(&("TIT2".into(), "Id3 Title".into())), "{tags:?}");
+
+            // The reader is back at the start of the audio data.
+            let packets = read_all_packets(&mut reader);
+            assert_eq!(packets[0].pts.get(), 0);
+            let bytes: Vec<u8> = packets.iter().flat_map(|p| p.data.iter().copied()).collect();
+            assert_eq!(&bytes[..], &data[..bytes.len()]);
+            assert_eq!(bytes.len(), 200);
+        }
+    }
+
+    #[test]
+    fn id3_chunk_before_data_is_read() {
+        let data = vec![0u8; 100];
+        let file = riff_wave(
+            None,
+            &[
+                chunk(b"fmt ", &pcm16_mono_fmt()),
+                chunk(b"ID3 ", &id3v2_tag("Before")),
+                chunk(b"data", &data),
+            ],
+        );
+
+        let mut reader = open_wav(file).unwrap();
+        assert!(all_tags(&mut reader).contains(&("TIT2".into(), "Before".into())));
+        assert_eq!(reader.tracks[0].num_frames, Some(50));
+    }
+
+    #[test]
+    fn malformed_chunks_after_data_do_not_fail_the_probe() {
+        let data = vec![0u8; 100];
+
+        let mut garbage = Vec::new();
+        garbage.extend_from_slice(b"LIST");
+        garbage.extend_from_slice(&0x7fff_fff0u32.to_le_bytes());
+        garbage.extend_from_slice(b"INFOgarbage");
+
+        for trailer in [
+            garbage,
+            // A truncated chunk header.
+            b"LIS".to_vec(),
+            // A malformed ID3 tag.
+            chunk(b"id3 ", b"not an id3 tag at all"),
+            // Chunk of excessive length.
+            [b"id3 ".as_slice(), &u32::MAX.to_le_bytes()].concat(),
+        ] {
+            let file = riff_wave(
+                None,
+                &[chunk(b"fmt ", &pcm16_mono_fmt()), chunk(b"data", &data), trailer],
+            );
+
+            let mut reader = open_wav(file).unwrap();
+            let packets = read_all_packets(&mut reader);
+            assert_eq!(packets.iter().map(|p| p.dur.get()).sum::<u64>(), 50);
+        }
+    }
+
+    #[test]
+    fn chunks_after_data_are_ignored_for_unseekable_sources() {
+        let (file, _) = tagged_wav_after_data(false);
+        let mut reader = open_wav_unseekable(file).unwrap();
+        assert!(all_tags(&mut reader).iter().all(|(key, _)| key != "INAM" && key != "TIT2"));
+        assert_eq!(read_all_packets(&mut reader).iter().map(|p| p.dur.get()).sum::<u64>(), 100);
+    }
+
+    #[test]
+    fn oversized_info_strings_are_skipped() {
+        let mut info = Vec::new();
+        info.extend_from_slice(b"INFO");
+        info.extend_from_slice(&chunk(b"ICMT", &vec![b'x'; 2 * 1024 * 1024]));
+        info.extend_from_slice(&chunk(b"INAM", b"Kept\0"));
+
+        let file = riff_wave(
+            None,
+            &[chunk(b"fmt ", &pcm16_mono_fmt()), chunk(b"LIST", &info), chunk(b"data", &[0u8; 4])],
+        );
+
+        let mut reader = open_wav(file).unwrap();
+        let tags = all_tags(&mut reader);
+        assert!(tags.contains(&("INAM".into(), "Kept".into())));
+        // The value of the oversized string is skipped.
+        assert!(tags.iter().all(|(key, value)| key != "ICMT" || value.is_empty()));
+    }
+
+    // -- BW64 and Wave64 -----------------------------------------------------------------------
+
+    #[test]
+    fn bw64_is_supported() {
+        let pcm_data = vec![0u8; 1000];
+        let mut file = create_rf64_test_file(1000, 500, &pcm_data);
+        file[0..4].copy_from_slice(b"BW64");
+
+        let reader = open_wav(file).unwrap();
+        assert_eq!(reader.tracks[0].num_frames, Some(500));
+    }
+
+    fn w64_guid(tag: &[u8; 4]) -> Vec<u8> {
+        let mut guid = tag.to_vec();
+        guid.extend_from_slice(&[
+            0xf3, 0xac, 0xd3, 0x11, 0x8c, 0xd1, 0x00, 0xc0, 0x4f, 0x8e, 0xdb, 0x8a,
+        ]);
+        guid
+    }
+
+    fn w64_chunk(guid: &[u8], payload: &[u8]) -> Vec<u8> {
+        let mut out = guid.to_vec();
+        out.extend_from_slice(&(24 + payload.len() as u64).to_le_bytes());
+        out.extend_from_slice(payload);
+        // Chunks are padded to a multiple of 8 bytes.
+        out.resize(out.len().next_multiple_of(8), 0);
+        out
+    }
+
+    fn make_w64(data: &[u8]) -> Vec<u8> {
+        let mut riff_guid = b"riff".to_vec();
+        riff_guid.extend_from_slice(&[
+            0x2e, 0x91, 0xcf, 0x11, 0xa5, 0xd6, 0x28, 0xdb, 0x04, 0xc1, 0x00, 0x00,
+        ]);
+
+        // An unknown chunk (the LIST chunk GUID) to be skipped, before the data.
+        let mut list_guid = b"list".to_vec();
+        list_guid.extend_from_slice(&[
+            0x2f, 0x91, 0xcf, 0x11, 0xa5, 0xd6, 0x28, 0xdb, 0x04, 0xc1, 0x00, 0x00,
+        ]);
+
+        let chunks = [
+            w64_chunk(&w64_guid(b"fmt "), &pcm16_mono_fmt()),
+            w64_chunk(&list_guid, b"odd length payload"),
+            w64_chunk(&w64_guid(b"data"), data),
+        ]
+        .concat();
+
+        let mut out = riff_guid;
+        out.extend_from_slice(&(16 + 8 + 16 + chunks.len() as u64).to_le_bytes());
+        out.extend_from_slice(&w64_guid(b"wave"));
+        out.extend_from_slice(&chunks);
+        out
+    }
+
+    #[test]
+    fn wave64_is_supported() {
+        // An odd number of frames' bytes, so the data chunk is padded.
+        let data: Vec<u8> = (0..202).map(|i| i as u8).collect();
+
+        let mut reader = open_wav(make_w64(&data)).unwrap();
+
+        let params = reader.tracks[0].codec_params.as_ref().unwrap().audio().unwrap();
+        assert_eq!(params.sample_rate, Some(8000));
+        assert_eq!(params.codec, symphonia_core::codecs::audio::well_known::CODEC_ID_PCM_S16LE);
+        assert_eq!(reader.tracks[0].num_frames, Some(101));
+
+        let packets = read_all_packets(&mut reader);
+        let bytes: Vec<u8> = packets.iter().flat_map(|p| p.data.iter().copied()).collect();
+        assert_eq!(bytes, data);
+
+        // Seeking.
+        let seeked = reader
+            .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(1152), track_id: 0 });
+        assert!(seeked.is_err());
+        let seeked = reader
+            .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(0), track_id: 0 })
+            .unwrap();
+        assert_eq!(seeked.actual_ts.get(), 0);
+        assert_eq!(reader.next_packet().unwrap().unwrap().data.len(), 202);
+    }
+
+    #[test]
+    fn wave64_probe_scoring() {
+        let mss =
+            MediaSourceStream::new(Box::new(Cursor::new(make_w64(&[0u8; 8]))), Default::default());
+        let mut mss = mss;
+        let score = WavReader::score(ScopedStream::new(&mut mss, 64)).unwrap();
+        assert!(matches!(score, Score::Supported(255)));
+
+        let mut mss = MediaSourceStream::new(
+            Box::new(Cursor::new(b"riff0123456789abcdefghijklmnop".to_vec())),
+            Default::default(),
+        );
+        let score = WavReader::score(ScopedStream::new(&mut mss, 64)).unwrap();
+        assert!(matches!(score, Score::Unsupported));
+    }
+
+    // -- MPEG audio in WAVE --------------------------------------------------------------------
+
+    #[test]
+    fn mpeg_layer2_in_wav_is_supported() {
+        // MPEG-1 Layer II, 128 kbps, 44.1 kHz, stereo: 417 bytes.
+        let mut frame = vec![0u8; 417];
+        frame[0..4].copy_from_slice(&0xFFFD_8000u32.to_be_bytes());
+        let frames = vec![frame.clone(), frame.clone(), frame];
+
+        let mut bytes = riff_mpeglayer3(&frames);
+        // Change the format tag from WAVE_FORMAT_MPEGLAYER3 (0x0055) to WAVE_FORMAT_MPEG (0x0050).
+        assert_eq!(&bytes[20..22], &0x0055u16.to_le_bytes());
+        bytes[20..22].copy_from_slice(&0x0050u16.to_le_bytes());
+
+        let mut reader = open_wav(bytes).unwrap();
+
+        let params = reader.tracks[0].codec_params.as_ref().unwrap().audio().unwrap();
+        assert_eq!(params.codec, symphonia_core::codecs::audio::well_known::CODEC_ID_MP2);
+        assert_eq!(params.sample_rate, Some(44_100));
+
+        assert_eq!(read_all_packets(&mut reader).len(), 3);
+    }
+
+    /// MPEG-1 Layer III frames of varying bit-rate and padding (VBR), 44.1 kHz stereo. The two
+    /// bytes after the header of the `n`th frame identify `n`.
+    fn vbr_mp3_frames(count: usize) -> Vec<Vec<u8>> {
+        (0..count)
+            .map(|n| {
+                // 128 kbps (417 bytes, 418 with padding), or 320 kbps (1044 bytes).
+                let (header, len) = match n % 5 {
+                    0 | 3 => (0xFFFB_E000u32, 1044),
+                    1 => (0xFFFB_9200u32, 418),
+                    _ => (0xFFFB_9000u32, 417),
+                };
+                let mut frame = vec![0u8; len];
+                frame[0..4].copy_from_slice(&header.to_be_bytes());
+                frame[4] = (n / 100) as u8;
+                frame[5] = (n % 100) as u8;
+                frame
+            })
+            .collect()
+    }
+
+    #[test]
+    fn mpeg_in_wave_seek_is_exact_for_variable_frame_lengths() {
+        const NUM_FRAMES: usize = 600;
+        const SAMPLES_PER_FRAME: u64 = 1152;
+
+        let frames = vbr_mp3_frames(NUM_FRAMES);
+        let mut reader = open_wav(riff_mpeglayer3_ex(&frames, 16_000, None)).unwrap();
+
+        for &index in &[0usize, 1, 2, 77, 299, 300, 450, 598, 599] {
+            // The target is in the middle of the frame.
+            let required_ts = Timestamp::new((index as u64 * SAMPLES_PER_FRAME + 500) as i64);
+
+            let seeked = reader
+                .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: required_ts, track_id: 0 })
+                .unwrap_or_else(|e| panic!("seek to frame {index} failed: {e:?}"));
+
+            assert_eq!(seeked.actual_ts.get() as u64, index as u64 * SAMPLES_PER_FRAME);
+
+            // The very frame that was seeked to follows, and then the one after it.
+            let packet = reader.next_packet().unwrap().expect("packet after seek");
+            assert_eq!(packet.pts, seeked.actual_ts);
+            assert_eq!(&packet.data[..], &frames[index][..]);
+
+            if index + 1 < NUM_FRAMES {
+                let packet = reader.next_packet().unwrap().expect("second packet after seek");
+                assert_eq!(packet.pts.get() as u64, (index as u64 + 1) * SAMPLES_PER_FRAME);
+                assert_eq!(&packet.data[..], &frames[index + 1][..]);
+            }
+        }
+
+        // Past the last frame.
+        let result = reader.seek(
+            SeekMode::Accurate,
+            SeekTo::Timestamp {
+                ts: Timestamp::new((NUM_FRAMES as u64 * SAMPLES_PER_FRAME) as i64),
+                track_id: 0,
+            },
+        );
+        assert!(result.is_err());
     }
 }

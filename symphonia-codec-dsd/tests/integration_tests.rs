@@ -375,3 +375,39 @@ fn test_pcm_produces_decimated_signal() {
         _ => panic!("Expected F32 buffer for PCM mode"),
     }
 }
+
+/// A frame of the pass-through output is one byte (8 DSD samples) per channel. The spec's rate is
+/// the DSD rate / 8 so that `frames() / rate()` is the duration in seconds.
+#[test]
+fn test_passthrough_frames_are_bytes_at_dsd_rate_div_8() {
+    let mut params = AudioCodecParameters::new();
+    params
+        .for_codec(CODEC_ID_DSD)
+        .with_sample_rate(2822400)
+        .with_channels(Channels::Discrete(2))
+        .with_max_frames_per_packet(4096 * 8)
+        .with_channel_data_layout(ChannelDataLayout::Planar);
+
+    let mut decoder = DsdDecoder::try_new(&params, &AudioDecoderOptions::default()).unwrap();
+
+    // The codec parameters are unchanged: the sample rate is the rate of the 1-bit samples.
+    assert_eq!(decoder.codec_params().sample_rate, Some(2822400));
+
+    // 1 second of DSD64 is 2822400 samples per channel = 352800 bytes per channel. Use a packet of
+    // 4096 bytes per channel: 4096 * 8 DSD samples.
+    let data = vec![0x69u8; 4096 * 2];
+    let decoded = decoder.decode_ref(&packet(&data)).unwrap();
+
+    match decoded {
+        GenericAudioBufferRef::U8(buf) => {
+            assert_eq!(buf.frames(), 4096);
+            assert_eq!(buf.spec().rate(), 352800);
+
+            let secs = buf.frames() as f64 / f64::from(buf.spec().rate());
+            let expected = (4096 * 8) as f64 / 2822400.0;
+            assert!((secs - expected).abs() < 1e-12);
+        }
+        _ => panic!("Expected U8 buffer for pass-through mode"),
+    }
+}
+

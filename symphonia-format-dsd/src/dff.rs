@@ -64,7 +64,7 @@ impl DffSoundProperties {
                 b"CHNL" => {
                     let count = reader.read_be_u16()?;
                     for _ in 0..count { channel_ids.push(reader.read_quad_bytes()?); }
-                    let read_bytes = 2 + 4 * count as u64;
+                    let read_bytes = 2 + 4 * u64::from(count);
                     if size > read_bytes { reader.ignore_bytes(size - read_bytes)?; }
                     channel_count = Some(count);
                 }
@@ -73,7 +73,7 @@ impl DffSoundProperties {
             }
             let pad = size & 1;
             if pad == 1 { reader.ignore_bytes(1)?; }
-            consumed += 12 + size + pad;
+            consumed = consumed.saturating_add(12).saturating_add(size).saturating_add(pad);
         }
         let sample_rate = match sample_rate { Some(s) => s, None => return decode_error("dff: missing sample rate") };
         let channel_count = match channel_count { Some(c) => c, None => return decode_error("dff: missing channel count") };
@@ -109,6 +109,7 @@ impl DffSoundProperties {
             );
         }
         if self.channel_count < 1 || self.channel_count > 6 { return decode_error("dff: bad channels"); }
+        if self.sample_rate == 0 { return decode_error("dff: bad sample rate"); }
         Ok(())
     }
 }
@@ -137,7 +138,7 @@ impl<'s> DffReader<'s> {
         }
         let data_start_pos = match data_start_pos { Some(p) => p, None => return Err(decode_error::<u64>("dff: no data").unwrap_err()), };
         let data_size = match data_size { Some(s) => s, None => return Err(decode_error::<u64>("dff: no data size").unwrap_err()), };
-        let data_end_pos = data_start_pos + data_size;
+        let data_end_pos = data_start_pos.saturating_add(data_size);
         if source.is_seekable() {
             let pad = data_size & 1;
             let _ = source.seek(SeekFrom::Start(data_end_pos + pad));
@@ -159,7 +160,7 @@ impl<'s> DffReader<'s> {
             .with_channel_data_layout(ChannelDataLayout::Interleaved)
             .with_bit_order(BitOrder::MsbFirst);
         let total_bytes = data_size;
-        let samples_per_channel = (total_bytes * 8) / props.channel_count as u64;
+        let samples_per_channel = total_bytes.saturating_mul(8) / props.channel_count as u64;
         let tb = TimeBase::new(NonZero::new(1).unwrap(), NonZero::new(props.sample_rate).unwrap());
         params.with_max_frames_per_packet(4096 * 8).with_frames_per_block(4096 * 8);
         let mut track = Track::new(0);
@@ -212,20 +213,30 @@ impl FormatReader for DffReader<'_> {
     fn metadata(&mut self) -> Metadata<'_> { self.metadata.metadata() }
     fn tracks(&self) -> &[Track] { &self.tracks }
     fn seek(&mut self, _mode: SeekMode, to: SeekTo) -> Result<SeekedTo> {
-        let required_byte = match to {
-            SeekTo::Timestamp { ts, .. } => ts.get() as u64 / 8,
+        let required_ts = match to {
+            SeekTo::Timestamp { ts, .. } => ts,
             SeekTo::Time { time, .. } => {
                 let tb = self.tracks[0].time_base
                     .ok_or(symphonia_core::errors::Error::SeekError(SeekErrorKind::Unseekable))?;
-                tb.calc_timestamp(time).unwrap_or(Timestamp::ZERO).get() as u64 / 8
+                tb.calc_timestamp(time).unwrap_or(Timestamp::ZERO)
             }
         };
-        let seek_pos = self.data_start_pos + required_byte;
-        if seek_pos >= self.data_end_pos { return seek_error(SeekErrorKind::OutOfRange); }
+        if required_ts.is_negative() { return seek_error(SeekErrorKind::OutOfRange); }
+        // The timestamp is in DSD samples per channel. Each byte holds 8 samples of one channel,
+        // and the channels are byte-interleaved, so a group of `channel_count` bytes must not be
+        // split by the seek.
+        let bytes_per_channel = required_ts.get() as u64 / 8;
+        let seek_pos = bytes_per_channel
+            .checked_mul(self.channel_count as u64)
+            .and_then(|offset| self.data_start_pos.checked_add(offset));
+        let seek_pos = match seek_pos {
+            Some(seek_pos) if seek_pos < self.data_end_pos => seek_pos,
+            _ => return seek_error(SeekErrorKind::OutOfRange),
+        };
         self.reader.seek(SeekFrom::Start(seek_pos))?;
         self.current_pos = seek_pos;
-        let actual_ts = (seek_pos - self.data_start_pos) * 8;
-        Ok(SeekedTo { track_id: 0, required_ts: Timestamp::new(actual_ts as i64), actual_ts: Timestamp::new(actual_ts as i64) })
+        let actual_ts = bytes_per_channel * 8;
+        Ok(SeekedTo { track_id: 0, required_ts, actual_ts: Timestamp::new(actual_ts as i64) })
     }
     fn into_inner<'a>(self: Box<Self>) -> MediaSourceStream<'a> where Self: 'a { self.reader }
 }

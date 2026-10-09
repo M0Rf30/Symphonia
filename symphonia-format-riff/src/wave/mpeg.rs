@@ -167,49 +167,56 @@ pub fn read_frame(
     }
 }
 
-/// Like [`read_frame`], but for use when resynchronising from an arbitrary byte offset (e.g.
-/// after a coarse seek). Compressed frame bodies can occasionally contain a byte sequence that
-/// happens to look like a sync word, so before accepting a candidate frame this also verifies
-/// that a plausible follow-up frame (same codec and sample rate) immediately follows it. This
-/// mirrors the "similar header" check `symphonia-bundle-mp3` performs when acquiring initial sync
-/// from an unknown position. Unlike `read_frame`, false syncs are retried one byte at a time
-/// rather than by the candidate's (possibly bogus) frame length.
-pub fn seek_sync_frame(
+/// Scans the `data` chunk, `[start_pos, end_pos)`, and returns the byte offset (relative to
+/// `start_pos`) of every MPEG audio frame in it, in order. Frame boundaries are found exactly as
+/// [`read_frame`] finds them, so the `n`th offset is the position of the `n`th packet produced by
+/// [`next_packet`]. The reader must be positioned at `start_pos`; its position is undefined when
+/// this function returns.
+///
+/// MPEG audio frames are variable-length (padding, VBR), so a frame's byte offset can't be
+/// derived from its timestamp by arithmetic without accumulating error. An index of the frame
+/// positions makes seeking exact.
+pub fn scan_frame_offsets(
     reader: &mut MediaSourceStream<'_>,
+    start_pos: u64,
     end_pos: u64,
-) -> Result<Option<(MpegFrameFormat, Vec<u8>)>> {
-    loop {
-        let start_pos = reader.pos();
+) -> Result<Vec<u64>> {
+    let mut offsets = Vec::new();
 
-        let Some((format, frame)) = read_frame(reader, end_pos)? else {
-            return Ok(None);
+    loop {
+        let pos = reader.pos();
+
+        if pos.saturating_add(4) > end_pos {
+            break;
+        }
+
+        // The data chunk ended part way through a sync search; treat as end of stream.
+        let Ok(word) = reader.read_quad_bytes().map(u32::from_be_bytes)
+        else {
+            break;
         };
 
-        // If the stream ends right after this candidate frame, there is nothing to cross-check
-        // against; accept it as-is.
-        if reader.pos() >= end_pos {
-            return Ok(Some((format, frame)));
-        }
-
-        match read_frame(reader, end_pos)? {
-            Some((next_format, next_frame)) => {
-                if next_format.sample_rate == format.sample_rate
-                    && next_format.codec == format.codec
-                {
-                    // Confirmed: rewind past the follow-up frame, keeping only the candidate.
-                    reader.seek_buffered_rev(next_frame.len());
-                    return Ok(Some((format, frame)));
+        match parse_header(word) {
+            Some((_, frame_len)) => {
+                // A truncated final frame is not a frame (see `read_frame`).
+                if pos.saturating_add(frame_len as u64) > end_pos {
+                    break;
                 }
+
+                if reader.ignore_bytes(frame_len as u64 - 4).is_err() {
+                    break;
+                }
+
+                offsets.push(pos - start_pos);
             }
+            // Not a frame header, slide the window forward by one byte.
             None => {
-                // Could not read a follow-up frame (e.g. truncated); accept the candidate as-is.
-                return Ok(Some((format, frame)));
+                reader.seek_buffered(pos + 1);
             }
         }
-
-        // False sync: retry scanning for a sync word starting one byte past the candidate.
-        reader.seek_buffered(start_pos + 1);
     }
+
+    Ok(offsets)
 }
 
 /// Reads the next MPEG audio frame from the `data` chunk and wraps it in a [`Packet`], advancing

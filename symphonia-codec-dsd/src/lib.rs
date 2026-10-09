@@ -48,6 +48,17 @@ enum DecoderMode {
 /// 1. **Pass-through mode** (default): Outputs native DSD as U8 samples
 ///    (1 byte = 8 DSD bits). For audio outputs that support native DSD.
 ///
+///    A *frame* of the decoded U8 buffer is one byte per channel, i.e. 8 consecutive 1-bit DSD
+///    samples of each channel. Therefore the `AudioSpec` of the decoded buffers has a rate of
+///    `dsd_rate / 8` (e.g. 352800 Hz for DSD64), so that `frames() / spec().rate()` is the
+///    duration of the buffer in seconds, and `frames()` is `packet.dur / 8`.
+///
+///    This differs from the *timeline* of the DSD format readers (`symphonia-format-dsd`), and the
+///    `AudioCodecParameters` of the track, where timestamps, durations, `num_frames`, and
+///    `sample_rate` count 1-bit DSD samples per channel (e.g. 2822400 Hz for DSD64). The codec
+///    parameters returned by [`AudioDecoder::codec_params`] are not altered in pass-through mode:
+///    `sample_rate` remains the DSD rate (needed, e.g., to encode DSD over PCM).
+///
 /// 2. **PCM mode**: Converts DSD to PCM F32 samples using high-quality
 ///    decimation filters (CIC + FIR). Enable by setting extra_data in
 ///    CodecParameters with PCM output rate.
@@ -139,6 +150,12 @@ impl RegisterableAudioDecoder for DsdDecoder {
 }
 
 
+/// The rate of the frames of the pass-through output buffers: one frame is one byte per channel,
+/// which holds 8 DSD samples.
+fn dsd_byte_rate(dsd_rate: u32) -> u32 {
+    (dsd_rate / 8).max(1)
+}
+
 impl DsdDecoder {
     pub fn try_new(params: &AudioCodecParameters, _options: &AudioDecoderOptions) -> Result<Self> {
         // Verify this is a DSD codec
@@ -186,7 +203,7 @@ impl DsdDecoder {
         let (pcm_buf, decimator, output_params) = match mode {
             DecoderMode::PassThrough => {
                 // Pass-through mode
-                let spec = AudioSpec::new(input_sample_rate, channels.clone());
+                let spec = AudioSpec::new(dsd_byte_rate(input_sample_rate), channels.clone());
                 let duration = params.max_frames_per_packet.unwrap_or(4096);
 
                 debug!(
@@ -232,7 +249,7 @@ impl DsdDecoder {
         };
 
         // DSD buffer always needed for input
-        let dsd_spec = AudioSpec::new(input_sample_rate, channels.clone());
+        let dsd_spec = AudioSpec::new(dsd_byte_rate(input_sample_rate), channels.clone());
         let dsd_duration = params.max_frames_per_packet.unwrap_or(4096);
         let dsd_buf = GenericAudioBuffer::new(SampleFormat::U8, dsd_spec, dsd_duration as usize);
 

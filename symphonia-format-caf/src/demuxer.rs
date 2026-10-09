@@ -15,7 +15,10 @@ use symphonia_core::{
     audio::{Channels, Position},
     codecs::{
         CodecParameters,
-        audio::{well_known::CODEC_ID_AAC, *},
+        audio::{
+            well_known::{CODEC_ID_AAC, CODEC_ID_PCM_ALAW, CODEC_ID_PCM_MULAW},
+            *,
+        },
     },
     errors::{Error, Result, SeekErrorKind, decode_error, seek_error, unsupported_error},
     formats::{
@@ -145,7 +148,28 @@ impl FormatReader for CafReader<'_> {
                     return Ok(None);
                 };
 
-                let buf = self.reader.read_boxed_slice(bytes_to_read as usize)?;
+                // If the length of the audio data is unknown, the end of the stream is the end of
+                // the data. A trailing partial packet is discarded.
+                let buf = match self.reader.read_boxed_slice(bytes_to_read as usize) {
+                    Ok(buf) => buf,
+                    Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        return Ok(None);
+                    }
+                    Err(err) => return Err(err.into()),
+                };
+                let num_packets = buf.len() as u64 / bytes_per_packet;
+
+                if num_packets == 0 {
+                    return Ok(None);
+                }
+
+                let (buf, dur) = if num_packets < bytes_to_read / bytes_per_packet {
+                    let dur = Duration::new(num_packets * frames_per_packet);
+                    (buf[..(num_packets * bytes_per_packet) as usize].into(), dur)
+                }
+                else {
+                    (buf, dur)
+                };
 
                 Ok(Some(Packet::new(0, pts, dur, buf)))
             }
@@ -392,11 +416,17 @@ impl<'s> CafReader<'s> {
         desc: &AudioDescription,
         codec_params: &mut AudioCodecParameters,
     ) -> Result<()> {
-        codec_params
-            .for_codec(desc.codec_id()?)
-            .with_sample_rate(desc.sample_rate as u32)
-            .with_bits_per_sample(desc.bits_per_channel)
-            .with_bits_per_coded_sample((desc.bytes_per_packet * 8) / desc.channels_per_frame);
+        let codec = desc.codec_id()?;
+
+        codec_params.for_codec(codec).with_sample_rate(desc.sample_rate as u32);
+
+        // A-law and mu-law samples are expanded to 16-bit by the decoder, so the decoder derives
+        // the sample widths itself. Do not set them from the (8-bit) coded width.
+        if codec != CODEC_ID_PCM_ALAW && codec != CODEC_ID_PCM_MULAW {
+            codec_params
+                .with_bits_per_sample(desc.bits_per_channel)
+                .with_bits_per_coded_sample((desc.bytes_per_packet * 8) / desc.channels_per_frame);
+        }
 
         // TODO: Bits per sample and bits per coded sample are wrong for compressed.
 
@@ -464,6 +494,7 @@ impl<'s> CafReader<'s> {
         let mut codec_params = AudioCodecParameters::new();
         let mut audio_desc = None;
         let mut num_frames = None;
+        let mut data_len_unknown = false;
 
         loop {
             match Chunk::read(&mut self.reader, &audio_desc)? {
@@ -477,6 +508,11 @@ impl<'s> CafReader<'s> {
                 Some(AudioData(data)) => {
                     self.data_start_pos = data.start_pos;
                     self.data_len = data.data_len;
+
+                    // A data chunk of unknown length (-1) extends to the end of the stream. The
+                    // reader is positioned at the start of the audio data, and there can be no
+                    // other chunks after it.
+                    data_len_unknown = data.data_len.is_none();
 
                     if let Some(data_len) = self.data_len {
                         if let PacketInfo::FixedAudioPacket {
@@ -570,6 +606,10 @@ impl<'s> CafReader<'s> {
             if audio_desc.is_none() {
                 error!("missing audio description chunk");
                 return decode_error("caf: missing audio description chunk");
+            }
+
+            if data_len_unknown {
+                break;
             }
 
             if let Some(byte_len) = self.reader.byte_len() {
@@ -704,5 +744,120 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -- Synthetic file tests ------------------------------------------------------------------
+
+    use std::io::Cursor;
+
+    use symphonia_core::codecs::audio::well_known::{
+        CODEC_ID_PCM_ALAW, CODEC_ID_PCM_MULAW, CODEC_ID_PCM_S8,
+    };
+
+    /// Builds a CAF file with an Audio Description chunk, and an Audio Data chunk.
+    fn make_caf(
+        format_id: &[u8; 4],
+        format_flags: u32,
+        bytes_per_packet: u32,
+        frames_per_packet: u32,
+        channels: u32,
+        bits_per_channel: u32,
+        data_chunk_size: i64,
+        data: &[u8],
+    ) -> Vec<u8> {
+        let mut file = Vec::new();
+        file.extend_from_slice(b"caff");
+        file.extend_from_slice(&1u16.to_be_bytes());
+        file.extend_from_slice(&0u16.to_be_bytes());
+
+        file.extend_from_slice(b"desc");
+        file.extend_from_slice(&32i64.to_be_bytes());
+        file.extend_from_slice(&8000.0f64.to_be_bytes());
+        file.extend_from_slice(format_id);
+        file.extend_from_slice(&format_flags.to_be_bytes());
+        file.extend_from_slice(&bytes_per_packet.to_be_bytes());
+        file.extend_from_slice(&frames_per_packet.to_be_bytes());
+        file.extend_from_slice(&channels.to_be_bytes());
+        file.extend_from_slice(&bits_per_channel.to_be_bytes());
+
+        file.extend_from_slice(b"data");
+        file.extend_from_slice(&data_chunk_size.to_be_bytes());
+        file.extend_from_slice(&0u32.to_be_bytes()); // Edit count.
+        file.extend_from_slice(data);
+        file
+    }
+
+    fn open(file: Vec<u8>) -> Result<CafReader<'static>> {
+        let mss = MediaSourceStream::new(Box::new(Cursor::new(file)), Default::default());
+        CafReader::try_new(mss, FormatOptions::default())
+    }
+
+    fn audio_params(reader: &CafReader<'_>) -> AudioCodecParameters {
+        reader.tracks()[0].codec_params.as_ref().unwrap().audio().unwrap().clone()
+    }
+
+    #[test]
+    fn verify_8bit_pcm_is_supported() {
+        // Little-endian flag set, and clear: 8-bit samples have no endianness.
+        for flags in [0, 2] {
+            let data = (0..200u32).map(|i| i as u8).collect::<Vec<u8>>();
+            let mut reader =
+                open(make_caf(b"lpcm", flags, 2, 1, 2, 8, 4 + data.len() as i64, &data)).unwrap();
+
+            let params = audio_params(&reader);
+            assert_eq!(params.codec, CODEC_ID_PCM_S8);
+            assert_eq!(params.bits_per_sample, Some(8));
+            assert_eq!(reader.tracks()[0].num_frames, Some(100));
+
+            let packet = reader.next_packet().unwrap().unwrap();
+            assert_eq!(&packet.data[..], &data[..]);
+            assert_eq!(packet.dur.get(), 100);
+            assert!(reader.next_packet().unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn verify_alaw_and_ulaw_have_implicit_sample_width() {
+        for (id, codec) in [(b"alaw", CODEC_ID_PCM_ALAW), (b"ulaw", CODEC_ID_PCM_MULAW)] {
+            let data = [0x55u8; 64];
+            let reader = open(make_caf(id, 0, 1, 1, 1, 8, 4 + data.len() as i64, &data)).unwrap();
+
+            let params = audio_params(&reader);
+            assert_eq!(params.codec, codec);
+            // The PCM decoder expands A-law and mu-law samples to 16-bit and derives the sample
+            // widths itself. They must not be set to the 8-bit coded width.
+            assert_eq!(params.bits_per_sample, None);
+            assert_eq!(params.bits_per_coded_sample, None);
+            assert_eq!(reader.tracks()[0].num_frames, Some(64));
+        }
+    }
+
+    #[test]
+    fn verify_unknown_length_data_chunk_ends_with_no_packet() {
+        // 16-bit mono. A data chunk size of -1 means the audio data extends to the end of the
+        // stream. The stream ends part way through a packet, and a frame.
+        let data = vec![0x11u8; 3 * 1152 * 2 + 700 + 1];
+        let mut reader = open(make_caf(b"lpcm", 2, 2, 1, 1, 16, -1, &data)).unwrap();
+
+        assert_eq!(reader.tracks()[0].num_frames, None);
+
+        let mut frames = 0;
+        let mut pts = 0;
+
+        loop {
+            match reader.next_packet() {
+                Ok(Some(packet)) => {
+                    assert_eq!(packet.pts.get(), pts);
+                    assert_eq!(packet.data.len() as u64, packet.dur.get() * 2);
+                    pts += packet.dur.get() as i64;
+                    frames += packet.dur.get();
+                }
+                Ok(None) => break,
+                Err(err) => panic!("unexpected error at the end of the stream: {err:?}"),
+            }
+        }
+
+        // Only whole frames are returned.
+        assert_eq!(frames, 3 * 1152 + 350);
     }
 }

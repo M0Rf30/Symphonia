@@ -7,6 +7,7 @@
 
 /// `PacketInfo` helps to simulate packetization over a number of blocks of data.
 /// In case the codec is blockless the block size equals one full audio frame in bytes.
+use std::io;
 use std::marker::PhantomData;
 use std::num::NonZero;
 
@@ -16,7 +17,7 @@ use symphonia_core::codecs::audio::well_known::{
     CODEC_ID_PCM_F64BE, CODEC_ID_PCM_F64LE,
 };
 use symphonia_core::codecs::audio::{AudioCodecId, AudioCodecParameters};
-use symphonia_core::errors::{Result, decode_error};
+use symphonia_core::errors::{Error, Result, decode_error};
 use symphonia_core::formats::prelude::*;
 use symphonia_core::io::{MediaSourceStream, ReadBytes};
 
@@ -406,6 +407,16 @@ impl PacketInfo {
         ts.align_towards_zero(Duration::from(max_frames_per_packet))
             .expect("max_frames_per_packet is non-zero")
     }
+
+    /// Gets the byte offset, relative to the start of the data, of the block containing the frame
+    /// at `ts`. `ts` must be non-negative, and is rounded down to the start of its block.
+    ///
+    /// Note that the byte offset is a function of the number of *blocks* preceding the frame, not
+    /// the number of frames. For formats with more than one frame per block (e.g., ADPCM) the two
+    /// are not the same.
+    pub fn get_data_pos_at(&self, ts: Timestamp) -> u64 {
+        (ts.get().max(0) as u64 / self.frames_per_block.get()) * self.block_size.get()
+    }
 }
 
 pub fn next_packet(
@@ -440,10 +451,45 @@ pub fn next_packet(
     let dur = Duration::from(blocks_per_packet * packet_info.frames_per_block.get());
     let pkt_len = blocks_per_packet * packet_info.block_size.get();
 
-    // Copy the frames.
-    let packet_buf = reader.read_boxed_slice(pkt_len as usize)?;
+    // Copy the frames. The data chunk length may be unknown (e.g., a stream with a length of
+    // 0xFFFFFFFF), or the stream may be shorter than the data chunk length claims (truncated
+    // file). Therefore, hitting the end of the stream while reading is not an error: it is the end
+    // of the stream. Only complete blocks are returned in a packet.
+    let mut packet_buf = Vec::new();
 
-    Ok(Some(Packet::new(0, pts, dur, packet_buf)))
+    packet_buf
+        .try_reserve_exact(pkt_len as usize)
+        .map_err(|_| Error::IoError(io::Error::from(io::ErrorKind::OutOfMemory)))?;
+    packet_buf.resize(pkt_len as usize, 0);
+
+    let mut filled = 0;
+
+    while filled < packet_buf.len() {
+        match reader.read_buf(&mut packet_buf[filled..]) {
+            Ok(0) => break,
+            Ok(count) => filled += count,
+            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(err) => return Err(err.into()),
+        }
+    }
+
+    packet_buf.truncate(filled);
+
+    let blocks_read = packet_buf.len() as u64 / packet_info.block_size.get();
+
+    if blocks_read == 0 {
+        return Ok(None);
+    }
+
+    let dur = if blocks_read < blocks_per_packet {
+        packet_buf.truncate((blocks_read * packet_info.block_size.get()) as usize);
+        Duration::from(blocks_read * packet_info.frames_per_block.get())
+    }
+    else {
+        dur
+    };
+
+    Ok(Some(Packet::new(0, pts, dur, packet_buf.into_boxed_slice())))
 }
 
 /// TODO: format here refers to format chunk in Wave terminology, but the data being handled here is

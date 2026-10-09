@@ -16,7 +16,7 @@ version.workspace = true
 [features]
 default = ["aiff", "wav"]
 aiff = ["symphonia-metadata/riff-id3"]
-wav = ["symphonia-metadata/riff-info"]
+wav = ["symphonia-metadata/riff-info", "symphonia-metadata/riff-id3"]
 
 [dependencies]
 extended = "0.1.0"
