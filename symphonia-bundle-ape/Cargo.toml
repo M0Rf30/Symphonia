@@ -15,7 +15,6 @@ version.workspace = true
 
 [dependencies]
 symphonia-core = { version = "0.6.1", path = "../symphonia-core" }
-ape-decoder = "0.3.2"
 
 [lints]
 workspace = true

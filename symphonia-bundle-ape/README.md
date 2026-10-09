@@ -10,10 +10,12 @@ APE (Monkey's Audio) demuxer and decoder for Project Symphonia.
 
 Symphonia is provided under the MPL v2.0 license. Please refer to the LICENSE file for more details.
 
+The `src/mac` module is derived from the [ape-decoder](https://crates.io/crates/ape-decoder) crate (Copyright (c) 2026 ombs.io, licensed under MIT OR Apache-2.0) and retains its license files and attribution; see `src/mac/NOTICE`.
+
 ## Acknowledgements
 
  * [Monkey's Audio SDK](https://monkeysaudio.com/), for the reference implementation
- * [ape-decoder](https://crates.io/crates/ape-decoder), the pure Rust APE header, tag, and frame decoding library this crate is built on
+ * [ape-decoder](https://crates.io/crates/ape-decoder), the pure Rust APE header and frame decoding library that the `src/mac` module was vendored from
 
 ## Contributing
 

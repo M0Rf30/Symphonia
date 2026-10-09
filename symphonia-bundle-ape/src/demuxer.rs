@@ -78,12 +78,12 @@ fn channels_from_count(count: u16) -> Channels {
     Channels::Positioned(pos)
 }
 
-/// Pack the codec state the decoder needs to reconstruct its `ape_decoder::FrameDecoder`, but
+/// Pack the codec state the decoder needs to reconstruct its `FrameDecoder`, but
 /// that isn't otherwise carried by `AudioCodecParameters`.
 ///
 /// Layout (6 bytes, all little-endian): `version(u16)`, `compression_level(u16)`,
 /// `channels(u16)`.
-fn build_extra_data(info: &ape_decoder::ApeFileInfo) -> Box<[u8]> {
+fn build_extra_data(info: &crate::mac::format::ApeFileInfo) -> Box<[u8]> {
     let mut buf = [0u8; 6];
     buf[0..2].copy_from_slice(&info.descriptor.version.to_le_bytes());
     buf[2..4].copy_from_slice(&info.header.compression_level.to_le_bytes());
@@ -97,7 +97,7 @@ pub struct ApeReader<'s> {
     media_info: MediaInfo,
     tracks: Vec<Track>,
     metadata: MetadataLog,
-    file_info: ape_decoder::ApeFileInfo,
+    file_info: crate::mac::format::ApeFileInfo,
     current_frame: u32,
 }
 
@@ -107,7 +107,7 @@ impl<'s> ApeReader<'s> {
         // channel count, blocks-per-frame) and independently locates the descriptor, so it is
         // robust regardless of where the probe left the stream position (e.g. after skipping a
         // leading ID3v2 tag).
-        let file_info = ape_decoder::format::parse(&mut reader).map_err(map_ape_error)?;
+        let file_info = crate::mac::format::parse(&mut reader).map_err(map_ape_error)?;
         let header = &file_info.header;
 
         if header.sample_rate == 0 {

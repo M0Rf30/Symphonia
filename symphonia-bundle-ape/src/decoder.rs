@@ -21,16 +21,15 @@ const DEFAULT_MAX_FRAMES_PER_PACKET: u64 = 73728 * 4;
 
 /// Monkey's Audio (APE) decoder.
 ///
-/// This wraps `ape_decoder::FrameDecoder`, a stateful frame decoder purpose-built for external
-/// demuxer integration: it only decodes already-demuxed compressed frame bytes and holds no I/O
-/// of its own. All demuxing (header/seek-table parsing, frame boundary lookup) is done by
+/// This wraps `mac::frame::FrameDecoder`, a stateful frame decoder that only decodes
+/// already-demuxed compressed frame bytes and holds no I/O of its own. All demuxing (header/seek-table parsing, frame boundary lookup) is done by
 /// [`crate::ApeReader`].
 pub struct ApeDecoder {
     params: AudioCodecParameters,
     /// Decoded audio, normalized to 32-bit width regardless of the source bit depth (matching the
     /// convention used by the FLAC and ALAC decoders in this workspace).
     buf: AudioBuffer<i32>,
-    frame_decoder: ape_decoder::FrameDecoder,
+    frame_decoder: crate::mac::frame::FrameDecoder,
     channels: u16,
     bits_per_sample: u16,
 }
@@ -61,7 +60,7 @@ impl ApeDecoder {
         let channels_count = u16::from_le_bytes([extra[4], extra[5]]);
 
         let frame_decoder =
-            ape_decoder::FrameDecoder::new(version, channels_count, bits_per_sample, compression_level)
+            crate::mac::frame::FrameDecoder::new(version, channels_count, bits_per_sample, compression_level)
                 .map_err(map_ape_error)?;
 
         let spec = AudioSpec::new(sample_rate, channels);
@@ -170,7 +169,7 @@ impl AudioDecoder for ApeDecoder {
 
     fn reset(&mut self) {
         // APE frames are independently decodable (predictors/entropy/range coder are reset at
-        // the start of each frame by `ape_decoder::FrameDecoder`), so there is no persistent
+        // the start of each frame by `FrameDecoder`), so there is no persistent
         // state to clear here.
     }
 

@@ -10,25 +10,22 @@
 
 mod decoder;
 mod demuxer;
+mod mac;
 
 pub use decoder::ApeDecoder;
 pub use demuxer::ApeReader;
 
 use symphonia_core::errors::Error;
 
-/// Map an `ape_decoder` crate error to a Symphonia `Error`.
-///
-/// `ape_decoder::ApeError` is `#[non_exhaustive]`, so a catch-all arm is required even though
-/// every variant defined at the time of writing is handled explicitly.
-fn map_ape_error(err: ape_decoder::ApeError) -> Error {
+/// Map an APE core error to a Symphonia `Error`.
+fn map_ape_error(err: mac::error::ApeError) -> Error {
     match err {
-        ape_decoder::ApeError::Io(e) => Error::IoError(e),
-        ape_decoder::ApeError::UnsupportedVersion(_) => {
+        mac::error::ApeError::Io(e) => Error::IoError(e),
+        mac::error::ApeError::UnsupportedVersion(_) => {
             Error::Unsupported("ape: unsupported file version")
         }
-        ape_decoder::ApeError::InvalidChecksum => Error::DecodeError("ape: invalid checksum"),
-        ape_decoder::ApeError::InvalidFormat(msg) => Error::DecodeError(msg),
-        ape_decoder::ApeError::DecodingError(msg) => Error::DecodeError(msg),
-        _ => Error::DecodeError("ape: unknown error"),
+        mac::error::ApeError::InvalidChecksum => Error::DecodeError("ape: invalid checksum"),
+        mac::error::ApeError::InvalidFormat(msg) => Error::DecodeError(msg),
+        mac::error::ApeError::DecodingError(msg) => Error::DecodeError(msg),
     }
 }

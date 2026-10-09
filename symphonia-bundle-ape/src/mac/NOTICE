@@ -1,0 +1,43 @@
+The files in this directory (the `mac` module of symphonia-bundle-ape) are derived from the
+`ape-decoder` crate, version 0.3.2:
+
+    Repository: https://github.com/OMBS-IO/ape-decoder  (commit c7141a84dfdc548d871a62b79daf4815efb4eb7b)
+    Crate:      https://crates.io/crates/ape-decoder/0.3.2
+    Copyright:  (c) 2026 ombs.io
+    License:    MIT OR Apache-2.0 (see LICENSE-MIT and LICENSE-APACHE in this directory)
+
+Modifications for Symphonia: the crate was reduced to header/seek-table parsing and the
+frame decoder (tag, ID3v2, MD5 verification, seeking/parallel convenience APIs and the I/O wrapper
+were removed), the `crc32fast` dependency was replaced by an in-tree CRC-32, and the hot loops were
+optimised (output is bit-identical).
+
+`ape-decoder` in turn states that it is based on the Monkey's Audio SDK by Matthew T. Ashland,
+licensed under the 3-clause BSD license (https://monkeysaudio.com/). The algorithms, constants and
+tables in these files originate from that SDK:
+
+    Copyright (c) Matthew T. Ashland. All rights reserved.
+
+    Redistribution and use in source and binary forms, with or without modification, are
+    permitted provided that the following conditions are met:
+
+    1. Redistributions of source code must retain the above copyright notice, this list of
+       conditions and the following disclaimer.
+    2. Redistributions in binary form must reproduce the above copyright notice, this list of
+       conditions and the following disclaimer in the documentation and/or other materials
+       provided with the distribution.
+    3. Neither the name of the copyright holder nor the names of its contributors may be used to
+       endorse or promote products derived from this software without specific prior written
+       permission.
+
+    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR
+    IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY
+    AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+    CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+    CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+    SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+    OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+    POSSIBILITY OF SUCH DAMAGE.
+
+(The text above is the standard 3-clause BSD license as referenced by `ape-decoder`'s README; the
+copyright line should be confirmed against the SDK's own license file if this notice is updated.)
