@@ -406,6 +406,11 @@ fn synthesise_complex<const N: usize>(m: &SynthesisMatrix, bands: &[Complex], v:
     let v = &mut v[..N];
     v.fill(0.0);
     for (k, x) in bands.iter().enumerate() {
+        // The terms of a band that is exactly zero are zeros, and adding a zero to a sum that
+        // starts at +0.0 never changes it: the highest bands (above the SBR range) are skipped.
+        if x.re == 0.0 && x.im == 0.0 {
+            continue;
+        }
         let mr = &m.re[k * N..(k + 1) * N];
         let mi = &m.im[k * N..(k + 1) * N];
         for n in 0..N {
@@ -420,6 +425,10 @@ fn synthesise_real<const N: usize>(m: &SynthesisMatrix, bands: &[f64], v: &mut [
     let v = &mut v[..N];
     v.fill(0.0);
     for (k, &x) in bands.iter().enumerate() {
+        // As in `synthesise_complex`: a zero band does not change the sums.
+        if x == 0.0 {
+            continue;
+        }
         let mr = &m.re[k * N..(k + 1) * N];
         for n in 0..N {
             v[n] += x * mr[n];

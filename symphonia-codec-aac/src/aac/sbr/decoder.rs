@@ -244,6 +244,10 @@ struct ChannelState {
     synthesis: SynthesisBank,
     /// The previous frame's last `tHFGen` analysis slots (`W'`).
     w_hist: Vec<[Complex; 32]>,
+    /// Buffers of a frame that are kept to avoid allocating them again: the `XLow` buffer, and
+    /// the assembled `X` columns.
+    x_low_buf: Vec<[Complex; 32]>,
+    x_cols_buf: Vec<[Complex; 64]>,
     /// The previous frame's `Y` buffer (spec absolute columns).
     y_prev: Vec<[Complex; 64]>,
     /// `tE'(LE')` — the previous frame's trailing envelope border.
@@ -265,6 +269,8 @@ impl ChannelState {
             analysis: AnalysisBank::new(low_power, eld),
             synthesis: SynthesisBank::new(downsampled, low_power, eld),
             w_hist: vec![[Complex::default(); 32]; geo.t_hf_gen()],
+            x_low_buf: Vec::with_capacity(geo.cols()),
+            x_cols_buf: Vec::with_capacity(geo.lf()),
             y_prev: vec![[Complex::default(); 64]; geo.cols()],
             t_e_last_prev: geo.num_time_slots as i32,
             k_x_prev: 0,
@@ -285,7 +291,8 @@ impl ChannelState {
             return Err(Error::SbrQmfInvalid);
         }
         let (lf, cols, t_hf_gen) = (self.geo.lf(), self.geo.cols(), self.geo.t_hf_gen());
-        let mut x_low = Vec::with_capacity(cols);
+        let mut x_low = core::mem::take(&mut self.x_low_buf);
+        x_low.clear();
         x_low.extend_from_slice(&self.w_hist);
         for slot in 0..lf {
             let w = self.analysis.push_slot(&core[slot * 32..(slot + 1) * 32])?;
@@ -679,7 +686,9 @@ impl SbrDecoder {
             // §4.6.18.5 X assembly.
             let l_temp = (rate * ch.t_e_last_prev - self.geo.num_time_slots as i32 * rate).max(0)
                 as usize;
-            let mut x_cols: Vec<[Complex; 64]> = vec![[Complex::default(); 64]; lf];
+            let mut x_cols = core::mem::take(&mut ch.x_cols_buf);
+            x_cols.clear();
+            x_cols.resize(lf, [Complex::default(); 64]);
             for (l, x) in x_cols.iter_mut().enumerate() {
                 *x = [Complex::default(); 64];
                 let (kx_cur, m_cur, y_col) = if l < l_temp {
@@ -762,6 +771,8 @@ impl SbrDecoder {
             }
 
             // Thread cross-frame state.
+            ch.x_low_buf = x_low;
+            ch.x_cols_buf = x_cols;
             ch.y_prev = y;
             ch.t_e_last_prev = grid.t_e[grid.t_e.len() - 1];
             ch.k_x_prev = bands.k_x;

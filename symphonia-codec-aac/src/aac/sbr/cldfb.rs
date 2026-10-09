@@ -95,21 +95,29 @@ impl TransformIv {
         }
     }
 
-    /// Both transforms: the cosine transform of `xc` and the sine transform of `xs`.
-    fn dct_dst(&self, xc: &[f64], xs: &[f64], oc: &mut [f64], os: &mut [f64]) {
-        let l = self.tables.l;
-        let (oc, os) = (&mut oc[..l], &mut os[..l]);
-        // The sum of an iterator of floats starts at -0.0.
-        oc.fill(-0.0);
-        os.fill(-0.0);
-        for n in 0..l {
-            let (c, s) = (xc[n], xs[n]);
-            let rc = &self.tables.cos[n * l..(n + 1) * l];
-            let rs = &self.tables.sin[n * l..(n + 1) * l];
-            for k in 0..l {
-                oc[k] += rc[k] * c;
-                os[k] += rs[k] * s;
-            }
+    /// Both transforms: the cosine transform of `xc` and the sine transform of `xs`, with the
+    /// length `L` of the tables.
+    #[inline]
+    fn dct_dst<const L: usize>(
+        &self,
+        xc: &[f64; L],
+        xs: &[f64; L],
+        oc: &mut [f64; L],
+        os: &mut [f64; L],
+    ) {
+        transform_full(&self.tables.cos, xc, oc);
+        transform_full(&self.tables.sin, xs, os);
+    }
+}
+
+/// `out[k] = Σ_n x[n]·table[n][k]`, summed in the order of `n`.
+#[inline]
+fn transform_full<const L: usize>(table: &[f64], x: &[f64; L], out: &mut [f64; L]) {
+    // The sum of an iterator of floats starts at -0.0.
+    *out = [-0.0; L];
+    for (row, &v) in table.chunks_exact(L).zip(x.iter()) {
+        for k in 0..L {
+            out[k] += row[k] * v;
         }
     }
 }
@@ -281,7 +289,20 @@ impl CldfbSynthesis {
 
         let mut tre = [0.0f64; 64];
         let mut tim = [0.0f64; 64];
-        self.transform.dct_dst(&re[..l], &im[..l], &mut tre, &mut tim);
+        if l == 64 {
+            self.transform.dct_dst::<64>(&re, &im, &mut tre, &mut tim);
+        }
+        else {
+            let (mut c, mut s) = ([0.0f64; 32], [0.0f64; 32]);
+            self.transform.dct_dst::<32>(
+                re[..32].try_into().unwrap(),
+                im[..32].try_into().unwrap(),
+                &mut c,
+                &mut s,
+            );
+            tre[..32].copy_from_slice(&c);
+            tim[..32].copy_from_slice(&s);
+        }
 
         // The unfolding.
         for i in 0..l / 2 {
