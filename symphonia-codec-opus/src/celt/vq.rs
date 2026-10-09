@@ -37,21 +37,46 @@ pub(crate) fn celt_inner_prod(x: &[f32], y: &[f32], n: i32) -> f32 {
 /// elements of `x` spaced `stride` apart.
 fn exp_rotation1(x: &mut [f32], len: i32, stride: i32, c: f32, s: f32) {
     let ms = -s;
-    let mut i = 0;
-    while i < len - stride {
-        let x1 = x[i as usize];
-        let x2 = x[(i + stride) as usize];
-        x[(i + stride) as usize] = c * x2 + s * x1;
-        x[i as usize] = c * x1 + ms * x2;
-        i += 1;
+    let len = len as usize;
+    let stride = stride as usize;
+    let x = &mut x[..len];
+    if stride == 1 {
+        // Each step consumes the value the previous step produced for `x[i + 1]`, so carry it
+        // in a register instead of storing and reloading it.
+        if len >= 2 {
+            let mut x1 = x[0];
+            for i in 0..len - 1 {
+                let x2 = x[i + 1];
+                x[i] = c * x1 + ms * x2;
+                x1 = c * x2 + s * x1;
+            }
+            x[len - 1] = x1;
+        }
+        // Backward pass starting at `len - 3` (C: `i = len - 2 * stride - 1`).
+        if len >= 3 {
+            let mut x2 = x[len - 2];
+            for i in (0..len - 2).rev() {
+                let x1 = x[i];
+                x[i + 1] = c * x2 + s * x1;
+                x2 = c * x1 + ms * x2;
+            }
+            x[0] = x2;
+        }
+        return;
     }
-    let mut i = len - 2 * stride - 1;
-    while i >= 0 {
-        let x1 = x[i as usize];
-        let x2 = x[(i + stride) as usize];
-        x[(i + stride) as usize] = c * x2 + s * x1;
-        x[i as usize] = c * x1 + ms * x2;
-        i -= 1;
+    for i in 0..len.saturating_sub(stride) {
+        let x1 = x[i];
+        let x2 = x[i + stride];
+        x[i + stride] = c * x2 + s * x1;
+        x[i] = c * x1 + ms * x2;
+    }
+    if len > 2 * stride {
+        for i in (0..len - 2 * stride).rev() {
+            let x1 = x[i];
+            let x2 = x[i + stride];
+            x[i + stride] = c * x2 + s * x1;
+            x[i] = c * x1 + ms * x2;
+        }
     }
 }
 
@@ -133,7 +158,25 @@ pub fn alg_unquant(x: &mut [f32], n: i32, k: i32, spread: i32, blocks: i32, gain
     // band per CELT frame).
     const MAX_N: usize = 960;
     debug_assert!(n as usize <= MAX_N);
-    let mut iy_buf = [0i32; MAX_N];
+    // Pick the smallest stack buffer that fits so small bands do not clear a full-frame one.
+    match n as usize {
+        0..=16 => alg_unquant_cap::<16>(x, n, k, spread, blocks, gain, rd),
+        17..=48 => alg_unquant_cap::<48>(x, n, k, spread, blocks, gain, rd),
+        49..=160 => alg_unquant_cap::<160>(x, n, k, spread, blocks, gain, rd),
+        _ => alg_unquant_cap::<MAX_N>(x, n, k, spread, blocks, gain, rd),
+    }
+}
+
+fn alg_unquant_cap<const CAP: usize>(
+    x: &mut [f32],
+    n: i32,
+    k: i32,
+    spread: i32,
+    blocks: i32,
+    gain: f32,
+    rd: &mut RangeDecoder<'_>,
+) -> u32 {
+    let mut iy_buf = [0i32; CAP];
     let iy = &mut iy_buf[..n as usize];
     let ryy = decode_pulses(iy, n, k, rd);
     normalise_residual(iy, x, n, ryy, gain);

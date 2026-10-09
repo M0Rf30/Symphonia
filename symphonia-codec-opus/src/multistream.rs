@@ -6,14 +6,17 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! The multistream Opus decoder (RFC 7845 section 5.2 / libopus `src/opus_multistream_decoder.c`,
-//! `struct OpusMSDecoder`, `opus_multistream_decode_native`).
+//! `struct OpusMSDecoder`, `opus_multistream_decode_native`), including the projection decoder
+//! of mapping family 3 (RFC 8486, libopus `src/opus_projection_decoder.c`).
 //! Ported from libopus (BSD-3-Clause), see NOTICE.
 //!
 //! A multistream packet contains `stream_count` self-delimited Opus packets back-to-back (the
 //! last one NOT self-delimited, per `crate::packet::parse_impl`'s `self_delimited` flag), decoded
 //! by `stream_count` independent [`crate::decoder::OpusDecoder`] instances (`coupled_count` of
 //! them stereo, the rest mono), then the decoded channels are scattered into the output according
-//! to [`crate::mapping::ChannelMapping::table`] (`255` entries produce silence).
+//! to [`crate::mapping::ChannelMapping::table`] (`255` entries produce silence). For mapping
+//! family 3 the decoded channels (`stream_count + coupled_count` of them, in stream order) are
+//! instead multiplied with the demixing matrix to produce the ambisonic output channels.
 
 use crate::decoder::{DecodeError, OpusDecoder, Result, SampleRate};
 use crate::mapping::ChannelMapping;
@@ -38,9 +41,46 @@ fn get_mono_channel(table: &[u8], stream_id: u8, coupled_count: u8, prev: i32) -
 }
 
 /// C: `copy_channel_out` (the float/`opus_val16` specialization `opus_copy_channel_out_float`).
-fn scatter(out: &mut [f32], total_ch: usize, chan: usize, buf: &[f32], buf_stride: usize, buf_offset: usize, frame_size: usize) {
+fn scatter(
+    out: &mut [f32],
+    total_ch: usize,
+    chan: usize,
+    buf: &[f32],
+    buf_stride: usize,
+    buf_offset: usize,
+    frame_size: usize,
+) {
     for i in 0..frame_size {
         out[chan + i * total_ch] = buf[buf_offset + i * buf_stride];
+    }
+}
+
+/// C: `mapping_matrix_multiply_channel_out_float` applied to every decoded channel in turn (the
+/// projection decoder's `opus_projection_copy_channel_out_float`). `mix` holds `frame_size` frames
+/// of `cols` interleaved decoded channels, `matrix` is column-major with `rows` rows, and `out`
+/// receives `frame_size` frames of `rows` interleaved channels. Only the first `used_cols`
+/// decoded channels contribute (libopus' identity mapping covers just `i < rows`). The
+/// accumulation order (ascending decoded channel, each term `((1/32768) * m) * x`, no fused
+/// multiply-add) reproduces libopus' float result exactly.
+fn demix(
+    matrix: &[i16],
+    rows: usize,
+    cols: usize,
+    used_cols: usize,
+    mix: &[f32],
+    out: &mut [f32],
+    frame_size: usize,
+) {
+    for i in 0..frame_size {
+        let src = &mix[i * cols..(i + 1) * cols];
+        let dst = &mut out[i * rows..(i + 1) * rows];
+        for (row, d) in dst.iter_mut().enumerate() {
+            let mut acc = 0.0f32;
+            for (col, &x) in src.iter().enumerate().take(used_cols) {
+                acc += ((1.0 / 32768.0) * f32::from(matrix[rows * col + row])) * x;
+            }
+            *d = acc;
+        }
     }
 }
 
@@ -60,7 +100,11 @@ pub struct MultistreamDecoder {
 
 impl MultistreamDecoder {
     /// C: `opus_multistream_decoder_init`.
-    pub fn try_new(sample_rate: SampleRate, layout_channels: u8, mapping: ChannelMapping) -> Result<Self> {
+    pub fn try_new(
+        sample_rate: SampleRate,
+        layout_channels: u8,
+        mapping: ChannelMapping,
+    ) -> Result<Self> {
         if mapping.stream_count == 0 {
             return Err(DecodeError::InvalidChannelCount);
         }
@@ -68,7 +112,21 @@ impl MultistreamDecoder {
         if max_channel > 255 {
             return Err(DecodeError::InvalidChannelCount);
         }
-        let effective_table = if mapping.table.is_empty() {
+        let projection = mapping.family == 3;
+        let effective_table = if projection {
+            // Mapping family 3: libopus initializes the multistream decoder with the trivial
+            // mapping `mapping[i] = i` so that each decoded channel pairs with a matrix column.
+            // The decoded channels are collected in a `stream_count + coupled_count` wide buffer
+            // (identity table) and mixed down to `layout_channels` afterwards.
+            let n_in = mapping.stream_count as usize + mapping.coupled_count as usize;
+            if layout_channels as usize > n_in
+                || mapping.demixing_matrix.len() != layout_channels as usize * n_in
+            {
+                return Err(DecodeError::InvalidChannelCount);
+            }
+            (0..n_in as u8).collect()
+        }
+        else if mapping.table.is_empty() {
             // Family 0: implicit identity mapping (C: `opus_decoder.c` uses a plain
             // `OpusDecoder` directly for family 0, never `OpusMSDecoder`; this crate always
             // routes through `MultistreamDecoder` for uniformity, so synthesize the equivalent
@@ -142,7 +200,13 @@ impl MultistreamDecoder {
     /// via `crate::packet::parse_impl(..., self_delimited = true)` (all but the last stream) /
     /// `false` (the last), decodes each with its own [`OpusDecoder`], and scatters the decoded
     /// channels into `out` per `self.mapping.table`.
-    pub fn decode(&mut self, data: Option<&[u8]>, out: &mut [f32], frame_size: usize, decode_fec: bool) -> Result<usize> {
+    pub fn decode(
+        &mut self,
+        data: Option<&[u8]>,
+        out: &mut [f32],
+        frame_size: usize,
+        decode_fec: bool,
+    ) -> Result<usize> {
         if frame_size == 0 {
             return Err(DecodeError::BadArgument);
         }
@@ -157,6 +221,12 @@ impl MultistreamDecoder {
             _ => return Err(DecodeError::BufferTooSmall),
         }
         let mut buf = vec![0f32; 2 * frame_size];
+
+        // Mapping family 3 (projection): decode into a `stream_count + coupled_count` channel
+        // intermediate buffer, demixed into `out` at the end.
+        let projection = self.mapping.family == 3;
+        let n_in = self.mapping.stream_count as usize + self.mapping.coupled_count as usize;
+        let mut mix = if projection { vec![0f32; frame_size * n_in] } else { Vec::new() };
 
         let do_plc = data.is_none();
         if !do_plc {
@@ -180,8 +250,13 @@ impl MultistreamDecoder {
                 return Err(DecodeError::Internal);
             }
 
-            let (n, packet_offset) =
-                self.decoders[s].decode_native(if do_plc { None } else { data_ptr }, &mut buf, frame_size, decode_fec, self_delimited)?;
+            let (n, packet_offset) = self.decoders[s].decode_native(
+                if do_plc { None } else { data_ptr },
+                &mut buf,
+                frame_size,
+                decode_fec,
+                self_delimited,
+            )?;
             if !do_plc {
                 data_ptr = Some(&data_ptr.unwrap()[packet_offset..]);
             }
@@ -190,28 +265,61 @@ impl MultistreamDecoder {
             }
             frame_size = n;
 
-            let total_ch = self.layout_channels as usize;
+            let total_ch = if projection { n_in } else { self.layout_channels as usize };
             if is_coupled {
                 let mut prev = -1i32;
                 while let Some(chan) = get_left_channel(&self.effective_table, s as u8, prev) {
-                    scatter(out, total_ch, chan, &buf, 2, 0, frame_size);
+                    scatter(
+                        if projection { &mut mix[..] } else { &mut out[..] },
+                        total_ch,
+                        chan,
+                        &buf,
+                        2,
+                        0,
+                        frame_size,
+                    );
                     prev = chan as i32;
                 }
                 prev = -1;
                 while let Some(chan) = get_right_channel(&self.effective_table, s as u8, prev) {
-                    scatter(out, total_ch, chan, &buf, 2, 1, frame_size);
+                    scatter(
+                        if projection { &mut mix[..] } else { &mut out[..] },
+                        total_ch,
+                        chan,
+                        &buf,
+                        2,
+                        1,
+                        frame_size,
+                    );
                     prev = chan as i32;
                 }
             }
             else {
                 let mut prev = -1i32;
-                while let Some(chan) =
-                    get_mono_channel(&self.effective_table, s as u8, self.mapping.coupled_count, prev)
-                {
-                    scatter(out, total_ch, chan, &buf, 1, 0, frame_size);
+                while let Some(chan) = get_mono_channel(
+                    &self.effective_table,
+                    s as u8,
+                    self.mapping.coupled_count,
+                    prev,
+                ) {
+                    scatter(
+                        if projection { &mut mix[..] } else { &mut out[..] },
+                        total_ch,
+                        chan,
+                        &buf,
+                        1,
+                        0,
+                        frame_size,
+                    );
                     prev = chan as i32;
                 }
             }
+        }
+
+        if projection {
+            let rows = self.layout_channels as usize;
+            demix(&self.mapping.demixing_matrix, rows, n_in, rows.min(n_in), &mix, out, frame_size);
+            return Ok(frame_size);
         }
 
         // Handle muted channels (mapping index 255).

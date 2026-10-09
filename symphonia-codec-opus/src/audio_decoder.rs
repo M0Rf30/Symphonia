@@ -21,8 +21,11 @@
 //! For mapping family 1 with 3 to 8 channels the output [`AudioSpec`] is
 //! [`Channels::Positioned`] (the RFC 7845 layout), and the "Vorbis channel order" produced by
 //! [`crate::multistream::MultistreamDecoder::decode`] is reordered so plane `p` holds the channel
-//! at the `p`-th set `Position` bit, exactly as the Vorbis decoder does. Families 2 and 255 are
-//! exposed as `Discrete(n)` channels in mapping-table order.
+//! at the `p`-th set `Position` bit, exactly as the Vorbis decoder does. Families 2 and
+//! 255 are exposed as `Discrete(n)` channels in mapping-table order. Family 3 (RFC 8486
+//! ambisonics with a demixing matrix, libopus' projection decoder) is exposed as `Discrete(n)`
+//! ambisonic channels (ACN order, SN3D normalization) after the `OpusHead`'s demixing matrix has
+//! been applied.
 //!
 //! # Output level
 //!
@@ -34,17 +37,26 @@
 //! # Pre-roll
 //!
 //! Per RFC 7845 section 4.3, an Opus decoder needs audio *before* a seek target to "warm up"
-//! its state (SILK LPC history, CELT MDCT overlap, the post-filter, and the CELT inter-frame
-//! energy prediction). `symphonia-format-ogg` and `symphonia-format-mkv` seek back by the
-//! recommended 80 ms pre-roll, and the caller decodes and discards the audio up to the requested
-//! timestamp after calling [`Self::reset`]. Output after exactly 80 ms is close to, but not
-//! bit-exact with, a continuous decode: the decoder state is identical to libopus' (decoding a
-//! stream from a cold start matches libopus exactly), and the CELT energy predictor converges
-//! geometrically (about 6 dB of SNR per 20 ms frame), reaching bit-exactness after a few hundred
-//! milliseconds. SILK is different: its gains and pitch/LTP state are coded relative to the
-//! previous frame, so a decoder that starts cold never fully converges to a continuous decode
-//! (libopus itself differs by only ~45-50 dB SNR from a continuous decode, measured on a speech
-//! stream, however long the pre-roll).
+//! its state (SILK LPC/LTP history, CELT MDCT overlap, the post-filter, and the CELT inter-frame
+//! energy prediction). `symphonia-format-ogg` and `symphonia-format-mkv` seek back before the
+//! requested timestamp, and the caller decodes and discards the audio up to it after calling
+//! [`Self::reset`] (the decoder state itself is identical to libopus': decoding a stream from a
+//! cold start matches libopus exactly). The 80 ms recommended by the RFC only gets the output
+//! close to a continuous decode (the CELT energy predictor converges geometrically, about 6 dB
+//! of SNR per 20 ms frame), so the readers use more:
+//!
+//! * CELT-only streams: 1.5 s. Measured against libopus 1.6.1 on 2.5 to 120 ms frames, the output
+//!   after 0.64 to 0.96 s of pre-roll is bit-identical to a continuous decode.
+//! * Streams with SILK or Hybrid packets: 10 s. SILK is a fixed-point recursion whose rounding
+//!   makes decoder states that start out different settle into persistently different orbits
+//!   instead of merging (libopus itself behaves identically). Whether, and when, a cold start
+//!   catches up with a continuous decode depends on the material: quiet or narrowband speech
+//!   merges within seconds (25/25 seeks bit-identical after 10 s on narrowband speech), loud
+//!   wideband material may never merge (SNR plateaus around 45-48 dB after about 8 frames, the
+//!   same as libopus). Bit-exactness after a seek is therefore not achievable without decoding
+//!   the whole stream up to the target, and the pre-roll is the longest practical choice.
+//!
+//! The constants live in `symphonia_common::xiph::audio::opus`.
 
 use symphonia_core::audio::{AsGenericAudioBufferRef, AudioBuffer, AudioSpec, Channels, GenericAudioBufferRef, Position};
 use symphonia_core::codecs::CodecInfo;

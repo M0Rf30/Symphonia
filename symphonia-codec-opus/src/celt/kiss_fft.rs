@@ -998,31 +998,30 @@ fn kf_bfly4(fout: &mut [Complex], fstride: usize, twiddles: &[Complex], m: usize
         }
     }
     else {
-        let m2 = 2 * m;
-        let m3 = 3 * m;
-        for i in 0..n {
-            let base = i * mm;
-            let mut tw1 = 0usize;
-            let mut tw2 = 0usize;
-            let mut tw3 = 0usize;
-            for j in 0..m {
-                let fout_j = base + j;
-                let scratch0 = fout[fout_j + m].mul(twiddles[tw1]);
-                let scratch1 = fout[fout_j + m2].mul(twiddles[tw2]);
-                let scratch2 = fout[fout_j + m3].mul(twiddles[tw3]);
+        debug_assert_eq!(mm, 4 * m);
+        for chunk in fout.chunks_exact_mut(4 * m).take(n) {
+            let (a, rest) = chunk.split_at_mut(m);
+            let (b, rest) = rest.split_at_mut(m);
+            let (c, d) = rest.split_at_mut(m);
+            let tw1 = twiddles.iter().step_by(fstride);
+            let tw2 = twiddles.iter().step_by(fstride * 2);
+            let tw3 = twiddles.iter().step_by(fstride * 3);
+            for (((((f0, f1), f2), f3), (t1, t2)), t3) in
+                a.iter_mut().zip(b.iter_mut()).zip(c.iter_mut()).zip(d.iter_mut()).zip(tw1.zip(tw2)).zip(tw3)
+            {
+                let scratch0 = f1.mul(*t1);
+                let scratch1 = f2.mul(*t2);
+                let scratch2 = f3.mul(*t3);
 
-                let scratch5 = fout[fout_j].sub(scratch1);
-                fout[fout_j] = fout[fout_j].add(scratch1);
+                let scratch5 = f0.sub(scratch1);
+                *f0 = f0.add(scratch1);
                 let scratch3 = scratch0.add(scratch2);
                 let scratch4 = scratch0.sub(scratch2);
-                fout[fout_j + m2] = fout[fout_j].sub(scratch3);
-                tw1 += fstride;
-                tw2 += fstride * 2;
-                tw3 += fstride * 3;
-                fout[fout_j] = fout[fout_j].add(scratch3);
+                *f2 = f0.sub(scratch3);
+                *f0 = f0.add(scratch3);
 
-                fout[fout_j + m] = Complex { r: scratch5.r + scratch4.i, i: scratch5.i - scratch4.r };
-                fout[fout_j + m3] = Complex { r: scratch5.r - scratch4.i, i: scratch5.i + scratch4.r };
+                *f1 = Complex { r: scratch5.r + scratch4.i, i: scratch5.i - scratch4.r };
+                *f3 = Complex { r: scratch5.r - scratch4.i, i: scratch5.i + scratch4.r };
             }
         }
     }
@@ -1030,32 +1029,30 @@ fn kf_bfly4(fout: &mut [Complex], fstride: usize, twiddles: &[Complex], m: usize
 
 /// C: `kf_bfly3`.
 fn kf_bfly3(fout: &mut [Complex], fstride: usize, twiddles: &[Complex], m: usize, n: usize, mm: usize) {
-    let m2 = 2 * m;
     // C: `epi3 = st->twiddles[fstride*m]` (float build).
     let epi3 = twiddles[fstride * m];
-    for i in 0..n {
-        let base = i * mm;
-        let mut tw1 = 0usize;
-        let mut tw2 = 0usize;
-        for k in 0..m {
-            let idx = base + k;
-            let scratch1 = fout[idx + m].mul(twiddles[tw1]);
-            let scratch2 = fout[idx + m2].mul(twiddles[tw2]);
+    debug_assert_eq!(mm, 3 * m);
+    for chunk in fout.chunks_exact_mut(3 * m).take(n) {
+        let (a, rest) = chunk.split_at_mut(m);
+        let (b, c) = rest.split_at_mut(m);
+        let tw1 = twiddles.iter().step_by(fstride);
+        let tw2 = twiddles.iter().step_by(fstride * 2);
+        for (((f0, f1), f2), (t1, t2)) in a.iter_mut().zip(b.iter_mut()).zip(c.iter_mut()).zip(tw1.zip(tw2)) {
+            let scratch1 = f1.mul(*t1);
+            let scratch2 = f2.mul(*t2);
 
             let scratch3 = scratch1.add(scratch2);
             let scratch0 = scratch1.sub(scratch2);
-            tw1 += fstride;
-            tw2 += fstride * 2;
 
-            let fm_r = fout[idx].r - 0.5 * scratch3.r;
-            let fm_i = fout[idx].i - 0.5 * scratch3.i;
+            let fm_r = f0.r - 0.5 * scratch3.r;
+            let fm_i = f0.i - 0.5 * scratch3.i;
 
             let scratch0 = Complex { r: scratch0.r * epi3.i, i: scratch0.i * epi3.i };
 
-            fout[idx] = fout[idx].add(scratch3);
+            *f0 = f0.add(scratch3);
 
-            fout[idx + m2] = Complex { r: fm_r + scratch0.i, i: fm_i - scratch0.r };
-            fout[idx + m] = Complex { r: fm_r - scratch0.i, i: fm_i + scratch0.r };
+            *f2 = Complex { r: fm_r + scratch0.i, i: fm_i - scratch0.r };
+            *f1 = Complex { r: fm_r - scratch0.i, i: fm_i + scratch0.r };
         }
     }
 }
@@ -1064,22 +1061,25 @@ fn kf_bfly3(fout: &mut [Complex], fstride: usize, twiddles: &[Complex], m: usize
 fn kf_bfly5(fout: &mut [Complex], fstride: usize, twiddles: &[Complex], m: usize, n: usize, mm: usize) {
     let ya = twiddles[fstride * m];
     let yb = twiddles[fstride * 2 * m];
-    for i in 0..n {
-        let base = i * mm;
-        let (f0, f1, f2, f3, f4) = (base, base + m, base + 2 * m, base + 3 * m, base + 4 * m);
+    debug_assert_eq!(mm, 5 * m);
+    for chunk in fout.chunks_exact_mut(5 * m).take(n) {
+        let (a, rest) = chunk.split_at_mut(m);
+        let (b, rest) = rest.split_at_mut(m);
+        let (c, rest) = rest.split_at_mut(m);
+        let (d, e) = rest.split_at_mut(m);
         for u in 0..m {
-            let scratch0 = fout[f0 + u];
-            let scratch1 = fout[f1 + u].mul(twiddles[u * fstride]);
-            let scratch2 = fout[f2 + u].mul(twiddles[2 * u * fstride]);
-            let scratch3 = fout[f3 + u].mul(twiddles[3 * u * fstride]);
-            let scratch4 = fout[f4 + u].mul(twiddles[4 * u * fstride]);
+            let scratch0 = a[u];
+            let scratch1 = b[u].mul(twiddles[u * fstride]);
+            let scratch2 = c[u].mul(twiddles[2 * u * fstride]);
+            let scratch3 = d[u].mul(twiddles[3 * u * fstride]);
+            let scratch4 = e[u].mul(twiddles[4 * u * fstride]);
 
             let scratch7 = scratch1.add(scratch4);
             let scratch10 = scratch1.sub(scratch4);
             let scratch8 = scratch2.add(scratch3);
             let scratch9 = scratch2.sub(scratch3);
 
-            fout[f0 + u] = Complex { r: scratch0.r + scratch7.r + scratch8.r, i: scratch0.i + scratch7.i + scratch8.i };
+            a[u] = Complex { r: scratch0.r + scratch7.r + scratch8.r, i: scratch0.i + scratch7.i + scratch8.i };
 
             let scratch5 = Complex {
                 r: scratch0.r + scratch7.r * ya.r + scratch8.r * yb.r,
@@ -1090,8 +1090,8 @@ fn kf_bfly5(fout: &mut [Complex], fstride: usize, twiddles: &[Complex], m: usize
                 i: -(scratch10.r * ya.i + scratch9.r * yb.i),
             };
 
-            fout[f1 + u] = scratch5.sub(scratch6);
-            fout[f4 + u] = scratch5.add(scratch6);
+            b[u] = scratch5.sub(scratch6);
+            e[u] = scratch5.add(scratch6);
 
             let scratch11 = Complex {
                 r: scratch0.r + scratch7.r * yb.r + scratch8.r * ya.r,
@@ -1102,8 +1102,8 @@ fn kf_bfly5(fout: &mut [Complex], fstride: usize, twiddles: &[Complex], m: usize
                 i: scratch10.r * yb.i - scratch9.r * ya.i,
             };
 
-            fout[f2 + u] = scratch11.add(scratch12);
-            fout[f3 + u] = scratch11.sub(scratch12);
+            c[u] = scratch11.add(scratch12);
+            d[u] = scratch11.sub(scratch12);
         }
     }
 }
@@ -1176,9 +1176,8 @@ impl FftState {
 }
 
 impl FftState {
-    /// Largest `nfft` among the four static FFT states (`FFT_STATE_0`, nfft=480); used to size
-    /// a fixed-size stack scratch buffer in [`FftState::fft_impl_interleaved`] so callers never
-    /// need a heap allocation on the decode hot path.
+    /// Largest `nfft` among the four static FFT states (`FFT_STATE_0`, nfft=480); sizes the
+    /// fixed stack scratch buffer of the MDCT so the decode hot path never allocates.
     pub(crate) const MAX_NFFT: usize = 480;
 
     /// Crate-visible accessor for `bitrev[i]`, needed by `mdct.rs`'s pre-rotation step (which
@@ -1191,27 +1190,6 @@ impl FftState {
     /// Crate-visible accessor for `scale` (`1/nfft`), needed by `mdct.rs`'s forward transform.
     pub(crate) fn scale(&self) -> f32 {
         self.scale
-    }
-
-    /// Runs [`FftState::fft_impl`] over an interleaved `[re, im, re, im, ...]` buffer (length
-    /// `2*nfft`) without requiring the caller to hold a `[Complex]` buffer. Uses a fixed-size
-    /// stack scratch array (no heap allocation, no `unsafe`) since `nfft <= MAX_NFFT` for every
-    /// FFT size CELT uses. C: `clt_mdct_backward_c` casts `out+(overlap>>1)` to
-    /// `kiss_fft_cpx*` in place instead; we can't do that safely, so we copy through a small
-    /// stack buffer instead (nfft <= 480 => <= 3.75 KiB on the stack).
-    pub(crate) fn fft_impl_interleaved(&self, buf: &mut [f32]) {
-        assert_eq!(buf.len(), 2 * self.nfft);
-        let mut scratch = [Complex { r: 0.0, i: 0.0 }; Self::MAX_NFFT];
-        let cbuf = &mut scratch[..self.nfft];
-        for (k, c) in cbuf.iter_mut().enumerate() {
-            c.r = buf[2 * k];
-            c.i = buf[2 * k + 1];
-        }
-        self.fft_impl(cbuf);
-        for (k, c) in cbuf.iter().enumerate() {
-            buf[2 * k] = c.r;
-            buf[2 * k + 1] = c.i;
-        }
     }
 }
 

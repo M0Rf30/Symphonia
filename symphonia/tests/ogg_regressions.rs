@@ -375,12 +375,86 @@ fn opus_timeline_excludes_pre_skip() {
         let n = (4800 * channels).min(full.len() - required * channels);
         let snr = snr_db(&full[required * channels..][..n], &got[..n]);
         println!("seek {secs}s: SNR vs continuous decode = {snr:.1} dB");
-        // A seek to the start must be exact. Elsewhere the decoder state has only had the 80 ms
-        // pre-roll to converge, so it is not bit-exact; but a misaligned (even by one frame)
-        // noise signal would score ~0 dB.
-        let min_snr = if secs == 0.0 { 100.0 } else { 20.0 };
+        // The seek pre-roll of a CELT-only Opus stream (1.5 s) re-converges the decoder: the
+        // output is bit-identical to a continuous decode (an 80 ms pre-roll is not enough). A
+        // misaligned (even by one frame) noise signal would score ~0 dB.
+        let min_snr = 100.0;
         assert!(snr > min_snr, "seek to {secs}s: SNR {snr:.1} dB");
     }
+}
+
+/// An Opus stream that contains SILK frames is seeked with a 10 s pre-roll (the SILK decoder
+/// converges slowly, if at all), found out while reading the page of the seek if the stream is
+/// not known to contain SILK yet. The output after the seek is then as close to a continuous
+/// decode as libopus' own cold start gets.
+#[test]
+fn opus_silk_seek_uses_long_pre_roll() {
+    if !have_encoder("libopus") {
+        eprintln!("libopus not available; skipping");
+        return;
+    }
+
+    let path = fixtures_dir().join("opus_silk_seek.opus");
+    run_ffmpeg(&[
+        "-y",
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "anoisesrc=d=14:c=pink:r=48000:a=0.05,aformat=channel_layouts=mono",
+        "-c:a",
+        "libopus",
+        "-application",
+        "voip",
+        "-cutoff",
+        "8000",
+        "-b:a",
+        "24k",
+        path.to_str().unwrap(),
+    ]);
+
+    let (full, channels) = decode_all(&path);
+    assert_eq!(channels, 1);
+
+    let mut format = open(&path);
+    let mut decoder = make_decoder(format.as_ref());
+
+    for secs in [12.0, 13.0] {
+        let required = (secs * 48_000.0) as usize;
+        let seeked = format
+            .seek(
+                SeekMode::Accurate,
+                SeekTo::Time { time: Time::try_from_secs_f64(secs).unwrap(), track_id: None },
+            )
+            .expect("seek failed");
+        assert_eq!(seeked.required_ts.get(), required as i64);
+
+        // The first seek of the stream had not seen a SILK packet when it began. The pre-roll is
+        // 10 s (480000 frames) whichever the seek: the landing packet is within one 20 ms packet.
+        let pre_roll = seeked.required_ts.get() - seeked.actual_ts.get();
+        assert!((480_000..480_000 + 960).contains(&pre_roll), "pre-roll {pre_roll} at {secs}s");
+
+        decoder.reset();
+        let (first_pos, got) =
+            read_after_seek(format.as_mut(), decoder.as_mut(), required as i64, 4800, 1);
+        assert_eq!(first_pos, Some(required as i64));
+
+        let n = 4800.min(full.len() - required);
+        let snr = snr_db(&full[required..][..n], &got[..n]);
+        println!("silk seek {secs}s: SNR vs continuous decode = {snr:.1} dB");
+        assert!(snr > 35.0, "seek to {secs}s: SNR {snr:.1} dB");
+    }
+
+    // A seek to a position closer to the start than the pre-roll starts at the beginning, which
+    // is exact.
+    let seeked = format
+        .seek(
+            SeekMode::Accurate,
+            SeekTo::Time { time: Time::try_from_secs_f64(3.0).unwrap(), track_id: None },
+        )
+        .expect("seek failed");
+    assert_eq!(seeked.actual_ts.get(), -312);
 }
 
 /// Cross-checks the externally generated multichannel samples against `ffmpeg`. Set
@@ -433,6 +507,99 @@ fn opus_family_255_and_2() {
             "libopus",
             120.0,
         );
+    }
+}
+
+/// Mapping family 3 (RFC 8486 ambisonics with a demixing matrix): probed, decoded to discrete
+/// ambisonic channels, and equal to libopus' projection decoder (`opus_projection_decode_float`,
+/// the golden frames of `symphonia-codec-opus/tests/data`, which start at frame 1920 of the
+/// decoder output, i.e. 1920 - pre-skip of the timeline).
+#[test]
+fn opus_family3_ambisonics() {
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("../symphonia-codec-opus/tests/data");
+
+    for (name, channels) in [("foa", 4usize), ("o2", 9), ("o3", 16)] {
+        let path = data.join(format!("family3_{name}.opus"));
+
+        let format = open(&path);
+        let track = format.default_track(TrackType::Audio).unwrap();
+        let params = track.codec_params.as_ref().unwrap().audio().unwrap();
+        assert_eq!(params.channels, Some(Channels::Discrete(channels as u16)));
+        assert_eq!(track.delay, Some(312));
+
+        let (pcm, got_channels) = decode_all(&path);
+        assert_eq!(got_channels, channels);
+        let frames = pcm.len() / channels;
+        assert_eq!(track.num_frames, Some(frames as u64));
+
+        let golden: Vec<f32> = std::fs::read(data.join(format!("family3_{name}.golden.f32")))
+            .unwrap()
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
+        let start = (1920 - 312) * channels;
+        let got = &pcm[start..start + golden.len()];
+        let max_err = got.iter().zip(&golden).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+        println!("family 3 {name}: {channels} channels, {frames} frames, max error {max_err:e}");
+        assert!(max_err < 1e-6, "{name}: max error {max_err}");
+    }
+}
+
+/// Seeks in the externally generated Opus samples (`RMPD_SAMPLES`): the 8192 frames after the
+/// requested position are compared to a continuous decode. CELT streams are bit-identical; SILK
+/// speech converges to a continuous decode only as far as libopus' own cold start does, which is
+/// reported (`opus_speech_mono_16`, loud wideband speech, never converges).
+#[test]
+fn external_opus_seek_convergence() {
+    let Ok(dir) = std::env::var("RMPD_SAMPLES")
+    else {
+        eprintln!("RMPD_SAMPLES not set; skipping");
+        return;
+    };
+
+    // (file, minimum SNR in dB)
+    let files = [
+        ("opus_music_128", 100.0),
+        ("opus_ffm_celt_fb", 100.0),
+        ("opus_ffm_fd10", 100.0),
+        ("opus_ffm_fd60", 100.0),
+        ("opus_ffm_hybrid_swb", 100.0),
+        ("opus_speech_mono_8", 35.0),
+        ("opus_ffm_silk_wb", 35.0),
+        ("opus_speech_mono_16", 35.0),
+    ];
+
+    for (name, min_snr) in files {
+        let path = Path::new(&dir).join("opus").join(format!("{name}.opus"));
+        if !path.exists() {
+            eprintln!("{name} missing; skipping");
+            continue;
+        }
+
+        let (full, channels) = decode_all(&path);
+        let mut format = open(&path);
+        let mut decoder = make_decoder(format.as_ref());
+        let total = full.len() / channels;
+
+        for fraction in [0.25, 0.5, 0.9] {
+            let required = (total as f64 * fraction) as usize;
+            let secs = required as f64 / 48_000.0;
+            let seeked = format
+                .seek(
+                    SeekMode::Accurate,
+                    SeekTo::Time { time: Time::try_from_secs_f64(secs).unwrap(), track_id: None },
+                )
+                .expect("seek failed");
+            decoder.reset();
+            let required = seeked.required_ts.get();
+            let (first, got) =
+                read_after_seek(format.as_mut(), decoder.as_mut(), required, 8192, channels);
+            assert_eq!(first, Some(required));
+            let n = (8192 * channels).min(full.len() - required as usize * channels);
+            let snr = snr_db(&full[required as usize * channels..][..n], &got[..n]);
+            println!("{name} @ {fraction}: SNR vs continuous decode = {snr:.1} dB");
+            assert!(snr > min_snr, "{name} @ {fraction}: SNR {snr:.1} dB");
+        }
     }
 }
 
@@ -665,8 +832,11 @@ fn external_chained_samples() {
 /// libopus' soft clipper (`opus_pcm_soft_clip`), which differs from the float decode for every
 /// packet that exceeds full-scale (this is not a decoder error).
 ///
-/// SILK saturates its 16-bit output at the negative rail to -32767; the following resampler
-/// then rings differently if -32768 is delivered instead (bit-exactness regression).
+/// libopus (built with `ENABLE_OSCE`, as the 1.6 distribution builds are) runs the SILK enhancer
+/// stage on 20 ms frames of 16 kHz SILK even though no enhancement is selected. That stage
+/// clamps the SILK output to [-32767, 32767]; the following resampler then rings differently if
+/// -32768 is delivered instead (bit-exactness regression). 10 ms frames and 8/12 kHz SILK are
+/// not affected and must keep -32768.
 fn check_loud_mono(name: &str, extra_args: &[&str]) {
     if !have_encoder("libopus") {
         return;
@@ -711,4 +881,40 @@ fn opus_mono_silk_loud_matches_libopus_float() {
 #[test]
 fn opus_mono_loud_matches_libopus_float() {
     check_loud_mono("opus_mono_loud", &["-application", "voip", "-b:a", "48k"]);
+}
+
+/// 8 kHz SILK: the enhancer stage does not run, `-32768` is kept.
+#[test]
+fn opus_mono_silk_nb_loud_matches_libopus_float() {
+    check_loud_mono(
+        "opus_mono_silk_nb_loud",
+        &["-application", "voip", "-cutoff", "4000", "-b:a", "16k"],
+    );
+}
+
+/// 12 kHz SILK: the enhancer stage does not run, `-32768` is kept.
+#[test]
+fn opus_mono_silk_mb_loud_matches_libopus_float() {
+    check_loud_mono(
+        "opus_mono_silk_mb_loud",
+        &["-application", "voip", "-cutoff", "6000", "-b:a", "20k"],
+    );
+}
+
+/// 10 ms frames of 16 kHz SILK (2 subframes): the enhancer stage does not run.
+#[test]
+fn opus_mono_silk_10ms_loud_matches_libopus_float() {
+    check_loud_mono(
+        "opus_mono_silk_10ms_loud",
+        &["-application", "voip", "-cutoff", "8000", "-b:a", "24k", "-frame_duration", "10"],
+    );
+}
+
+/// 60 ms packets of 16 kHz SILK (three 20 ms frames): the enhancer stage runs on each frame.
+#[test]
+fn opus_mono_silk_60ms_loud_matches_libopus_float() {
+    check_loud_mono(
+        "opus_mono_silk_60ms_loud",
+        &["-application", "voip", "-cutoff", "8000", "-b:a", "24k", "-frame_duration", "60"],
+    );
 }

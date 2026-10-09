@@ -41,7 +41,7 @@ pub type Result<T, E = MappingError> = std::result::Result<T, E>;
 
 const MAGIC: &[u8; 8] = b"OpusHead";
 
-/// The RFC 7845 channel mapping table (mapping families 1 and 255).
+/// The RFC 7845 / RFC 8486 channel mapping table (mapping families 1, 2, 3 and 255).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelMapping {
     pub family: u8,
@@ -50,15 +50,27 @@ pub struct ChannelMapping {
     /// Number of those streams that are stereo-coupled (must be <= `stream_count`).
     pub coupled_count: u8,
     /// `mapping[output_channel] = decoded_channel_index`, or `255` for silence.
-    /// Present (non-empty) only for family 1 and family 255; family 0 uses the implicit
-    /// identity/Vorbis-order mapping for up to 2 channels and has an empty table here.
+    /// Present (non-empty) only for family 1, 2 and 255; family 0 uses the implicit
+    /// identity/Vorbis-order mapping for up to 2 channels and has an empty table here, and
+    /// family 3 (ambisonics with projection) maps through [`Self::demixing_matrix`] instead.
     pub table: Vec<u8>,
+    /// RFC 8486 demixing matrix of mapping family 3: `channel_count` rows by
+    /// `stream_count + coupled_count` columns of signed Q15 gains, stored in column-major order
+    /// exactly as in the `OpusHead` (libopus `MappingMatrix`, `MATRIX_INDEX(rows, row, col) =
+    /// rows * col + row`). Empty for every other mapping family.
+    pub demixing_matrix: Vec<i16>,
 }
 
 impl ChannelMapping {
     /// The implicit mapping used by family 0 (mono/stereo, no explicit table).
     fn family0(channels: u8) -> Self {
-        ChannelMapping { family: 0, stream_count: 1, coupled_count: (channels == 2) as u8, table: Vec::new() }
+        ChannelMapping {
+            family: 0,
+            stream_count: 1,
+            coupled_count: (channels == 2) as u8,
+            table: Vec::new(),
+            demixing_matrix: Vec::new(),
+        }
     }
 }
 
@@ -134,7 +146,48 @@ impl OpusHead {
                     // RFC 7845: family 1 (Vorbis channel order) is defined for up to 8 channels.
                     return Err(MappingError::InvalidMapping);
                 }
-                ChannelMapping { family: channel_mapping_family, stream_count, coupled_count, table }
+                ChannelMapping {
+                    family: channel_mapping_family,
+                    stream_count,
+                    coupled_count,
+                    table,
+                    demixing_matrix: Vec::new(),
+                }
+            }
+            3 => {
+                // RFC 8486: stream count, coupled count, then the demixing matrix
+                // (`channel_count` x (`stream_count` + `coupled_count`) signed 16-bit
+                // little-endian Q15 elements in column-major order).
+                if data.len() < 21 {
+                    return Err(MappingError::InvalidHeader);
+                }
+                let stream_count = data[19];
+                let coupled_count = data[20];
+                if stream_count == 0 || coupled_count > stream_count {
+                    return Err(MappingError::InvalidMapping);
+                }
+                let decoded_channels = stream_count as usize + coupled_count as usize;
+                // libopus `opus_multistream_decoder_init` (called with the identity mapping
+                // `mapping[i] = i`, `i < channel_count`) rejects a layout with more output
+                // channels than decoded channels.
+                if channel_count as usize > decoded_channels {
+                    return Err(MappingError::InvalidMapping);
+                }
+                let matrix_len = 2 * channel_count as usize * decoded_channels;
+                if data.len() < 21 + matrix_len {
+                    return Err(MappingError::InvalidHeader);
+                }
+                let demixing_matrix = data[21..21 + matrix_len]
+                    .chunks_exact(2)
+                    .map(|b| i16::from_le_bytes([b[0], b[1]]))
+                    .collect();
+                ChannelMapping {
+                    family: 3,
+                    stream_count,
+                    coupled_count,
+                    table: Vec::new(),
+                    demixing_matrix,
+                }
             }
             _ => return Err(MappingError::InvalidMapping),
         };
@@ -201,7 +254,10 @@ mod tests {
 
     #[test]
     fn rejects_bad_magic_and_truncated() {
-        assert_eq!(OpusHead::parse(b"NotOpus\0\0\0\0\0\0\0\0\0\0\0"), Err(MappingError::InvalidHeader));
+        assert_eq!(
+            OpusHead::parse(b"NotOpus\0\0\0\0\0\0\0\0\0\0\0"),
+            Err(MappingError::InvalidHeader)
+        );
         assert_eq!(OpusHead::parse(b"OpusHead"), Err(MappingError::InvalidHeader));
     }
 

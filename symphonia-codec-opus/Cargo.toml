@@ -44,3 +44,13 @@ workspace = true
 [[test]]
 name = "encoder_roundtrip"
 required-features = ["ogg"]
+
+[[test]]
+name = "golden_hashes"
+required-features = ["ogg"]
+
+# Timing/regression-hash harness for the decoder and encoder hot paths
+# (`cargo run -p symphonia-codec-opus --features ogg --release --example perf`).
+[[example]]
+name = "perf"
+required-features = ["ogg"]

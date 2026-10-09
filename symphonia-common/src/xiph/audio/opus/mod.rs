@@ -11,6 +11,43 @@ use symphonia_core::{
     io::ReadBytes,
 };
 
+/// The seek pre-roll, in frames at 48 kHz, that makes the output after a seek identical to a
+/// continuous decode for streams without SILK frames (CELT-only): 1.5 s.
+///
+/// RFC 7845 section 4.6 only mandates 80 ms, enough to bring the decoder *close* to the continuous
+/// decode, but the state of an Opus decoder never fully forgets a reset that quickly: the CELT
+/// inter-frame energy prediction (and the post-filter and overlap state with it) converges
+/// geometrically and the output becomes bit-identical to a continuous decode after about 640-960
+/// ms, independent of the frame size (measured against libopus 1.6.1 on 2.5 to 120 ms frames).
+pub const SEEK_PREROLL_CELT: u64 = 72_000;
+
+/// The seek pre-roll, in frames at 48 kHz, for streams containing SILK or Hybrid frames: 10 s.
+///
+/// SILK is different. Its decoder is a fixed-point recursion (LPC synthesis plus the long-term
+/// predictor fed back from the output history) whose rounding makes two trajectories with
+/// different initial states settle into persistently
+/// different orbits instead of contracting to the same one. Even libopus itself does not reach a
+/// continuous decode after a cold start on loud (high gain) material, however long the pre-roll.
+/// For quiet or narrowband material the trajectories do merge: measured against libopus 1.6.1,
+/// the fraction of seeks that are bit-identical to a continuous decode grows with the pre-roll
+/// (narrowband speech: 8/25 at 0.64 s, 17/25 at 1.3 s, 21/25 at 2.6 s, 25/25 at 10 s; wideband
+/// SILK: 0/25, 3/25, 11/25 and 23/25), and the median SNR plateaus at 45-48 dB after about 8
+/// frames otherwise. Pre-rolling 10 s is the longest practical choice: decoding SILK is several
+/// hundred times faster than real time.
+pub const SEEK_PREROLL_SILK: u64 = 480_000;
+
+/// Returns the seek pre-roll in frames at 48 kHz for a stream that does (`silk`) or does not
+/// contain SILK or Hybrid frames.
+pub fn seek_preroll(silk: bool) -> u64 {
+    if silk { SEEK_PREROLL_SILK } else { SEEK_PREROLL_CELT }
+}
+
+/// Returns `true` if the Opus packet with the first byte (table-of-contents byte) `toc` carries
+/// SILK data (RFC 6716 section 3.1: configurations 0 to 11 are SILK-only, 12 to 15 Hybrid).
+pub fn toc_has_silk(toc: u8) -> bool {
+    toc >> 3 < 16
+}
+
 const OPUS_MAGIC_SIGNATURE: &[u8] = b"OpusHead";
 
 #[derive(Debug, Default)]
@@ -59,9 +96,10 @@ impl OpusHead {
         // The next byte indicates the channel mapping. Most of these values are reserved.
         let channel_mapping = reader.read_byte()?;
 
-        // Families 2 (ambisonics, RFC 8486) and 255 (undefined) have no defined speaker positions.
+        // Families 2 and 3 (ambisonics, RFC 8486; family 3 additionally carries a demixing
+        // matrix that the decoder applies) and 255 (undefined) have no defined speaker positions.
         // The channels are presented as discrete channels in mapping table order.
-        if channel_mapping == 2 || channel_mapping == 255 {
+        if channel_mapping == 2 || channel_mapping == 3 || channel_mapping == 255 {
             return Ok(Self {
                 version,
                 channels: Channels::Discrete(u16::from(channel_count)),
@@ -156,8 +194,8 @@ mod tests {
     }
 
     #[test]
-    fn family_255_and_2_are_discrete() {
-        for (ch, family) in [(3, 255), (11, 255), (16, 2)] {
+    fn family_255_2_and_3_are_discrete() {
+        for (ch, family) in [(3, 255), (11, 255), (16, 2), (4, 3), (16, 3)] {
             let buf = head(ch, family);
             let h = OpusHead::read(&mut BufReader::new(&buf), 15).unwrap();
             assert_eq!(h.channels, Channels::Discrete(u16::from(ch)));

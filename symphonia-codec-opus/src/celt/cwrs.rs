@@ -164,7 +164,13 @@ fn celt_pvq_u_row(n: usize) -> &'static [u32] {
 
 /// C: `CELT_PVQ_U(_n,_k)` macro: `U(N,K) = U(K,N) := CELT_PVQ_U_ROW[min(n,k)][max(n,k)]`.
 fn celt_pvq_u(n: i32, k: i32) -> u32 {
-    celt_pvq_u_row(n.min(k) as usize)[n.max(k) as usize]
+    celt_pvq_u_at(n.min(k) as usize, n.max(k) as usize)
+}
+
+/// `CELT_PVQ_U_ROW[row][col]` without materialising the row slice.
+#[inline(always)]
+fn celt_pvq_u_at(row: usize, col: usize) -> u32 {
+    CELT_PVQ_U_DATA[CELT_PVQ_U_ROW[row] + col]
 }
 
 /// C: `CELT_PVQ_V(_n,_k)` macro: the number of PVQ codewords for a band of size `N` with `K`
@@ -195,7 +201,7 @@ fn cwrsi(mut n: i32, mut k: i32, mut i: u32, y: &mut [i32]) -> f32 {
                 k = n;
                 loop {
                     k -= 1;
-                    p = celt_pvq_u_row(k as usize)[n as usize];
+                    p = celt_pvq_u_at(k as usize, n as usize);
                     if p <= i {
                         break;
                     }
@@ -212,8 +218,8 @@ fn cwrsi(mut n: i32, mut k: i32, mut i: u32, y: &mut [i32]) -> f32 {
             val = if is_neg { -(k0 - k) } else { k0 - k };
         }
         else {
-            let p = celt_pvq_u_row(k as usize)[n as usize];
-            let q = celt_pvq_u_row((k + 1) as usize)[n as usize];
+            let p = celt_pvq_u_at(k as usize, n as usize);
+            let q = celt_pvq_u_at((k + 1) as usize, n as usize);
             if p <= i && i < q {
                 i -= p;
                 val = 0;
@@ -227,7 +233,7 @@ fn cwrsi(mut n: i32, mut k: i32, mut i: u32, y: &mut [i32]) -> f32 {
                 let mut p2;
                 loop {
                     k -= 1;
-                    p2 = celt_pvq_u_row(k as usize)[n as usize];
+                    p2 = celt_pvq_u_at(k as usize, n as usize);
                     if p2 <= i {
                         break;
                     }
