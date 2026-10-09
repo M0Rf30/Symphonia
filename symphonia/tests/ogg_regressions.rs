@@ -665,8 +665,11 @@ fn external_chained_samples() {
 /// libopus' soft clipper (`opus_pcm_soft_clip`), which differs from the float decode for every
 /// packet that exceeds full-scale (this is not a decoder error).
 ///
-/// SILK saturates its 16-bit output at the negative rail to -32767; the following resampler
-/// then rings differently if -32768 is delivered instead (bit-exactness regression).
+/// libopus (built with `ENABLE_OSCE`, as the 1.6 distribution builds are) runs the SILK enhancer
+/// stage on 20 ms frames of 16 kHz SILK even though no enhancement is selected. That stage
+/// clamps the SILK output to [-32767, 32767]; the following resampler then rings differently if
+/// -32768 is delivered instead (bit-exactness regression). 10 ms frames and 8/12 kHz SILK are
+/// not affected and must keep -32768.
 fn check_loud_mono(name: &str, extra_args: &[&str]) {
     if !have_encoder("libopus") {
         return;
@@ -711,4 +714,40 @@ fn opus_mono_silk_loud_matches_libopus_float() {
 #[test]
 fn opus_mono_loud_matches_libopus_float() {
     check_loud_mono("opus_mono_loud", &["-application", "voip", "-b:a", "48k"]);
+}
+
+/// 8 kHz SILK: the enhancer stage does not run, `-32768` is kept.
+#[test]
+fn opus_mono_silk_nb_loud_matches_libopus_float() {
+    check_loud_mono(
+        "opus_mono_silk_nb_loud",
+        &["-application", "voip", "-cutoff", "4000", "-b:a", "16k"],
+    );
+}
+
+/// 12 kHz SILK: the enhancer stage does not run, `-32768` is kept.
+#[test]
+fn opus_mono_silk_mb_loud_matches_libopus_float() {
+    check_loud_mono(
+        "opus_mono_silk_mb_loud",
+        &["-application", "voip", "-cutoff", "6000", "-b:a", "20k"],
+    );
+}
+
+/// 10 ms frames of 16 kHz SILK (2 subframes): the enhancer stage does not run.
+#[test]
+fn opus_mono_silk_10ms_loud_matches_libopus_float() {
+    check_loud_mono(
+        "opus_mono_silk_10ms_loud",
+        &["-application", "voip", "-cutoff", "8000", "-b:a", "24k", "-frame_duration", "10"],
+    );
+}
+
+/// 60 ms packets of 16 kHz SILK (three 20 ms frames): the enhancer stage runs on each frame.
+#[test]
+fn opus_mono_silk_60ms_loud_matches_libopus_float() {
+    check_loud_mono(
+        "opus_mono_silk_60ms_loud",
+        &["-application", "voip", "-cutoff", "8000", "-b:a", "24k", "-frame_duration", "60"],
+    );
 }
