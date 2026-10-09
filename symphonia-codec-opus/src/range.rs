@@ -263,6 +263,13 @@ impl<'a> RangeDecoder<'a> {
         nbits - l
     }
 
+    /// C: `dec->nbits_total += tell - ec_tell(dec)`. Makes every later [`Self::tell`] /
+    /// [`Self::tell_frac`] report `tell` bits as used, i.e. "pretend we've read all the remaining
+    /// bits" (used by the CELT decoder for silence frames, whose encoder does the same).
+    pub fn force_tell(&mut self, tell: i32) {
+        self.nbits_total += tell - self.tell();
+    }
+
     /// C: `ec_get_error`.
     pub fn error(&self) -> bool {
         self.error
