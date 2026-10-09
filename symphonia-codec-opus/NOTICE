@@ -2,8 +2,8 @@ This crate (`symphonia-codec-opus`) is a from-scratch, pure-Rust reimplementatio
 audio codec's decoder. It is licensed under the Mozilla Public License, v. 2.0, like the rest of
 Project Symphonia (see `LICENSE`).
 
-Portions of this crate's algorithms (the range coder, TOC/packet framing, SILK decoder, and CELT
-decoder) are ported, function-by-function, from the reference `libopus` implementation
+Portions of this crate's algorithms (the range coder, TOC/packet framing, SILK decoder, CELT
+decoder and, behind the `encoder` feature, the CELT encoder) are ported, function-by-function, from the reference `libopus` implementation
 (https://opus-codec.org/, https://gitlab.xiph.org/xiph/opus), which is distributed under the
 following BSD-3-Clause-style license:
 

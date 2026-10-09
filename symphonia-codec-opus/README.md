@@ -21,6 +21,23 @@ license.
   mono and stereo) and cross-checked against `libopus` on real-world Ogg/WebM content (SILK
   bit-exact; CELT/Hybrid within audible-transparency SNR of `libopus`).
 
+## Encoder (optional)
+
+With the `encoder` cargo feature the crate also contains a pure-Rust Opus **encoder**
+(`symphonia_codec_opus::encoder`), a port of the CELT half of `libopus` specialised for music
+streaming: CELT-only mode, 48 kHz, mono/stereo, 20 ms frames, CBR / VBR / constrained VBR at a
+configurable bitrate, a complexity knob (0-10), MDCT with transient detection and short blocks,
+TF analysis, spreading decision, dynamic allocation, intensity/dual/mid-side stereo, and the
+RFC 7845 `OpusHead`/`OpusTags` header builders. The `ogg` feature adds an Ogg Opus muxer
+(`encoder::ogg::OggOpusWriter`) on top of the page writer in `symphonia-format-ogg` (feature
+`writer`). The pitch pre-filter, SILK/hybrid modes and QEXT are not implemented; this affects
+compression efficiency only. The streams decode identically in this crate's decoder, `libopus`
+and FFmpeg, and reach the same SNR as `libopus` at equal bitrate on the test material.
+
+```toml
+symphonia-codec-opus = { version = "0.6", features = ["ogg"] }
+```
+
 > [!NOTE]
 > This crate is part of Symphonia. Please use the [`symphonia`](https://crates.io/crates/symphonia) crate instead of this one directly.
 

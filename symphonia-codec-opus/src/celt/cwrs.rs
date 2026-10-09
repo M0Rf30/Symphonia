@@ -277,6 +277,36 @@ pub fn decode_pulses(y: &mut [i32], n: i32, k: i32, rd: &mut RangeDecoder<'_>) -
     cwrsi(n, k, idx, y)
 }
 
+/// C: `icwrs` (`celt/cwrs.c`, non-`SMALL_FOOTPRINT` build): the codeword index of the pulse
+/// vector `y` (length `n >= 2`), the encode-direction inverse of [`cwrsi`].
+#[cfg(feature = "encoder")]
+fn icwrs(n: i32, y: &[i32]) -> u32 {
+    debug_assert!(n >= 2);
+    let mut j = n - 1;
+    let mut i: u32 = (y[j as usize] < 0) as u32;
+    let mut k = y[j as usize].abs();
+    loop {
+        j -= 1;
+        i = i.wrapping_add(celt_pvq_u(n - j, k));
+        k += y[j as usize].abs();
+        if y[j as usize] < 0 {
+            i = i.wrapping_add(celt_pvq_u(n - j, k + 1));
+        }
+        if j <= 0 {
+            break;
+        }
+    }
+    i
+}
+
+/// C: `encode_pulses`. Writes the codeword index of the `n`-dimensional pulse vector `y` (which
+/// must hold exactly `k > 0` pulses) to the range encoder.
+#[cfg(feature = "encoder")]
+pub(crate) fn encode_pulses(y: &[i32], n: i32, k: i32, enc: &mut crate::encoder::entenc::RangeEncoder) {
+    debug_assert!(k > 0);
+    enc.enc_uint(icwrs(n, y), celt_pvq_v(n, k));
+}
+
 #[cfg(test)]
 mod tests {
     //! Port of libopus `celt/tests/test_unit_cwrs32.c` (non-`CUSTOM_MODES`/non-`SMALL_FOOTPRINT`

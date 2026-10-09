@@ -107,9 +107,55 @@ pub struct Allocation {
     pub coded_bands: i32,
 }
 
-/// C: `interp_bits2pulses` (decode direction only, `encode == 0`).
+/// Context handed to [`AllocCoder::skip_band`] for the band-skip decision.
+pub struct SkipInfo {
+    /// C: `codedBands` (the current candidate number of coded bands).
+    pub coded_bands: i32,
+    /// First coded band.
+    pub start: i32,
+    /// C: `j`, the band being considered for skipping (`coded_bands - 1`).
+    pub band: i32,
+    /// Bits (1/8 bit units) the band would receive if it were kept.
+    pub band_bits: i32,
+    /// Width of the bands `j..coded_bands` in MDCT bins at `LM == 0`.
+    pub band_width: i32,
+    pub lm: i32,
+}
+
+/// The entropy-coding side of the bit allocator (the three places `interp_bits2pulses` in
+/// libopus branches on `encode`). The decoder implements this for
+/// [`RangeDecoder`]; the optional encoder implements it with its own decision logic.
+pub trait AllocCoder {
+    /// Codes the "skip this band?" flag. Returns `true` when the band is *kept* (stops the
+    /// backwards skip search), `false` when it is dropped.
+    fn skip_band(&mut self, info: &SkipInfo) -> bool;
+    /// Codes the intensity-stereo start band (`coded_bands + 1 - start` possible values) and
+    /// returns its absolute band index.
+    fn intensity(&mut self, start: i32, coded_bands: i32) -> i32;
+    /// Codes the dual-stereo flag.
+    fn dual_stereo(&mut self) -> bool;
+}
+
+impl AllocCoder for RangeDecoder<'_> {
+    #[inline]
+    fn skip_band(&mut self, _info: &SkipInfo) -> bool {
+        self.dec_bit_logp(1)
+    }
+
+    #[inline]
+    fn intensity(&mut self, start: i32, coded_bands: i32) -> i32 {
+        start + self.dec_uint((coded_bands + 1 - start) as u32) as i32
+    }
+
+    #[inline]
+    fn dual_stereo(&mut self) -> bool {
+        self.dec_bit_logp(1)
+    }
+}
+
+/// C: `interp_bits2pulses` (shared between the decode and, via [`AllocCoder`], encode paths).
 #[allow(clippy::too_many_arguments)]
-fn interp_bits2pulses(
+fn interp_bits2pulses<R: AllocCoder>(
     m: &CeltMode,
     start: i32,
     end: i32,
@@ -127,7 +173,7 @@ fn interp_bits2pulses(
     fine_priority: &mut [i32],
     channels: i32,
     lm: i32,
-    rd: &mut RangeDecoder<'_>,
+    rd: &mut R,
 ) -> (i32, i32, bool, i32, i32) {
     let alloc_floor = channels << BITRES;
     let stereo = channels > 1;
@@ -198,7 +244,8 @@ fn interp_bits2pulses(
         let band_width = eb(m, coded_bands as usize) - eb(m, j as usize);
         let mut band_bits = bits[j as usize] + percoeff * band_width + rem;
         if band_bits >= thresh[j as usize].max(alloc_floor + (1 << BITRES)) {
-            if rd.dec_bit_logp(1) {
+            let info = SkipInfo { coded_bands, start, band: j, band_bits, band_width, lm };
+            if rd.skip_band(&info) {
                 break;
             }
             psum += 1 << BITRES;
@@ -222,13 +269,13 @@ fn interp_bits2pulses(
     debug_assert!(coded_bands > start);
 
     // Code the intensity and dual stereo parameters.
-    let intensity = if intensity_rsv > 0 { start + rd.dec_uint((coded_bands + 1 - start) as u32) as i32 } else { 0 };
+    let intensity = if intensity_rsv > 0 { rd.intensity(start, coded_bands) } else { 0 };
     let mut dual_stereo_rsv = dual_stereo_rsv_in;
     if intensity <= start {
         total += dual_stereo_rsv;
         dual_stereo_rsv = 0;
     }
-    let dual_stereo = if dual_stereo_rsv > 0 { rd.dec_bit_logp(1) } else { false };
+    let dual_stereo = if dual_stereo_rsv > 0 { rd.dual_stereo() } else { false };
 
     // Allocate the remaining bits.
     let left = total - psum;
@@ -331,7 +378,7 @@ pub fn clt_compute_allocation(
     total_bits: i32,
     lm: i32,
     channels: i32,
-    rd: &mut RangeDecoder<'_>,
+    rd: &mut impl AllocCoder,
     pulses_out: &mut [i32],
     fine_energy_bits_out: &mut [i32],
     fine_priority_out: &mut [i32],

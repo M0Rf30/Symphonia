@@ -1,6 +1,6 @@
 [package]
 name = "symphonia-codec-opus"
-description = "Pure Rust Opus decoder (a part of project Symphonia)."
+description = "Pure Rust Opus decoder and CELT encoder (a part of project Symphonia)."
 authors = ["Philip Deljanov <philip.deljanov@gmail.com>"]
 readme = "README.md"
 categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
@@ -13,12 +13,34 @@ repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[features]
+default = []
+# Pure-Rust CELT-only Opus encoder (`symphonia_codec_opus::encoder`) and the RFC 7845 header
+# builders.
+encoder = []
+# Ogg Opus muxing on top of the encoder (`symphonia_codec_opus::encoder::ogg`), using the page
+# writer of `symphonia-format-ogg` (feature `writer`).
+ogg = ["encoder", "dep:symphonia-format-ogg"]
+
 [dependencies]
 log = { workspace = true }
 symphonia-core = { version = "0.6.1", path = "../symphonia-core" }
+
+[dependencies.symphonia-format-ogg]
+version = "0.6.1"
+path = "../symphonia-format-ogg"
+optional = true
+default-features = false
+features = ["writer"]
 
 [dev-dependencies]
 rand = "0.9"
 
 [lints]
 workspace = true
+
+# The encoder tests need the `ogg` feature (`cargo test -p symphonia-codec-opus --features ogg`);
+# without it these test targets are skipped.
+[[test]]
+name = "encoder_roundtrip"
+required-features = ["ogg"]
