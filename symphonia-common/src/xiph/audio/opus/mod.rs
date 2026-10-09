@@ -59,6 +59,18 @@ impl OpusHead {
         // The next byte indicates the channel mapping. Most of these values are reserved.
         let channel_mapping = reader.read_byte()?;
 
+        // Families 2 (ambisonics, RFC 8486) and 255 (undefined) have no defined speaker positions.
+        // The channels are presented as discrete channels in mapping table order.
+        if channel_mapping == 2 || channel_mapping == 255 {
+            return Ok(Self {
+                version,
+                channels: Channels::Discrete(u16::from(channel_count)),
+                gain,
+                original_sample_rate,
+                pre_skip,
+            });
+        }
+
         let positions = match channel_mapping {
             // RTP Mapping
             0 if channel_count == 1 => Position::FRONT_LEFT,
@@ -121,5 +133,42 @@ impl OpusHead {
             original_sample_rate,
             pre_skip,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use symphonia_core::io::BufReader;
+
+    fn head(channels: u8, family: u8) -> Vec<u8> {
+        let mut v = b"OpusHead".to_vec();
+        v.extend_from_slice(&[1, channels]);
+        v.extend_from_slice(&312u16.to_le_bytes());
+        v.extend_from_slice(&48_000u32.to_le_bytes());
+        v.extend_from_slice(&0i16.to_le_bytes());
+        v.push(family);
+        if family != 0 {
+            v.extend_from_slice(&[u8::from(channels), 0]);
+            v.extend(0..channels);
+        }
+        v
+    }
+
+    #[test]
+    fn family_255_and_2_are_discrete() {
+        for (ch, family) in [(3, 255), (11, 255), (16, 2)] {
+            let buf = head(ch, family);
+            let h = OpusHead::read(&mut BufReader::new(&buf), 15).unwrap();
+            assert_eq!(h.channels, Channels::Discrete(u16::from(ch)));
+            assert_eq!(h.pre_skip, 312);
+        }
+    }
+
+    #[test]
+    fn family_1_is_positioned() {
+        let buf = head(6, 1);
+        let h = OpusHead::read(&mut BufReader::new(&buf), 15).unwrap();
+        assert!(matches!(h.channels, Channels::Positioned(_)));
     }
 }

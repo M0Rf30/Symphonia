@@ -114,7 +114,7 @@ impl OpusHead {
                 }
                 ChannelMapping::family0(channel_count)
             }
-            1 | 255 => {
+            1 | 2 | 255 => {
                 if data.len() < 21 + channel_count as usize {
                     return Err(MappingError::InvalidHeader);
                 }
