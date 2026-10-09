@@ -249,11 +249,16 @@ impl<'s> OggReader<'s> {
 
             // Reset all logical bitstreams since the physical stream will be reading from a new
             // location now.
-            for (&s, stream) in self.streams.iter_mut() {
-                stream.reset();
+            let page_seq = self.pages.header().sequence;
 
-                // Read in the current page since it contains our timestamp.
-                if s == serial {
+            for (&s, stream) in self.streams.iter_mut() {
+                if s != serial {
+                    stream.reset();
+                }
+                else {
+                    stream.reset_for_seek(page_seq);
+
+                    // Read in the current page since it contains our timestamp.
                     stream.read_page(&self.pages.page())?;
                 }
             }
@@ -503,9 +508,11 @@ impl FormatReader for OggReader<'_> {
 
                     // Timestamp upper-bound out-of-range.
                     if let Some(num_frames) = track.num_frames {
+                        // The number of frames excludes the delay frames at the start.
                         let max_ts = track
                             .start_ts
-                            .checked_add(Duration::from(num_frames))
+                            .checked_add(Duration::from(u64::from(track.delay.unwrap_or(0))))
+                            .and_then(|ts| ts.checked_add(Duration::from(num_frames)))
                             .ok_or(Error::SeekError(SeekErrorKind::Unseekable))?;
 
                         if ts > max_ts {
@@ -552,9 +559,11 @@ impl FormatReader for OggReader<'_> {
 
                     // Timestamp upper-bound out-of-range.
                     if let Some(num_frames) = track.num_frames {
+                        // The number of frames excludes the delay frames at the start.
                         let max_ts = track
                             .start_ts
-                            .checked_add(Duration::from(num_frames))
+                            .checked_add(Duration::from(u64::from(track.delay.unwrap_or(0))))
+                            .and_then(|ts| ts.checked_add(Duration::from(num_frames)))
                             .ok_or(Error::SeekError(SeekErrorKind::Unseekable))?;
 
                         if ts > max_ts {

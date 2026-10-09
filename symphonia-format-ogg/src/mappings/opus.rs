@@ -18,7 +18,7 @@ use symphonia_core::formats::Track;
 use symphonia_core::io::{BufReader, ReadBytes};
 use symphonia_core::meta::MetadataBuilder;
 
-use symphonia_core::units::Duration;
+use symphonia_core::units::{Duration, Timestamp};
 use symphonia_metadata::embedded::vorbis::{self, VORBIS_COMMENT_METADATA_INFO};
 
 use log::warn;
@@ -179,6 +179,19 @@ impl Mapper for OpusMapper {
         // mandatory pre-skip discard would incorrectly trim audio from the middle of the stream.
         // The RFC 7845 pre-skip only ever applies once, at the true start of the logical
         // bitstream, which `parser` (constructed once in `detect`) already tracks correctly.
+    }
+
+    fn reset_at_start(&mut self) {
+        // The seek landed on the first bitstream page. The mandatory pre-skip applies again.
+        self.parser = OpusPacketParser::new(self.pre_skip);
+    }
+
+    fn absgp_to_ts(&self, absgp: u64) -> Timestamp {
+        // RFC 7845 section 4: the granule position of an Opus page counts the pre-skip samples.
+        // Remove them so that timestamp 0 is the first playable frame (as for the other codecs,
+        // delay frames have negative timestamps), and the track's frame count excludes the
+        // delay. An all-ones granule position (no packet finishes on the page) is -1.
+        Timestamp::from((absgp as i64).saturating_sub(i64::from(self.pre_skip)))
     }
 
     fn max_rap_period(&self) -> Duration {
