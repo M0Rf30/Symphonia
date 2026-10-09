@@ -25,6 +25,8 @@ default = ["opt-simd", "all-meta", "adpcm", "flac", "mkv", "ogg", "opus", "pcm",
 
 # Feature flags to enable specific codecs, container, and standalone metadata formats.
 aac = ["dep:symphonia-codec-aac"]
+# Compute the complex QMF banks of SBR with an FFT: faster, but not bit for bit identical.
+aac-sbr-fft-qmf = ["aac", "symphonia-codec-aac/sbr-fft-qmf"]
 adpcm = ["dep:symphonia-codec-adpcm"]
 alac = ["dep:symphonia-codec-alac"]
 ape-format = ["dep:symphonia-bundle-ape"]

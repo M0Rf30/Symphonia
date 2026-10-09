@@ -201,6 +201,10 @@ fn decode_output_matches_golden_hashes() {
 
     let mut failures = Vec::new();
     for &(rel, hash, frames) in GOLDEN {
+        // The FFT QMF banks of SBR are not bit exact with the pinned output.
+        if cfg!(feature = "aac-sbr-fft-qmf") && rel.contains("heaac") {
+            continue;
+        }
         let path = Path::new(&root).join(rel);
         if !path.exists() {
             continue;

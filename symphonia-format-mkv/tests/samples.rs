@@ -188,7 +188,9 @@ fn seek_after_end_of_stream() {
             let behind = (seeked.required_ts.get() - seeked.actual_ts.get()) as f64
                 * f64::from(tb.numer.get())
                 / f64::from(tb.denom.get());
-            assert!(behind < 0.5, "{name}: {secs}s");
+            // Opus seeks back by its seek pre-roll, 1.5 s or 10 s with SILK (RFC 7845 section 4.6).
+            let limit = if name.contains("opus") { 10.5 } else { 0.5 };
+            assert!(behind < limit, "{name}: {secs}s");
 
             // The packets read after the seek are the packets of the stream.
             let packet = reader.next_packet().unwrap().unwrap();

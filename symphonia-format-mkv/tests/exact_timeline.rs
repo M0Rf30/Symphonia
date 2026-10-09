@@ -269,8 +269,9 @@ fn ffmpeg_vorbis_has_short_and_long_blocks() {
     assert!(durations.contains(&576), "{durations:?}");
 }
 
-/// The seek pre-roll of CELT-only Opus streams in frames (1.5 s at 48 kHz).
+/// The seek pre-rolls of Opus streams in frames (1.5 s, and 10 s with SILK or Hybrid packets).
 const OPUS_CELT_PREROLL: i64 = 72_000;
+const OPUS_SILK_PREROLL: i64 = 480_000;
 
 /// Check the timeline of an Opus stream is exact, and seeks land on the packet at the pre-roll
 /// before the target. Returns the number of frames of the stream.
@@ -295,6 +296,7 @@ fn check_opus_file(path: &Path) -> u64 {
 
     // Seeks land on a packet, before the pre-roll.
     let mut rng = Lcg(11);
+    let mut silk = false;
 
     for _ in 0..100 {
         let target = (rng.next() % total) as i64;
@@ -302,8 +304,22 @@ fn check_opus_file(path: &Path) -> u64 {
             .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(target), track_id })
             .unwrap();
 
-        let expected = packets.iter().rev().find(|packet| packet.pts.get() <= target - OPUS_CELT_PREROLL);
-        let expected = expected.unwrap_or(&packets[0]);
+        let at = |preroll: i64| {
+            let found = packets.iter().rev().find(|packet| packet.pts.get() <= target - preroll);
+            found.unwrap_or(&packets[0])
+        };
+
+        // The pre-roll grows to that of SILK once a SILK or Hybrid packet is found by a seek.
+        let expected = if silk {
+            at(OPUS_SILK_PREROLL)
+        }
+        else if seeked.actual_ts == at(OPUS_CELT_PREROLL).pts {
+            at(OPUS_CELT_PREROLL)
+        }
+        else {
+            silk = true;
+            at(OPUS_SILK_PREROLL)
+        };
 
         assert_eq!(seeked.actual_ts, expected.pts, "{}: seek to {target}", path.display());
 

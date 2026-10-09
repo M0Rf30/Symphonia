@@ -137,8 +137,14 @@ fn adts_in_mpegts_matches_adts_reader() {
         let es = std::fs::read(&path).unwrap();
 
         let mut native = AdtsReader::try_new(open_file(&path), FormatOptions::default()).unwrap();
-        let rate = audio_params(&native, 0).sample_rate.unwrap();
         let want = read_all(&mut native);
+
+        // The native reader detects the implicit SBR of HE-AAC, and counts its packets and rate
+        // in decoded frames (twice those of the core codec). The transport stream reader reports
+        // the frames of the core codec, which `sbr` converts to.
+        let sbr = want[0].dur.get() / 1024;
+        assert!(sbr == 1 || sbr == 2, "{name}");
+        let rate = audio_params(&native, 0).sample_rate.unwrap() / sbr as u32;
 
         // The offsets of the frames.
         let mut starts = vec![];
@@ -173,7 +179,12 @@ fn adts_in_mpegts_matches_adts_reader() {
 
             // The last frame is only complete if the stream ends on the frame boundary, which it
             // does.
-            assert_same_packets(&got, &want);
+            assert_eq!(got.len(), want.len(), "number of packets");
+            for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+                assert_eq!(g.data, w.data, "packet {i} data");
+                assert_eq!(g.dur.get() * sbr, w.dur.get(), "packet {i} dur");
+                assert_eq!(g.pts.get() * sbr as i64, w.pts.get(), "packet {i} pts");
+            }
 
             let track = &reader.tracks()[0];
             assert_eq!(track.duration.unwrap().get(), want.len() as u64 * 1024, "{name}");

@@ -5,6 +5,11 @@
 //!
 //! The in-tree fixtures are always checked. The generated format-coverage samples are checked if
 //! `RMPD_SAMPLES` points at them. Set `SBR_GOLDEN_PRINT` to print the table instead of comparing.
+//!
+//! The `sbr-fft-qmf` feature computes the QMF banks with an FFT, which differs from the pinned output
+//! by rounding errors, so the hashes are only checked without it.
+
+#![cfg(not(feature = "sbr-fft-qmf"))]
 
 use symphonia_codec_aac::{AacDecoder, AdtsReader, LoasReader};
 use symphonia_common::mpeg::audio::AudioSpecificConfig;

@@ -5,7 +5,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! An MPEG program stream must not be probed as raw MPEG audio, and MP3 files must still be. Uses
+//! An MPEG program stream must be probed as such (not as raw MPEG audio), and MP3 files must still be. Uses
 //! the samples in `$RMPD_SAMPLES`; skipped if absent.
 
 use std::fs::File;
@@ -36,8 +36,9 @@ fn mpeg_program_stream_is_not_probed_as_mpeg_audio() {
         Default::default(),
     );
 
+    // Without the MPEG-PS reader the probe finds nothing; with it, the stream is an MPEG-PS.
     if let Ok(reader) = result {
-        panic!("probed as {}", reader.format_info().short_name);
+        assert_eq!(reader.format_info().short_name, "mpegps");
     }
 }
 
