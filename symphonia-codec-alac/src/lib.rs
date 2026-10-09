@@ -53,16 +53,28 @@ const ALAC_ELEM_TAG_END: u32 = 7;
 
 /// Given the current ALAC channel layout, this function will return a mappings of an ALAC
 /// channel number (the index into the array) to a Symphonia `AudioBuffer` channel index.
+///
+/// The ALAC channel order is the channel order of the Apple channel layout tag, and the
+/// `AudioBuffer` order is the order of the bits of the channel positions (FL, FR, FC, LFE, RL,
+/// RR, FLC, FRC, RC, ...).
 fn map_channels(channels: &Channels) -> [u8; 8] {
     match *channels {
+        // C
         layouts::CHANNEL_LAYOUT_MONO => [0, 0, 0, 0, 0, 0, 0, 0],
+        // L R
         layouts::CHANNEL_LAYOUT_STEREO => [0, 1, 0, 0, 0, 0, 0, 0],
+        // C L R
         layouts::CHANNEL_LAYOUT_MPEG_3P0_B => [2, 0, 1, 0, 0, 0, 0, 0],
+        // C L R Cs
         layouts::CHANNEL_LAYOUT_MPEG_4P0_B => [2, 0, 1, 3, 0, 0, 0, 0],
+        // C L R Ls Rs
         layouts::CHANNEL_LAYOUT_MPEG_5P0_D => [2, 0, 1, 3, 4, 0, 0, 0],
+        // C L R Ls Rs LFE
         layouts::CHANNEL_LAYOUT_MPEG_5P1_D => [2, 0, 1, 4, 5, 3, 0, 0],
-        layouts::CHANNEL_LAYOUT_AAC_6P1 => [2, 0, 1, 5, 6, 4, 3, 0],
-        layouts::CHANNEL_LAYOUT_MPEG_7P1_B => [2, 4, 5, 0, 1, 6, 7, 3],
+        // C L R Ls Rs Cs LFE
+        layouts::CHANNEL_LAYOUT_AAC_6P1 => [2, 0, 1, 4, 5, 6, 3, 0],
+        // C Lc Rc L R Ls Rs LFE
+        layouts::CHANNEL_LAYOUT_MPEG_7P1_B => [2, 6, 7, 0, 1, 4, 5, 3],
         _ => unreachable!(),
     }
 }
@@ -680,5 +692,77 @@ fn decorrelate_mid_side(out0: &mut [i32], out1: &mut [i32], weight: i32, shift: 
     for (s0, s1) in out0.iter_mut().zip(out1.iter_mut()) {
         *s0 = *s0 + *s1 - ((*s1 * weight) >> shift);
         *s1 = *s0 - *s1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use symphonia_core::audio::Position as P;
+
+    /// Verify the map of a layout against the Apple channel order of its layout tag.
+    fn check(layout: Channels, apple_order: &[P]) {
+        let Channels::Positioned(set) = layout
+        else {
+            panic!("not positioned")
+        };
+        assert_eq!(apple_order.len(), set.bits().count_ones() as usize);
+
+        let map = map_channels(&layout);
+
+        for (i, pos) in apple_order.iter().enumerate() {
+            // The buffer index is the rank of the position within the layout.
+            assert!(set.contains(*pos));
+            let idx = (set.bits() & (pos.bits() - 1)).count_ones() as u8;
+            assert_eq!(map[i], idx, "alac channel {i} ({pos:?})");
+        }
+    }
+
+    #[test]
+    fn verify_channel_maps() {
+        check(layouts::CHANNEL_LAYOUT_MONO, &[P::FRONT_CENTER]);
+        check(layouts::CHANNEL_LAYOUT_STEREO, &[P::FRONT_LEFT, P::FRONT_RIGHT]);
+        check(
+            layouts::CHANNEL_LAYOUT_MPEG_3P0_B,
+            &[P::FRONT_CENTER, P::FRONT_LEFT, P::FRONT_RIGHT],
+        );
+        check(
+            layouts::CHANNEL_LAYOUT_MPEG_4P0_B,
+            &[P::FRONT_CENTER, P::FRONT_LEFT, P::FRONT_RIGHT, P::REAR_CENTER],
+        );
+        check(
+            layouts::CHANNEL_LAYOUT_MPEG_5P0_D,
+            &[P::FRONT_CENTER, P::FRONT_LEFT, P::FRONT_RIGHT, P::REAR_LEFT, P::REAR_RIGHT],
+        );
+        check(
+            layouts::CHANNEL_LAYOUT_MPEG_5P1_D,
+            &[P::FRONT_CENTER, P::FRONT_LEFT, P::FRONT_RIGHT, P::REAR_LEFT, P::REAR_RIGHT, P::LFE1],
+        );
+        check(
+            layouts::CHANNEL_LAYOUT_AAC_6P1,
+            &[
+                P::FRONT_CENTER,
+                P::FRONT_LEFT,
+                P::FRONT_RIGHT,
+                P::REAR_LEFT,
+                P::REAR_RIGHT,
+                P::REAR_CENTER,
+                P::LFE1,
+            ],
+        );
+        check(
+            layouts::CHANNEL_LAYOUT_MPEG_7P1_B,
+            &[
+                P::FRONT_CENTER,
+                P::FRONT_LEFT_CENTER,
+                P::FRONT_RIGHT_CENTER,
+                P::FRONT_LEFT,
+                P::FRONT_RIGHT,
+                P::REAR_LEFT,
+                P::REAR_RIGHT,
+                P::LFE1,
+            ],
+        );
+        assert_eq!(map_channels(&layouts::CHANNEL_LAYOUT_AAC_6P1)[..7], [2, 0, 1, 4, 5, 6, 3]);
     }
 }
