@@ -25,8 +25,8 @@ static SYM_SCFI_2: [i8; 16] = [15, 10, 14, 11, 13, 9, 7, 6, 5, 12, 8, 3, 2, 0, 4
 
 /// `mpc_can_SCFI`.
 pub static CAN_SCFI: [CanTable; 2] = [
-    CanTable { table: &SCFI_1, sym: &SYM_SCFI_1 },
-    CanTable { table: &SCFI_2, sym: &SYM_SCFI_2 },
+    CanTable::new(&SCFI_1, &SYM_SCFI_1),
+    CanTable::new(&SCFI_2, &SYM_SCFI_2),
 ];
 
 static DSCF_1: [HuffEntry; 12] = [
@@ -52,8 +52,8 @@ static SYM_DSCF_2: [i8; 65] = [
 
 /// `mpc_can_DSCF`.
 pub static CAN_DSCF: [CanTable; 2] = [
-    CanTable { table: &DSCF_1, sym: &SYM_DSCF_1 },
-    CanTable { table: &DSCF_2, sym: &SYM_DSCF_2 },
+    CanTable::new(&DSCF_1, &SYM_DSCF_1),
+    CanTable::new(&DSCF_2, &SYM_DSCF_2),
 ];
 
 static BANDS: [HuffEntry; 12] = [
@@ -67,7 +67,7 @@ static SYM_BANDS: [i8; 33] = [
 ];
 
 /// `mpc_can_Bands`.
-pub static CAN_BANDS: CanTable = CanTable { table: &BANDS, sym: &SYM_BANDS };
+pub static CAN_BANDS: CanTable = CanTable::new(&BANDS, &SYM_BANDS);
 
 static RES_1: [HuffEntry; 16] = [
     he(0x8000, 1, 1), he(0x4000, 2, 2), he(0x2000, 3, 3), he(0x1000, 4, 4), he(0x800, 5, 5),
@@ -85,7 +85,7 @@ static SYM_RES_2: [i8; 17] = [16, 1, 0, 2, 15, 3, 14, 4, 5, 13, 6, 12, 7, 11, 10
 
 /// `mpc_can_Res`.
 pub static CAN_RES: [CanTable; 2] =
-    [CanTable { table: &RES_1, sym: &SYM_RES_1 }, CanTable { table: &RES_2, sym: &SYM_RES_2 }];
+    [CanTable::new(&RES_1, &SYM_RES_1), CanTable::new(&RES_2, &SYM_RES_2)];
 
 static Q1: [HuffEntry; 10] = [
     he(0x6000, 3, 7), he(0x1000, 4, 10), he(0x800, 5, 11), he(0x400, 6, 12), he(0x200, 7, 13),
@@ -94,7 +94,7 @@ static Q1: [HuffEntry; 10] = [
 static SYM_Q1: [i8; 19] = [7, 6, 5, 4, 3, 10, 9, 8, 2, 1, 11, 0, 12, 13, 14, 15, 16, 18, 17];
 
 /// `mpc_can_Q1`.
-pub static CAN_Q1: CanTable = CanTable { table: &Q1, sym: &SYM_Q1 };
+pub static CAN_Q1: CanTable = CanTable::new(&Q1, &SYM_Q1);
 
 static Q2_1: [HuffEntry; 10] = [
     he(0xe000, 3, 7), he(0x8000, 4, 14), he(0x3c00, 6, 38), he(0x2a00, 7, 53), he(0x1200, 8, 74),
@@ -211,12 +211,12 @@ static SYM_Q8_2: [i8; 127] = [
 /// with `Res == 2` reusing row `0`, exactly as the reference decoder does (see
 /// `decoder_core::read_bitstream_sv8`).
 pub static CAN_Q: [[CanTable; 2]; 6] = [
-    [CanTable { table: &Q2_1, sym: &SYM_Q2_1 }, CanTable { table: &Q2_2, sym: &SYM_Q2_2 }],
-    [CanTable { table: &Q3, sym: &SYM_Q3 }, CanTable { table: &Q4, sym: &SYM_Q4 }],
-    [CanTable { table: &Q5_1, sym: &SYM_Q5_1 }, CanTable { table: &Q5_2, sym: &SYM_Q5_2 }],
-    [CanTable { table: &Q6_1, sym: &SYM_Q6_1 }, CanTable { table: &Q6_2, sym: &SYM_Q6_2 }],
-    [CanTable { table: &Q7_1, sym: &SYM_Q7_1 }, CanTable { table: &Q7_2, sym: &SYM_Q7_2 }],
-    [CanTable { table: &Q8_1, sym: &SYM_Q8_1 }, CanTable { table: &Q8_2, sym: &SYM_Q8_2 }],
+    [CanTable::new(&Q2_1, &SYM_Q2_1), CanTable::new(&Q2_2, &SYM_Q2_2)],
+    [CanTable::new(&Q3, &SYM_Q3), CanTable::new(&Q4, &SYM_Q4)],
+    [CanTable::new(&Q5_1, &SYM_Q5_1), CanTable::new(&Q5_2, &SYM_Q5_2)],
+    [CanTable::new(&Q6_1, &SYM_Q6_1), CanTable::new(&Q6_2, &SYM_Q6_2)],
+    [CanTable::new(&Q7_1, &SYM_Q7_1), CanTable::new(&Q7_2, &SYM_Q7_2)],
+    [CanTable::new(&Q8_1, &SYM_Q8_1), CanTable::new(&Q8_2, &SYM_Q8_2)],
 ];
 
 static Q9UP: [HuffEntry; 6] = [
@@ -240,4 +240,4 @@ static SYM_Q9UP: [i8; 256] = [
 ];
 
 /// `mpc_can_Q9up`.
-pub static CAN_Q9UP: CanTable = CanTable { table: &Q9UP, sym: &SYM_Q9UP };
+pub static CAN_Q9UP: CanTable = CanTable::new(&Q9UP, &SYM_Q9UP);

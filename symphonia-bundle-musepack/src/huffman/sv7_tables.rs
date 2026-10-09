@@ -11,7 +11,7 @@
 //! numeric contents of every table below are byte-for-byte identical to the C source; only the
 //! syntax (`{code, length, value}` -> `he(code, length, value)`) differs.
 
-use crate::bits::HuffEntry;
+use crate::bits::{HuffEntry, HuffTable};
 
 const fn he(code: u16, length: u8, value: i8) -> HuffEntry {
     HuffEntry { code, length, value }
@@ -167,19 +167,39 @@ pub static HUFF_Q7: [[HuffEntry; 63]; 2] = [
     ],
 ];
 
+/// Lookup-accelerated wrappers over the tables above (see [`HuffTable`]).
+pub static T_HDR: HuffTable = HuffTable::new(&HUFF_HDR);
+pub static T_SCFI: HuffTable = HuffTable::new(&HUFF_SCFI);
+pub static T_DSCF: HuffTable = HuffTable::new(&HUFF_DSCF);
+static T_EMPTY: HuffTable = HuffTable::new(&[]);
+
+macro_rules! table_pair {
+    ($t:ident) => {
+        [HuffTable::new(&$t[0]), HuffTable::new(&$t[1])]
+    };
+}
+
+static T_Q1: [HuffTable; 2] = table_pair!(HUFF_Q1);
+static T_Q2: [HuffTable; 2] = table_pair!(HUFF_Q2);
+static T_Q3: [HuffTable; 2] = table_pair!(HUFF_Q3);
+static T_Q4: [HuffTable; 2] = table_pair!(HUFF_Q4);
+static T_Q5: [HuffTable; 2] = table_pair!(HUFF_Q5);
+static T_Q6: [HuffTable; 2] = table_pair!(HUFF_Q6);
+static T_Q7: [HuffTable; 2] = table_pair!(HUFF_Q7);
+
 /// Bundled per-quantizer-order table pair lookup, matching the C `mpc_HuffQ[7][2]` array of
 /// `mpc_lut_data`. Index `0` (order 0, `Res==-1` noise) is unused by the decoder; indices `1..=6`
 /// correspond to SV7 `Res` values `1..=6` (the `Res==7` "raw bits" case as `Res_bit`/no Huffman
 /// table).
-pub fn huff_q(order: usize, sub: usize) -> &'static [HuffEntry] {
+pub fn huff_q(order: usize, sub: usize) -> &'static HuffTable {
     match order {
-        1 => &HUFF_Q1[sub],
-        2 => &HUFF_Q2[sub],
-        3 => &HUFF_Q3[sub],
-        4 => &HUFF_Q4[sub],
-        5 => &HUFF_Q5[sub],
-        6 => &HUFF_Q6[sub],
-        7 => &HUFF_Q7[sub],
-        _ => &HUFF_HDR[..0],
+        1 => &T_Q1[sub & 1],
+        2 => &T_Q2[sub & 1],
+        3 => &T_Q3[sub & 1],
+        4 => &T_Q4[sub & 1],
+        5 => &T_Q5[sub & 1],
+        6 => &T_Q6[sub & 1],
+        7 => &T_Q7[sub & 1],
+        _ => &T_EMPTY,
     }
 }

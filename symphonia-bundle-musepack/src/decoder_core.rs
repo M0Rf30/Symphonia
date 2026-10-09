@@ -132,9 +132,9 @@ impl Decoder {
         }
 
         for n in 1..=max_band {
-            let idx = huff_dec(r, &sv7_tables::HUFF_HDR);
+            let idx = huff_dec(r, &sv7_tables::T_HDR);
             self.res_l[n] = if idx != 4 { self.res_l[n - 1] + idx } else { r.read_bits(4) as i32 };
-            let idx = huff_dec(r, &sv7_tables::HUFF_HDR);
+            let idx = huff_dec(r, &sv7_tables::T_HDR);
             self.res_r[n] = if idx != 4 { self.res_r[n - 1] + idx } else { r.read_bits(4) as i32 };
             if !(self.res_l[n] == 0 && self.res_r[n] == 0) {
                 if self.ms {
@@ -148,10 +148,10 @@ impl Decoder {
 
         for n in 0..mub {
             if self.res_l[n] != 0 {
-                self.scfi_l[n] = huff_dec(r, &sv7_tables::HUFF_SCFI);
+                self.scfi_l[n] = huff_dec(r, &sv7_tables::T_SCFI);
             }
             if self.res_r[n] != 0 {
-                self.scfi_r[n] = huff_dec(r, &sv7_tables::HUFF_SCFI);
+                self.scfi_r[n] = huff_dec(r, &sv7_tables::T_SCFI);
             }
         }
 
@@ -476,8 +476,9 @@ impl Decoder {
     /// bookkeeping (see below).
     ///
     /// Decodes exactly one Musepack frame from `r` (which must be positioned at the start of a
-    /// frame). `out` must have room for `FRAME_LENGTH * channels` interleaved `f32` samples; the
-    /// full frame is always written (`FRAME_LENGTH` sample-frames).
+    /// frame). Each channel's `FRAME_LENGTH` samples are written contiguously (planar) into
+    /// `left` and, for stereo streams, `right`, so the caller can decode straight into its
+    /// destination planes.
     ///
     /// The reference decoder also tracks the stream's total sample count and the encoder delay
     /// here (`samples`/`decoded_samples`/`samples_to_skip`) and trims the output itself. That
@@ -485,18 +486,20 @@ impl Decoder {
     /// instead through `Packet::trim_start`/`trim_end`, computed by the demuxer from the very same
     /// quantities (see `demuxer::StreamInfo::skip_samples`) and applied by the `AudioDecoder`.
     ///
-    /// Returns `false` (and writes nothing) if `out` is too small.
+    /// Returns `false` (and writes nothing) if a required plane is too small or missing.
     pub fn decode_frame(
         &mut self,
         r: &mut BitReader<'_>,
         is_key_frame: bool,
-        out: &mut [f32],
+        left: &mut [f32],
+        right: Option<&mut [f32]>,
     ) -> bool {
-        let channels = self.channels as usize;
-        let frame_buf_len = FRAME_LENGTH * channels;
+        let stereo = self.channels > 1;
         // `synth_channel` writes the full 36*32 grid unconditionally; malformed/undersized
         // buffers must never cause a panic.
-        if out.len() < frame_buf_len {
+        if left.len() < FRAME_LENGTH
+            || (stereo && right.as_ref().is_none_or(|p| p.len() < FRAME_LENGTH))
+        {
             return false;
         }
 
@@ -508,10 +511,9 @@ impl Decoder {
         }
 
         self.requantize();
-        let buf = &mut out[..frame_buf_len];
-        synth::synth_channel(&mut self.v_l, &self.y_l, buf, channels, 0);
-        if channels > 1 {
-            synth::synth_channel(&mut self.v_r, &self.y_r, buf, channels, 1);
+        synth::synth_channel(&mut self.v_l, &self.y_l, &mut left[..FRAME_LENGTH], 1, 0);
+        if let (true, Some(right)) = (stereo, right) {
+            synth::synth_channel(&mut self.v_r, &self.y_r, &mut right[..FRAME_LENGTH], 1, 0);
         }
         true
     }
@@ -633,31 +635,31 @@ fn decode_dscf_sv7(r: &mut BitReader<'_>, res: i32, scfi: i32, scf: &mut [i32; 3
     }
     match scfi {
         1 => {
-            let idx = huff_dec(r, &sv7_tables::HUFF_DSCF);
+            let idx = huff_dec(r, &sv7_tables::T_DSCF);
             scf[0] = if idx != 8 { scf[2] + idx } else { r.read_bits(6) as i32 };
-            let idx = huff_dec(r, &sv7_tables::HUFF_DSCF);
+            let idx = huff_dec(r, &sv7_tables::T_DSCF);
             scf[1] = if idx != 8 { scf[0] + idx } else { r.read_bits(6) as i32 };
             scf[2] = scf[1];
         }
         3 => {
-            let idx = huff_dec(r, &sv7_tables::HUFF_DSCF);
+            let idx = huff_dec(r, &sv7_tables::T_DSCF);
             scf[0] = if idx != 8 { scf[2] + idx } else { r.read_bits(6) as i32 };
             scf[1] = scf[0];
             scf[2] = scf[1];
         }
         2 => {
-            let idx = huff_dec(r, &sv7_tables::HUFF_DSCF);
+            let idx = huff_dec(r, &sv7_tables::T_DSCF);
             scf[0] = if idx != 8 { scf[2] + idx } else { r.read_bits(6) as i32 };
             scf[1] = scf[0];
-            let idx = huff_dec(r, &sv7_tables::HUFF_DSCF);
+            let idx = huff_dec(r, &sv7_tables::T_DSCF);
             scf[2] = if idx != 8 { scf[1] + idx } else { r.read_bits(6) as i32 };
         }
         0 => {
-            let idx = huff_dec(r, &sv7_tables::HUFF_DSCF);
+            let idx = huff_dec(r, &sv7_tables::T_DSCF);
             scf[0] = if idx != 8 { scf[2] + idx } else { r.read_bits(6) as i32 };
-            let idx = huff_dec(r, &sv7_tables::HUFF_DSCF);
+            let idx = huff_dec(r, &sv7_tables::T_DSCF);
             scf[1] = if idx != 8 { scf[0] + idx } else { r.read_bits(6) as i32 };
-            let idx = huff_dec(r, &sv7_tables::HUFF_DSCF);
+            let idx = huff_dec(r, &sv7_tables::T_DSCF);
             scf[2] = if idx != 8 { scf[1] + idx } else { r.read_bits(6) as i32 };
         }
         _ => return,
