@@ -52,6 +52,8 @@
 //! and the Figure 4.42 / 4.43 / 4.44 flowcharts of the staged spec.
 //! No part of this implementation is derived from any external decoder.
 
+use std::sync::LazyLock;
+
 use super::error::{SbrError as Error, SbrResult as Result};
 
 /// A complex number, as used by the SBR subband domain (§4.6.18.2.2:
@@ -299,6 +301,184 @@ pub const QMF_WINDOW: [f64; 640] = [
     -0.0004875227, -0.0004947518, -0.0005617692, -0.000552528,
 ];
 
+/// The window of the analysis and downsampled synthesis banks: every other coefficient of
+/// [`QMF_WINDOW`], `c[2i]`.
+fn decimated_window() -> &'static [f64; 320] {
+    static WIN: LazyLock<[f64; 320]> = LazyLock::new(|| {
+        let mut w = [0.0; 320];
+        for (i, w) in w.iter_mut().enumerate() {
+            *w = QMF_WINDOW[2 * i];
+        }
+        w
+    });
+    &WIN
+}
+
+/// The modulation matrix of an analysis bank, transposed into `[n][k]` order (`bands` values
+/// of `k` per `n`) so that the products of one input value with a row accumulate into all bands
+/// at once (the sum of every band still runs over `n` in order).
+#[derive(Debug)]
+struct AnalysisMatrix {
+    re: Vec<f64>,
+    im: Vec<f64>,
+}
+
+impl AnalysisMatrix {
+    /// `scale·exp(i·arg(k, n))` for `k` in `0..bands` and `n` in `0..taps`.
+    fn new(bands: usize, taps: usize, scale: f64, arg: impl Fn(f64, f64) -> f64) -> Self {
+        let mut re = vec![0.0; bands * taps];
+        let mut im = vec![0.0; bands * taps];
+        for k in 0..bands {
+            for n in 0..taps {
+                let arg = arg(k as f64, n as f64);
+                re[n * bands + k] = scale * arg.cos();
+                im[n * bands + k] = scale * arg.sin();
+            }
+        }
+        AnalysisMatrix { re, im }
+    }
+}
+
+/// `w[k] = Σ_n u[n]·m[n][k]` for the `B` bands, as complex values.
+#[inline]
+fn analyse_complex<const B: usize>(m: &AnalysisMatrix, u: &[f64]) -> [Complex; B] {
+    let mut re = [0.0f64; B];
+    let mut im = [0.0f64; B];
+    for (n, &un) in u.iter().enumerate() {
+        let mr = &m.re[n * B..(n + 1) * B];
+        let mi = &m.im[n * B..(n + 1) * B];
+        for k in 0..B {
+            re[k] += mr[k] * un;
+            im[k] += mi[k] * un;
+        }
+    }
+    let mut w = [Complex::default(); B];
+    for k in 0..B {
+        w[k] = Complex::new(re[k], im[k]);
+    }
+    w
+}
+
+/// The polyphase sum of the input history of an analysis bank: `u[n] = Σ_j x[n + B·j]·win[n + B·j]`
+/// over the five blocks of `B` samples.
+#[inline]
+fn analysis_window<const B: usize>(x: &[f64], win: &[f64]) -> [f64; B] {
+    let mut u = [0.0f64; B];
+    for j in 0..5 {
+        let xs = &x[B * j..B * (j + 1)];
+        let ws = &win[B * j..B * (j + 1)];
+        for n in 0..B {
+            u[n] += xs[n] * ws[n];
+        }
+    }
+    u
+}
+
+/// The matrix of a synthesis bank, in `[k][n]` order with `n_out` values of `n` per `k`, so that
+/// one subband sample contributes to all the values of `v` at once (the sum of every value
+/// still runs over `k` in order). `im` is empty for the real banks.
+#[derive(Debug)]
+struct SynthesisMatrix {
+    re: Vec<f64>,
+    im: Vec<f64>,
+}
+
+impl SynthesisMatrix {
+    fn new(bands: usize, n_out: usize, complex: bool, f: impl Fn(f64, f64) -> (f64, f64)) -> Self {
+        let mut re = vec![0.0; bands * n_out];
+        let mut im = vec![0.0; if complex { bands * n_out } else { 0 }];
+        for n in 0..n_out {
+            for k in 0..bands {
+                let (c, s) = f(k as f64, n as f64);
+                re[k * n_out + n] = c;
+                if complex {
+                    im[k * n_out + n] = s;
+                }
+            }
+        }
+        SynthesisMatrix { re, im }
+    }
+}
+
+/// `v[n] = Σ_k Re(X[k]·m[k][n])` for the `N` values of `v` (`N` = 2·bands), from complex bands.
+#[inline]
+fn synthesise_complex<const N: usize>(m: &SynthesisMatrix, bands: &[Complex], v: &mut [f64]) {
+    let v = &mut v[..N];
+    v.fill(0.0);
+    for (k, x) in bands.iter().enumerate() {
+        let mr = &m.re[k * N..(k + 1) * N];
+        let mi = &m.im[k * N..(k + 1) * N];
+        for n in 0..N {
+            v[n] += x.re * mr[n] - x.im * mi[n];
+        }
+    }
+}
+
+/// `v[n] = Σ_k X[k]·m[k][n]`, from real bands.
+#[inline]
+fn synthesise_real<const N: usize>(m: &SynthesisMatrix, bands: &[f64], v: &mut [f64]) {
+    let v = &mut v[..N];
+    v.fill(0.0);
+    for (k, &x) in bands.iter().enumerate() {
+        let mr = &m.re[k * N..(k + 1) * N];
+        for n in 0..N {
+            v[n] += x * mr[n];
+        }
+    }
+}
+
+/// The windowing of a synthesis bank with `B` output samples per slot: `g` is extracted from the
+/// history `v` (`4B` values per block), windowed by `win` (`2B` values per block) and the ten taps
+/// are summed.
+#[inline]
+fn synthesis_window<const B: usize>(v: &[f64], win: &[f64]) -> [f64; B] {
+    let mut out = [0.0f64; B];
+    for n in 0..5 {
+        let v1 = &v[4 * B * n..4 * B * n + B];
+        let w1 = &win[2 * B * n..2 * B * n + B];
+        let v2 = &v[4 * B * n + 3 * B..4 * B * (n + 1)];
+        let w2 = &win[2 * B * n + B..2 * B * (n + 1)];
+        for k in 0..B {
+            out[k] += v1[k] * w1[k];
+            out[k] += v2[k] * w2[k];
+        }
+    }
+    out
+}
+
+/// The history of a synthesis bank: the newest `len` values, newest first. A slot is shifted in
+/// by moving the start of the view back by `shift`; the view is moved to the end of the buffer
+/// once per `SLOTS` slots.
+#[derive(Debug, Clone)]
+struct History {
+    buf: Vec<f64>,
+    pos: usize,
+    len: usize,
+    shift: usize,
+}
+
+impl History {
+    const SLOTS: usize = 16;
+
+    fn new(len: usize, shift: usize) -> Self {
+        History { buf: vec![0.0; len + shift * Self::SLOTS], pos: shift * Self::SLOTS, len, shift }
+    }
+
+    /// Make room for `shift` new values at the start of the view, and return the view.
+    #[inline]
+    fn advance(&mut self) -> &mut [f64] {
+        if self.pos == 0 {
+            let keep = self.len - self.shift;
+            self.pos = self.shift * Self::SLOTS;
+            self.buf.copy_within(0..keep, self.pos + self.shift);
+        }
+        else {
+            self.pos -= self.shift;
+        }
+        &mut self.buf[self.pos..self.pos + self.len]
+    }
+}
+
 /// §4.6.18.4.1 / Figure 4.42 — the 32-band complex analysis QMF bank.
 ///
 /// One instance carries the 320-sample input history `x` of one
@@ -309,9 +489,8 @@ pub const QMF_WINDOW: [f64; 640] = [
 pub struct AnalysisQmf {
     /// The Figure 4.42 input history; a higher index is an older sample.
     x: Vec<f64>,
-    /// Precomputed modulation matrix
-    /// `2·exp(i·π/64·(k + 0.5)·(2n − 0.5))`, row-major `[k][n]`.
-    m: Vec<Complex>,
+    /// Shared modulation matrix `2·exp(i·π/64·(k + 0.5)·(2n − 0.5))`.
+    m: &'static AnalysisMatrix,
 }
 
 impl Default for AnalysisQmf {
@@ -324,17 +503,13 @@ impl AnalysisQmf {
     /// A fresh analysis bank with an all-zero history.
     #[must_use]
     pub fn new() -> Self {
-        let mut m = Vec::with_capacity(32 * 64);
-        for k in 0..32 {
-            for n in 0..64 {
-                let arg = core::f64::consts::PI / 64.0 * (k as f64 + 0.5) * (2.0 * n as f64 - 0.5);
-                m.push(Complex::new(2.0 * arg.cos(), 2.0 * arg.sin()));
-            }
-        }
-        AnalysisQmf {
-            x: vec![0.0; 320],
-            m,
-        }
+        static M: LazyLock<AnalysisMatrix> = LazyLock::new(|| {
+            AnalysisMatrix::new(32, 64, 2.0, |k, n| {
+                core::f64::consts::PI / 64.0 * (k + 0.5) * (2.0 * n - 0.5)
+            })
+        });
+        let m: &'static AnalysisMatrix = &M;
+        AnalysisQmf { x: vec![0.0; 320], m }
     }
 
     /// Run one Figure 4.42 loop: shift in 32 new time samples (oldest
@@ -353,26 +528,9 @@ impl AnalysisQmf {
             self.x[31 - n] = *s;
         }
         // z[n] = x[n] · c[2n]; u[n] = Σ_{j=0..=4} z[n + 64j].
-        let mut u = [0.0f64; 64];
-        for (n, un) in u.iter_mut().enumerate() {
-            let mut acc = 0.0;
-            for j in 0..5 {
-                let idx = n + j * 64;
-                acc += self.x[idx] * QMF_WINDOW[2 * idx];
-            }
-            *un = acc;
-        }
+        let u = analysis_window::<64>(&self.x, decimated_window());
         // W[k] = Σ_n u[n] · 2·exp(i·π/64·(k + 0.5)(2n − 0.5)).
-        let mut w = [Complex::default(); 32];
-        for (k, wk) in w.iter_mut().enumerate() {
-            let row = &self.m[k * 64..(k + 1) * 64];
-            let mut acc = Complex::default();
-            for (n, cell) in row.iter().enumerate() {
-                acc += *cell * u[n];
-            }
-            *wk = acc;
-        }
-        Ok(w)
+        Ok(analyse_complex::<32>(self.m, &u))
     }
 }
 
@@ -394,9 +552,8 @@ pub struct EncoderAnalysisQmf {
     /// The Figure 4.B.16 input history `x` (640 samples; a higher
     /// index is an older sample).
     x: Vec<f64>,
-    /// Precomputed modulation matrix
-    /// `exp(i·π/128·(k + 0.5)·(2n + 1))`, row-major `[k][n]`.
-    m: Vec<Complex>,
+    /// Shared modulation matrix `exp(i·π/128·(k + 0.5)·(2n + 1))`.
+    m: &'static AnalysisMatrix,
 }
 
 impl Default for EncoderAnalysisQmf {
@@ -409,17 +566,13 @@ impl EncoderAnalysisQmf {
     /// A fresh 64-band analysis bank with an all-zero history.
     #[must_use]
     pub fn new() -> Self {
-        let mut m = Vec::with_capacity(64 * 128);
-        for k in 0..64 {
-            for n in 0..128 {
-                let arg = core::f64::consts::PI / 128.0 * (k as f64 + 0.5) * (2.0 * n as f64 + 1.0);
-                m.push(Complex::new(arg.cos(), arg.sin()));
-            }
-        }
-        EncoderAnalysisQmf {
-            x: vec![0.0; 640],
-            m,
-        }
+        static M: LazyLock<AnalysisMatrix> = LazyLock::new(|| {
+            AnalysisMatrix::new(64, 128, 1.0, |k, n| {
+                core::f64::consts::PI / 128.0 * (k + 0.5) * (2.0 * n + 1.0)
+            })
+        });
+        let m: &'static AnalysisMatrix = &M;
+        EncoderAnalysisQmf { x: vec![0.0; 640], m }
     }
 
     /// Run one Figure 4.B.16 loop: shift in 64 new time samples
@@ -436,26 +589,9 @@ impl EncoderAnalysisQmf {
             self.x[63 - n] = *s;
         }
         // Z[n] = x[n] · c[n]; u[n] = Σ_{j=0..=4} Z[n + 128j].
-        let mut u = [0.0f64; 128];
-        for (n, un) in u.iter_mut().enumerate() {
-            let mut acc = 0.0;
-            for j in 0..5 {
-                let idx = n + j * 128;
-                acc += self.x[idx] * QMF_WINDOW[idx];
-            }
-            *un = acc;
-        }
+        let u = analysis_window::<128>(&self.x, &QMF_WINDOW);
         // X[k] = Σ_n u[n] · exp(i·π/128·(k + 0.5)(2n + 1)).
-        let mut out = [Complex::default(); 64];
-        for (k, xk) in out.iter_mut().enumerate() {
-            let row = &self.m[k * 128..(k + 1) * 128];
-            let mut acc = Complex::default();
-            for (n, cell) in row.iter().enumerate() {
-                acc += *cell * u[n];
-            }
-            *xk = acc;
-        }
-        Ok(out)
+        Ok(analyse_complex::<64>(self.m, &u))
     }
 }
 
@@ -464,10 +600,9 @@ impl EncoderAnalysisQmf {
 #[derive(Debug, Clone)]
 pub struct SynthesisQmf {
     /// The Figure 4.43 synthesis history `v`.
-    v: Vec<f64>,
-    /// Precomputed `exp(i·π/128·(k + 0.5)·(2n − 255)) / 64`, row-major
-    /// `[n][k]` (transposed for the inner sum over `k`).
-    n_mat: Vec<Complex>,
+    v: History,
+    /// Shared `exp(i·π/128·(k + 0.5)·(2n − 255)) / 64`, `[k][n]`.
+    m: &'static SynthesisMatrix,
 }
 
 impl Default for SynthesisQmf {
@@ -480,18 +615,14 @@ impl SynthesisQmf {
     /// A fresh synthesis bank with an all-zero history.
     #[must_use]
     pub fn new() -> Self {
-        let mut n_mat = Vec::with_capacity(128 * 64);
-        for n in 0..128 {
-            for k in 0..64 {
-                let arg =
-                    core::f64::consts::PI / 128.0 * (k as f64 + 0.5) * (2.0 * n as f64 - 255.0);
-                n_mat.push(Complex::new(arg.cos() / 64.0, arg.sin() / 64.0));
-            }
-        }
-        SynthesisQmf {
-            v: vec![0.0; 1280],
-            n_mat,
-        }
+        static M: LazyLock<SynthesisMatrix> = LazyLock::new(|| {
+            SynthesisMatrix::new(64, 128, true, |k, n| {
+                let arg = core::f64::consts::PI / 128.0 * (k + 0.5) * (2.0 * n - 255.0);
+                (arg.cos() / 64.0, arg.sin() / 64.0)
+            })
+        });
+        let m: &'static SynthesisMatrix = &M;
+        SynthesisQmf { v: History::new(1280, 128), m }
     }
 
     /// Run one Figure 4.43 loop: consume the 64 complex subband samples
@@ -501,30 +632,11 @@ impl SynthesisQmf {
             return Err(Error::SbrQmfInvalid);
         }
         // Shift v by 128 (discard the oldest 128 samples).
-        self.v.copy_within(0..1152, 128);
+        let v = self.v.advance();
         // v[n] = Σ_k Real(X[k]/64 · exp(i·π/128·(k + 0.5)(2n − 255))).
-        for n in 0..128 {
-            let row = &self.n_mat[n * 64..(n + 1) * 64];
-            let mut acc = 0.0;
-            for (k, cell) in row.iter().enumerate() {
-                let x = bands[k];
-                acc += x.re * cell.re - x.im * cell.im;
-            }
-            self.v[n] = acc;
-        }
+        synthesise_complex::<128>(self.m, bands, v);
         // Extract g from v, window by c, and sum the ten taps.
-        let mut out = [0.0f64; 64];
-        for (k, o) in out.iter_mut().enumerate() {
-            let mut acc = 0.0;
-            for n in 0..5 {
-                // g[128n + k] = v[256n + k]; w = g·c.
-                acc += self.v[256 * n + k] * QMF_WINDOW[128 * n + k];
-                // g[128n + 64 + k] = v[256n + 192 + k].
-                acc += self.v[256 * n + 192 + k] * QMF_WINDOW[128 * n + 64 + k];
-            }
-            *o = acc;
-        }
-        Ok(out)
+        Ok(synthesis_window::<64>(v, &QMF_WINDOW))
     }
 }
 
@@ -533,10 +645,9 @@ impl SynthesisQmf {
 #[derive(Debug, Clone)]
 pub struct DownsampledSynthesisQmf {
     /// The Figure 4.44 synthesis history `v`.
-    v: Vec<f64>,
-    /// Precomputed `exp(i·π/64·(k + 0.5)·(2n − 127.5)) / 64`, row-major
-    /// `[n][k]`.
-    n_mat: Vec<Complex>,
+    v: History,
+    /// Shared `exp(i·π/64·(k + 0.5)·(2n − 127.5)) / 64`, `[k][n]`.
+    m: &'static SynthesisMatrix,
 }
 
 impl Default for DownsampledSynthesisQmf {
@@ -549,18 +660,14 @@ impl DownsampledSynthesisQmf {
     /// A fresh downsampled synthesis bank with an all-zero history.
     #[must_use]
     pub fn new() -> Self {
-        let mut n_mat = Vec::with_capacity(64 * 32);
-        for n in 0..64 {
-            for k in 0..32 {
-                let arg =
-                    core::f64::consts::PI / 64.0 * (k as f64 + 0.5) * (2.0 * n as f64 - 127.5);
-                n_mat.push(Complex::new(arg.cos() / 64.0, arg.sin() / 64.0));
-            }
-        }
-        DownsampledSynthesisQmf {
-            v: vec![0.0; 640],
-            n_mat,
-        }
+        static M: LazyLock<SynthesisMatrix> = LazyLock::new(|| {
+            SynthesisMatrix::new(32, 64, true, |k, n| {
+                let arg = core::f64::consts::PI / 64.0 * (k + 0.5) * (2.0 * n - 127.5);
+                (arg.cos() / 64.0, arg.sin() / 64.0)
+            })
+        });
+        let m: &'static SynthesisMatrix = &M;
+        DownsampledSynthesisQmf { v: History::new(640, 64), m }
     }
 
     /// Run one Figure 4.44 loop: consume the 32 complex subband samples
@@ -570,30 +677,11 @@ impl DownsampledSynthesisQmf {
             return Err(Error::SbrQmfInvalid);
         }
         // Shift v by 64 (discard the oldest 64 samples).
-        self.v.copy_within(0..576, 64);
+        let v = self.v.advance();
         // v[n] = Σ_k Real(X[k]/64 · exp(i·π/64·(k + 0.5)(2n − 127.5))).
-        for n in 0..64 {
-            let row = &self.n_mat[n * 32..(n + 1) * 32];
-            let mut acc = 0.0;
-            for (k, cell) in row.iter().enumerate() {
-                let x = bands[k];
-                acc += x.re * cell.re - x.im * cell.im;
-            }
-            self.v[n] = acc;
-        }
+        synthesise_complex::<64>(self.m, bands, v);
         // g extraction, every-other-coefficient windowing, ten-tap sum.
-        let mut out = [0.0f64; 32];
-        for (k, o) in out.iter_mut().enumerate() {
-            let mut acc = 0.0;
-            for n in 0..5 {
-                // g[64n + k] = v[128n + k]; w[n] = g[n]·c[2n].
-                acc += self.v[128 * n + k] * QMF_WINDOW[2 * (64 * n + k)];
-                // g[64n + 32 + k] = v[128n + 96 + k].
-                acc += self.v[128 * n + 96 + k] * QMF_WINDOW[2 * (64 * n + 32 + k)];
-            }
-            *o = acc;
-        }
-        Ok(out)
+        Ok(synthesis_window::<32>(v, decimated_window()))
     }
 }
 
@@ -603,9 +691,8 @@ impl DownsampledSynthesisQmf {
 pub struct RealAnalysisQmf {
     /// The Figure 4.50 input history; a higher index is an older sample.
     x: Vec<f64>,
-    /// Precomputed modulation matrix
-    /// `2·cos(π/64·(k + 0.5)·(2n − 96))`, row-major `[k][n]`.
-    m: Vec<f64>,
+    /// Shared modulation matrix `2·cos(π/64·(k + 0.5)·(2n − 96))`, `[n][k]`.
+    m: &'static [f64],
 }
 
 impl Default for RealAnalysisQmf {
@@ -618,17 +705,19 @@ impl RealAnalysisQmf {
     /// A fresh real-valued analysis bank with an all-zero history.
     #[must_use]
     pub fn new() -> Self {
-        let mut m = Vec::with_capacity(32 * 64);
-        for k in 0..32 {
-            for n in 0..64 {
-                let arg = core::f64::consts::PI / 64.0 * (k as f64 + 0.5) * (2.0 * n as f64 - 96.0);
-                m.push(2.0 * arg.cos());
+        static M: LazyLock<Vec<f64>> = LazyLock::new(|| {
+            let mut m = vec![0.0; 32 * 64];
+            for k in 0..32 {
+                for n in 0..64 {
+                    let arg =
+                        core::f64::consts::PI / 64.0 * (k as f64 + 0.5) * (2.0 * n as f64 - 96.0);
+                    m[n * 32 + k] = 2.0 * arg.cos();
+                }
             }
-        }
-        RealAnalysisQmf {
-            x: vec![0.0; 320],
-            m,
-        }
+            m
+        });
+        let m: &'static Vec<f64> = &M;
+        RealAnalysisQmf { x: vec![0.0; 320], m }
     }
 
     /// Run one Figure 4.50 loop: shift in 32 new time samples (oldest
@@ -644,24 +733,14 @@ impl RealAnalysisQmf {
             self.x[31 - n] = *s;
         }
         // z[n] = x[n] · c[2n]; u[n] = Σ_{j=0..=4} z[n + 64j].
-        let mut u = [0.0f64; 64];
-        for (n, un) in u.iter_mut().enumerate() {
-            let mut acc = 0.0;
-            for j in 0..5 {
-                let idx = n + j * 64;
-                acc += self.x[idx] * QMF_WINDOW[2 * idx];
-            }
-            *un = acc;
-        }
+        let u = analysis_window::<64>(&self.x, decimated_window());
         // W[k] = Σ_n u[n] · 2·cos(π/64·(k + 0.5)(2n − 96)).
         let mut w = [0.0f64; 32];
-        for (k, wk) in w.iter_mut().enumerate() {
-            let row = &self.m[k * 64..(k + 1) * 64];
-            let mut acc = 0.0;
-            for (n, cell) in row.iter().enumerate() {
-                acc += *cell * u[n];
+        for (n, &un) in u.iter().enumerate() {
+            let row = &self.m[n * 32..(n + 1) * 32];
+            for k in 0..32 {
+                w[k] += row[k] * un;
             }
-            *wk = acc;
         }
         Ok(w)
     }
@@ -672,10 +751,9 @@ impl RealAnalysisQmf {
 #[derive(Debug, Clone)]
 pub struct RealSynthesisQmf {
     /// The Figure 4.51 synthesis history `v`.
-    v: Vec<f64>,
-    /// Precomputed `cos(π/128·(k + 0.5)·(2n − 64)) / 32`, row-major
-    /// `[n][k]`.
-    n_mat: Vec<f64>,
+    v: History,
+    /// Shared `cos(π/128·(k + 0.5)·(2n − 64)) / 32`, `[k][n]`.
+    m: &'static SynthesisMatrix,
 }
 
 impl Default for RealSynthesisQmf {
@@ -688,18 +766,14 @@ impl RealSynthesisQmf {
     /// A fresh real synthesis bank with an all-zero history.
     #[must_use]
     pub fn new() -> Self {
-        let mut n_mat = Vec::with_capacity(128 * 64);
-        for n in 0..128 {
-            for k in 0..64 {
-                let arg =
-                    core::f64::consts::PI / 128.0 * (k as f64 + 0.5) * (2.0 * n as f64 - 64.0);
-                n_mat.push(arg.cos() / 32.0);
-            }
-        }
-        RealSynthesisQmf {
-            v: vec![0.0; 1280],
-            n_mat,
-        }
+        static M: LazyLock<SynthesisMatrix> = LazyLock::new(|| {
+            SynthesisMatrix::new(64, 128, false, |k, n| {
+                let arg = core::f64::consts::PI / 128.0 * (k + 0.5) * (2.0 * n - 64.0);
+                (arg.cos() / 32.0, 0.0)
+            })
+        });
+        let m: &'static SynthesisMatrix = &M;
+        RealSynthesisQmf { v: History::new(1280, 128), m }
     }
 
     /// Run one Figure 4.51 loop: consume the 64 real subband samples
@@ -709,30 +783,12 @@ impl RealSynthesisQmf {
             return Err(Error::SbrQmfInvalid);
         }
         // Shift v by 128 (discard the oldest 128 samples).
-        self.v.copy_within(0..1152, 128);
+        let v = self.v.advance();
         // v[n] = Σ_k X[k]/32 · cos(π/128·(k + 0.5)(2n − 64)).
-        for n in 0..128 {
-            let row = &self.n_mat[n * 64..(n + 1) * 64];
-            let mut acc = 0.0;
-            for (k, cell) in row.iter().enumerate() {
-                acc += bands[k] * *cell;
-            }
-            self.v[n] = acc;
-        }
+        synthesise_real::<128>(self.m, bands, v);
         // g extraction (as Figure 4.51), full-window multiply, ten-tap
         // sum.
-        let mut out = [0.0f64; 64];
-        for (k, o) in out.iter_mut().enumerate() {
-            let mut acc = 0.0;
-            for n in 0..5 {
-                // g[128n + k] = v[256n + k]; w = g·c.
-                acc += self.v[256 * n + k] * QMF_WINDOW[128 * n + k];
-                // g[128n + 64 + k] = v[256n + 192 + k].
-                acc += self.v[256 * n + 192 + k] * QMF_WINDOW[128 * n + 64 + k];
-            }
-            *o = acc;
-        }
-        Ok(out)
+        Ok(synthesis_window::<64>(v, &QMF_WINDOW))
     }
 }
 
@@ -741,10 +797,9 @@ impl RealSynthesisQmf {
 #[derive(Debug, Clone)]
 pub struct RealDownsampledSynthesisQmf {
     /// The Figure 4.52 synthesis history `v`.
-    v: Vec<f64>,
-    /// Precomputed `cos(π/64·(k + 0.5)·(2n − 32)) / 32`, row-major
-    /// `[n][k]`.
-    n_mat: Vec<f64>,
+    v: History,
+    /// Shared `cos(π/64·(k + 0.5)·(2n − 32)) / 32`, `[k][n]`.
+    m: &'static SynthesisMatrix,
 }
 
 impl Default for RealDownsampledSynthesisQmf {
@@ -757,17 +812,14 @@ impl RealDownsampledSynthesisQmf {
     /// A fresh downsampled real synthesis bank with an all-zero history.
     #[must_use]
     pub fn new() -> Self {
-        let mut n_mat = Vec::with_capacity(64 * 32);
-        for n in 0..64 {
-            for k in 0..32 {
-                let arg = core::f64::consts::PI / 64.0 * (k as f64 + 0.5) * (2.0 * n as f64 - 32.0);
-                n_mat.push(arg.cos() / 32.0);
-            }
-        }
-        RealDownsampledSynthesisQmf {
-            v: vec![0.0; 640],
-            n_mat,
-        }
+        static M: LazyLock<SynthesisMatrix> = LazyLock::new(|| {
+            SynthesisMatrix::new(32, 64, false, |k, n| {
+                let arg = core::f64::consts::PI / 64.0 * (k + 0.5) * (2.0 * n - 32.0);
+                (arg.cos() / 32.0, 0.0)
+            })
+        });
+        let m: &'static SynthesisMatrix = &M;
+        RealDownsampledSynthesisQmf { v: History::new(640, 64), m }
     }
 
     /// Run one Figure 4.52 loop: consume the 32 real subband samples
@@ -777,30 +829,12 @@ impl RealDownsampledSynthesisQmf {
             return Err(Error::SbrQmfInvalid);
         }
         // Shift v by 64 (discard the oldest 64 samples).
-        self.v.copy_within(0..576, 64);
+        let v = self.v.advance();
         // v[n] = Σ_k X[k]/32 · cos(π/64·(k + 0.5)(2n − 32)).
-        for n in 0..64 {
-            let row = &self.n_mat[n * 32..(n + 1) * 32];
-            let mut acc = 0.0;
-            for (k, cell) in row.iter().enumerate() {
-                acc += bands[k] * *cell;
-            }
-            self.v[n] = acc;
-        }
+        synthesise_real::<64>(self.m, bands, v);
         // g extraction (as Figure 4.52), every-other-coefficient
         // windowing, ten-tap sum.
-        let mut out = [0.0f64; 32];
-        for (k, o) in out.iter_mut().enumerate() {
-            let mut acc = 0.0;
-            for n in 0..5 {
-                // g[64n + k] = v[128n + k]; w[n] = g[n]·c[2n].
-                acc += self.v[128 * n + k] * QMF_WINDOW[2 * (64 * n + k)];
-                // g[64n + 32 + k] = v[128n + 96 + k].
-                acc += self.v[128 * n + 96 + k] * QMF_WINDOW[2 * (64 * n + 32 + k)];
-            }
-            *o = acc;
-        }
-        Ok(out)
+        Ok(synthesis_window::<32>(v, decimated_window()))
     }
 }
 
