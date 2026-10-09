@@ -23,7 +23,7 @@ use symphonia_core::util::text;
 
 use lazy_static::lazy_static;
 use log::debug;
-use smallvec::{SmallVec, smallvec};
+use smallvec::SmallVec;
 
 use crate::id3v2::frames::{FrameResult, Id3v2Chapter, Id3v2TableOfContents};
 use crate::id3v2::sub_fields::*;
@@ -31,6 +31,9 @@ use crate::utils::id3v2::get_visual_key_from_picture_type;
 use crate::utils::std_tag::*;
 
 use crate::utils::images::try_get_image_info;
+
+/// The owner identifier of a `UFID` frame containing a MusicBrainz recording ID.
+const UFID_OWNER_MUSICBRAINZ: &str = "http://musicbrainz.org";
 
 /// Function pointer to an ID3v2 frame reader.
 pub type FrameReader = fn(BufReader<'_>, &FrameInfo<'_>) -> Result<FrameResult>;
@@ -911,12 +914,28 @@ pub fn read_ufid_frame(mut reader: BufReader<'_>, frame: &FrameInfo<'_>) -> Resu
         return decode_error("ufid: ufid indentifier exceeds 64 bytes");
     }
 
+    // The MusicBrainz recording ID is stored as an ASCII UUID string in a UFID frame owned by
+    // "http://musicbrainz.org".
+    let std = if owner.eq_ignore_ascii_case(UFID_OWNER_MUSICBRAINZ) {
+        str::from_utf8(id)
+            .ok()
+            .map(|id| id.trim_end_matches('\0'))
+            .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_graphic()))
+            .map(|id| StandardTag::MusicBrainzRecordingId(Arc::new(id.to_string())))
+    }
+    else {
+        None
+    };
+
     let sub_fields = vec![RawTagSubField::new(UFID_OWNER, owner)];
 
     // Create the tag.
     let raw = RawTag::new_with_sub_fields(frame.id, id, sub_fields.into_boxed_slice());
 
-    Ok(FrameResult::Tag(Tag::new(raw)))
+    Ok(FrameResult::Tag(match std {
+        Some(std) => Tag::new_std(raw, std),
+        None => Tag::new(raw),
+    }))
 }
 
 /// Reads all URL frames except for `WXXX`.
@@ -1000,33 +1019,71 @@ pub fn skip_frame(_: BufReader<'_>, frame: &FrameInfo<'_>) -> Result<FrameResult
     Ok(FrameResult::Skipped)
 }
 
-/// Attempt to map the raw tag into one or more standard tags.
-fn map_raw_tag(raw: RawTag, parser: Option<RawTagParser>) -> FrameResult {
-    if let Some(parser) = parser {
-        // A parser was provided.
-        if let RawValue::String(value) = &raw.value {
-            // Parse and return frame result.
-            match parser(value.clone()) {
-                [Some(std), None] => {
-                    // One raw tag yielded one standard tag.
-                    return FrameResult::Tag(Tag::new_std(raw, std));
-                }
-                [None, Some(std)] => {
-                    // One raw tag yielded one standard tag.
-                    return FrameResult::Tag(Tag::new_std(raw, std));
-                }
-                [Some(std0), Some(std1)] => {
-                    // One raw tag yielded two standards tags.
-                    let tags = smallvec![Tag::new_std(raw.clone(), std0), Tag::new_std(raw, std1)];
-                    return FrameResult::MultipleTags(tags);
-                }
-                // The raw value could not be parsed.
-                _ => (),
+/// Attempt to map a single-valued raw tag into zero or more standard tags, appending the resulting
+/// tags to `tags`. If the value cannot be mapped, the raw tag is appended as-is.
+fn map_single_raw_tag(raw: RawTag, parser: RawTagParser, tags: &mut SmallVec<[Tag; 2]>) {
+    if let RawValue::String(value) = &raw.value {
+        // Parse and return frame result.
+        match parser(value.clone()) {
+            [Some(std), None] | [None, Some(std)] => {
+                // One raw tag yielded one standard tag.
+                tags.push(Tag::new_std(raw, std));
+                return;
             }
+            [Some(std0), Some(std1)] => {
+                // One raw tag yielded two standards tags.
+                tags.push(Tag::new_std(raw.clone(), std0));
+                tags.push(Tag::new_std(raw, std1));
+                return;
+            }
+            // The raw value could not be parsed.
+            _ => (),
         }
     }
 
     // Could not parse, add a raw tag.
+    tags.push(Tag::new(raw));
+}
+
+/// Attempt to map the raw tag into one or more standard tags.
+///
+/// If the raw tag has multiple values (a list of strings) and a parser is provided, each value is
+/// mapped individually, yielding one or more tags per value.
+fn map_raw_tag(raw: RawTag, parser: Option<RawTagParser>) -> FrameResult {
+    if let Some(parser) = parser {
+        let mut tags: SmallVec<[Tag; 2]> = SmallVec::new();
+
+        match &raw.value {
+            RawValue::String(_) => {
+                map_single_raw_tag(raw, parser, &mut tags);
+            }
+            RawValue::StringList(values) => {
+                // A multi-valued frame. Map each non-empty value on its own.
+                for value in values.iter().filter(|value| !value.is_empty()) {
+                    let single = RawTag {
+                        key: raw.key.clone(),
+                        value: RawValue::from(value.clone()),
+                        sub_fields: raw.sub_fields.clone(),
+                    };
+
+                    map_single_raw_tag(single, parser, &mut tags);
+                }
+
+                // If all values were empty, keep the original raw tag.
+                if tags.is_empty() {
+                    tags.push(Tag::new(raw));
+                }
+            }
+            _ => tags.push(Tag::new(raw)),
+        }
+
+        return match tags.len() {
+            1 => FrameResult::Tag(tags.remove(0)),
+            _ => FrameResult::MultipleTags(tags),
+        };
+    }
+
+    // No parser, add a raw tag.
     FrameResult::Tag(Tag::new(raw))
 }
 

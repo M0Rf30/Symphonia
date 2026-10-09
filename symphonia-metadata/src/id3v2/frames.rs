@@ -21,6 +21,7 @@ use smallvec::SmallVec;
 
 use crate::id3v2::sub_fields::*;
 use crate::id3v2::unsync::{decode_unsynchronisation, read_syncsafe_leq32};
+use crate::utils::inflate::zlib_decompress;
 use crate::utils::std_tag::*;
 
 mod readers;
@@ -427,6 +428,24 @@ fn from_ascii(id: &[u8]) -> &str {
     std::str::from_utf8(id).expect("ascii only")
 }
 
+/// The maximum number of bytes a single compressed frame body may decompress to.
+const MAX_DECOMPRESSED_FRAME_SIZE: usize = 32 * 1024 * 1024;
+
+/// Decompress the zlib-compressed body of a frame.
+///
+/// `indicated_size` is the decompressed size declared by the frame, if any. It is untrusted, but
+/// the decompressed body is not permitted to exceed it, and is always bounded by
+/// `MAX_DECOMPRESSED_FRAME_SIZE` regardless.
+fn inflate_frame_body(data: &[u8], indicated_size: Option<u32>) -> Option<Vec<u8>> {
+    let max_len = match indicated_size {
+        Some(size) => (size as usize).min(MAX_DECOMPRESSED_FRAME_SIZE),
+        None => MAX_DECOMPRESSED_FRAME_SIZE,
+    };
+
+    // An empty frame body is not allowed.
+    zlib_decompress(data, max_len).filter(|buf| !buf.is_empty())
+}
+
 /// Get the default frame reader for unknown frames.
 fn null_frame_reader() -> (FrameReader, Option<RawTagParser>) {
     (read_raw_frame, None)
@@ -539,7 +558,7 @@ pub fn read_id3v2p3_frame<B: ReadBytes>(reader: &mut B) -> Result<FrameResult> {
     let data_size = size - flag_data_size;
 
     // If compression is enabled, read the decompressed size of the frame.
-    let _decompressed_size = if is_compressed { Some(reader.read_be_u32()?) } else { None };
+    let decompressed_size = if is_compressed { Some(reader.read_be_u32()?) } else { None };
 
     // If encryption is enabled, read the encryption ID. A sub-field indicating the frame is
     // encrypted, and its encryption ID will be added to the tag.
@@ -549,14 +568,6 @@ pub fn read_id3v2p3_frame<B: ReadBytes>(reader: &mut B) -> Result<FrameResult> {
     // group will be added to the tag.
     let group_id = if is_grouped { Some(reader.read_byte()?) } else { None };
 
-    // TODO: Implement zlib DEFLATE decompression.
-    if is_compressed {
-        reader.ignore_bytes(u64::from(data_size))?;
-
-        warn!("'{}' was skipped because compressed frames are not supported", from_ascii(&id));
-        return Ok(FrameResult::Skipped);
-    }
-
     // A zero-length frame body is not allowed, but can be skipped.
     if data_size == 0 {
         warn!("'{}' was skipped because it has a size of 0", from_ascii(&id));
@@ -564,7 +575,19 @@ pub fn read_id3v2p3_frame<B: ReadBytes>(reader: &mut B) -> Result<FrameResult> {
     }
 
     // Read the frame body into a frame buffer.
-    let data = reader.read_boxed_slice_exact(data_size as usize)?;
+    let mut data = reader.read_boxed_slice_exact(data_size as usize)?;
+
+    // If the frame body has been compressed, decompress it. Compression is applied before
+    // encryption, so an encrypted frame body cannot be decompressed.
+    if is_compressed && !is_encrypted {
+        match inflate_frame_body(&data, decompressed_size) {
+            Some(buf) => data = buf.into_boxed_slice(),
+            None => {
+                warn!("'{}' was skipped because it could not be decompressed", from_ascii(&id));
+                return Ok(FrameResult::Skipped);
+            }
+        }
+    }
 
     // Find a reader for the frame. If the frame is encrypted, then the frame is provided as a
     // binary buffer.
@@ -625,8 +648,10 @@ pub fn read_id3v2p4_frame<B: ReadBytes + FiniteStream>(reader: &mut B) -> Result
     let is_unsynchronised = flags & 0x2 != 0;
     let has_indicated_size = flags & 0x1 != 0;
 
+    // A compressed frame should have a data length indicator that gives the decompressed size.
+    // Do not rely on it being present, but warn if it is not.
     if is_compressed && !has_indicated_size {
-        return decode_error("id3v2: frame compressed without a data length indicator");
+        warn!("'{}' is compressed without a data length indicator", from_ascii(&id));
     }
 
     // When some flags are set, the frame header is extended with additional fields. Calculate the
@@ -658,16 +683,8 @@ pub fn read_id3v2p4_frame<B: ReadBytes + FiniteStream>(reader: &mut B) -> Result
     //
     // The indicated size will be added to all produced tags as a sub-field if the frame is
     // encrypted.
-    let _indicated_size =
+    let indicated_size =
         if has_indicated_size { Some(read_syncsafe_leq32(reader, 28)?) } else { None };
-
-    // TODO: Implement zlib DEFLATE decompression.
-    if is_compressed {
-        reader.ignore_bytes(u64::from(data_size))?;
-
-        warn!("'{}' was skipped because compressed frames are not supported", from_ascii(&id));
-        return Ok(FrameResult::Skipped);
-    }
 
     // A zero-length frame body is not allowed, but can be skipped.
     if data_size == 0 {
@@ -686,18 +703,32 @@ pub fn read_id3v2p4_frame<B: ReadBytes + FiniteStream>(reader: &mut B) -> Result
     // Prepare frame information for the frame reader.
     let info = FrameInfo::new(&id, 4, raw_tag_parser);
 
-    // Read the frame.
-    let result = if is_unsynchronised {
-        // The frame body has been unsynchronised. Decode the unsynchronised data back to it's
-        // unencoded form in-place before parsing.
-        let unsync_data = decode_unsynchronisation(&mut data);
+    // If the frame body has been unsynchronised, decode the unsynchronised data back to it's
+    // unencoded form in-place before parsing.
+    let body: &[u8] = if is_unsynchronised { decode_unsynchronisation(&mut data) } else { &data };
 
-        read_frame(BufReader::new(unsync_data), &info)
+    // If the frame body has been compressed, decompress it. Compression is applied before
+    // encryption, so an encrypted frame body cannot be decompressed.
+    let decompressed;
+
+    let body = if is_compressed && !is_encrypted {
+        match inflate_frame_body(body, indicated_size) {
+            Some(buf) => {
+                decompressed = buf;
+                &decompressed[..]
+            }
+            None => {
+                warn!("'{}' was skipped because it could not be decompressed", from_ascii(&id));
+                return Ok(FrameResult::Skipped);
+            }
+        }
     }
     else {
-        // The frame body has not been unsynchronised.
-        read_frame(BufReader::new(&data), &info)
+        body
     };
+
+    // Read the frame.
+    let result = read_frame(BufReader::new(body), &info);
 
     // An error while reading the frame from the frame buffer is not fatal.
     match result {
