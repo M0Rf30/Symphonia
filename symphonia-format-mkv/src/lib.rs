@@ -17,12 +17,17 @@
 //! of every block is recovered from the first block of the track, so `required_ts` and `actual_ts`
 //! are exact.
 //!
-//! For other tracks (e.g., Vorbis, whose blocks have a varying duration) the timestamp of a
-//! packet is only accurate to within the timestamp scale. For these tracks `actual_ts` may be
-//! off from the true position of the packet by up to that precision (about 44 frames at 44.1kHz
-//! with the default scale), and a caller cannot discard frames to `required_ts` more exactly than
-//! that. Tracks of codecs that need state to be re-established after a seek (Opus, MPEG audio,
-//! AAC, Vorbis) back the seek off by a pre-roll: the returned `actual_ts` is at or before
+//! The same is done for Vorbis and Opus, whose packets carry their own duration (the block sizes
+//! of the packet and of the one before it, and the TOC byte, respectively): the exact timeline is
+//! the running sum of the durations of the packets, anchored to the first block of the stream. To
+//! be able to seek to an exact position the demuxer needs the timeline at the target. The stream
+//! is scanned once, on the first seek, to index the exact position of every block, so the first
+//! seek in a seekable stream reads the whole file. If the stream is not seekable, or the scan
+//! fails, the timestamp of the packet after a seek is only accurate to within the timestamp scale
+//! (about 44 frames at 44.1kHz with the default scale).
+//!
+//! Tracks of codecs that need state to be re-established after a seek (Opus, MPEG audio, AAC,
+//! Vorbis) back the seek off by a pre-roll: the returned `actual_ts` is at or before
 //! `required_ts`, and the caller should decode (and discard) the packets from `actual_ts` before
 //! presenting audio from `required_ts`.
 
@@ -42,6 +47,7 @@ mod lacing;
 mod schema;
 mod segment;
 mod tags;
+mod timeline;
 
 pub use crate::demuxer::MkvReader;
 
