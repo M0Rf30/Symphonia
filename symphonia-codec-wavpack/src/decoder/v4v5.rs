@@ -1035,146 +1035,145 @@ fn update_weight_clip(weight: &mut i32, delta: i32, source: i32, result: i32) {
 // Decorrelation passes (unpack.c decorr_stereo_pass / decorr_mono_pass)
 // ---------------------------------------------------------------------------
 
-pub fn decorr_stereo_pass(p: &mut DecorrPass, buf: &mut [i32]) {
-    let n = buf.len() / 2;
-    let mut m = 0usize;
+/// Apply all the decorrelation passes (in order) to a stereo block of interleaved samples, then
+/// undo the joint stereo (if `joint`).
+///
+/// The passes are fused into one loop over the frames. Every pass is a serial chain (the weight
+/// update and the history feed back into the next frame), but pass `j + 1` of frame `i` only
+/// depends on pass `j` of frame `i`, so the chains of the passes overlap in the out-of-order
+/// window instead of running one after the other over the whole buffer. The result is identical
+/// to running each pass over the whole buffer.
+pub fn decorr_stereo_passes(passes: &mut [DecorrPass], buf: &mut [i32], joint: bool) {
+    for (i, frame) in buf.chunks_exact_mut(2).enumerate() {
+        let m = i & (MAX_TERM - 1);
+        let (mut a, mut b) = (frame[0], frame[1]);
 
-    match p.term {
-        t if t > 0 && t <= MAX_TERM as i32 => {
-            for i in 0..n {
-                let sam_a = p.samples_a[m];
-                let sam_b = p.samples_b[m];
-                let k     = (m + t as usize) & (MAX_TERM - 1);
+        for p in passes.iter_mut() {
+            match p.term {
+                t if t > 0 && t <= MAX_TERM as i32 => {
+                    let sam_a = p.samples_a[m];
+                    let sam_b = p.samples_b[m];
+                    let k = (m + t as usize) & (MAX_TERM - 1);
 
-                let na = buf[i * 2    ].wrapping_add(apply_weight(p.weight_a, sam_a));
-                let nb = buf[i * 2 + 1].wrapping_add(apply_weight(p.weight_b, sam_b));
-                update_weight(&mut p.weight_a, p.delta, sam_a, buf[i * 2    ]);
-                update_weight(&mut p.weight_b, p.delta, sam_b, buf[i * 2 + 1]);
-                p.samples_a[k] = na; buf[i * 2    ] = na;
-                p.samples_b[k] = nb; buf[i * 2 + 1] = nb;
-                m = (m + 1) & (MAX_TERM - 1);
-            }
-        }
-        17 => {
-            for i in 0..n {
-                let sa = (2i32).wrapping_mul(p.samples_a[0]).wrapping_sub(p.samples_a[1]);
-                let sb = (2i32).wrapping_mul(p.samples_b[0]).wrapping_sub(p.samples_b[1]);
-                p.samples_a[1] = p.samples_a[0];
-                p.samples_b[1] = p.samples_b[0];
+                    let na = a.wrapping_add(apply_weight(p.weight_a, sam_a));
+                    let nb = b.wrapping_add(apply_weight(p.weight_b, sam_b));
+                    update_weight(&mut p.weight_a, p.delta, sam_a, a);
+                    update_weight(&mut p.weight_b, p.delta, sam_b, b);
+                    p.samples_a[k] = na;
+                    p.samples_b[k] = nb;
+                    a = na;
+                    b = nb;
+                }
+                17 => {
+                    let sa = (2i32).wrapping_mul(p.samples_a[0]).wrapping_sub(p.samples_a[1]);
+                    let sb = (2i32).wrapping_mul(p.samples_b[0]).wrapping_sub(p.samples_b[1]);
+                    p.samples_a[1] = p.samples_a[0];
+                    p.samples_b[1] = p.samples_b[0];
 
-                let na = buf[i * 2    ].wrapping_add(apply_weight(p.weight_a, sa));
-                let nb = buf[i * 2 + 1].wrapping_add(apply_weight(p.weight_b, sb));
-                update_weight(&mut p.weight_a, p.delta, sa, buf[i * 2    ]);
-                update_weight(&mut p.weight_b, p.delta, sb, buf[i * 2 + 1]);
-                p.samples_a[0] = na; buf[i * 2    ] = na;
-                p.samples_b[0] = nb; buf[i * 2 + 1] = nb;
-            }
-        }
-        18 => {
-            for i in 0..n {
-                let sa = ((3i32).wrapping_mul(p.samples_a[0]).wrapping_sub(p.samples_a[1])) >> 1;
-                let sb = ((3i32).wrapping_mul(p.samples_b[0]).wrapping_sub(p.samples_b[1])) >> 1;
-                p.samples_a[1] = p.samples_a[0];
-                p.samples_b[1] = p.samples_b[0];
+                    let na = a.wrapping_add(apply_weight(p.weight_a, sa));
+                    let nb = b.wrapping_add(apply_weight(p.weight_b, sb));
+                    update_weight(&mut p.weight_a, p.delta, sa, a);
+                    update_weight(&mut p.weight_b, p.delta, sb, b);
+                    p.samples_a[0] = na;
+                    p.samples_b[0] = nb;
+                    a = na;
+                    b = nb;
+                }
+                18 => {
+                    let sa = ((3i32).wrapping_mul(p.samples_a[0]).wrapping_sub(p.samples_a[1])) >> 1;
+                    let sb = ((3i32).wrapping_mul(p.samples_b[0]).wrapping_sub(p.samples_b[1])) >> 1;
+                    p.samples_a[1] = p.samples_a[0];
+                    p.samples_b[1] = p.samples_b[0];
 
-                let na = buf[i * 2    ].wrapping_add(apply_weight(p.weight_a, sa));
-                let nb = buf[i * 2 + 1].wrapping_add(apply_weight(p.weight_b, sb));
-                update_weight(&mut p.weight_a, p.delta, sa, buf[i * 2    ]);
-                update_weight(&mut p.weight_b, p.delta, sb, buf[i * 2 + 1]);
-                p.samples_a[0] = na; buf[i * 2    ] = na;
-                p.samples_b[0] = nb; buf[i * 2 + 1] = nb;
+                    let na = a.wrapping_add(apply_weight(p.weight_a, sa));
+                    let nb = b.wrapping_add(apply_weight(p.weight_b, sb));
+                    update_weight(&mut p.weight_a, p.delta, sa, a);
+                    update_weight(&mut p.weight_b, p.delta, sb, b);
+                    p.samples_a[0] = na;
+                    p.samples_b[0] = nb;
+                    a = na;
+                    b = nb;
+                }
+                -1 => {
+                    let sam = a.wrapping_add(apply_weight(p.weight_a, p.samples_a[0]));
+                    update_weight_clip(&mut p.weight_a, p.delta, p.samples_a[0], a);
+                    let nb = b.wrapping_add(apply_weight(p.weight_b, sam));
+                    update_weight_clip(&mut p.weight_b, p.delta, sam, b);
+                    p.samples_a[0] = nb;
+                    a = sam;
+                    b = nb;
+                }
+                -2 => {
+                    let sam = b.wrapping_add(apply_weight(p.weight_b, p.samples_b[0]));
+                    update_weight_clip(&mut p.weight_b, p.delta, p.samples_b[0], b);
+                    let na = a.wrapping_add(apply_weight(p.weight_a, sam));
+                    update_weight_clip(&mut p.weight_a, p.delta, sam, a);
+                    p.samples_b[0] = na;
+                    a = na;
+                    b = sam;
+                }
+                -3 => {
+                    let sam_a = a.wrapping_add(apply_weight(p.weight_a, p.samples_a[0]));
+                    update_weight_clip(&mut p.weight_a, p.delta, p.samples_a[0], a);
+                    let nb = b.wrapping_add(apply_weight(p.weight_b, p.samples_b[0]));
+                    update_weight_clip(&mut p.weight_b, p.delta, p.samples_b[0], b);
+                    p.samples_a[0] = nb;
+                    p.samples_b[0] = sam_a;
+                    a = sam_a;
+                    b = nb;
+                }
+                _ => {}
             }
         }
-        -1 => {
-            for i in 0..n {
-                let sam = buf[i * 2].wrapping_add(apply_weight(p.weight_a, p.samples_a[0]));
-                update_weight_clip(&mut p.weight_a, p.delta, p.samples_a[0], buf[i * 2]);
-                buf[i * 2] = sam;
-                p.samples_a[0] = buf[i * 2 + 1].wrapping_add(apply_weight(p.weight_b, sam));
-                update_weight_clip(&mut p.weight_b, p.delta, sam, buf[i * 2 + 1]);
-                buf[i * 2 + 1] = p.samples_a[0];
-            }
+
+        if joint {
+            // Undo joint stereo: `a += (b -= (a >> 1))`.
+            b = b.wrapping_sub(a >> 1);
+            a = a.wrapping_add(b);
         }
-        -2 => {
-            for i in 0..n {
-                let sam = buf[i * 2 + 1].wrapping_add(apply_weight(p.weight_b, p.samples_b[0]));
-                update_weight_clip(&mut p.weight_b, p.delta, p.samples_b[0], buf[i * 2 + 1]);
-                buf[i * 2 + 1] = sam;
-                p.samples_b[0] = buf[i * 2].wrapping_add(apply_weight(p.weight_a, sam));
-                update_weight_clip(&mut p.weight_a, p.delta, sam, buf[i * 2]);
-                buf[i * 2] = p.samples_b[0];
-            }
-        }
-        -3 => {
-            for i in 0..n {
-                let sam_a = buf[i * 2    ].wrapping_add(apply_weight(p.weight_a, p.samples_a[0]));
-                update_weight_clip(&mut p.weight_a, p.delta, p.samples_a[0], buf[i * 2]);
-                p.samples_a[0] = buf[i * 2 + 1].wrapping_add(apply_weight(p.weight_b, p.samples_b[0]));
-                update_weight_clip(&mut p.weight_b, p.delta, p.samples_b[0], buf[i * 2 + 1]);
-                buf[i * 2    ] = sam_a;
-                buf[i * 2 + 1] = p.samples_a[0];
-                p.samples_b[0] = sam_a;
-            }
-        }
-        _ => {}
+
+        frame[0] = a;
+        frame[1] = b;
     }
 }
 
-pub fn decorr_mono_pass(p: &mut DecorrPass, buf: &mut [i32]) {
-    let mut m = 0usize;
+/// Apply all the decorrelation passes (in order) to a mono block; see [`decorr_stereo_passes`].
+pub fn decorr_mono_passes(passes: &mut [DecorrPass], buf: &mut [i32]) {
+    for (i, x) in buf.iter_mut().enumerate() {
+        let m = i & (MAX_TERM - 1);
+        let mut a = *x;
 
-    match p.term {
-        t if t > 0 && t <= MAX_TERM as i32 => {
-            for x in buf.iter_mut() {
-                let sam = p.samples_a[m];
-                let k   = (m + t as usize) & (MAX_TERM - 1);
-                let na  = x.wrapping_add(apply_weight(p.weight_a, sam));
-                update_weight(&mut p.weight_a, p.delta, sam, *x);
-                p.samples_a[k] = na;
-                *x = na;
-                m = (m + 1) & (MAX_TERM - 1);
+        for p in passes.iter_mut() {
+            match p.term {
+                t if t > 0 && t <= MAX_TERM as i32 => {
+                    let sam = p.samples_a[m];
+                    let k = (m + t as usize) & (MAX_TERM - 1);
+                    let na = a.wrapping_add(apply_weight(p.weight_a, sam));
+                    update_weight(&mut p.weight_a, p.delta, sam, a);
+                    p.samples_a[k] = na;
+                    a = na;
+                }
+                17 => {
+                    let sa = (2i32).wrapping_mul(p.samples_a[0]).wrapping_sub(p.samples_a[1]);
+                    p.samples_a[1] = p.samples_a[0];
+                    let na = a.wrapping_add(apply_weight(p.weight_a, sa));
+                    update_weight(&mut p.weight_a, p.delta, sa, a);
+                    p.samples_a[0] = na;
+                    a = na;
+                }
+                18 => {
+                    let sa = ((3i32).wrapping_mul(p.samples_a[0]).wrapping_sub(p.samples_a[1])) >> 1;
+                    p.samples_a[1] = p.samples_a[0];
+                    let na = a.wrapping_add(apply_weight(p.weight_a, sa));
+                    update_weight(&mut p.weight_a, p.delta, sa, a);
+                    p.samples_a[0] = na;
+                    a = na;
+                }
+                _ => {}
             }
         }
-        17 => {
-            for x in buf.iter_mut() {
-                let sa = (2i32).wrapping_mul(p.samples_a[0]).wrapping_sub(p.samples_a[1]);
-                p.samples_a[1] = p.samples_a[0];
-                let na = x.wrapping_add(apply_weight(p.weight_a, sa));
-                update_weight(&mut p.weight_a, p.delta, sa, *x);
-                p.samples_a[0] = na;
-                *x = na;
-            }
-        }
-        18 => {
-            for x in buf.iter_mut() {
-                let sa = ((3i32).wrapping_mul(p.samples_a[0]).wrapping_sub(p.samples_a[1])) >> 1;
-                p.samples_a[1] = p.samples_a[0];
-                let na = x.wrapping_add(apply_weight(p.weight_a, sa));
-                update_weight(&mut p.weight_a, p.delta, sa, *x);
-                p.samples_a[0] = na;
-                *x = na;
-            }
-        }
-        _ => {}
-    }
-}
 
-// ---------------------------------------------------------------------------
-// fixup_samples: apply shift, joint-stereo undo, int32 restoration
-// ---------------------------------------------------------------------------
-
-/// Undo joint-stereo decorrelation: `bptr[0] += (bptr[1] -= (bptr[0] >> 1))`.
-/// Runs unconditionally after the decorrelation passes (for both integer and float
-/// data), matching the placement in unpack.c's stereo decode loop rather than in
-/// `fixup_samples()` (which for `FLOAT_DATA` returns before doing anything else).
-pub fn undo_joint_stereo(buf: &mut [i32], flags: u32) {
-    if (flags & MONO_DATA) == 0 && (flags & JOINT_STEREO) != 0 {
-        let n = buf.len() / 2;
-        for i in 0..n {
-            let r_new = buf[i * 2 + 1].wrapping_sub(buf[i * 2] >> 1);
-            buf[i * 2    ] = buf[i * 2].wrapping_add(r_new);
-            buf[i * 2 + 1] = r_new;
-        }
+        *x = a;
     }
 }
 
@@ -1802,16 +1801,12 @@ pub fn unpack_samples_v4v5(
         get_words_lossless(&mut bs, ws, flags, block_samples)?
     };
 
-    // Apply decorrelation passes in forward order
-    for p in passes.iter_mut() {
-        if is_mono {
-            decorr_mono_pass(p, &mut buf);
-        } else {
-            decorr_stereo_pass(p, &mut buf);
-        }
+    // Apply the decorrelation passes in forward order, then undo the joint stereo.
+    if is_mono {
+        decorr_mono_passes(passes, &mut buf);
+    } else {
+        decorr_stereo_passes(passes, &mut buf, (flags & JOINT_STEREO) != 0);
     }
-
-    undo_joint_stereo(&mut buf, flags);
 
     if (flags & FLOAT_DATA) != 0 {
         wp_trace!("[float] wvx_present={} float_info_present={}", wvx.is_some(), float_info.is_some());
