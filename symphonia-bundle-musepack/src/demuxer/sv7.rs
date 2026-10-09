@@ -40,9 +40,9 @@ use symphonia_core::errors::{decode_error, seek_error, Error, Result, SeekErrorK
 use symphonia_core::io::{MediaSource, MediaSourceStream, ReadBytes};
 
 use crate::bits::BitReader;
-use crate::decoder_core::{FRAME_LENGTH, SYNTH_DELAY};
+use crate::decoder_core::{Decoder as Core, Sv7Sync, FRAME_LENGTH, SYNTH_DELAY};
 
-use super::StreamInfo;
+use super::{StreamInfo, PACKET_TAG_PLAIN, PACKET_TAG_SYNC};
 
 const SAMPLE_FREQS: [u32; 4] = [44100, 48000, 37800, 32000];
 /// Maximum amount of audio-region data this demuxer will buffer for one SV7 stream.
@@ -66,6 +66,13 @@ pub(crate) struct Sv7State {
     /// an appended APEv2 tag).
     frames_total: u64,
     frames_emitted: u64,
+    /// Stream parameters needed to parse frames outside of the decoder (see `build_index`).
+    max_band: i32,
+    ms: bool,
+    /// Lazily built by the first seek.
+    index: Option<FrameIndex>,
+    /// Decoder state to attach to the next packet (set by a seek).
+    pending_sync: Option<Sv7Sync>,
 }
 
 /// Ported from libmpcdec `streaminfo.c` (`streaminfo_read_header_sv7`).
@@ -145,6 +152,12 @@ pub(crate) fn read_header(
         samples
     };
 
+    // The decoder's output lags its input by `SYNTH_DELAY`, so a stream of `frames` frames can
+    // never yield more than `frames * FRAME_LENGTH - SYNTH_DELAY` samples. A true-gapless
+    // last-frame count above `FRAME_LENGTH - SYNTH_DELAY` would otherwise claim samples that
+    // were never encoded (libmpcdec silently stops short in that case as well).
+    let max_output = (frames * FRAME_LENGTH as u64).saturating_sub(u64::from(SYNTH_DELAY));
+
     let info = StreamInfo {
         stream_version: 7,
         sample_rate,
@@ -154,7 +167,8 @@ pub(crate) fn read_header(
         block_pwr: 0,
         decoder_samples,
         beg_silence: 0,
-        display_samples: samples,
+        display_samples: samples.min(max_output),
+        total_frames: Some(frames),
         gain_title,
         peak_title,
         gain_album,
@@ -188,27 +202,119 @@ pub(crate) fn read_header(
     // words).
     byte_swap_words(&mut data[3..]);
 
-    Ok((info, Sv7State { data, bit_pos: 0, frames_total: frames, frames_emitted: 0 }))
+    Ok((
+        info,
+        Sv7State {
+            data,
+            bit_pos: 0,
+            frames_total: frames,
+            frames_emitted: 0,
+            max_band,
+            ms,
+            index: None,
+            pending_sync: None,
+        },
+    ))
 }
 
-/// Copies `bit_len` bits starting at `bit_start` of `src` into a fresh, zero-padded byte buffer
-/// with the frame's first bit realigned to bit 0 of byte 0. See the module-level docs.
-fn extract_bits(src: &[u8], bit_start: u64, bit_len: u64) -> Vec<u8> {
-    let n_bytes = ((bit_len + 7) / 8) as usize;
-    let mut out = vec![0u8; n_bytes];
-    for i in 0..bit_len {
-        let src_bit = bit_start + i;
-        let byte_idx = (src_bit >> 3) as usize;
-        let bit_idx = 7 - (src_bit & 7) as u32;
-        let bit = src.get(byte_idx).map(|b| (b >> bit_idx) & 1).unwrap_or(0);
-        if bit != 0 {
-            out[(i / 8) as usize] |= 1 << (7 - (i % 8) as u32);
-        }
+/// Appends `bit_len` bits starting at `bit_start` of `src` to `out`, with the first bit realigned
+/// to bit 0 of a fresh byte and the final byte zero-padded. Bits past the end of `src` read as
+/// zero. See the module-level docs.
+fn extract_bits(src: &[u8], bit_start: u64, bit_len: u64, out: &mut Vec<u8>) {
+    let n_bytes = bit_len.div_ceil(8) as usize;
+    let byte0 = (bit_start >> 3) as usize;
+    let shift = (bit_start & 7) as u32;
+    let at = |i: usize| src.get(byte0 + i).copied().unwrap_or(0);
+
+    let base = out.len();
+    out.extend(
+        (0..n_bytes).map(|i| {
+            if shift == 0 { at(i) } else { (at(i) << shift) | (at(i + 1) >> (8 - shift)) }
+        }),
+    );
+    // Zero the padding bits after the last frame bit.
+    let tail = (bit_len & 7) as u32;
+    if tail != 0 {
+        out[base + n_bytes - 1] &= 0xFFu8 << (8 - tail);
     }
-    out
+}
+
+/// Number of frames between two stored [`Sv7Sync`] checkpoints.
+const CHECKPOINT_INTERVAL: u64 = 64;
+
+/// Random-access index over the buffered audio region, built lazily by the first seek.
+struct FrameIndex {
+    /// Bit position of each frame's 20-bit length prefix, for every complete frame present in
+    /// the buffered data.
+    frame_pos: Vec<u64>,
+    /// SV7 inter-frame decoder state at the start of every `CHECKPOINT_INTERVAL`th frame.
+    checkpoints: Vec<Sv7Sync>,
 }
 
 impl Sv7State {
+    /// Walks every frame once, parsing (but not synthesizing) its bitstream, to record where each
+    /// frame starts and what the decoder's scale-factor state is on entry to every
+    /// `CHECKPOINT_INTERVAL`th frame. Parsing a frame is a small fraction of the cost of decoding
+    /// it, and the result is reused by every later seek.
+    fn build_index(&self) -> FrameIndex {
+        let total_bits = (self.data.len() as u64) * 8;
+        let mut parser = Core::new(7, self.max_band, self.ms, 2);
+        let mut frame_pos = Vec::new();
+        let mut checkpoints = Vec::new();
+        let mut pos = 0u64;
+
+        let mut scratch = Vec::new();
+        for frame in 0..self.frames_total {
+            if pos + 20 > total_bits {
+                break;
+            }
+            let mut r = BitReader::new(&self.data);
+            r.set_bit_pos(pos);
+            let bit_len = u64::from(r.read_bits(20));
+            if pos + 20 + bit_len > total_bits {
+                // Truncated final frame: not seekable-to (it is still emitted linearly).
+                break;
+            }
+            if frame % CHECKPOINT_INTERVAL == 0 {
+                checkpoints.push(parser.sv7_sync());
+            }
+            frame_pos.push(pos);
+            pos = parse_frame(&mut parser, &self.data, pos, &mut scratch);
+        }
+        FrameIndex { frame_pos, checkpoints }
+    }
+}
+
+/// Parses the frame whose length prefix is at `pos` exactly as the decoder will see it (from its
+/// own zero-padded copy, so a frame that over- or under-runs its declared length cannot desync
+/// the state), and returns the position of the next frame's length prefix.
+fn parse_frame(parser: &mut Core, data: &[u8], pos: u64, scratch: &mut Vec<u8>) -> u64 {
+    let mut r = BitReader::new(data);
+    r.set_bit_pos(pos);
+    let bit_len = u64::from(r.read_bits(20));
+    let start = r.bit_pos();
+    scratch.clear();
+    extract_bits(data, start, bit_len, scratch);
+    parser.skip_frame_sv7(&mut BitReader::new(scratch));
+    start + bit_len
+}
+
+/// The decoder state on entry to `frame`, which must be indexed.
+fn sync_at(data: &[u8], max_band: i32, ms: bool, index: &FrameIndex, frame: u64) -> Sv7Sync {
+    let ckpt = (frame / CHECKPOINT_INTERVAL) as usize;
+    let mut parser = Core::new(7, max_band, ms, 2);
+    parser.set_sv7_sync(&index.checkpoints[ckpt]);
+    let mut scratch = Vec::new();
+    for f in (ckpt as u64 * CHECKPOINT_INTERVAL)..frame {
+        parse_frame(&mut parser, data, index.frame_pos[f as usize], &mut scratch);
+    }
+    parser.sv7_sync()
+}
+
+impl Sv7State {
+    /// Returns the next packet's payload: a one-byte tag (`0`, or `1` followed by an encoded
+    /// [`Sv7Sync`] if this is the first packet after a seek) followed by the realigned frame
+    /// bits. See `crate::decoder::MpcDecoder` for the consumer.
     pub fn next_packet(&mut self, _mss: &mut MediaSourceStream<'_>) -> Result<Option<Vec<u8>>> {
         if self.frames_emitted >= self.frames_total {
             return Ok(None);
@@ -228,43 +334,37 @@ impl Sv7State {
             return decode_error("musepack: implausible SV7 frame length");
         }
 
-        // Ported from `mpc_demux_decode_inner`'s SV7 branch: the *last* frame in the stream is
-        // immediately followed by an extra 11-bit "true last-frame sample count" field (read by
-        // `decoder_core::Decoder::decode_frame`'s trailing-adjustment code), which is not
-        // included in the 20-bit length prefix itself. Include those 11 bits only for the final
-        // packet so that read lands on real bitstream content instead of zero-padding.
-        let is_last_frame = self.frames_emitted + 1 == self.frames_total;
-        let extract_len = if is_last_frame { bit_len + 11 } else { bit_len };
-
-        let packet = extract_bits(&self.data, frame_start, extract_len);
+        let mut packet = Vec::with_capacity(1 + ((bit_len + 7) / 8) as usize);
+        match self.pending_sync.take() {
+            Some(sync) => {
+                packet.push(PACKET_TAG_SYNC);
+                sync.write_to(&mut packet);
+            }
+            None => packet.push(PACKET_TAG_PLAIN),
+        }
+        // The 11-bit "true last-frame sample count" that follows the final frame in the
+        // reference bitstream is not passed on: gapless trimming is expressed through the
+        // packet's `trim_end` instead (see `decoder_core::Decoder::decode_frame`).
+        extract_bits(&self.data, frame_start, bit_len, &mut packet);
         self.bit_pos = frame_start + bit_len;
         self.frames_emitted += 1;
 
         Ok(Some(packet))
     }
 
-    /// Frame-accurate seek via linear scan (reading each frame's 20-bit length prefix and
-    /// skipping its payload, without decoding). Returns the actual sample position (a multiple
-    /// of `FRAME_LENGTH`, at or before `target_sample`).
-    pub fn seek(&mut self, _mss: &mut MediaSourceStream<'_>, target_sample: u64) -> Result<u64> {
-        let target_frame = target_sample / FRAME_LENGTH as u64;
-        let target_frame = target_frame.min(self.frames_total.saturating_sub(1));
-
-        let mut bit_pos = 0u64;
-        let mut frame_idx = 0u64;
-        while frame_idx < target_frame {
-            if bit_pos + 20 > (self.data.len() as u64) * 8 {
-                return seek_error(SeekErrorKind::OutOfRange);
-            }
-            let mut r = BitReader::new(&self.data);
-            r.set_bit_pos(bit_pos);
-            let bit_len = u64::from(r.read_bits(20));
-            bit_pos = r.bit_pos() + bit_len;
-            frame_idx += 1;
+    /// Positions the reader at the start of `frame` so that the next packet decodes correctly
+    /// from there (it carries the recovered scale-factor state, see [`Sv7Sync`]).
+    pub fn seek_frame(&mut self, frame: u64) -> Result<()> {
+        if self.index.is_none() {
+            self.index = Some(self.build_index());
         }
-
-        self.bit_pos = bit_pos;
-        self.frames_emitted = frame_idx;
-        Ok(frame_idx * FRAME_LENGTH as u64)
+        let index = self.index.as_ref().expect("index was just built");
+        let Some(&pos) = index.frame_pos.get(frame as usize) else {
+            return seek_error(SeekErrorKind::OutOfRange);
+        };
+        self.pending_sync = Some(sync_at(&self.data, self.max_band, self.ms, index, frame));
+        self.bit_pos = pos;
+        self.frames_emitted = frame;
+        Ok(())
     }
 }
