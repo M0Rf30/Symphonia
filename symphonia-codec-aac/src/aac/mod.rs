@@ -13,7 +13,7 @@
 
 use symphonia_core::audio::layouts;
 use symphonia_core::audio::{
-    Audio, AsGenericAudioBufferRef, AudioBuffer, AudioMut, AudioSpec, Channels,
+    AsGenericAudioBufferRef, Audio, AudioBuffer, AudioMut, AudioSpec, Channels,
     GenericAudioBufferRef,
 };
 use symphonia_core::codecs::CodecInfo;
@@ -40,6 +40,9 @@ mod window;
 
 use common::*;
 
+/// The initial state of the PNS random number generator. This is the same seed as ffmpeg's.
+const PNS_SEED: u32 = 0x1f2e3d4c;
+
 /// Advanced Audio Coding (AAC) decoder.
 ///
 /// Implements a decoder for Advanced Audio Decoding Low-Complexity (AAC-LC) as defined in
@@ -48,6 +51,11 @@ pub struct AacDecoder {
     // info: NACodecInfoRef,
     asc: AudioSpecificConfig,
     pairs: Vec<cpe::ChannelPair>,
+    /// The perceptual noise substitution (PNS) random number generator. A single generator is
+    /// shared by every channel of every syntactic element, in bitstream order, for the whole
+    /// stream (as in ffmpeg and FAAD2) rather than one per element. This keeps the generated
+    /// noise identical to the reference decoders for multi-element (multichannel) streams.
+    lcg: Lcg,
     /// For each syntactic element (`SCE`/`CPE`/`LFE`) expected, in bitstream order, whether it is
     /// a channel pair, and the target output buffer channel index/indices. Built once from
     /// [`AudioSpecificConfig::channel_elements`] so that e.g. a 5.1 stream's `SCE(center)`,
@@ -70,14 +78,17 @@ pub struct AacDecoder {
 /// `EXT_SBR_DATA_CRC` payload for implicit signalling (an ASC/ADTS header that declares plain
 /// LC at the core rate). See `sbr::mod` for the ported SBR tool itself.
 struct SbrRuntime {
-    /// The SBR internal / output sample rate: `2 ×` the AAC core rate for the standard
-    /// dual-rate mode. (`sbr::decoder::SbrDecoder`'s §4.6.18.4.3 downsampled-output mode is
-    /// ported but not selected here — see `sbr::mod`'s doc comment.)
+    /// The SBR output sample rate: `2 ×` the AAC core rate for the standard dual-rate mode, or
+    /// the core rate for the §4.6.18.4.3 downsampled-output mode (selected when the ASC signals
+    /// an extension sampling frequency equal to the core rate).
     fs_sbr: u32,
+    /// `true` if the §4.6.18.4.3 downsampled-output mode is selected.
+    downsampled: bool,
     /// One SBR decoder + header-reuse state per [`AacDecoder::elem_targets`] entry (SCE/CPE),
     /// in bitstream order.
     elems: Vec<SbrElemState>,
-    /// Output buffer at `fs_sbr`, `2 ×` the core `AudioBuffer`'s capacity.
+    /// Output buffer at `fs_sbr`: `2 ×` the core `AudioBuffer`'s capacity, or the same capacity in
+    /// the downsampled SBR mode.
     buf: AudioBuffer<f32>,
 }
 
@@ -92,6 +103,7 @@ struct SbrElemState {
 impl SbrRuntime {
     fn new(
         fs_sbr: u32,
+        downsampled: bool,
         channels: Channels,
         core_samples: usize,
         elem_targets: &[(bool, [usize; 2])],
@@ -99,14 +111,36 @@ impl SbrRuntime {
         let elems = elem_targets
             .iter()
             .map(|(is_pair, _)| {
-                let decoder = sbr::decoder::SbrDecoder::new(fs_sbr, if *is_pair { 2 } else { 1 })?;
+                let mut decoder =
+                    sbr::decoder::SbrDecoder::new(fs_sbr, if *is_pair { 2 } else { 1 })?;
+                decoder.set_downsampled(downsampled)?;
                 Ok(SbrElemState { decoder, prev_header: None })
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let buf = AudioBuffer::new(AudioSpec::new(fs_sbr, channels), core_samples * 2);
+        let out_samples = if downsampled { core_samples } else { core_samples * 2 };
+        let buf = AudioBuffer::new(AudioSpec::new(fs_sbr, channels), out_samples);
 
-        Ok(SbrRuntime { fs_sbr, elems, buf })
+        Ok(SbrRuntime { fs_sbr, downsampled, elems, buf })
+    }
+
+    /// Reset the signal state of every element's SBR decoder (analysis/synthesis filterbanks,
+    /// envelope and noise-floor history, parametric stereo state). The most recently parsed
+    /// `sbr_header()` of each element is kept: a stream's SBR header is practically constant, and
+    /// it is what allows a header-less payload (header reuse) to be decoded after a seek.
+    fn reset(&mut self, elem_targets: &[(bool, [usize; 2])]) {
+        for (elem, (is_pair, _)) in self.elems.iter_mut().zip(elem_targets) {
+            let decoder = sbr::decoder::SbrDecoder::new(self.fs_sbr, if *is_pair { 2 } else { 1 })
+                .and_then(|mut decoder| decoder.set_downsampled(self.downsampled).map(|_| decoder));
+
+            if let Ok(mut decoder) = decoder {
+                // The decoder is restarted at a frame the demuxer chose to start from, which is
+                // at the start of a 16 frame period of the stream.
+                decoder.set_resumed();
+                elem.decoder = decoder;
+            }
+        }
+        self.buf.clear();
     }
 }
 
@@ -230,8 +264,7 @@ impl AacDecoder {
         // stereo pair. A caller that only reads `codec_params()`/the channel count once at open
         // time will not see that transition and needs a follow-up fix to also consult the
         // first decoded buffer's spec, exactly as for the SBR sample-rate case.
-        let out_channels =
-            if asc.ps_present { layouts::CHANNEL_LAYOUT_STEREO } else { channels.clone() };
+        let out_channels = asc.output_channels().unwrap_or_else(|| channels.clone());
 
         // Explicit SBR signalling (ASC hierarchical `audioObjectType == 5`/`29` wrapper) gives
         // the SBR/output sample rate up front (ISO/IEC 14496-3 §1.6.3.8:
@@ -247,12 +280,16 @@ impl AacDecoder {
         // consult the first decoded buffer's spec, mirroring how they already do for channel
         // count.
         let sbr = if asc.sbr_present {
-            let fs_sbr = asc
-                .sbr_ps_info
-                .as_ref()
-                .map(|(rate, _)| *rate)
-                .unwrap_or_else(|| asc.sample_rate.saturating_mul(2));
-            Some(SbrRuntime::new(fs_sbr, out_channels.clone(), asc.samples, &elem_targets)?)
+            // An SBR output rate equal to the core rate selects the downsampled SBR mode.
+            let fs_sbr = asc.output_sample_rate();
+            let downsampled = fs_sbr == asc.sample_rate;
+            Some(SbrRuntime::new(
+                fs_sbr,
+                downsampled,
+                out_channels.clone(),
+                asc.samples,
+                &elem_targets,
+            )?)
         }
         else {
             None
@@ -272,6 +309,7 @@ impl AacDecoder {
         Ok(AacDecoder {
             asc,
             pairs: Vec::new(),
+            lcg: Lcg::new(PNS_SEED),
             elem_targets,
             dsp: dsp::Dsp::new(),
             sbinfo,
@@ -297,7 +335,11 @@ impl AacDecoder {
         Ok(())
     }
 
-    fn decode_ga<B: ReadBitsLtr + FiniteBitStream>(&mut self, bs: &mut B, data: &[u8]) -> Result<()> {
+    fn decode_ga<B: ReadBitsLtr + FiniteBitStream>(
+        &mut self,
+        bs: &mut B,
+        data: &[u8],
+    ) -> Result<()> {
         let mut cur_pair = 0;
         let mut sbr_ext: Vec<Option<sbr::extension::SbrExtensionData>> =
             vec![None; self.elem_targets.len()];
@@ -314,7 +356,7 @@ impl AacDecoder {
                     let (is_pair, indices) = self.elem_targets[cur_pair];
                     validate!(!is_pair);
                     self.set_pair(cur_pair, indices[0], false)?;
-                    self.pairs[cur_pair].decode_ga_sce(bs, self.asc.object_type)?;
+                    self.pairs[cur_pair].decode_ga_sce(bs, &mut self.lcg, self.asc.object_type)?;
                     cur_pair += 1;
                 }
                 1 => {
@@ -324,7 +366,7 @@ impl AacDecoder {
                     let (is_pair, indices) = self.elem_targets[cur_pair];
                     validate!(is_pair);
                     self.set_pair(cur_pair, indices[0], true)?;
-                    self.pairs[cur_pair].decode_ga_cpe(bs, self.asc.object_type)?;
+                    self.pairs[cur_pair].decode_ga_cpe(bs, &mut self.lcg, self.asc.object_type)?;
                     cur_pair += 1;
                 }
                 2 => {
@@ -405,6 +447,7 @@ impl AacDecoder {
                                 let fs_sbr = self.asc.sample_rate.saturating_mul(2);
                                 self.sbr = Some(SbrRuntime::new(
                                     fs_sbr,
+                                    false,
                                     self.buf.spec().channels().clone(),
                                     self.asc.samples,
                                     &self.elem_targets,
@@ -584,6 +627,14 @@ impl AudioDecoder for AacDecoder {
     fn reset(&mut self) {
         for pair in self.pairs.iter_mut() {
             pair.reset();
+        }
+
+        // Restart the noise generator so that a decode restarted from the beginning of the
+        // stream (e.g., after a seek to 0) reproduces the original perceptual noise.
+        self.lcg = Lcg::new(PNS_SEED);
+
+        if let Some(sbr) = self.sbr.as_mut() {
+            sbr.reset(&self.elem_targets);
         }
     }
 

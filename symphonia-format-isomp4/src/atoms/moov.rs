@@ -5,7 +5,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use symphonia_core::meta::MetadataRevision;
+use symphonia_core::meta::{ChapterGroup, MetadataRevision};
+use symphonia_core::units::{Duration, TimeBase};
 
 use crate::atoms::{
     Atom, AtomHeader, AtomIterator, AtomType, GaplessInfo, MvexAtom, MvhdAtom, ReadAtom, Result,
@@ -32,6 +33,15 @@ impl MoovAtom {
     /// If metadata was read, consumes the metadata and returns it.
     pub fn take_metadata(&mut self) -> Option<MetadataRevision> {
         self.udta.as_mut().and_then(|udta| udta.take_metadata())
+    }
+
+    /// Get the chapters from the Nero chapter list (`chpl`) atom, if present.
+    pub fn chapters(&self) -> Option<ChapterGroup> {
+        let chpl = self.udta.as_ref()?.chpl.as_ref()?;
+        // The end of the last chapter is the end of the movie.
+        let end = TimeBase::from_recip(self.mvhd.timescale)
+            .calc_duration(Duration::new(self.mvhd.duration));
+        chpl.make_chapters(end)
     }
 
     /// Is the movie segmented.

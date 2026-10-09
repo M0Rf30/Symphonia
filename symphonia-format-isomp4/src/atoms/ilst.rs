@@ -966,8 +966,10 @@ impl Atom for IlstAtom {
                     add_generic_tag(it, &mut mb, map_std_str!(StandardTag::UrlArtist))?
                 }
                 AtomType::WorkTag => add_generic_tag(it, &mut mb, map_std_str!(StandardTag::Work))?,
+                // The `\u{a9}wrt` atom is the iTunes composer atom (mapped the same way by ffmpeg,
+                // mutagen, and TagLib), while `\u{a9}com` is rarely used.
                 AtomType::WriterTag => {
-                    add_generic_tag(it, &mut mb, map_std_str!(StandardTag::Writer))?
+                    add_generic_tag(it, &mut mb, map_std_str!(StandardTag::Composer))?
                 }
                 // Free-form tag atom.
                 AtomType::FreeFormTag => add_freeform_tag(it, &mut mb, &mut gapless)?,
@@ -1102,5 +1104,49 @@ mod itunsmpb_tests {
         assert!(parse_itunsmpb("").is_none());
         assert!(parse_itunsmpb("not hex data here").is_none());
         assert!(parse_itunsmpb(" 00000000").is_none());
+    }
+}
+
+#[cfg(test)]
+mod writer_tests {
+    use std::io::Cursor;
+
+    use symphonia_core::io::MediaSourceStream;
+    use symphonia_core::meta::StandardTag;
+
+    use super::IlstAtom;
+    use crate::atoms::AtomIterator;
+
+    fn atom(fourcc: &[u8], body: &[u8]) -> Vec<u8> {
+        let mut buf = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+        buf.extend_from_slice(fourcc);
+        buf.extend_from_slice(body);
+        buf
+    }
+
+    #[test]
+    fn wrt_atom_is_the_composer() {
+        // A `data` atom: version 0 + flags 1 (UTF-8), locale 0, then the text.
+        let mut data = vec![0, 0, 0, 1, 0, 0, 0, 0];
+        data.extend_from_slice(b"J. S. Bach");
+
+        let ilst = atom(b"ilst", &atom(b"\xa9wrt", &atom(b"data", &data)));
+
+        let len = ilst.len() as u64;
+        let mss = MediaSourceStream::new(Box::new(Cursor::new(ilst)), Default::default());
+        let mut it = AtomIterator::new(mss, Some(len));
+
+        assert!(it.next_header().ok().flatten().is_some(), "ilst header should be read");
+        let ilst = match it.read_atom::<IlstAtom>() {
+            Ok(ilst) => ilst,
+            Err(_) => panic!("ilst should parse"),
+        };
+
+        let composer = ilst.metadata.media.tags.iter().find_map(|tag| match tag.std.as_ref() {
+            Some(StandardTag::Composer(name)) => Some(name.to_string()),
+            _ => None,
+        });
+
+        assert_eq!(composer.as_deref(), Some("J. S. Bach"));
     }
 }

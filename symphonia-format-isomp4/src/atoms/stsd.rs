@@ -762,7 +762,6 @@ impl Atom for PaspAtom {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
@@ -773,8 +772,8 @@ mod tests {
     use symphonia_core::io::{MediaSourceStream, MediaSourceStreamOptions};
 
     use super::StsdAtom;
-    use crate::atoms::AtomIterator;
     use crate::IsoMp4Reader;
+    use crate::atoms::AtomIterator;
 
     /// Build a minimal `stsd` atom declaring `entry_count` sample entries: a first `mp4a` audio
     /// entry (44.1 kHz, stereo) followed by a throwaway `jpeg` entry that must be skipped.
@@ -978,5 +977,185 @@ mod tests {
         // A PCM atom type with a fixed codec mapping remains valid at version 0.
         let result = probe(mp4_with_audio_sample_entry(b"sowt", 0));
         assert!(result.is_ok(), "probe failed: {:?}", result.err());
+    }
+
+    /// Build an `stsd` atom with one audio sample entry of type `entry_type` and `version`,
+    /// declaring `rate` (16.16 fixed-point, as truncated by writers) and `channels`, followed by
+    /// the given extra bytes (version 1 fields and/or sub-atoms).
+    fn stsd_audio_entry(
+        entry_type: &[u8; 4],
+        version: u16,
+        channels: u16,
+        rate: u32,
+        extra: &[u8],
+    ) -> Vec<u8> {
+        let mut entry = Vec::new();
+        entry.extend_from_slice(&[0; 6]); // Reserved.
+        entry.extend_from_slice(&1u16.to_be_bytes()); // Data reference index.
+        entry.extend_from_slice(&version.to_be_bytes());
+        entry.extend_from_slice(&[0; 6]); // Revision level + vendor.
+        entry.extend_from_slice(&channels.to_be_bytes());
+        entry.extend_from_slice(&16u16.to_be_bytes()); // Sample size.
+        entry.extend_from_slice(&[0; 4]); // Compression id + packet size.
+        entry.extend_from_slice(&rate.to_be_bytes()); // Sample rate (16.16).
+        entry.extend_from_slice(extra);
+
+        let mut stsd_body = vec![0; 4]; // Version + flags.
+        stsd_body.extend_from_slice(&1u32.to_be_bytes()); // Entry count.
+        stsd_body.extend_from_slice(&atom(entry_type, &entry));
+        atom(b"stsd", &stsd_body)
+    }
+
+    /// Parse an `stsd` atom and return the audio codec parameters of its first entry.
+    fn audio_params(stsd: Vec<u8>) -> symphonia_core::codecs::audio::AudioCodecParameters {
+        let len = stsd.len() as u64;
+        let mss = MediaSourceStream::new(Box::new(Cursor::new(stsd)), Default::default());
+        let mut it = AtomIterator::new(mss, Some(len));
+
+        assert!(it.next_header().ok().flatten().is_some(), "stsd header should be read");
+
+        let stsd = match it.read_atom::<StsdAtom>() {
+            Ok(stsd) => stsd,
+            Err(_) => panic!("stsd should parse"),
+        };
+
+        match stsd.make_codec_params() {
+            Some(CodecParameters::Audio(params)) => params,
+            _ => panic!("expected audio codec parameters"),
+        }
+    }
+
+    /// Build an `esds` atom for AAC (object type 0x40) with the given audio specific config.
+    fn esds_aac(asc: &[u8]) -> Vec<u8> {
+        // Object type, stream type, buffer size (3), max bitrate (4), average bitrate (4).
+        let mut dec_config = vec![0x40, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        dec_config.extend_from_slice(&[0x05, asc.len() as u8]);
+        dec_config.extend_from_slice(asc);
+
+        let mut es = vec![0, 1, 0]; // ES id + flags.
+        es.extend_from_slice(&[0x04, dec_config.len() as u8]);
+        es.extend_from_slice(&dec_config);
+        es.extend_from_slice(&[0x06, 0x01, 0x02]); // SL config (MP4).
+
+        let mut body = vec![0; 4]; // Version + flags.
+        body.extend_from_slice(&[0x03, es.len() as u8]);
+        body.extend_from_slice(&es);
+        atom(b"esds", &body)
+    }
+
+    #[test]
+    fn aac_sample_rate_above_65535_comes_from_audio_specific_config() {
+        // AAC-LC, 96 kHz, stereo. The 16.16 sample rate in the sample entry is truncated.
+        let truncated = (96_000u32 & 0xffff) << 16;
+        let stsd = stsd_audio_entry(b"mp4a", 0, 2, truncated, &esds_aac(&[0x10, 0x10]));
+
+        let params = audio_params(stsd);
+        assert_eq!(params.sample_rate, Some(96_000));
+    }
+
+    #[test]
+    fn he_aac_params_describe_decoded_output() {
+        use symphonia_core::audio::layouts;
+
+        // HE-AAC v1: 22.05 kHz stereo core, explicit backwards compatible SBR at 44.1 kHz.
+        let stsd = stsd_audio_entry(
+            b"mp4a",
+            0,
+            2,
+            22_050 << 16,
+            &esds_aac(&[0x13, 0x90, 0x56, 0xe5, 0xa0]),
+        );
+        let params = audio_params(stsd);
+        assert_eq!(params.sample_rate, Some(44_100));
+        assert_eq!(params.channels, Some(layouts::CHANNEL_LAYOUT_STEREO));
+
+        // HE-AAC v2: 22.05 kHz mono core, explicit SBR and PS signalling, stereo output.
+        let stsd = stsd_audio_entry(
+            b"mp4a",
+            0,
+            2,
+            22_050 << 16,
+            &esds_aac(&[0x13, 0x88, 0x56, 0xe5, 0xa5, 0x48, 0x80]),
+        );
+        let params = audio_params(stsd);
+        assert_eq!(params.sample_rate, Some(44_100));
+        assert_eq!(params.channels, Some(layouts::CHANNEL_LAYOUT_STEREO));
+    }
+
+    #[test]
+    fn quicktime_alac_cookie_in_wave_atom() {
+        use symphonia_core::audio::layouts;
+        use symphonia_core::codecs::audio::well_known::CODEC_ID_ALAC;
+
+        // The ALAC magic cookie.
+        let mut cookie = vec![0; 4]; // Version + flags.
+        cookie.extend_from_slice(&4096u32.to_be_bytes()); // Frame length.
+        cookie.extend_from_slice(&[0, 16, 40, 10, 14, 2]); // Compat version, depth, pb, mb, kb, ch.
+        cookie.extend_from_slice(&255u16.to_be_bytes()); // Max run.
+        cookie.extend_from_slice(&[0; 8]); // Max frame bytes + average bit rate.
+        cookie.extend_from_slice(&44_100u32.to_be_bytes()); // Sample rate.
+
+        // The QuickTime version 1 sample entry stores it in a `wave` atom.
+        let mut wave = atom(b"frma", b"alac");
+        wave.extend_from_slice(&atom(b"alac", &cookie));
+        wave.extend_from_slice(&atom(b"\0\0\0\0", &[]));
+
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&[0; 16]); // Version 1 sample entry fields.
+        extra.extend_from_slice(&atom(b"wave", &wave));
+
+        let params = audio_params(stsd_audio_entry(b"alac", 1, 2, 44_100 << 16, &extra));
+        assert_eq!(params.codec, CODEC_ID_ALAC);
+        assert_eq!(params.sample_rate, Some(44_100));
+        assert_eq!(params.channels, Some(layouts::CHANNEL_LAYOUT_STEREO));
+        assert!(params.extra_data.is_some());
+    }
+
+    #[test]
+    fn opus_dops_is_converted_to_opus_head() {
+        use symphonia_core::codecs::audio::well_known::CODEC_ID_OPUS;
+
+        // dOps: version 0, 2 channels, big-endian pre-skip (312), input rate (44100), and
+        // output gain (-256), mapping family 0.
+        let mut dops = vec![0, 2];
+        dops.extend_from_slice(&312u16.to_be_bytes());
+        dops.extend_from_slice(&44_100u32.to_be_bytes());
+        dops.extend_from_slice(&(-256i16).to_be_bytes());
+        dops.push(0);
+
+        let params =
+            audio_params(stsd_audio_entry(b"Opus", 0, 2, 48_000 << 16, &atom(b"dOps", &dops)));
+
+        assert_eq!(params.codec, CODEC_ID_OPUS);
+        assert_eq!(params.sample_rate, Some(48_000));
+
+        // The extra data is a (little-endian, version 1) OpusHead.
+        let mut head = b"OpusHead".to_vec();
+        head.push(1);
+        head.push(2);
+        head.extend_from_slice(&312u16.to_le_bytes());
+        head.extend_from_slice(&44_100u32.to_le_bytes());
+        head.extend_from_slice(&(-256i16).to_le_bytes());
+        head.push(0);
+        assert_eq!(params.extra_data.as_deref(), Some(head.as_slice()));
+    }
+
+    #[test]
+    fn opus_dops_with_channel_mapping_table() {
+        // 6 channels, family 1: stream count, coupled count, then a table with 6 entries.
+        let mut dops = vec![0, 6];
+        dops.extend_from_slice(&312u16.to_be_bytes());
+        dops.extend_from_slice(&48_000u32.to_be_bytes());
+        dops.extend_from_slice(&0i16.to_be_bytes());
+        dops.push(1);
+        dops.extend_from_slice(&[4, 2, 0, 4, 1, 2, 3, 5]);
+
+        let params =
+            audio_params(stsd_audio_entry(b"Opus", 0, 6, 48_000 << 16, &atom(b"dOps", &dops)));
+
+        let extra_data = params.extra_data.expect("opus extra data");
+        assert_eq!(&extra_data[..9], b"OpusHead\x01");
+        assert_eq!(&extra_data[19..], &[4, 2, 0, 4, 1, 2, 3, 5]);
+        assert_eq!(params.channels.map(|c| c.count()), Some(6));
     }
 }

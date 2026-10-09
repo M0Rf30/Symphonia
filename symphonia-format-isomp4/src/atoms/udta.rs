@@ -7,7 +7,9 @@
 
 use symphonia_core::meta::MetadataRevision;
 
-use crate::atoms::{Atom, AtomHeader, AtomIterator, AtomType, GaplessInfo, MetaAtom, ReadAtom, Result};
+use crate::atoms::{
+    Atom, AtomHeader, AtomIterator, AtomType, ChplAtom, GaplessInfo, MetaAtom, ReadAtom, Result,
+};
 
 /// User data atom.
 #[allow(dead_code)]
@@ -15,6 +17,8 @@ use crate::atoms::{Atom, AtomHeader, AtomIterator, AtomType, GaplessInfo, MetaAt
 pub struct UdtaAtom {
     /// Metadata atom.
     pub meta: Option<MetaAtom>,
+    /// Nero chapter list atom.
+    pub chpl: Option<ChplAtom>,
 }
 
 impl UdtaAtom {
@@ -33,17 +37,21 @@ impl Atom for UdtaAtom {
     #[allow(clippy::single_match)]
     fn read<R: ReadAtom>(it: &mut AtomIterator<R>, _header: &AtomHeader) -> Result<Self> {
         let mut meta = None;
+        let mut chpl = None;
 
         while let Some(header) = it.next_header()? {
             match header.atom_type {
                 AtomType::Meta => {
                     meta = Some(it.read_atom::<MetaAtom>()?);
                 }
+                AtomType::ChapterList => {
+                    chpl = Some(it.read_atom::<ChplAtom>()?);
+                }
                 // TODO: Support older QuickTime-style user data lists. Need sample files.
                 _ => (),
             }
         }
 
-        Ok(UdtaAtom { meta })
+        Ok(UdtaAtom { meta, chpl })
     }
 }

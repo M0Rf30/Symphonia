@@ -21,6 +21,7 @@ use symphonia_core::meta::{Metadata, MetadataLog};
 
 use symphonia_common::mpeg::audio::*;
 
+use std::collections::VecDeque;
 use std::io::{Seek, SeekFrom};
 
 use log::{debug, info};
@@ -248,6 +249,21 @@ impl AdtsHeader {
     }
 }
 
+impl AdtsReader<'_> {
+    /// Returns true if the stream may use SBR, which ADTS can only signal implicitly.
+    fn may_use_sbr(&self) -> bool {
+        /// The highest core sample rate of an SBR stream.
+        const MAX_SBR_CORE_RATE: u32 = 32_000;
+
+        match &self.tracks[0].codec_params {
+            Some(CodecParameters::Audio(audio)) => {
+                audio.sample_rate.is_some_and(|rate| rate <= MAX_SBR_CORE_RATE)
+            }
+            _ => false,
+        }
+    }
+}
+
 impl ProbeableFormat<'_> for AdtsReader<'_> {
     fn try_probe_new(
         mss: MediaSourceStream<'_>,
@@ -321,7 +337,7 @@ impl FormatReader for AdtsReader<'_> {
         &self.tracks
     }
 
-    fn seek(&mut self, _mode: SeekMode, to: SeekTo) -> Result<SeekedTo> {
+    fn seek(&mut self, mode: SeekMode, to: SeekTo) -> Result<SeekedTo> {
         // Get the timestamp of the desired audio frame.
         let required_ts = match to {
             // Frame timestamp given.
@@ -360,6 +376,17 @@ impl FormatReader for AdtsReader<'_> {
             self.next_packet_ts = Timestamp::from(0);
         }
 
+        // For an accurate seek, the decoder must be fed some frames before the target for it to
+        // converge (MDCT overlap, SBR state). Remember the position of the most recent frames.
+        let sbr = self.may_use_sbr();
+        let preroll = match (mode == SeekMode::Accurate, sbr) {
+            (false, _) => 0,
+            (true, false) => 1,
+            // The maximum distance between the target and the start frame.
+            (true, true) => AAC_SEEK_MAX_PREROLL_FRAMES as usize,
+        };
+        let mut recent: VecDeque<(u64, Timestamp)> = VecDeque::with_capacity(preroll + 1);
+
         // Parse frames from the stream until the frame containing the desired timestamp is
         // reached.
         loop {
@@ -387,11 +414,38 @@ impl FormatReader for AdtsReader<'_> {
                 }
             };
 
+            if preroll > 0 {
+                if recent.len() == preroll {
+                    recent.pop_front();
+                }
+                recent.push_back((
+                    self.reader.pos().saturating_sub(u64::from(header.header_len())),
+                    self.next_packet_ts,
+                ));
+            }
+
             // Ignore the frame body.
             self.reader.ignore_bytes(u64::from(header.payload_len()))?;
 
             // Increment the timestamp for the next packet.
             self.next_packet_ts = next_packet_ts;
+        }
+
+        // Rewind to the frame to start decoding from, if possible and not already there.
+        if preroll > 0 && self.reader.is_seekable() {
+            let target = u64::try_from(self.next_packet_ts.get()).unwrap_or(0)
+                / SAMPLES_PER_AAC_PACKET.get();
+            let start = aac_seek_start_frame(target, sbr);
+
+            let start_frame = recent.iter().find(|(_, ts)| {
+                u64::try_from(ts.get()).ok() == start.checked_mul(SAMPLES_PER_AAC_PACKET.get())
+            });
+
+            if let Some(&(pos, ts)) = start_frame {
+                if self.reader.seek(SeekFrom::Start(pos)).is_ok() {
+                    self.next_packet_ts = ts;
+                }
+            }
         }
 
         debug!(

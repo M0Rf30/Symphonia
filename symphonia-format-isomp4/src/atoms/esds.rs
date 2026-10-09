@@ -6,6 +6,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use symphonia_core::codecs::CodecId;
+use symphonia_core::codecs::audio::well_known::CODEC_ID_AAC;
 use symphonia_core::codecs::video::{VIDEO_EXTRA_DATA_ID_NULL, VideoExtraData};
 use symphonia_core::errors::Error;
 use symphonia_core::io::BufReader;
@@ -79,7 +80,28 @@ impl EsdsAtom {
             // Try to read the audio specific configuration and populate the audio sample entry.
             if let Ok(asc) = AudioSpecificConfig::read(&ds_config.extra_data) {
                 entry.profile = get_audio_codec_profile(&asc);
-                entry.channels = asc.channels;
+
+                if entry.codec_id == CODEC_ID_AAC {
+                    // The parameters of an AAC track describe the decoded output. The sample
+                    // rate in the sample entry is a 16.16 fixed-point number and cannot hold
+                    // rates above 65535 Hz, so prefer the rate in the audio specific config.
+                    // When SBR is signalled the output rate is the SBR rate (and parametric
+                    // stereo widens a mono core to stereo). An implicitly signalled SBR stream
+                    // is recognised by a sample entry rate that is twice the core rate.
+                    let stsd_rate = entry.sample_rate.round() as u32;
+
+                    if asc.sbr_present {
+                        entry.sample_rate = f64::from(asc.output_sample_rate());
+                    }
+                    else if stsd_rate != asc.sample_rate.saturating_mul(2) {
+                        entry.sample_rate = f64::from(asc.sample_rate);
+                    }
+
+                    entry.channels = asc.output_channels();
+                }
+                else {
+                    entry.channels = asc.channels;
+                }
             }
 
             entry.extra_data = Some(ds_config.extra_data);
