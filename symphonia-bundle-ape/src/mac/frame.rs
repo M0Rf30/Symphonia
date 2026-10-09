@@ -306,18 +306,26 @@ fn decode_frame_impl<P: Predictor>(
                 }
             }
             else {
-                for (i, (x, y)) in s0.iter_mut().zip(s1.iter_mut()).enumerate() {
+                // The entropy decoding of a pair of samples is the longest chain of dependent
+                // operations, so it runs one pair ahead of the reconstruction of the samples: the
+                // processor overlaps that with the reconstruction of the pair before it, which is
+                // placed first so that the mispredicted branches of the entropy decoding do not
+                // discard its work.
+                let decode_pair = |rc: &mut RangeCoder,
+                                   br: &mut ByteReader<'_>,
+                                   e0: &mut EntropyState,
+                                   e1: &mut EntropyState|
+                 -> ApeResult<(i64, i64)> {
                     // The second channel is coded first.
-                    let ny = match rc.decode_value(e1, &mut br) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            entropy_error = Some(e);
-                            n_ok = i;
-                            break;
-                        }
-                    };
-                    let nx = match rc.decode_value(e0, &mut br) {
-                        Ok(v) => v,
+                    let ny = rc.decode_value(e1, br)?;
+                    let nx = rc.decode_value(e0, br)?;
+                    Ok((nx, ny))
+                };
+
+                let mut next = decode_pair(&mut rc, &mut br, e0, e1);
+                for (i, (x, y)) in s0.iter_mut().zip(s1.iter_mut()).enumerate() {
+                    let (nx, ny) = match next {
+                        Ok(pair) => pair,
                         Err(e) => {
                             entropy_error = Some(e);
                             n_ok = i;
@@ -327,6 +335,9 @@ fn decode_frame_impl<P: Predictor>(
                     *y = p1.decompress_value(ny, last_x);
                     *x = p0.decompress_value(nx, *y);
                     last_x = *x;
+                    if i + 1 < n {
+                        next = decode_pair(&mut rc, &mut br, e0, e1);
+                    }
                 }
             }
 
@@ -342,14 +353,21 @@ fn decode_frame_impl<P: Predictor>(
                 s0.fill(0);
             }
             else {
+                // As for stereo, the decoding of a sample runs ahead of the reconstruction of the
+                // sample before it.
+                let mut next = rc.decode_value(e0, &mut br);
                 for (i, x) in s0.iter_mut().enumerate() {
-                    match rc.decode_value(e0, &mut br) {
-                        Ok(v) => *x = p0.decompress_value(v, 0),
+                    let v = match next {
+                        Ok(v) => v,
                         Err(e) => {
                             entropy_error = Some(e);
                             n_ok = i;
                             break;
                         }
+                    };
+                    *x = p0.decompress_value(v, 0);
+                    if i + 1 < n {
+                        next = rc.decode_value(e0, &mut br);
                     }
                 }
             }

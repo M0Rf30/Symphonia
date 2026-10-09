@@ -293,11 +293,10 @@ impl RangeCoder {
             // Large pivot: split into two smaller range-coded values
             let pivot_value_bits: u32 = 32 - pivot_value.leading_zeros();
 
+            // The pivot is split in a part of at most 16 bits and a power of two, so that the
+            // lower portion only needs shifts.
             let shift = pivot_value_bits.saturating_sub(16);
-            let split_factor: u32 = 1u32 << shift;
-
-            let pivot_value_a: u32 = (pivot_value / split_factor).wrapping_add(1);
-            let pivot_value_b: u32 = split_factor;
+            let pivot_value_a: u32 = (pivot_value >> shift).wrapping_add(1);
 
             // Decode upper portion
             if !self.normalize(br) {
@@ -311,11 +310,11 @@ impl RangeCoder {
             if !self.normalize(br) {
                 return Ok(0); // end-of-life
             }
-            self.range /= pivot_value_b;
+            self.range >>= shift;
             let base_b = self.low / self.range;
             self.low %= self.range;
 
-            base = base_a.wrapping_mul(split_factor).wrapping_add(base_b);
+            base = base_a.wrapping_shl(shift).wrapping_add(base_b);
         }
         else {
             // Small pivot: single range-coded value
