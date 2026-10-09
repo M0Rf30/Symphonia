@@ -4,11 +4,10 @@
 
 //! Stateful APE frame decoder for external demuxer integration.
 //!
-//! A frame is decoded in blocks of [`CHUNK`] samples per channel, in three phases: the residuals
-//! of the block are range decoded, they are run through the neural network filter cascade of
-//! their channel, and finally the second prediction stage and the channel decorrelation
-//! reconstruct the PCM samples. This is possible because the entropy decoding does not depend on
-//! the predictors, and the neural network filters do not depend on the other channels.
+//! A frame is decoded in blocks of [`CHUNK`] samples per channel. The samples of a block are
+//! range decoded and reconstructed by the predictors one after the other (the entropy decoding is
+//! a long chain of dependent operations that the processor overlaps with the predictors of the
+//! samples before it), then the whole block is decorrelated and written out as PCM bytes.
 
 use crate::mac::crc::ape_crc;
 use crate::mac::error::{ApeError, ApeResult};
@@ -24,7 +23,7 @@ const SPECIAL_FRAME_LEFT_SILENCE: i32 = 1;
 const SPECIAL_FRAME_RIGHT_SILENCE: i32 = 2;
 const SPECIAL_FRAME_PSEUDO_STEREO: i32 = 4;
 
-/// The number of blocks (samples per channel) that are decoded phase by phase.
+/// The number of blocks (samples per channel) that are decoded before they are formatted.
 const CHUNK: usize = 4096;
 
 /// The largest PCM size of a frame that will be decoded.
