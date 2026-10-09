@@ -11,7 +11,7 @@ use symphonia_core::checksum::Crc16AnsiLe;
 use symphonia_core::codecs::CodecParameters;
 use symphonia_core::codecs::audio::AudioCodecParameters;
 use symphonia_core::codecs::audio::well_known::{CODEC_ID_MP1, CODEC_ID_MP2, CODEC_ID_MP3};
-use symphonia_core::errors::{Error, Result, SeekErrorKind, seek_error};
+use symphonia_core::errors::{Error, Result, SeekErrorKind, seek_error, unsupported_error};
 use symphonia_core::formats::prelude::*;
 use symphonia_core::formats::probe::{ProbeFormatData, ProbeableFormat, Score, Scoreable};
 use symphonia_core::formats::well_known::{FORMAT_ID_MP1, FORMAT_ID_MP2, FORMAT_ID_MP3};
@@ -155,8 +155,38 @@ struct ScannedFrame {
     main_data_len: usize,
 }
 
+/// Returns true if the buffered stream begins with an MPEG program stream (MPEG-PS) pack header
+/// (`00 00 01 BA`). MPEG audio elementary stream frames are found inside the PES packets of such a
+/// stream, but the stream is not an MPEG audio stream: the audio data is interleaved with PES
+/// headers, and so decoding it as one would produce garbage.
+///
+/// The start of the stream must still be buffered, otherwise this returns false. The position of
+/// the stream is restored.
+fn is_mpeg_ps_stream(reader: &mut MediaSourceStream<'_>) -> bool {
+    let pos = reader.pos();
+
+    if reader.seek_buffered(0) != 0 {
+        reader.seek_buffered(pos);
+        return false;
+    }
+
+    let mut buf = [0u8; 5];
+    let is_ps = reader.read_buf_exact(&mut buf).is_ok()
+        && buf[..4] == [0x00, 0x00, 0x01, 0xba]
+        // MPEG-2 PS: '01' marker bits. MPEG-1 PS: '0010' marker bits.
+        && (buf[4] & 0xc0 == 0x40 || buf[4] & 0xf0 == 0x20);
+
+    reader.seek_buffered(pos);
+
+    is_ps
+}
+
 impl Scoreable for MpaReader<'_> {
     fn score(mut src: ScopedStream<&mut MediaSourceStream<'_>>) -> Result<Score> {
+        if is_mpeg_ps_stream(src.inner_mut()) {
+            return Ok(Score::Unsupported);
+        }
+
         // Read the sync word for the first (assumed) MPEG frame and try to parse it into a header.
         let sync1 = header::read_frame_header_word_no_sync(&mut src)?;
 
@@ -567,6 +597,11 @@ impl FormatReader for MpaReader<'_> {
 
 impl<'s> MpaReader<'s> {
     pub fn try_new(mut mss: MediaSourceStream<'s>, opts: FormatOptions) -> Result<Self> {
+        // An MPEG program stream contains MPEG audio frames, but it is not an MPEG audio stream.
+        if is_mpeg_ps_stream(&mut mss) {
+            return unsupported_error("mp3: mpeg program streams are not supported");
+        }
+
         // Free-format streams have no bit-rate in their frame headers, so the length of their frames
         // must be found first.
         let free_len = detect_free_format_len(&mut mss);
@@ -1165,15 +1200,18 @@ fn estimate_num_mpeg_frames(
 
     let mut avg_frame_len = total_frame_len as f64 / total_frames as f64;
 
-    // For a constant bit-rate stream, the average frame length is the length without padding or
-    // 1 slot more, depending on how often padding is used. The sampled frames may over-represent
-    // padding.
+    // For a constant bit-rate stream, the average frame length is exactly the length implied by
+    // the bit-rate (the length without padding plus the fraction of a slot, depending on how often
+    // padding is used). The sampled frames may over- or under-represent padding.
     if is_constant_bitrate && free_len.is_none() {
-        let slot_size = if first_header.layer == MpegLayer::Layer1 { 4.0 } else { 1.0 };
-        let base_len = (first_header.frame_size + MPEG_HEADER_LEN) as f64
-            - if first_header.has_padding { slot_size } else { 0.0 };
+        avg_frame_len = f64::from(first_header.num_frames()) / 8.0
+            * f64::from(first_header.bitrate)
+            / f64::from(first_header.sample_rate);
 
-        avg_frame_len = avg_frame_len.clamp(base_len, base_len + slot_size);
+        // A stream of whole frames has an integral number of frames, but the division by the
+        // average length is inexact, and truncating it would drop the last frame. A fraction of a
+        // frame this close to the next frame boundary is rounding error, not a partial frame.
+        return Some((total_len as f64 / avg_frame_len + 0.05) as u64);
     }
 
     Some((total_len as f64 / avg_frame_len) as u64)
@@ -1617,6 +1655,45 @@ mod tests {
         };
 
         MpaReader::try_new(mss, opts).unwrap()
+    }
+
+    #[test]
+    fn verify_cbr_duration_estimate_counts_the_last_frame() {
+        // Streams without a Xing/Info tag. The estimate must be the number of frames, not 1 less.
+        for n in [10usize, 100, 231, 232, 500] {
+            let data = build_stream(&plain_frames(n), 9, FRAME_LEN);
+            let reader = open_stream(data, true, FormatOptions::default());
+
+            assert_eq!(reader.tracks[0].num_frames, Some(n as u64 * 1152), "{n} frames");
+        }
+    }
+
+    #[test]
+    fn verify_mpeg_ps_is_rejected() {
+        // An MPEG-2 program stream pack header, then a PES packet header for the audio stream
+        // directly before the MPEG audio frames.
+        let mut ps = vec![0x00, 0x00, 0x01, 0xba, 0x44, 0x00, 0x04, 0x00, 0x04, 0x01, 0x01, 0x89];
+        ps.extend_from_slice(&[0xc3, 0xf8, 0x00, 0x00, 0x01, 0xc0, 0x0f, 0xff, 0x80, 0x00, 0x00]);
+        let hdr_len = ps.len() as u64;
+        ps.extend_from_slice(&build_stream(&plain_frames(8), 9, FRAME_LEN));
+
+        // Position the stream on the first frame, as the probe would.
+        let new_stream = |data: Vec<u8>| {
+            let mut mss = MediaSourceStream::new(Box::new(Cursor::new(data)), Default::default());
+            mss.ignore_bytes(hdr_len).unwrap();
+            mss
+        };
+
+        let mut mss = new_stream(ps.clone());
+        let score = MpaReader::score(ScopedStream::new(&mut mss, 4096)).unwrap();
+        assert!(matches!(score, Score::Unsupported));
+        assert!(MpaReader::try_new(new_stream(ps), FormatOptions::default()).is_err());
+
+        // The same frames without the pack header are supported.
+        let data = build_stream(&plain_frames(8), 9, FRAME_LEN);
+        let mut mss = MediaSourceStream::new(Box::new(Cursor::new(data)), Default::default());
+        let score = MpaReader::score(ScopedStream::new(&mut mss, 4096)).unwrap();
+        assert!(matches!(score, Score::Supported(_)));
     }
 
     fn frame_idx(packet: &Packet) -> u32 {

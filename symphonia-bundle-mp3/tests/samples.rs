@@ -579,3 +579,28 @@ fn verify_seek_all_samples() {
     eprintln!("checked {n_files} files");
     assert!(failures.is_empty(), "failed: {failures:#?}");
 }
+
+/// The duration estimate of a CBR stream without a Xing/Info tag includes the last frame.
+#[test]
+fn cbr_duration_estimate_is_not_a_frame_short() {
+    let Some(path) = sample_path("tags/id3v1_only.mp3")
+    else {
+        return;
+    };
+
+    let (reader, _) = open(&path, FormatOptions::default());
+    assert_eq!(reader.tracks()[0].num_frames, Some(231 * 1152));
+}
+
+/// An MPEG program stream is rejected, not decoded as raw MPEG audio.
+#[test]
+fn mpeg_program_stream_is_rejected() {
+    let Some(path) = sample_path("unsupported/mp2_in_mpegps.mpg")
+    else {
+        return;
+    };
+
+    let file = File::open(path).unwrap();
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    assert!(MpaReader::try_new(mss, FormatOptions::default()).is_err());
+}
