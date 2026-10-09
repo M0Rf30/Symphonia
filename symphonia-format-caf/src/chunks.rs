@@ -193,6 +193,8 @@ impl AudioDescription {
                 }
                 else {
                     match (self.bits_per_channel, *little_endian) {
+                        // Endianness is meaningless for 8-bit samples, which are signed in CAF.
+                        (8, _) => CODEC_ID_PCM_S8,
                         (16, true) => CODEC_ID_PCM_S16LE,
                         (16, false) => CODEC_ID_PCM_S16BE,
                         (24, true) => CODEC_ID_PCM_S24LE,
@@ -338,9 +340,19 @@ impl ChannelLayout {
         let channel_layout = reader.read_be_u32()?;
         let channel_bitmap = reader.read_be_u32()?;
         let channel_description_count = reader.read_be_u32()?;
+
+        // Each channel description is 20 bytes. The count must be consistent with the chunk size.
+        if u64::from(channel_description_count) * 20 > (chunk_size as u64) - 12 {
+            return decode_error("caf: channel description count exceeds chunk size");
+        }
+
         let channel_descriptions: Vec<ChannelDescription> = (0..channel_description_count)
             .map(|_| ChannelDescription::read(reader))
             .collect::<Result<_>>()?;
+
+        // Skip any trailing data in the chunk.
+        let consumed = 12 + 20 * u64::from(channel_description_count);
+        reader.ignore_bytes((chunk_size as u64) - consumed)?;
 
         Ok(Self { channel_layout, channel_bitmap, channel_descriptions })
     }
@@ -496,7 +508,10 @@ impl PacketTable {
 
         let mut current_frame =
             Timestamp::from(-i64::from(if priming_frames > 0 { priming_frames } else { 0 }));
-        let mut packet_offset = 0;
+        let mut packet_offset = 0u64;
+
+        // The packet sizes are untrusted, and may overflow the data offset.
+        const OFFSET_OVERFLOW: Error = Error::DecodeError("caf: packet table data size overflow");
 
         match (desc.bytes_per_packet, desc.frames_per_packet) {
             // Variable bytes per packet, variable number of frames
@@ -513,7 +528,7 @@ impl PacketTable {
                     current_frame = current_frame
                         .checked_add(frames)
                         .ok_or(Error::Unsupported("track too long"))?;
-                    packet_offset += size; // TODO: This could overflow...
+                    packet_offset = packet_offset.checked_add(size).ok_or(OFFSET_OVERFLOW)?;
                 }
             }
             // Variable bytes per packet, constant number of frames
@@ -530,7 +545,7 @@ impl PacketTable {
                     current_frame = current_frame
                         .checked_add(frames)
                         .ok_or(Error::Unsupported("track too long"))?;
-                    packet_offset += size;
+                    packet_offset = packet_offset.checked_add(size).ok_or(OFFSET_OVERFLOW)?;
                 }
             }
             // Constant bytes per packet, variable number of frames
@@ -547,7 +562,7 @@ impl PacketTable {
                     current_frame = current_frame
                         .checked_add(frames)
                         .ok_or(Error::Unsupported("track too long"))?;
-                    packet_offset += size;
+                    packet_offset = packet_offset.checked_add(size).ok_or(OFFSET_OVERFLOW)?;
                 }
             }
             // Constant bit rate format
@@ -600,8 +615,15 @@ fn invalid_chunk_size_error<T>(chunk_type: &str, chunk_size: i64) -> Result<T> {
     decode_error("caf: invalid chunk size")
 }
 
+/// The maximum size of an `info` chunk that will be read into memory. Larger chunks are skipped.
+const MAX_INFO_CHUNK_SIZE: usize = 4 * 1024 * 1024;
+
 /// Reads the `info` chunk: a `UInt32` count of entries followed by that many key/value pairs of
 /// NUL-terminated UTF-8 strings. See Apple's CAF specification, "Information Chunk".
+///
+/// The entry count is not trusted. Entries are read until the chunk data is exhausted, or the
+/// stated count is reached. A malformed entry (e.g., a missing terminator) ends the list: the
+/// entries read up to that point are returned since tags are optional.
 fn read_info_chunk(
     reader: &mut MediaSourceStream<'_>,
     chunk_size: i64,
@@ -615,16 +637,36 @@ fn read_info_chunk(
         return invalid_chunk_size_error("Information", chunk_size as i64);
     }
 
+    if chunk_size > MAX_INFO_CHUNK_SIZE {
+        warn!("skipping excessively large information chunk ({chunk_size} bytes)");
+        reader.ignore_bytes(chunk_size as u64)?;
+        return Ok(Vec::new());
+    }
+
     let data = reader.read_boxed_slice_exact(chunk_size)?;
 
     let num_entries = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
 
+    // Every entry is at least two bytes (a key and a value terminator). Therefore, the number of
+    // entries that can be in the chunk is bounded by the chunk size, regardless of the stated count.
+    let max_entries = (data.len() - 4) / 2;
+
+    if num_entries as usize > max_entries {
+        warn!("information chunk entry count ({num_entries}) exceeds the chunk size");
+    }
+
     let mut pos = 4;
-    let mut entries = Vec::with_capacity(num_entries as usize);
+    let mut entries = Vec::with_capacity((num_entries as usize).min(max_entries));
 
     for _ in 0..num_entries {
-        let key = read_c_string(&data, &mut pos)?;
-        let value = read_c_string(&data, &mut pos)?;
+        let Ok(key) = read_c_string(&data, &mut pos)
+        else {
+            break;
+        };
+        let Ok(value) = read_c_string(&data, &mut pos)
+        else {
+            break;
+        };
         entries.push((key, value));
     }
 
@@ -703,5 +745,87 @@ mod tests {
         let mut source = MediaSourceStream::new(Box::new(cursor), Default::default());
 
         assert!(read_variable_length_integer(&mut source).is_err());
+    }
+
+    fn open_stream(data: Vec<u8>) -> MediaSourceStream<'static> {
+        MediaSourceStream::new(Box::new(Cursor::new(data)), Default::default())
+    }
+
+    #[test]
+    fn info_chunk_with_huge_entry_count_does_not_preallocate() {
+        // A chunk of 4 + 4 bytes that claims 0xFFFFFFFF entries. Preallocating the stated number of
+        // entries would exhaust memory (an allocation of 200+ GB).
+        let mut data = Vec::new();
+        data.extend_from_slice(&0xffff_ffffu32.to_be_bytes());
+        data.extend_from_slice(b"k\0v\0");
+
+        let mut stream = open_stream(data);
+        let entries = read_info_chunk(&mut stream, 8).unwrap();
+
+        // The entries that are actually present are read.
+        assert_eq!(entries, vec![("k".to_string(), "v".to_string())]);
+        // The whole chunk was consumed.
+        assert_eq!(stream.pos(), 8);
+    }
+
+    #[test]
+    fn info_chunk_stops_at_malformed_entry() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&3u32.to_be_bytes());
+        data.extend_from_slice(b"a\0b\0c\0d\0e");
+
+        let mut stream = open_stream(data);
+        let entries = read_info_chunk(&mut stream, 13).unwrap();
+
+        assert_eq!(
+            entries,
+            vec![("a".to_string(), "b".to_string()), ("c".to_string(), "d".to_string())]
+        );
+    }
+
+    #[test]
+    fn info_chunk_too_small_is_an_error() {
+        let mut stream = open_stream(vec![0; 3]);
+        assert!(read_info_chunk(&mut stream, 3).is_err());
+    }
+
+    #[test]
+    fn channel_layout_description_count_is_bounded_by_chunk_size() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&0u32.to_be_bytes()); // Layout tag: use channel descriptions.
+        data.extend_from_slice(&0u32.to_be_bytes()); // Bitmap.
+        data.extend_from_slice(&0x7fff_ffffu32.to_be_bytes()); // Number of descriptions.
+
+        let mut stream = open_stream(data);
+        assert!(ChannelLayout::read(&mut stream, 12).is_err());
+    }
+
+    #[test]
+    fn packet_table_data_offset_overflow_is_an_error() {
+        let desc = AudioDescription {
+            sample_rate: 44100.0,
+            format_id: AudioDescriptionFormatId::MPEG4AAC,
+            bytes_per_packet: 0,
+            frames_per_packet: 1024,
+            channels_per_frame: 2,
+            bits_per_channel: 0,
+        };
+
+        // Three packets of size 2^63 - 1 (the largest variable-length integer is 9 bytes: 8 bytes
+        // of 0xff, then 0x7f). The sum of the sizes overflows 64 bits.
+        let huge = [0xffu8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f];
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&3i64.to_be_bytes()); // Packets.
+        data.extend_from_slice(&3072i64.to_be_bytes()); // Valid frames.
+        data.extend_from_slice(&0i32.to_be_bytes()); // Priming frames.
+        data.extend_from_slice(&0i32.to_be_bytes()); // Remainder frames.
+        data.extend_from_slice(&huge);
+        data.extend_from_slice(&huge);
+        data.extend_from_slice(&huge);
+
+        let len = data.len() as i64;
+        let mut stream = open_stream(data);
+        assert!(PacketTable::read(&mut stream, &Some(desc), len).is_err());
     }
 }
