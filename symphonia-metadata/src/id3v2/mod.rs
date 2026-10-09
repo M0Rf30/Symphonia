@@ -389,6 +389,18 @@ pub(crate) fn read_id3v2<B: ReadBytes>(
     // Ignore any remaining data in the tag.
     scoped.ignore()?;
 
+    // If the header indicates the tag has a footer, it immediately follows the tag. The footer is
+    // a copy of the header, so it carries no additional information. Skip it so that the reader is
+    // positioned at the end of the tag. The tag has already been read at this point, so a
+    // truncated footer is not an error.
+    if header.has_footer {
+        let reader = scoped.into_inner();
+
+        if let Err(err) = reader.ignore_bytes(ID3V2_HEADER_LEN) {
+            debug!("failed to skip id3v2 footer: {err}");
+        }
+    }
+
     Ok(())
 }
 
@@ -1164,5 +1176,36 @@ mod tests {
         let mut stream = vec![0xffu8; 100];
         stream.extend_from_slice(&[b'3', b'D', b'I', 4, 0, 0x10, 0, 0, 0, 0x10]);
         assert!(read_trailing(stream).is_none());
+    }
+
+    /// The footer of a prepended tag is consumed, leaving the stream at the end of the tag.
+    #[test]
+    fn verify_footer_is_skipped() {
+        for major in [4u8, 3] {
+            let frames = if major == 4 {
+                frame_v24(b"TIT2", 0, &utf8_text(&["Title"]))
+            }
+            else {
+                frame_v23(b"TIT2", 0, &utf8_text(&["Title"]))
+            };
+
+            // A footer only exists in ID3v2.4 tags.
+            let tag = tag_bytes(major, &frames, major == 4);
+            let tag_len = tag.len() as u64;
+
+            let mut stream = tag;
+            stream.extend_from_slice(b"AUDIO");
+
+            let mss = MediaSourceStream::new(
+                Box::new(Cursor::new(stream)),
+                MediaSourceStreamOptions::default(),
+            );
+            let mut reader = Id3v2Reader::try_new(mss, MetadataOptions::default()).unwrap();
+            assert_eq!(titles(&reader.read_all().unwrap().revision.media.tags), ["Title"]);
+
+            let mut mss = Box::new(reader).into_inner();
+            assert_eq!(mss.pos(), tag_len);
+            assert_eq!(mss.read_quad_bytes().unwrap(), *b"AUDI");
+        }
     }
 }

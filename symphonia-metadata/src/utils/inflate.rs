@@ -272,9 +272,12 @@ fn read_dynamic_tables(reader: &mut BitReader<'_>) -> Option<(Huffman, Huffman)>
 
 /// Decompress a raw DEFLATE stream (RFC 1951).
 ///
+/// On success, returns the decompressed data and the number of bytes of `data` that made up the
+/// DEFLATE stream.
+///
 /// Returns `None` if the stream is malformed, truncated, or would decompress to more than
 /// `max_out` bytes.
-pub fn inflate(data: &[u8], max_out: usize) -> Option<Vec<u8>> {
+pub fn inflate(data: &[u8], max_out: usize) -> Option<(Vec<u8>, usize)> {
     let mut reader = BitReader::new(data);
     let mut out = Vec::new();
 
@@ -325,15 +328,39 @@ pub fn inflate(data: &[u8], max_out: usize) -> Option<Vec<u8>> {
         }
 
         if is_final {
-            return Some(out);
+            // The reader never buffers more than the unused bits of the last byte it consumed, so
+            // the stream ends at the reader's byte position.
+            return Some((out, reader.pos));
         }
     }
 }
 
+/// Compute the Adler-32 checksum (RFC 1950) of a buffer.
+fn adler32(data: &[u8]) -> u32 {
+    const MOD: u32 = 65521;
+    // The largest number of bytes that can be summed before the sums may overflow a `u32`.
+    const CHUNK: usize = 5552;
+
+    let (mut a, mut b) = (1u32, 0u32);
+
+    for chunk in data.chunks(CHUNK) {
+        for &byte in chunk {
+            a += u32::from(byte);
+            b += a;
+        }
+
+        a %= MOD;
+        b %= MOD;
+    }
+
+    (b << 16) | a
+}
+
 /// Decompress a zlib stream (RFC 1950).
 ///
-/// Returns `None` if the stream is malformed, truncated, requires a preset dictionary, or would
-/// decompress to more than `max_out` bytes. The Adler-32 trailer is not verified.
+/// Returns `None` if the stream is malformed, truncated, requires a preset dictionary, would
+/// decompress to more than `max_out` bytes, or its Adler-32 checksum does not match. Any data
+/// following the checksum is ignored.
 pub fn zlib_decompress(data: &[u8], max_out: usize) -> Option<Vec<u8>> {
     let (cmf, flg) = match data {
         [cmf, flg, ..] => (*cmf, *flg),
@@ -350,7 +377,17 @@ pub fn zlib_decompress(data: &[u8], max_out: usize) -> Option<Vec<u8>> {
         return None;
     }
 
-    inflate(&data[2..], max_out)
+    let (out, len) = inflate(&data[2..], max_out)?;
+
+    // The big-endian Adler-32 checksum of the decompressed data follows the DEFLATE stream.
+    let trailer = data.get(2 + len..2 + len + 4)?;
+    let expected = u32::from_be_bytes([trailer[0], trailer[1], trailer[2], trailer[3]]);
+
+    if adler32(&out) != expected {
+        return None;
+    }
+
+    Some(out)
 }
 
 #[cfg(test)]
@@ -402,6 +439,31 @@ mod tests {
         assert!(zlib_decompress(&FIXED, 22).is_none());
         assert!(zlib_decompress(&FIXED, 23).is_some());
         assert!(zlib_decompress(&STORED, 2).is_none());
+    }
+
+    #[test]
+    fn verify_adler32() {
+        assert_eq!(adler32(b""), 1);
+        assert_eq!(adler32(b"Wikipedia"), 0x11e6_0398);
+        // Large enough to require multiple modulo reductions.
+        assert_eq!(adler32(&[0xffu8; 100_000]), 0x149a_302c);
+    }
+
+    #[test]
+    fn verify_checksum_is_enforced() {
+        // A corrupt checksum is rejected.
+        let mut bad = FIXED;
+        bad[15] ^= 1;
+        assert!(zlib_decompress(&bad, 64).is_none());
+
+        // A missing or truncated checksum is rejected.
+        assert!(zlib_decompress(&FIXED[..12], 64).is_none());
+        assert!(zlib_decompress(&FIXED[..15], 64).is_none());
+
+        // Data following the checksum is ignored.
+        let mut extra = FIXED.to_vec();
+        extra.extend_from_slice(&[1, 2, 3]);
+        assert!(zlib_decompress(&extra, 64).is_some());
     }
 
     #[test]

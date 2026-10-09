@@ -8,22 +8,38 @@
 //! Tests against externally generated sample files.
 //!
 //! The samples are located using the `SYMPHONIA_TAG_SAMPLES` environment variable, which should
-//! point to a directory containing the sample files. Each test is skipped if the sample is
-//! absent.
+//! point to a directory containing the sample files. A test is skipped (and reports that it was
+//! skipped) if its sample is absent, unless the `SYMPHONIA_TAG_SAMPLES_REQUIRED` environment
+//! variable is set, in which case it fails.
 
 #![cfg(feature = "id3v2")]
 
 use std::fs::File;
 use std::path::PathBuf;
 
-use symphonia_core::io::MediaSourceStream;
+use symphonia_core::io::{MediaSourceStream, ReadBytes};
 use symphonia_core::meta::{MetadataOptions, MetadataReader, StandardTag, Tag};
 use symphonia_metadata::id3v2::{Id3v2Reader, read_trailing_id3v2};
 
 fn open(name: &str) -> Option<(MediaSourceStream<'static>, u64)> {
-    let dir = PathBuf::from(std::env::var_os("SYMPHONIA_TAG_SAMPLES")?);
-    let file = File::open(dir.join(name)).ok()?;
-    let len = file.metadata().ok()?.len();
+    let sample = std::env::var_os("SYMPHONIA_TAG_SAMPLES")
+        .map(PathBuf::from)
+        .map(|dir| dir.join(name))
+        .and_then(|path| File::open(path).ok());
+
+    let Some(file) = sample
+    else {
+        assert!(
+            std::env::var_os("SYMPHONIA_TAG_SAMPLES_REQUIRED").is_none(),
+            "required sample '{name}' is missing"
+        );
+        eprintln!("sample-test: SKIPPED {name}");
+        return None;
+    };
+
+    eprintln!("sample-test: RAN {name}");
+
+    let len = file.metadata().expect("sample metadata").len();
     Some((MediaSourceStream::new(Box::new(file), Default::default()), len))
 }
 
@@ -63,6 +79,13 @@ fn multi_valued_and_legacy_genre_frames_are_mapped() {
         });
 
         assert_eq!(genres, ["Electronic", "Ambient"]);
+
+        let artists = values(&tags, |s| match s {
+            StandardTag::Artist(v) => Some(v.as_str()),
+            _ => None,
+        });
+
+        assert!(artists.len() > 1, "{artists:?}");
     }
 
     if let Some(tags) = read_leading("id3v2_4_tcon_legacy.mp3") {
@@ -89,6 +112,21 @@ fn musicbrainz_recording_id_is_mapped() {
     });
 
     assert_eq!(ids, ["8622e4d1-bc90-4532-b8df-35f6bbb6731c"]);
+}
+
+#[test]
+fn prepended_footer_is_skipped() {
+    let Some((mss, _)) = open("id3v2_4_footer.mp3")
+    else {
+        return;
+    };
+
+    let mut reader = Id3v2Reader::try_new(mss, MetadataOptions::default()).unwrap();
+    reader.read_all().unwrap();
+
+    // The footer ("3DI") must not be left in the stream.
+    let mut mss = Box::new(reader).into_inner();
+    assert_ne!(mss.read_triple_bytes().unwrap(), *b"3DI");
 }
 
 #[test]
