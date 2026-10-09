@@ -1,12 +1,11 @@
 // DSD Decimation Orchestrator
 // Coordinates CIC and FIR filters for high-quality DSD-to-PCM conversion
 
-use crate::bitstream::unpack_dsd_bytes_to_f32;
 use crate::cic::CicFilter;
 use crate::fir::FirDecimator;
 
 use symphonia_core::codecs::audio::BitOrder;
-use symphonia_core::errors::{decode_error, Result};
+use symphonia_core::errors::{Result, decode_error};
 
 use log::debug;
 
@@ -60,7 +59,13 @@ impl DecimationConfig {
 
         debug!(
             "DSD decimation config: {} -> {} (total: {}, CIC: {}x{}, FIR: {}x{})",
-            dsd_rate, pcm_rate, total_decimation, cic_decimation, cic_stages, fir_decimation, fir_taps
+            dsd_rate,
+            pcm_rate,
+            total_decimation,
+            cic_decimation,
+            cic_stages,
+            fir_decimation,
+            fir_taps
         );
 
         Ok(DecimationConfig {
@@ -77,13 +82,13 @@ impl DecimationConfig {
         // Try to keep CIC decimation high (efficient) and FIR decimation moderate
         // Always use at least 2x FIR to ensure proper filtering
         match total {
-            8 => (4, 2),      // DSD64 -> 352.8k
-            16 => (8, 2),     // DSD64 -> 176.4k or DSD128 -> 352.8k
-            32 => (16, 2),    // DSD128 -> 176.4k or DSD64 -> 88.2k or DSD256 -> 352.8k
-            64 => (32, 2),    // DSD64 -> 44.1k or DSD256 -> 176.4k
-            128 => (64, 2),   // DSD128 -> 44.1k or DSD512 -> 176.4k
-            256 => (128, 2),  // DSD256 -> 44.1k
-            512 => (128, 4),  // DSD512 -> 44.1k
+            8 => (4, 2),     // DSD64 -> 352.8k
+            16 => (8, 2),    // DSD64 -> 176.4k or DSD128 -> 352.8k
+            32 => (16, 2),   // DSD128 -> 176.4k or DSD64 -> 88.2k or DSD256 -> 352.8k
+            64 => (32, 2),   // DSD64 -> 44.1k or DSD256 -> 176.4k
+            128 => (64, 2),  // DSD128 -> 44.1k or DSD512 -> 176.4k
+            256 => (128, 2), // DSD256 -> 44.1k
+            512 => (128, 4), // DSD512 -> 44.1k
             _ => {
                 // General case: try to balance, always use FIR >= 2
                 if total % 64 == 0 {
@@ -129,8 +134,11 @@ pub struct ChannelDecimator {
 impl ChannelDecimator {
     /// Create a new channel decimator
     pub fn new(config: &DecimationConfig) -> Self {
-        log::debug!("Creating ChannelDecimator: CIC={}x, FIR={}x",
-                    config.cic_decimation, config.fir_decimation);
+        log::debug!(
+            "Creating ChannelDecimator: CIC={}x, FIR={}x",
+            config.cic_decimation,
+            config.fir_decimation
+        );
 
         let cic = CicFilter::new(config.cic_decimation, config.cic_stages);
 
@@ -138,8 +146,12 @@ impl ChannelDecimator {
         let fir_cutoff = 0.4 / config.fir_decimation as f64;
         let fir = FirDecimator::new(config.fir_decimation, config.fir_taps, fir_cutoff);
 
-        log::debug!("FIR created with decimation={}, taps={}, cutoff={}",
-                    config.fir_decimation, config.fir_taps, fir_cutoff);
+        log::debug!(
+            "FIR created with decimation={}, taps={}, cutoff={}",
+            config.fir_decimation,
+            config.fir_taps,
+            fir_cutoff
+        );
 
         // Intermediate buffer between CIC and FIR
         // Size enough for typical block processing
@@ -153,7 +165,6 @@ impl ChannelDecimator {
     /// # Arguments
     /// * `dsd_input` - DSD sample bytes for this channel
     /// * `bit_order` - Bit order of DSD data
-    /// * `unpacked_buffer` - Temporary buffer for unpacked DSD bits (reused for efficiency)
     /// * `pcm_output` - Output buffer for PCM samples
     ///
     /// # Returns
@@ -162,31 +173,29 @@ impl ChannelDecimator {
         &mut self,
         dsd_input: &[u8],
         bit_order: BitOrder,
-        unpacked_buffer: &mut Vec<f32>,
         pcm_output: &mut [f32],
     ) -> usize {
-        // Unpack DSD bytes to individual bit values (as f32: -1.0 or +1.0)
-        let num_bits = dsd_input.len() * 8;
-        unpacked_buffer.clear();
-        unpacked_buffer.resize(num_bits, 0.0);
-        unpack_dsd_bytes_to_f32(dsd_input, bit_order, unpacked_buffer);
-
-        // Stage 1: CIC filter (high decimation)
+        // Stage 1: CIC filter (high decimation), directly on the packed bits.
         self.intermediate_buffer.clear();
-        let cic_output_size = self.cic.output_size_for_input(num_bits);
+        let cic_output_size = self.cic.output_size_for_input(dsd_input.len());
         if cic_output_size > 0 {
             self.intermediate_buffer.resize(cic_output_size, 0.0);
-            let cic_produced = self.cic.process_buffer(unpacked_buffer, &mut self.intermediate_buffer);
+            let cic_produced =
+                self.cic.process_bytes(dsd_input, bit_order, &mut self.intermediate_buffer);
             self.intermediate_buffer.truncate(cic_produced);
         }
+        else {
+            // No output yet, but the filter state must still absorb the bits.
+            self.cic.process_bytes(dsd_input, bit_order, &mut []);
+        }
+
         // Stage 2: FIR filter (moderate decimation + droop compensation)
-        let fir_produced = if !self.intermediate_buffer.is_empty() {
-            self.fir.process_buffer(&self.intermediate_buffer, pcm_output)
+        if self.intermediate_buffer.is_empty() {
+            0
         }
         else {
-            0
-        };
-        fir_produced
+            self.fir.process_buffer(&self.intermediate_buffer, pcm_output)
+        }
     }
 
     /// Reset filter state
@@ -201,7 +210,6 @@ impl ChannelDecimator {
 pub struct DsdDecimator {
     channels: Vec<ChannelDecimator>,
     bit_order: BitOrder,
-    unpacked_buffer: Vec<f32>,
 }
 
 impl DsdDecimator {
@@ -214,11 +222,7 @@ impl DsdDecimator {
     pub fn new(config: DecimationConfig, num_channels: usize, bit_order: BitOrder) -> Self {
         let channels = (0..num_channels).map(|_| ChannelDecimator::new(&config)).collect();
 
-        DsdDecimator {
-            channels,
-            bit_order,
-            unpacked_buffer: Vec::with_capacity(8192 * 8),
-        }
+        DsdDecimator { channels, bit_order }
     }
 
     /// Process DSD data to PCM
@@ -229,7 +233,11 @@ impl DsdDecimator {
     ///
     /// # Returns
     /// Number of PCM samples produced per channel
-    pub fn process_planar(&mut self, dsd_planes: &[&[u8]], pcm_planes: &mut [&mut [f32]]) -> Result<usize> {
+    pub fn process_planar(
+        &mut self,
+        dsd_planes: &[&[u8]],
+        pcm_planes: &mut [&mut [f32]],
+    ) -> Result<usize> {
         if dsd_planes.len() != self.channels.len() {
             return decode_error("dsd: channel count mismatch");
         }
@@ -242,7 +250,7 @@ impl DsdDecimator {
 
         for (ch_idx, decimator) in self.channels.iter_mut().enumerate() {
             let produced =
-                decimator.process(dsd_planes[ch_idx], self.bit_order, &mut self.unpacked_buffer, pcm_planes[ch_idx]);
+                decimator.process(dsd_planes[ch_idx], self.bit_order, pcm_planes[ch_idx]);
 
             if ch_idx == 0 {
                 samples_produced = produced;
@@ -260,9 +268,7 @@ impl DsdDecimator {
         for decimator in &mut self.channels {
             decimator.reset();
         }
-        self.unpacked_buffer.clear();
     }
-
 }
 
 #[cfg(test)]
@@ -309,5 +315,119 @@ mod tests {
         assert_eq!(DecimationConfig::choose_decimation_ratios(32), (16, 2));
         assert_eq!(DecimationConfig::choose_decimation_ratios(64), (32, 2));
         assert_eq!(DecimationConfig::choose_decimation_ratios(128), (64, 2));
+    }
+
+    /// The pipeline as it was before the table-driven CIC stage: unpack to `f32`, run the
+    /// integrator/comb cascade, then the FIR stage.
+    fn reference_pipeline(
+        config: &DecimationConfig,
+        chunks: &[&[u8]],
+        bit_order: BitOrder,
+    ) -> Vec<f32> {
+        use crate::cic::test_support::ReferenceCic;
+
+        let mut cic = ReferenceCic::new(config.cic_decimation, config.cic_stages);
+        let mut fir = FirDecimator::new(
+            config.fir_decimation,
+            config.fir_taps,
+            0.4 / config.fir_decimation as f64,
+        );
+        let mut out = Vec::new();
+
+        for chunk in chunks {
+            let mut intermediate = Vec::new();
+            cic.process_bytes(chunk, bit_order, &mut intermediate);
+            let mut pcm = vec![0.0; intermediate.len()];
+            let n = fir.process_buffer(&intermediate, &mut pcm);
+            out.extend_from_slice(&pcm[..n]);
+        }
+
+        out
+    }
+
+    #[test]
+    fn test_pipeline_bit_exact_with_reference_cic() {
+        use crate::cic::test_support::Rng;
+
+        let rates = [
+            (2822400, 44100),
+            (2822400, 88200),
+            (2822400, 176400),
+            (2822400, 352800),
+            (5644800, 44100),
+            (5644800, 176400),
+            (11289600, 44100),
+            (11289600, 352800),
+            (22579200, 44100),
+        ];
+
+        for &(dsd_rate, pcm_rate) in &rates {
+            for &bit_order in &[BitOrder::LsbFirst, BitOrder::MsbFirst] {
+                let config = DecimationConfig::new(dsd_rate, pcm_rate).unwrap();
+                let mut rng = Rng(dsd_rate as u64 * 7 + pcm_rate as u64);
+
+                // Packets of varying size, from a signal with a tone-like pattern plus noise.
+                let data: Vec<Vec<u8>> = (0..6)
+                    .map(|p| {
+                        let len = 1024 * (1 + p % 3) as usize;
+                        (0..len)
+                            .map(|i| {
+                                if (i / 40) % 2 == 0 {
+                                    0xf0 | (rng.next() as u8 & 0x0f)
+                                }
+                                else {
+                                    rng.next() as u8 & 0x1f
+                                }
+                            })
+                            .collect()
+                    })
+                    .collect();
+                let chunks: Vec<&[u8]> = data.iter().map(Vec::as_slice).collect();
+
+                let expected = reference_pipeline(&config, &chunks, bit_order);
+
+                let mut decimator = ChannelDecimator::new(&config);
+                let mut got = Vec::new();
+                for chunk in &chunks {
+                    let mut pcm = vec![0.0; chunk.len() * 8 / config.total_decimation + 2];
+                    let n = decimator.process(chunk, bit_order, &mut pcm);
+                    got.extend_from_slice(&pcm[..n]);
+                }
+
+                assert!(!expected.is_empty());
+                assert_eq!(got.len(), expected.len(), "{dsd_rate} -> {pcm_rate}");
+                for (i, (a, b)) in got.iter().zip(&expected).enumerate() {
+                    assert_eq!(
+                        a.to_bits(),
+                        b.to_bits(),
+                        "{dsd_rate} -> {pcm_rate} {bit_order:?} sample {i}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_small_packets_do_not_lose_bits() {
+        // Feeding a stream in tiny pieces must give the same result as feeding it at once, even
+        // when a piece alone does not complete a CIC block.
+        let config = DecimationConfig::new(2822400, 44100).unwrap();
+        let data: Vec<u8> =
+            (0..8192u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+
+        let mut whole = ChannelDecimator::new(&config);
+        let mut expected = vec![0.0; 1024];
+        let n = whole.process(&data, BitOrder::MsbFirst, &mut expected);
+        expected.truncate(n);
+
+        let mut split = ChannelDecimator::new(&config);
+        let mut got = Vec::new();
+        for chunk in data.chunks(5) {
+            let mut pcm = vec![0.0; 8];
+            let n = split.process(chunk, BitOrder::MsbFirst, &mut pcm);
+            got.extend_from_slice(&pcm[..n]);
+        }
+
+        assert_eq!(got, expected);
     }
 }
