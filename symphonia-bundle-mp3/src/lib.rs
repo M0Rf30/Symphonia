@@ -17,6 +17,7 @@
 // Shared modules.
 mod common;
 mod header;
+mod trailer;
 
 // Demuxer module.
 mod demuxer;
