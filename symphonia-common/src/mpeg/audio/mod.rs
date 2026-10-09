@@ -208,6 +208,8 @@ pub fn get_mpeg4_audio_channels_by_config_index(index: u32) -> Mpeg4AudioChannel
         5 => layouts::CHANNEL_LAYOUT_AAC_5P0,
         6 => layouts::CHANNEL_LAYOUT_AAC_5P1,
         7 => layouts::CHANNEL_LAYOUT_AAC_7P1,
+        11 => layouts::CHANNEL_LAYOUT_AAC_6P1,
+        12 => layouts::CHANNEL_LAYOUT_7P1,
         _ => return Mpeg4AudioChannels::Invalid,
     };
     Mpeg4AudioChannels::Channels(channels)
@@ -228,7 +230,7 @@ pub enum ChannelElement {
     Pair(Position, Position),
 }
 
-/// The syntactic element order for the predefined `channelConfiguration` values 1-7 of
+/// The syntactic element order for the predefined `channelConfiguration` values 1-7, 11 and 12 of
 /// ISO/IEC 14496-3 Table 1.19. Returns `None` for the "escape" value (0, use
 /// `program_config_element()`) or any reserved/invalid index.
 fn default_channel_elements(index: u32) -> Option<Vec<ChannelElement>> {
@@ -237,7 +239,9 @@ fn default_channel_elements(index: u32) -> Option<Vec<ChannelElement>> {
     let elements = match index {
         1 => vec![Single(Position::FRONT_CENTER)],
         2 => vec![Pair(Position::FRONT_LEFT, Position::FRONT_RIGHT)],
-        3 => vec![Single(Position::FRONT_CENTER), Pair(Position::FRONT_LEFT, Position::FRONT_RIGHT)],
+        3 => {
+            vec![Single(Position::FRONT_CENTER), Pair(Position::FRONT_LEFT, Position::FRONT_RIGHT)]
+        }
         4 => vec![
             Single(Position::FRONT_CENTER),
             Pair(Position::FRONT_LEFT, Position::FRONT_RIGHT),
@@ -258,6 +262,22 @@ fn default_channel_elements(index: u32) -> Option<Vec<ChannelElement>> {
             Single(Position::FRONT_CENTER),
             Pair(Position::FRONT_LEFT, Position::FRONT_RIGHT),
             Pair(Position::FRONT_LEFT_CENTER, Position::FRONT_RIGHT_CENTER),
+            Pair(Position::REAR_LEFT, Position::REAR_RIGHT),
+            Single(Position::LFE1),
+        ],
+        // 6.1: front C, front L/R, back L/R, back C, LFE.
+        11 => vec![
+            Single(Position::FRONT_CENTER),
+            Pair(Position::FRONT_LEFT, Position::FRONT_RIGHT),
+            Pair(Position::REAR_LEFT, Position::REAR_RIGHT),
+            Single(Position::REAR_CENTER),
+            Single(Position::LFE1),
+        ],
+        // 7.1: front C, front L/R, side L/R, back L/R, LFE.
+        12 => vec![
+            Single(Position::FRONT_CENTER),
+            Pair(Position::FRONT_LEFT, Position::FRONT_RIGHT),
+            Pair(Position::SIDE_LEFT, Position::SIDE_RIGHT),
             Pair(Position::REAR_LEFT, Position::REAR_RIGHT),
             Single(Position::LFE1),
         ],
@@ -296,12 +316,42 @@ pub struct AudioSpecificConfig {
     /// `program_config_element()` (`channelConfiguration == 0`).
     pub channel_elements: Option<Vec<ChannelElement>>,
     pub samples: usize,
+    /// The SBR output sampling frequency (and, for some object types, the extension channel
+    /// configuration), if the stream explicitly signals SBR (hierarchically, or backwards
+    /// compatibly via the `sync_extension`).
     pub sbr_ps_info: Option<(u32, Option<Channels>)>,
     pub sbr_present: bool,
     pub ps_present: bool,
 }
 
 impl AudioSpecificConfig {
+    /// The sampling frequency of the decoded output.
+    ///
+    /// For plain streams this is the core sampling frequency. If the stream signals SBR, it is the
+    /// SBR output sampling frequency: twice the core rate for dual-rate SBR, or equal to the core
+    /// rate for the downsampled SBR mode.
+    pub fn output_sample_rate(&self) -> u32 {
+        if !self.sbr_present {
+            return self.sample_rate;
+        }
+
+        match self.sbr_ps_info {
+            Some((rate, _)) if rate == self.sample_rate || rate == self.sample_rate * 2 => rate,
+            _ => self.sample_rate.saturating_mul(2),
+        }
+    }
+
+    /// The channels of the decoded output: identical to `channels`, unless parametric stereo
+    /// expands a mono core stream to stereo.
+    pub fn output_channels(&self) -> Option<Channels> {
+        match &self.channels {
+            Some(channels) if self.ps_present && channels.count() == 1 => {
+                Some(layouts::CHANNEL_LAYOUT_STEREO)
+            }
+            channels => channels.clone(),
+        }
+    }
+
     /// Read the audio specific configuration from the provided buffer. ISO14496-3-2009
     pub fn read(buf: &[u8]) -> Result<AudioSpecificConfig> {
         let mut bs = BitReaderLtr::new(buf);
@@ -494,7 +544,12 @@ impl AudioSpecificConfig {
                 if ext_otype == AudioObjectType::Sbr {
                     asc.sbr_present = bs.read_bool()?;
                     if asc.sbr_present {
-                        let _ext_srate = Self::read_sampling_frequency(&mut bs)?;
+                        let ext_srate = Self::read_sampling_frequency(&mut bs)?;
+                        // Backwards-compatible explicit signalling also conveys the SBR output
+                        // sampling frequency.
+                        if asc.sbr_ps_info.is_none() {
+                            asc.sbr_ps_info = Some((ext_srate, None));
+                        }
                         if bs.bits_left() >= 12 {
                             let sync = bs.read_bits_leq32(11)?;
                             if sync == 0x548 {
@@ -671,24 +726,33 @@ impl AudioSpecificConfig {
             mask |= Position::SIDE_LEFT | Position::SIDE_RIGHT;
         }
 
-        let mut back_cpe_seen = false;
+        // A second back `CPE` is only meaningful alongside a first one, in which case the pair
+        // that is listed first is the side surround pair (e.g. Fraunhofer FDK writes a 7.1 stream
+        // as front `SCE` + `CPE`, back `CPE` + `CPE`, `LFE`) and the pair that is listed last is
+        // the rear surround pair. This is only done when the PCE does not declare a side pair of
+        // its own.
+        let back_cpe_count = back_is_cpe.iter().filter(|&&is_cpe| is_cpe).count();
+        let mut back_cpe_seen = 0usize;
         let mut back_sce_seen = false;
         for &is_cpe in &back_is_cpe {
             if is_cpe {
-                if back_cpe_seen {
-                    return unsupported_error(
-                        "common (mp4a): PCE back channel layout too complex",
-                    );
-                }
-                back_cpe_seen = true;
-                elements.push(ChannelElement::Pair(Position::REAR_LEFT, Position::REAR_RIGHT));
-                mask |= Position::REAR_LEFT | Position::REAR_RIGHT;
+                let (l, r) = match (back_cpe_count, back_cpe_seen) {
+                    (1, 0) => (Position::REAR_LEFT, Position::REAR_RIGHT),
+                    (2, 0) if !side_cpe_seen => (Position::SIDE_LEFT, Position::SIDE_RIGHT),
+                    (2, 1) if !side_cpe_seen => (Position::REAR_LEFT, Position::REAR_RIGHT),
+                    _ => {
+                        return unsupported_error(
+                            "common (mp4a): PCE back channel layout too complex",
+                        );
+                    }
+                };
+                back_cpe_seen += 1;
+                elements.push(ChannelElement::Pair(l, r));
+                mask |= l | r;
             }
             else {
                 if back_sce_seen {
-                    return unsupported_error(
-                        "common (mp4a): PCE back channel layout too complex",
-                    );
+                    return unsupported_error("common (mp4a): PCE back channel layout too complex");
                 }
                 back_sce_seen = true;
                 elements.push(ChannelElement::Single(Position::REAR_CENTER));
@@ -714,6 +778,34 @@ impl AudioSpecificConfig {
     }
 }
 
+/// The maximum number of frames [`aac_seek_start_frame`] starts decoding before the target.
+pub const AAC_SEEK_MAX_PREROLL_FRAMES: u64 = 56;
+
+/// Get the index of the AAC frame (packet) to start decoding from, after a decoder reset, to
+/// reproduce a continuous decode from frame `target` onwards. The frame indices are relative to
+/// the start of the stream (the last SBR reset).
+///
+/// * AAC-LC needs the previous frame for the MDCT overlap-add.
+/// * With SBR (HE-AAC), the decoder state is also a function of the number of frames since the
+///   last SBR reset (the noise and sinusoid phase indices run through a 512 entry table, with a
+///   period of at most 16 frames). The envelope, gain, and filterbank state take about 8 frames
+///   to settle, and the delta coded envelopes only resynchronise at the next frame coded
+///   independently of its predecessor, which encoders insert regularly. So, decode from the
+///   multiple of 16 frames that is at least 41 frames before the target (the first frames may
+///   start at a frame that is not independent), up to 56 frames in total. This converges to the
+///   continuous decode exactly for most streams.
+pub fn aac_seek_start_frame(target: u64, sbr: bool) -> u64 {
+    const SBR_PHASE_PERIOD: u64 = 16;
+    const SBR_PREROLL_FRAMES: u64 = 41;
+
+    if sbr {
+        (target.saturating_sub(SBR_PREROLL_FRAMES) / SBR_PHASE_PERIOD) * SBR_PHASE_PERIOD
+    }
+    else {
+        target.saturating_sub(1)
+    }
+}
+
 pub fn get_audio_codec_profile(asc: &AudioSpecificConfig) -> Option<CodecProfile> {
     match asc.object_type {
         AudioObjectType::Main => Some(CODEC_PROFILE_AAC_MAIN),
@@ -731,5 +823,84 @@ pub fn get_audio_codec_profile(asc: &AudioSpecificConfig) -> Option<CodecProfile
             }
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FDK_7P1_PCE: [u8; 11] =
+        [0x11, 0x80, 0x04, 0xc8, 0x09, 0x00, 0x01, 0x08, 0xc8, 0x00, 0x00];
+
+    fn elements_7p1() -> Vec<ChannelElement> {
+        vec![
+            ChannelElement::Single(Position::FRONT_CENTER),
+            ChannelElement::Pair(Position::FRONT_LEFT, Position::FRONT_RIGHT),
+            ChannelElement::Pair(Position::SIDE_LEFT, Position::SIDE_RIGHT),
+            ChannelElement::Pair(Position::REAR_LEFT, Position::REAR_RIGHT),
+            ChannelElement::Single(Position::LFE1),
+        ]
+    }
+
+    #[test]
+    fn pce_with_two_back_pairs_is_7p1() {
+        // Fraunhofer FDK writes 7.1 as a PCE with front SCE + CPE, two back CPEs, and an LFE.
+        let asc = AudioSpecificConfig::read(&FDK_7P1_PCE).expect("valid asc");
+        assert_eq!(asc.channels, Some(layouts::CHANNEL_LAYOUT_7P1));
+        assert_eq!(asc.channel_elements, Some(elements_7p1()));
+    }
+
+    #[test]
+    fn channel_configuration_12_is_7p1() {
+        // AAC-LC, 48 kHz, channelConfiguration 12.
+        let asc = AudioSpecificConfig::read(&[0x11, 0xe0]).expect("valid asc");
+        assert_eq!(asc.channels, Some(layouts::CHANNEL_LAYOUT_7P1));
+        assert_eq!(asc.channel_elements, Some(elements_7p1()));
+    }
+
+    #[test]
+    fn channel_configuration_11_is_6p1() {
+        // AAC-LC, 48 kHz, channelConfiguration 11.
+        let asc = AudioSpecificConfig::read(&[0x11, 0xd8]).expect("valid asc");
+        assert_eq!(asc.channels, Some(layouts::CHANNEL_LAYOUT_AAC_6P1));
+        assert_eq!(asc.channel_elements.map(|e| e.len()), Some(5));
+    }
+
+    #[test]
+    fn aac_seek_start_frames() {
+        assert_eq!(aac_seek_start_frame(0, false), 0);
+        assert_eq!(aac_seek_start_frame(100, false), 99);
+        assert_eq!(aac_seek_start_frame(5, true), 0);
+        assert_eq!(aac_seek_start_frame(79, true), 32);
+        assert_eq!(aac_seek_start_frame(100, true), 48);
+        for target in 0..1000 {
+            let start = aac_seek_start_frame(target, true);
+            assert!(start <= target && target - start <= AAC_SEEK_MAX_PREROLL_FRAMES);
+        }
+    }
+
+    #[test]
+    fn he_aac_output_format() {
+        // HE-AAC v1: 22.05 kHz stereo core, explicit SBR at 44.1 kHz.
+        let asc = AudioSpecificConfig::read(&[0x13, 0x90, 0x56, 0xe5, 0xa0]).expect("valid asc");
+        assert_eq!(asc.sample_rate, 22_050);
+        assert_eq!(asc.output_sample_rate(), 44_100);
+        assert_eq!(asc.output_channels(), Some(layouts::CHANNEL_LAYOUT_STEREO));
+
+        // HE-AAC v2: 22.05 kHz mono core, SBR + PS.
+        let asc = AudioSpecificConfig::read(&[0x13, 0x88, 0x56, 0xe5, 0xa5, 0x48, 0x80])
+            .expect("valid asc");
+        assert_eq!(asc.sample_rate, 22_050);
+        assert_eq!(asc.output_sample_rate(), 44_100);
+        assert_eq!(asc.output_channels(), Some(layouts::CHANNEL_LAYOUT_STEREO));
+
+        // Downsampled SBR: 44.1 kHz core with a 44.1 kHz SBR output rate.
+        let asc = AudioSpecificConfig::read(&[0x12, 0x10, 0x56, 0xe5, 0xa0]).expect("valid asc");
+        assert_eq!(asc.output_sample_rate(), 44_100);
+
+        // Plain AAC-LC.
+        let asc = AudioSpecificConfig::read(&[0x12, 0x10]).expect("valid asc");
+        assert_eq!(asc.output_sample_rate(), 44_100);
     }
 }

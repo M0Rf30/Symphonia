@@ -29,7 +29,6 @@ pub struct ChannelPair {
     ms_used: [[bool; MAX_SFBS]; MAX_WINDOWS],
     ics0: ics::Ics,
     ics1: ics::Ics,
-    lcg: Lcg,
 }
 
 impl ChannelPair {
@@ -41,7 +40,6 @@ impl ChannelPair {
             ms_used: [[false; MAX_SFBS]; MAX_WINDOWS],
             ics0: ics::Ics::new(sbinfo),
             ics1: ics::Ics::new(sbinfo),
-            lcg: Lcg::new(0x1f2e3d4c), // Use the same seed as ffmpeg for symphonia-check.
         }
     }
 
@@ -53,15 +51,17 @@ impl ChannelPair {
     pub fn decode_ga_sce<B: ReadBitsLtr>(
         &mut self,
         bs: &mut B,
+        lcg: &mut Lcg,
         aot: AudioObjectType,
     ) -> Result<()> {
-        self.ics0.decode(bs, &mut self.lcg, aot, false)?;
+        self.ics0.decode(bs, lcg, aot, false)?;
         Ok(())
     }
 
     pub fn decode_ga_cpe<B: ReadBitsLtr>(
         &mut self,
         bs: &mut B,
+        lcg: &mut Lcg,
         aot: AudioObjectType,
     ) -> Result<()> {
         let common_window = bs.read_bool()?;
@@ -103,8 +103,8 @@ impl ChannelPair {
             self.ics1.info.copy_from_common(&self.ics0.info);
         }
 
-        self.ics0.decode(bs, &mut self.lcg, aot, common_window)?;
-        self.ics1.decode(bs, &mut self.lcg, aot, common_window)?;
+        self.ics0.decode(bs, lcg, aot, common_window)?;
+        self.ics1.decode(bs, lcg, aot, common_window)?;
 
         // Joint-stereo decoding
         if common_window {
