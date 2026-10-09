@@ -21,7 +21,7 @@ use symphonia_core::packet::Packet;
 use symphonia_core::units::{Duration, Timestamp};
 
 use symphonia_common::mpeg::audio::{
-    AudioObjectType, AudioSpecificConfig, Mpeg4AudioSampleRate,
+    AudioObjectType, AudioSpecificConfig, Mpeg4AudioSampleRate, ProgramConfig,
     get_mpeg4_audio_sample_rate_by_index,
 };
 
@@ -125,6 +125,47 @@ impl BitWriter {
         }
     }
 
+    /// Write a `program_config_element()` with the elements of `pce`. The element instance tags
+    /// are numbered in the order of the elements of each kind, there are no mixdown coefficients
+    /// and no comment, and the byte alignment is relative to the first bit written.
+    fn put_program_config_element(&mut self, pce: &ProgramConfig) {
+        self.put(0, 4); // element_instance_tag
+        self.put(pce.object_type, 2);
+        self.put(pce.sampling_frequency_index, 4);
+        self.put(pce.front_is_cpe.len() as u32, 4);
+        self.put(pce.side_is_cpe.len() as u32, 4);
+        self.put(pce.back_is_cpe.len() as u32, 4);
+        self.put(pce.num_lfe, 2);
+        self.put(pce.num_assoc_data, 3);
+        self.put(pce.num_valid_cc, 4);
+        self.put(0, 3); // No mono, stereo, or matrix mixdown.
+
+        for is_cpe in [&pce.front_is_cpe, &pce.side_is_cpe, &pce.back_is_cpe] {
+            for (tag, &is_cpe) in is_cpe.iter().enumerate() {
+                self.put(u32::from(is_cpe), 1);
+                self.put(tag as u32 & 0xf, 4);
+            }
+        }
+
+        for tag in 0..pce.num_lfe {
+            self.put(tag, 4);
+        }
+
+        for tag in 0..pce.num_assoc_data {
+            self.put(tag, 4);
+        }
+
+        for tag in 0..pce.num_valid_cc {
+            self.put(0, 1); // cc_element_is_ind_sw
+            self.put(tag, 4);
+        }
+
+        // byte_alignment()
+        self.n_bits = self.n_bits.next_multiple_of(8);
+
+        self.put(0, 8); // comment_field_bytes
+    }
+
     fn put_audio_object_type(&mut self, aot: u32) {
         if aot < 31 {
             self.put(aot, 5);
@@ -151,13 +192,47 @@ impl BitWriter {
 /// Builds the plain audio specific config of an AAC-LC stream with a predefined channel
 /// configuration from the fields of an ADTS header: the sample rate and `channel_configuration`.
 pub(crate) fn plain_asc(sample_rate: u32, channel_config: u32) -> Box<[u8]> {
+    build_asc(2, sample_rate, channel_config, None, None)
+}
+
+/// Builds an audio specific config for a stream of an AAC object type with a 1024 sample frame
+/// (`audio_object_type`: 1 is AAC Main, 2 is AAC LC, ...).
+///
+/// If `channel_config` is 0, the channel layout is that of the program config `pce`. If `sbr` is
+/// `Some((output_rate, ps))`, the config signals SBR (and parametric stereo if `ps` is true)
+/// explicitly and hierarchically, ISO/IEC 14496-3 §1.6.2.1.
+pub(crate) fn build_asc(
+    audio_object_type: u32,
+    sample_rate: u32,
+    channel_config: u32,
+    pce: Option<&ProgramConfig>,
+    sbr: Option<(u32, bool)>,
+) -> Box<[u8]> {
     let mut bw = BitWriter::default();
 
-    bw.put_audio_object_type(2);
-    bw.put_sampling_frequency(sample_rate);
-    bw.put(channel_config, 4);
+    match sbr {
+        Some((output_rate, ps)) => {
+            bw.put_audio_object_type(if ps { 29 } else { 5 });
+            bw.put_sampling_frequency(sample_rate);
+            bw.put(channel_config, 4);
+            bw.put_sampling_frequency(output_rate);
+            bw.put_audio_object_type(audio_object_type);
+        }
+        None => {
+            bw.put_audio_object_type(audio_object_type);
+            bw.put_sampling_frequency(sample_rate);
+            bw.put(channel_config, 4);
+        }
+    }
+
     // GASpecificConfig: frameLengthFlag, dependsOnCoreCoder, extensionFlag.
     bw.put(0, 3);
+
+    if channel_config == 0 {
+        if let Some(pce) = pce {
+            bw.put_program_config_element(pce);
+        }
+    }
 
     bw.bytes.into_boxed_slice()
 }
@@ -182,6 +257,11 @@ pub(crate) fn with_explicit_sbr(asc: &[u8], out_rate: u32, ps: bool) -> Option<B
     let sf_index = bs.read_bits_leq32(4).ok()?;
     let escaped_rate = if sf_index == 15 { Some(bs.read_bits_leq32(24).ok()?) } else { None };
     let channel_config = bs.read_bits_leq32(4).ok()?;
+
+    // The byte alignment of a program config element depends on its position.
+    if channel_config == 0 {
+        return None;
+    }
 
     let mut bw = BitWriter::default();
 
@@ -278,5 +358,56 @@ mod tests {
         bw.put(0, 3);
 
         assert!(with_explicit_sbr(&bw.bytes, 44_100, false).is_none());
+    }
+
+    fn stereo_pce() -> ProgramConfig {
+        ProgramConfig {
+            object_type: 1,
+            sampling_frequency_index: 4,
+            front_is_cpe: vec![true],
+            side_is_cpe: vec![],
+            back_is_cpe: vec![],
+            num_lfe: 0,
+            num_assoc_data: 0,
+            num_valid_cc: 0,
+        }
+    }
+
+    #[test]
+    fn asc_with_program_config_has_its_layout() {
+        let pce = ProgramConfig {
+            front_is_cpe: vec![false, true],
+            back_is_cpe: vec![true],
+            num_lfe: 1,
+            ..stereo_pce()
+        };
+
+        let asc = AudioSpecificConfig::read(&build_asc(2, 44_100, 0, Some(&pce), None)).unwrap();
+
+        assert_eq!(asc.object_type, AudioObjectType::Lc);
+        assert_eq!(asc.sample_rate, 44_100);
+        assert_eq!(asc.channels, Some(layouts_5p1()));
+        assert!(!asc.sbr_present);
+
+        // With SBR, the program config follows the hierarchical signalling and is still aligned.
+        let asc =
+            AudioSpecificConfig::read(&build_asc(2, 22_050, 0, Some(&pce), Some((44_100, false))))
+                .unwrap();
+
+        assert_eq!(asc.channels, Some(layouts_5p1()));
+        assert_eq!(asc.output_sample_rate(), 44_100);
+        assert_eq!(asc.channel_elements.map(|e| e.len()), Some(4));
+    }
+
+    fn layouts_5p1() -> symphonia_core::audio::Channels {
+        symphonia_core::audio::layouts::CHANNEL_LAYOUT_AAC_5P1
+    }
+
+    #[test]
+    fn asc_with_stereo_program_config() {
+        let asc =
+            AudioSpecificConfig::read(&build_asc(2, 44_100, 0, Some(&stereo_pce()), None)).unwrap();
+
+        assert_eq!(asc.channels, Some(symphonia_core::audio::layouts::CHANNEL_LAYOUT_STEREO));
     }
 }

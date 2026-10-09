@@ -654,27 +654,51 @@ impl AudioSpecificConfig {
         Ok((channels, elements))
     }
 
-    /// Parse `program_config_element()` (ISO/IEC 14496-3 §4.4.1.1, Table 4.2 / Table 8.2).
-    ///
-    /// Assigns each declared front/side/back/LFE element a channel position using the
-    /// conventional ordering used throughout the industry for the common layouts described
-    /// informatively in ISO/IEC 14496-3 subclause 8.5.3: the first front `SCE` is the
-    /// front-center channel; front `CPE`s are assigned outward from the front-left/right pair to
-    /// the front-left/right-of-center "wide" pair; side `CPE`s are the side-left/right pair; the
-    /// first back `CPE` is the rear-left/right pair, optionally followed by a rear-center `SCE`;
-    /// LFE `SCE`s are LFE1, then LFE2. Layouts that don't fit this convention (e.g. more than one
-    /// front SCE, or a side SCE) are rejected as unsupported rather than silently mis-assigned.
+    /// Parse `program_config_element()` and map its elements onto channel positions. See
+    /// [`ProgramConfig`].
+    fn read_program_config_element<B: ReadBitsLtr>(
+        bs: &mut B,
+    ) -> Result<(Channels, Vec<ChannelElement>)> {
+        ProgramConfig::read(bs)?.layout()
+    }
+}
+
+/// The syntax of a `program_config_element()` (ISO/IEC 14496-3 §4.4.1.1): the part of it that
+/// determines the syntactic elements of the program.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProgramConfig {
+    /// The `profile` (2 bits): the audio object type minus 1 (0 is AAC Main, 1 is AAC LC, 2 is AAC
+    /// SSR, 3 is AAC LTP).
+    pub object_type: u32,
+    /// The index of the sampling frequency.
+    pub sampling_frequency_index: u32,
+    /// For each front element, in order, true if it is a channel pair element.
+    pub front_is_cpe: Vec<bool>,
+    /// For each side element, in order, true if it is a channel pair element.
+    pub side_is_cpe: Vec<bool>,
+    /// For each back element, in order, true if it is a channel pair element.
+    pub back_is_cpe: Vec<bool>,
+    /// The number of LFE elements.
+    pub num_lfe: u32,
+    /// The number of associated data elements.
+    pub num_assoc_data: u32,
+    /// The number of valid coupling channel elements.
+    pub num_valid_cc: u32,
+}
+
+impl ProgramConfig {
+    /// Read a `program_config_element()` (ISO/IEC 14496-3 §4.4.1.1, Table 4.2 / Table 8.2) from the
+    /// current position of a bit stream. The byte alignment before the comment field is relative
+    /// to the start of the bit stream.
     ///
     /// Mixdown coefficients, comment fields, and element instance tags (used to associate
     /// elements with mixdowns/CCEs) are parsed for correct bitstream alignment but otherwise
     /// discarded; the element order alone determines how `raw_data_block()` syntactic elements
     /// map onto output channels (see [`ChannelElement`]).
-    fn read_program_config_element<B: ReadBitsLtr>(
-        bs: &mut B,
-    ) -> Result<(Channels, Vec<ChannelElement>)> {
+    pub fn read<B: ReadBitsLtr>(bs: &mut B) -> Result<ProgramConfig> {
         let _element_instance_tag = bs.read_bits_leq32(4)?;
-        let _object_type = bs.read_bits_leq32(2)?;
-        let _sampling_frequency_index = bs.read_bits_leq32(4)?;
+        let object_type = bs.read_bits_leq32(2)?;
+        let sampling_frequency_index = bs.read_bits_leq32(4)?;
 
         let num_front = bs.read_bits_leq32(4)?;
         let num_side = bs.read_bits_leq32(4)?;
@@ -727,13 +751,39 @@ impl AudioSpecificConfig {
             bs.ignore_bits(8)?;
         }
 
+        Ok(ProgramConfig {
+            object_type,
+            sampling_frequency_index,
+            front_is_cpe,
+            side_is_cpe,
+            back_is_cpe,
+            num_lfe,
+            num_assoc_data,
+            num_valid_cc,
+        })
+    }
+
+    /// Map the syntactic elements of the program onto channel positions.
+    ///
+    /// Assigns each declared front/side/back/LFE element a channel position using the
+    /// conventional ordering used throughout the industry for the common layouts described
+    /// informatively in ISO/IEC 14496-3 subclause 8.5.3: the first front `SCE` is the
+    /// front-center channel; front `CPE`s are assigned outward from the front-left/right pair to
+    /// the front-left/right-of-center "wide" pair; side `CPE`s are the side-left/right pair; the
+    /// first back `CPE` is the rear-left/right pair, optionally followed by a rear-center `SCE`;
+    /// LFE `SCE`s are LFE1, then LFE2. Layouts that don't fit this convention (e.g. more than one
+    /// front SCE, or a side SCE) are rejected as unsupported rather than silently mis-assigned.
+    pub fn layout(&self) -> Result<(Channels, Vec<ChannelElement>)> {
+        let ProgramConfig { front_is_cpe, side_is_cpe, back_is_cpe, num_lfe, .. } = self;
+        let num_lfe = *num_lfe;
+
         let mut elements = Vec::new();
         let mut mask = Position::empty();
 
         let mut front_sce_seen = false;
         let mut front_cpe_seen = 0u32;
 
-        for &is_cpe in &front_is_cpe {
+        for &is_cpe in front_is_cpe {
             if is_cpe {
                 let (l, r) = match front_cpe_seen {
                     0 => (Position::FRONT_LEFT, Position::FRONT_RIGHT),
@@ -761,7 +811,7 @@ impl AudioSpecificConfig {
         }
 
         let mut side_cpe_seen = false;
-        for &is_cpe in &side_is_cpe {
+        for &is_cpe in side_is_cpe {
             if !is_cpe || side_cpe_seen {
                 return unsupported_error("common (mp4a): PCE side channel layout too complex");
             }
@@ -778,7 +828,7 @@ impl AudioSpecificConfig {
         let back_cpe_count = back_is_cpe.iter().filter(|&&is_cpe| is_cpe).count();
         let mut back_cpe_seen = 0usize;
         let mut back_sce_seen = false;
-        for &is_cpe in &back_is_cpe {
+        for &is_cpe in back_is_cpe {
             if is_cpe {
                 let (l, r) = match (back_cpe_count, back_cpe_seen) {
                     (1, 0) => (Position::REAR_LEFT, Position::REAR_RIGHT),

@@ -17,10 +17,12 @@
 #![allow(clippy::needless_range_loop)]
 
 mod aac;
+mod adif;
 mod adts;
 mod implicit_sbr;
 mod loas;
 
 pub use aac::AacDecoder;
+pub use adif::AdifReader;
 pub use adts::AdtsReader;
 pub use loas::LoasReader;

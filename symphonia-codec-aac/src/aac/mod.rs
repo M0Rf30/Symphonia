@@ -21,13 +21,14 @@ use symphonia_core::codecs::audio::well_known::CODEC_ID_AAC;
 use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoderOptions};
 use symphonia_core::codecs::audio::{AudioDecoder, FinalizeResult};
 use symphonia_core::codecs::registry::{RegisterableAudioDecoder, SupportedAudioCodec};
-use symphonia_core::errors::{Result, unsupported_error};
+use symphonia_core::errors::{Result, decode_error, unsupported_error};
 use symphonia_core::io::{BitReaderLtr, FiniteBitStream, ReadBitsLtr};
 use symphonia_core::packet::PacketRef;
 use symphonia_core::{codec_profile, support_audio_codec};
 
 use symphonia_common::mpeg::audio::{
-    AudioObjectType, AudioSpecificConfig, ChannelElement, channel_elements_for_config,
+    AudioObjectType, AudioSpecificConfig, ChannelElement, ProgramConfig,
+    channel_elements_for_config,
 };
 
 mod codebooks;
@@ -70,6 +71,9 @@ pub struct AacDecoder {
     /// HE-AAC v1 (SBR) runtime state, present once SBR is known active for this stream. See
     /// [`SbrRuntime`].
     sbr: Option<SbrRuntime>,
+    /// If true, `raw_data_block()`s are only parsed to find where they end: the payload of SBR
+    /// extensions is skipped rather than parsed.
+    syntax_only: bool,
 }
 
 /// Per-stream SBR (HE-AAC v1) runtime state, present once SBR is known active: eagerly at
@@ -317,7 +321,40 @@ impl AacDecoder {
             buf,
             opts: *opts,
             sbr,
+            syntax_only: false,
         })
+    }
+
+    /// Create a decoder that is only used to find the end of `raw_data_block()`s, see
+    /// [`Self::measure_raw_data_block`].
+    pub(crate) fn try_new_syntax_parser(params: &AudioCodecParameters) -> Result<Self> {
+        let mut parser = Self::try_new(params, &AudioDecoderOptions::default())?;
+        parser.syntax_only = true;
+        Ok(parser)
+    }
+
+    /// Parse the `raw_data_block()` at the start of `data`, which may be followed by other data,
+    /// and return its length in bytes (the block is byte aligned at its end).
+    ///
+    /// This is how the blocks of a stream that does not delimit them (ADIF) are found: the block
+    /// ends with its `ID_END` element. The state of the parser is not meaningful as a decoder.
+    pub(crate) fn measure_raw_data_block(&mut self, data: &[u8]) -> Result<usize> {
+        match self.asc.object_type {
+            AudioObjectType::Lc => (),
+            _ => return unsupported_error("aac: object type"),
+        }
+
+        let mut bs = BitReaderLtr::new(data);
+
+        let (_, _, terminated) = self.parse_ga(&mut bs, data)?;
+
+        if !terminated {
+            return decode_error("aac: raw data block is not terminated");
+        }
+
+        let bits = (data.len() as u64) * 8 - bs.bits_left();
+
+        Ok(bits.div_ceil(8) as usize)
     }
 
     fn set_pair(&mut self, pair_no: usize, channel: usize, pair: bool) -> Result<()> {
@@ -335,12 +372,16 @@ impl AacDecoder {
         Ok(())
     }
 
-    fn decode_ga<B: ReadBitsLtr + FiniteBitStream>(
+    /// Parse a `raw_data_block()` of AAC-LC. Returns the number of channel elements, the SBR
+    /// extension payload of each of them, and whether the block was terminated by `ID_END`.
+    #[allow(clippy::type_complexity)]
+    fn parse_ga<B: ReadBitsLtr + FiniteBitStream>(
         &mut self,
         bs: &mut B,
         data: &[u8],
-    ) -> Result<()> {
+    ) -> Result<(usize, Vec<Option<sbr::extension::SbrExtensionData>>, bool)> {
         let mut cur_pair = 0;
+        let mut terminated = false;
         let mut sbr_ext: Vec<Option<sbr::extension::SbrExtensionData>> =
             vec![None; self.elem_targets.len()];
         while bs.bits_left() > 3 {
@@ -392,16 +433,10 @@ impl AacDecoder {
                 }
                 5 => {
                     // ID_PCE appearing inside raw_data_block(), as opposed to inside the
-                    // AudioSpecificConfig's GASpecificConfig() (which IS parsed and honoured; see
-                    // `AudioSpecificConfig::read` / `channel_elements`). This in-band form is used
-                    // when the transport carries no out-of-band channel configuration: MP4/ESDS
-                    // always carries an ASC (so this is unreachable there), but ADTS's own
-                    // `channel_configuration` field can itself be 0, in which case a `raw_data_
-                    // block()` is required to open with exactly this element. Supporting it would
-                    // mean deferring the decoder's channel count / output buffer sizing (currently
-                    // fixed at construction from `AudioSpecificConfig`/ADTS header) until the
-                    // first packet has been parsed; a real (if rare) case, but out of scope here.
-                    return unsupported_error("aac: program config element in raw_data_block");
+                    // AudioSpecificConfig's GASpecificConfig(). The channel layout comes from
+                    // the config of the stream (a decoder is always created with one), so the
+                    // element is only parsed to skip it.
+                    let _ = ProgramConfig::read(bs)?;
                 }
                 6 => {
                     // ID_FIL
@@ -416,7 +451,7 @@ impl AacDecoder {
                     if count > 0 {
                         let ext_type = bs.read_bits_leq32(4)?;
 
-                        if matches!(ext_type, 0xd | 0xe) && cur_pair > 0 {
+                        if matches!(ext_type, 0xd | 0xe) && cur_pair > 0 && !self.syntax_only {
                             // EXT_SBR_DATA (0xd) / EXT_SBR_DATA_CRC (0xe). `sbr_extension_data()`
                             // starts immediately after this 4-bit `extension_type` field (no
                             // byte alignment) and runs to the end of this `count`-byte
@@ -484,11 +519,29 @@ impl AacDecoder {
                 }
                 7 => {
                     // ID_TERM
+                    terminated = true;
                     break;
                 }
                 _ => unreachable!(),
             };
         }
+
+        // An `ID_END` element at the very end of the data has no bit after it to satisfy the
+        // loop condition above.
+        if !terminated && bs.bits_left() == 3 && bs.read_bits_leq32(3)? == 7 {
+            terminated = true;
+        }
+
+        Ok((cur_pair, sbr_ext, terminated))
+    }
+
+    fn decode_ga<B: ReadBitsLtr + FiniteBitStream>(
+        &mut self,
+        bs: &mut B,
+        data: &[u8],
+    ) -> Result<()> {
+        let (cur_pair, sbr_ext, _) = self.parse_ga(bs, data)?;
+
         let rate_idx = GASubbandInfo::find_idx(self.asc.sample_rate);
         for pair in 0..cur_pair {
             self.pairs[pair].synth_audio(&mut self.dsp, &mut self.buf, rate_idx);
