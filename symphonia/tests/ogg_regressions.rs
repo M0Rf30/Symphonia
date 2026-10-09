@@ -658,3 +658,57 @@ fn external_chained_samples() {
         assert!(!got.is_empty());
     }
 }
+
+/// Near full-scale mono Opus streams (a clipping square wave plus noise, so the decoded float
+/// output exceeds full-scale and the SILK decoder saturates). The float output must be libopus'
+/// *unclipped* float decode: ffmpeg's default libopus decode path produces 16-bit samples after
+/// libopus' soft clipper (`opus_pcm_soft_clip`), which differs from the float decode for every
+/// packet that exceeds full-scale (this is not a decoder error).
+///
+/// SILK saturates its 16-bit output at the negative rail to -32767; the following resampler
+/// then rings differently if -32768 is delivered instead (bit-exactness regression).
+fn check_loud_mono(name: &str, extra_args: &[&str]) {
+    if !have_encoder("libopus") {
+        return;
+    }
+    let path = fixtures_dir().join(format!("{name}.opus"));
+    let mut args = vec![
+        "-y",
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=f=300:d=3:r=48000,aeval=gte(val(0)\\,0)*1.96-0.98:c=mono",
+        "-c:a",
+        "libopus",
+        "-frame_duration",
+        "20",
+    ];
+    args.extend_from_slice(extra_args);
+    args.push(path.to_str().unwrap());
+    run_ffmpeg(&args);
+
+    let reference = ffmpeg_decode_f32(&path, "libopus");
+    let (pcm, channels) = decode_all(&path);
+    assert_eq!(channels, 1);
+    assert_eq!(reference.len(), pcm.len());
+
+    let peak = pcm.iter().fold(0f32, |m, v| m.max(v.abs()));
+    let max_err = reference.iter().zip(&pcm).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+    println!("{name}: peak {peak:.3}, max error vs libopus float {max_err:.2e}");
+    assert!(max_err < 1e-5, "{name}: max error {max_err}");
+}
+
+#[test]
+fn opus_mono_silk_loud_matches_libopus_float() {
+    check_loud_mono(
+        "opus_mono_silk_loud",
+        &["-application", "voip", "-cutoff", "8000", "-b:a", "24k"],
+    );
+}
+
+#[test]
+fn opus_mono_loud_matches_libopus_float() {
+    check_loud_mono("opus_mono_loud", &["-application", "voip", "-b:a", "48k"]);
+}
