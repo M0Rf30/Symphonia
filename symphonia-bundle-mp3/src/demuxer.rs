@@ -156,19 +156,100 @@ struct ScannedFrame {
 }
 
 /// The number of bytes before a candidate MPEG audio frame that are searched for MPEG program
-/// stream start codes.
+/// stream headers.
 const PS_LOOKBACK_LEN: usize = 4096;
+
+/// Returns true if `b` begins with a valid MPEG program stream pack header: the `00 00 01 BA` start
+/// code followed by the MPEG-2 (`01`) or MPEG-1 (`0010`) marker bits, and the fixed marker bits of
+/// the system clock reference and mux rate.
+fn is_ps_pack_header(b: &[u8]) -> bool {
+    if b.len() < 10 || b[..4] != [0x00, 0x00, 0x01, 0xba] {
+        return false;
+    }
+
+    if b[4] & 0xc0 == 0x40 {
+        // MPEG-2: SCR marker bits.
+        b[4] & 0x04 == 0x04 && b[6] & 0x04 == 0x04 && b[8] & 0x04 == 0x04 && b[9] & 0x01 == 0x01
+    }
+    else {
+        // MPEG-1: SCR and mux rate marker bits.
+        b[4] & 0xf1 == 0x21 && b[6] & 0x01 == 0x01 && b[8] & 0x01 == 0x01 && b[9] & 0x80 == 0x80
+    }
+}
+
+/// If `b` begins with a valid PES packet header of an audio stream (`00 00 01` and a stream id of
+/// private stream 1 or an MPEG audio stream), returns the range of the packet's payload, relative
+/// to the start of `b`. The end of the range may be after the end of `b`. Returns `None` if the
+/// header is invalid, or is not completely in `b`.
+fn ps_pes_payload(b: &[u8]) -> Option<std::ops::Range<usize>> {
+    if b.len() < 9 || b[..3] != [0x00, 0x00, 0x01] || !matches!(b[3], 0xbd | 0xc0..=0xdf) {
+        return None;
+    }
+
+    let len = usize::from(u16::from_be_bytes([b[4], b[5]]));
+
+    if len == 0 {
+        return None;
+    }
+
+    let start = if b[6] & 0xc0 == 0x80 {
+        // MPEG-2 PES header: '10' marker bits, flags, and the header data length.
+        9 + usize::from(b[8])
+    }
+    else {
+        // MPEG-1 PES header: stuffing bytes, an optional STD buffer field, and a PTS/DTS, or the
+        // end of the header.
+        let mut i = 6;
+
+        while *b.get(i)? == 0xff {
+            i += 1;
+
+            if i > 6 + 16 {
+                return None;
+            }
+        }
+
+        if b[i] & 0xc0 == 0x40 {
+            i += 2;
+        }
+
+        match *b.get(i)? {
+            x if x & 0xf0 == 0x20 => i + 5,
+            x if x & 0xf0 == 0x30 => i + 10,
+            0x0f => i + 1,
+            _ => return None,
+        }
+    };
+
+    // The header must be within the packet.
+    (start <= 6 + len).then_some(start..6 + len)
+}
+
+/// Returns true if `window`, the bytes of a stream immediately before a candidate MPEG audio
+/// frame, show that the frame is in an MPEG program stream: the window contains a valid pack
+/// header, or a valid PES header of an audio stream with the frame in its payload.
+///
+/// Image data (e.g., a picture in an ID3v2 tag) before the first frame may contain the start code
+/// bytes, but is very unlikely to also form a valid header that covers the frame.
+fn is_ps_window(window: &[u8]) -> bool {
+    (0..window.len()).any(|at| {
+        let b = &window[at..];
+
+        is_ps_pack_header(b)
+            || ps_pes_payload(b).is_some_and(|payload| {
+                // The frame is at `b.len()`.
+                payload.start <= b.len() && b.len() < payload.end
+            })
+    })
+}
 
 /// Returns true if the buffered stream is an MPEG program stream (MPEG-PS). MPEG audio frames are
 /// found inside the PES packets of such a stream, but the stream is not an MPEG audio stream: the
 /// audio data is interleaved with PES headers, and so decoding it as one would produce garbage.
 ///
-/// The stream is a program stream if either:
-/// * it begins with a pack header (`00 00 01 BA`), if the start of the stream is still buffered, or
-/// * a PS/PES start code (`00 00 01` followed by a pack, system, or stream id) is found in the
-///   buffered bytes just before the current position. This catches the probe scanning ahead to
-///   an MPEG audio frame inside a PES packet after the start of the stream was dropped from the
-///   buffer. Frames of an elementary stream do not contain start codes in practice.
+/// If the start of the stream is still buffered, the stream is a program stream if it begins with
+/// a pack header. Otherwise (the probe scanned ahead and the buffer no longer holds the start),
+/// the bytes before the current position are examined, see [`is_ps_window`].
 ///
 /// The position of the stream is restored.
 fn is_mpeg_ps_stream(reader: &mut MediaSourceStream<'_>) -> bool {
@@ -176,36 +257,23 @@ fn is_mpeg_ps_stream(reader: &mut MediaSourceStream<'_>) -> bool {
 
     // Look at the start of the stream.
     if reader.seek_buffered(0) == 0 {
-        let mut buf = [0u8; 5];
-
-        let is_ps = reader.read_buf_exact(&mut buf).is_ok()
-            && buf[..4] == [0x00, 0x00, 0x01, 0xba]
-            // MPEG-2 PS: '01' marker bits. MPEG-1 PS: '0010' marker bits.
-            && (buf[4] & 0xc0 == 0x40 || buf[4] & 0xf0 == 0x20);
+        let mut buf = [0u8; 10];
+        let is_ps = reader.read_buf_exact(&mut buf).is_ok() && is_ps_pack_header(&buf);
 
         reader.seek_buffered(pos);
 
-        if is_ps {
-            return true;
-        }
+        // The start of the stream is known, and decides.
+        return is_ps;
     }
 
     // Look at the bytes before the current position.
     let back = (pos as usize).min(PS_LOOKBACK_LEN);
     let mut buf = [0u8; PS_LOOKBACK_LEN];
 
-    let is_ps = if back >= 4 && reader.seek_buffered(pos - back as u64) == pos - back as u64 {
-        reader.read_buf_exact(&mut buf[..back]).is_ok()
-            && buf[..back].windows(4).any(|w| {
-                w[..3] == [0x00, 0x00, 0x01]
-                    // Pack header, system header, program stream map, private stream 1, padding,
-                    // private stream 2, audio streams, video streams.
-                    && matches!(w[3], 0xba..=0xbf | 0xc0..=0xef)
-            })
-    }
-    else {
-        false
-    };
+    let is_ps = back >= 9
+        && reader.seek_buffered(pos - back as u64) == pos - back as u64
+        && reader.read_buf_exact(&mut buf[..back]).is_ok()
+        && is_ps_window(&buf[..back]);
 
     reader.seek_buffered(pos);
 
@@ -1697,6 +1765,72 @@ mod tests {
 
             assert_eq!(reader.tracks[0].num_frames, Some(n as u64 * 1152), "{n} frames");
         }
+    }
+
+    #[test]
+    fn verify_ps_window_detection() {
+        // Pseudo-random "image" bytes without start codes.
+        let junk: Vec<u8> =
+            (0..3000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8 | 1).collect();
+
+        let pes2 = |len: u16| {
+            let mut v = vec![0x00, 0x00, 0x01, 0xc0];
+            v.extend_from_slice(&len.to_be_bytes());
+            // MPEG-2 PES: '10' flags, PTS only, header data length 5.
+            v.extend_from_slice(&[0x80, 0x80, 0x05, 0x21, 0x00, 0x01, 0x00, 0x01]);
+            v
+        };
+
+        // A window of junk is not a program stream.
+        assert!(!is_ps_window(&junk));
+
+        // Junk followed by a PES header whose packet covers the frame at the end of the window.
+        let mut window = junk.clone();
+        window.extend_from_slice(&pes2(2000));
+        assert!(is_ps_window(&window));
+
+        // MPEG-1 PES header (stuffing, PTS).
+        let mut window = junk.clone();
+        window
+            .extend_from_slice(&[0x00, 0x00, 0x01, 0xc0, 0x07, 0xd0, 0xff, 0xff, 0x21, 0, 1, 0, 1]);
+        assert!(is_ps_window(&window));
+
+        // A PES header whose packet ends before the frame (e.g., image bytes that happen to
+        // contain a start code).
+        let mut window = junk.clone();
+        window.extend_from_slice(&pes2(16));
+        window.extend_from_slice(&[0x55; 64]);
+        assert!(!is_ps_window(&window));
+
+        // A start code that is not followed by a valid PES header.
+        for tail in [
+            [0x00, 0x00, 0x01, 0xc0, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00],
+            [0x00, 0x00, 0x01, 0xc0, 0x00, 0x00, 0x80, 0x80, 0x05, 0x00],
+            [0x00, 0x00, 0x01, 0xe0, 0xff, 0xff, 0x80, 0x80, 0x05, 0x00],
+        ] {
+            let mut window = junk.clone();
+            window.extend_from_slice(&tail);
+            assert!(!is_ps_window(&window));
+        }
+    }
+
+    #[test]
+    fn verify_id3v2_image_before_the_first_frame_is_not_ps() {
+        // An ID3v2 tag whose picture ends with bytes that look like a PES start code, directly
+        // before the first frame.
+        let mut tag = vec![0u8; 0];
+        tag.extend((0..70_000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8 | 1));
+        tag.extend_from_slice(&[0x00, 0x00, 0x01, 0xc0, 0xff, 0xff, 0x00, 0x20, 0x80]);
+
+        let mut data = tag.clone();
+        data.extend_from_slice(&build_stream(&plain_frames(8), 9, FRAME_LEN));
+
+        // The start of the stream is no longer buffered when the probe reaches the frame.
+        let mut mss = MediaSourceStream::new(Box::new(Cursor::new(data)), Default::default());
+        mss.ignore_bytes(tag.len() as u64).unwrap();
+
+        let score = MpaReader::score(ScopedStream::new(&mut mss, 4096)).unwrap();
+        assert!(matches!(score, Score::Supported(_)));
     }
 
     #[test]
