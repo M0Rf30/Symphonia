@@ -203,14 +203,11 @@ fn matches_mpcdec_oracle_sv7_real_sample() {
     let _ = std::fs::remove_file(&tmp_wav);
 }
 
-/// Verifies that decoding *after a seek* matches `mpcdec` decoding from the start, at the exact
-/// sample the seek actually landed on (frame-accurate seeking may land at or before the
-/// requested target -- see `demuxer::sv7`/`demuxer::sv8`'s `seek`). This directly checks the
-/// "pre-roll" behaviour requested for review: there is no separate warm-up step because SV8 `AP`
-/// blocks are independently decodable at their start (`is_key_frame`) and SV7 seeking resets SCF
-/// state to the same neutral baseline `mpc_decoder_reset_scf` uses (see `decoder.rs::reset`), so
-/// the check is that decode-after-seek reproduces the *same* reference samples decode-from-start
-/// would produce at that position -- no discontinuity.
+/// Verifies that decoding *after a seek* matches `mpcdec` decoding from the start, at the sample
+/// the seek reports having landed on (`SeekedTo::actual_ts`, which for `SeekMode::Accurate` is
+/// the requested sample itself). The demuxer starts one packet early and trims it away, so the
+/// synthesis filter is warm, and hands SV7 decoders the recovered scale-factor state; see
+/// `tests/seek.rs` for the exhaustive (bit-exact, self-referential) variant of this check.
 #[test]
 fn seek_then_decode_matches_mpcdec_at_landed_sample() {
     let Some(mpcdec) = find_mpcdec()

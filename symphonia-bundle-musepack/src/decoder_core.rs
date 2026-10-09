@@ -30,19 +30,6 @@ fn absi(x: i32) -> i32 {
     x.wrapping_abs()
 }
 
-/// Result of decoding one Musepack frame.
-#[allow(dead_code)] // `bits`/`end_of_stream` are diagnostic (oracle-diff/test) fields.
-pub struct FrameResult {
-    /// Number of sample-frames written to the output buffer (after `samples_to_skip` trimming).
-    /// `0` with `end_of_stream == false` means the whole frame was consumed by skipping.
-    pub samples: usize,
-    /// Number of bits consumed from the bitstream by this frame (informational).
-    pub bits: u64,
-    /// Set when the decoder determined the stream has no more samples (SV7 only; SV8 end-of-
-    /// stream is signalled by the demuxer's `SE` block instead).
-    pub end_of_stream: bool,
-}
-
 /// The core Musepack decoder state. Shared between SV7 and SV8; instantiate once per logical
 /// stream and reuse across all packets (`decode_frame` mutates persistent history: the
 /// scale-factor deltas, `last_max_band`, `DSCF_Flag`, and the synthesis filter's `V` buffers).
@@ -52,9 +39,6 @@ pub struct Decoder {
     pub ms: bool,
     pub channels: u32,
 
-    pub samples: u64,
-    pub decoded_samples: u64,
-    pub samples_to_skip: u32,
     last_max_band: i32,
 
     r1: u32,
@@ -88,9 +72,6 @@ impl Decoder {
             max_band: max_band.clamp(0, MAX_BANDS as i32 - 1),
             ms,
             channels: channels.clamp(1, 2),
-            samples: 0,
-            decoded_samples: 0,
-            samples_to_skip: SYNTH_DELAY,
             last_max_band: 0,
             r1: 1,
             r2: 1,
@@ -110,23 +91,6 @@ impl Decoder {
             y_l: [[0.0; 32]; 36],
             y_r: [[0.0; 32]; 36],
             scf: requant::build_scf_table(1.0),
-        }
-    }
-
-    /// Sets the total sample count and initial skip (`mpc_decoder_set_streaminfo`), given the
-    /// stream's declared sample count and (SV8) leading silence / (SV7) gapless padding already
-    /// folded in by the caller (see `demuxer::sv7`/`demuxer::sv8`).
-    pub fn set_total_samples(&mut self, samples: u64, beg_silence: u64) {
-        self.samples = samples;
-        self.samples_to_skip = SYNTH_DELAY + (beg_silence.min(u64::from(u32::MAX)) as u32);
-    }
-
-    /// Resets seek-sensitive persistent state (used for SV7's `mpc_decoder_reset_scf`). Does
-    /// *not* reset the synthesis filter history, matching the reference (see NOTICE-adjacent
-    /// discussion of seek pre-roll in `demuxer/sv7.rs`/`demuxer/sv8.rs`).
-    pub fn reset_scf(&mut self, value: i32) {
-        for b in self.scf_index_l.iter_mut().chain(self.scf_index_r.iter_mut()) {
-            *b = [value; 3];
         }
     }
 
@@ -508,26 +472,33 @@ impl Decoder {
     // Frame driver
     // ------------------------------------------------------------------
 
-    /// Ported from libmpcdec `mpc_decoder.c` (`mpc_decoder_decode_frame`).
+    /// Ported from libmpcdec `mpc_decoder.c` (`mpc_decoder_decode_frame`), minus its gapless
+    /// bookkeeping (see below).
     ///
     /// Decodes exactly one Musepack frame from `r` (which must be positioned at the start of a
-    /// frame). `out` must have room for `FRAME_LENGTH * channels` interleaved `f32` samples;
-    /// on return, valid audio occupies `out[..result.samples * channels]` (already shifted to
-    /// the front if leading samples were trimmed by `samples_to_skip`).
+    /// frame). `out` must have room for `FRAME_LENGTH * channels` interleaved `f32` samples; the
+    /// full frame is always written (`FRAME_LENGTH` sample-frames).
+    ///
+    /// The reference decoder also tracks the stream's total sample count and the encoder delay
+    /// here (`samples`/`decoded_samples`/`samples_to_skip`) and trims the output itself. That
+    /// state is position dependent, which makes it unusable after a seek, so it is expressed
+    /// instead through `Packet::trim_start`/`trim_end`, computed by the demuxer from the very same
+    /// quantities (see `demuxer::StreamInfo::skip_samples`) and applied by the `AudioDecoder`.
+    ///
+    /// Returns `false` (and writes nothing) if `out` is too small.
     pub fn decode_frame(
         &mut self,
         r: &mut BitReader<'_>,
         is_key_frame: bool,
         out: &mut [f32],
-    ) -> FrameResult {
-        let start_bit = r.bit_pos();
-
-        let samples_left_signed =
-            self.samples as i64 - self.decoded_samples as i64 + i64::from(SYNTH_DELAY);
-        if samples_left_signed <= 0 && self.samples != 0 {
-            return FrameResult { samples: 0, bits: 0, end_of_stream: true };
+    ) -> bool {
+        let channels = self.channels as usize;
+        let frame_buf_len = FRAME_LENGTH * channels;
+        // `synth_channel` writes the full 36*32 grid unconditionally; malformed/undersized
+        // buffers must never cause a panic.
+        if out.len() < frame_buf_len {
+            return false;
         }
-        let mut samples_left = samples_left_signed.max(0) as u64;
 
         if self.stream_version >= 8 {
             self.read_bitstream_sv8(r, is_key_frame);
@@ -536,65 +507,122 @@ impl Decoder {
             self.read_bitstream_sv7(r);
         }
 
-        let channels = self.channels as usize;
-        let frame_buf_len = FRAME_LENGTH * channels;
-        // `synth_channel` writes the full 36*32 grid unconditionally; only run it when the
-        // caller-provided buffer is actually large enough (it always should be, per this
-        // method's contract, but malformed/undersized buffers must never cause a panic).
-        if out.len() >= frame_buf_len
-            && (self.samples_to_skip as u64) < (FRAME_LENGTH as u64 + u64::from(SYNTH_DELAY))
-        {
-            self.requantize();
-            let buf = &mut out[..frame_buf_len];
-            synth::synth_channel(&mut self.v_l, &self.y_l, buf, channels, 0);
-            if channels > 1 {
-                synth::synth_channel(&mut self.v_r, &self.y_r, buf, channels, 1);
+        self.requantize();
+        let buf = &mut out[..frame_buf_len];
+        synth::synth_channel(&mut self.v_l, &self.y_l, buf, channels, 0);
+        if channels > 1 {
+            synth::synth_channel(&mut self.v_r, &self.y_r, buf, channels, 1);
+        }
+        true
+    }
+
+    /// Parses one SV7 frame's bitstream without requantizing or synthesizing it, advancing only
+    /// the state that carries over between frames (scale-factor deltas, noise generator).
+    /// Used by the demuxer to recover that state at an arbitrary frame for seeking.
+    pub fn skip_frame_sv7(&mut self, r: &mut BitReader<'_>) {
+        self.read_bitstream_sv7(r);
+    }
+
+    /// SV8 counterpart of [`Decoder::skip_frame_sv7`]; `is_key_frame` is true for the first frame
+    /// of a packet.
+    pub fn skip_frame_sv8(&mut self, r: &mut BitReader<'_>, is_key_frame: bool) {
+        self.read_bitstream_sv8(r, is_key_frame);
+    }
+
+    /// The noise-substitution generator state (`r1`, `r2`).
+    pub fn noise_state(&self) -> [u32; 2] {
+        [self.r1, self.r2]
+    }
+
+    /// Restores a state captured by [`Decoder::noise_state`].
+    pub fn set_noise_state(&mut self, [r1, r2]: [u32; 2]) {
+        self.r1 = r1;
+        self.r2 = r2;
+    }
+
+    /// Snapshot of the SV7 inter-frame state (see [`Sv7Sync`]).
+    pub fn sv7_sync(&self) -> Sv7Sync {
+        Sv7Sync { scf_l: self.scf_index_l, scf_r: self.scf_index_r, r1: self.r1, r2: self.r2 }
+    }
+
+    /// Restores the SV7 inter-frame state captured by [`Decoder::sv7_sync`].
+    pub fn set_sv7_sync(&mut self, sync: &Sv7Sync) {
+        self.scf_index_l = sync.scf_l;
+        self.scf_index_r = sync.scf_r;
+        self.r1 = sync.r1;
+        self.r2 = sync.r2;
+    }
+}
+
+/// The SV7 decoder state that is *not* reconstructible from a single frame.
+///
+/// SV7 scale factors are delta-coded against the previous frame (`decode_dscf_sv7`), with no
+/// periodic key frames, so decoding from an arbitrary frame requires knowing the scale factors
+/// at that point (resetting them to a constant, as libmpcdec's seek does, leaves a gain error
+/// that persists until each band happens to be re-coded with an escape). The noise-substitution
+/// generator (`Res == -1`) is likewise sequential. Everything else read by
+/// `read_bitstream_sv7` is rewritten by every frame.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Sv7Sync {
+    scf_l: [[i32; 3]; MAX_BANDS],
+    scf_r: [[i32; 3]; MAX_BANDS],
+    r1: u32,
+    r2: u32,
+}
+
+impl Sv7Sync {
+    /// Serialized size in bytes, see [`Sv7Sync::write_to`].
+    pub const ENCODED_LEN: usize = 2 * MAX_BANDS * 3 * 4 + 8;
+
+    /// Appends the little-endian serialization of the state to `out`.
+    pub fn write_to(&self, out: &mut Vec<u8>) {
+        for band in self.scf_l.iter().chain(self.scf_r.iter()) {
+            for v in band {
+                out.extend_from_slice(&v.to_le_bytes());
             }
         }
+        out.extend_from_slice(&self.r1.to_le_bytes());
+        out.extend_from_slice(&self.r2.to_le_bytes());
+    }
 
-        self.decoded_samples += FRAME_LENGTH as u64;
-
-        // Ported from `mpc_decoder.c`: the C condition `d->decoded_samples - d->samples <
-        // MPC_FRAME_LENGTH` is an *unsigned* subtraction that wraps to a huge value (and is
-        // therefore false) whenever `decoded_samples < samples`, i.e. this only ever fires once
-        // `decoded_samples` has reached (or is within one frame of) `samples`. `saturating_sub`
-        // is NOT equivalent (it clamps to `0`, which is always `< FRAME_LENGTH`, making this
-        // fire on *every* frame) -- reproduce the wraparound explicitly instead.
-        if self.stream_version == 7
-            && self.decoded_samples >= self.samples
-            && self.decoded_samples - self.samples < FRAME_LENGTH as u64
-        {
-            let mut last_frame_samples = r.read_bits(11);
-            if self.decoded_samples == self.samples {
-                if last_frame_samples == 0 {
-                    last_frame_samples = FRAME_LENGTH as u32;
-                }
-                let delta = i64::from(last_frame_samples) - FRAME_LENGTH as i64;
-                self.samples = (self.samples as i64 + delta).max(0) as u64;
-                samples_left = (samples_left as i64 + delta).max(0) as u64;
+    /// Parses the serialization written by [`Sv7Sync::write_to`]. Returns `None` if `data` is
+    /// shorter than [`Sv7Sync::ENCODED_LEN`].
+    pub fn read_from(data: &[u8]) -> Option<Self> {
+        let data = data.get(..Self::ENCODED_LEN)?;
+        let mut words = data.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]));
+        let mut scf_l = [[0i32; 3]; MAX_BANDS];
+        let mut scf_r = [[0i32; 3]; MAX_BANDS];
+        for band in scf_l.iter_mut().chain(scf_r.iter_mut()) {
+            for v in band.iter_mut() {
+                *v = words.next()? as i32;
             }
         }
+        let r1 = words.next()?;
+        let r2 = words.next()?;
+        Some(Sv7Sync { scf_l, scf_r, r1, r2 })
+    }
+}
 
-        let mut n_samples = samples_left.min(FRAME_LENGTH as u64) as usize;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        if self.samples_to_skip != 0 {
-            let skip = self.samples_to_skip as usize;
-            if n_samples <= skip {
-                self.samples_to_skip -= n_samples as u32;
-                n_samples = 0;
-            }
-            else {
-                let remaining = n_samples - skip;
-                let end = (n_samples * channels).min(out.len());
-                let start = (skip * channels).min(end);
-                out.copy_within(start..end, 0);
-                n_samples = remaining;
-                self.samples_to_skip = 0;
-            }
+    #[test]
+    fn sv7_sync_round_trips() {
+        let mut core = Decoder::new(7, 20, true, 2);
+        // Garbage frame data exercises the scale-factor and noise-generator state.
+        let data: Vec<u8> = (0..400u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        for _ in 0..5 {
+            core.skip_frame_sv7(&mut BitReader::new(&data));
         }
+        let sync = core.sv7_sync();
+        assert_ne!(sync, Decoder::new(7, 20, true, 2).sv7_sync());
 
-        let bits = r.bit_pos().saturating_sub(start_bit);
-        FrameResult { samples: n_samples, bits, end_of_stream: false }
+        let mut bytes = Vec::new();
+        sync.write_to(&mut bytes);
+        assert_eq!(bytes.len(), Sv7Sync::ENCODED_LEN);
+        assert_eq!(Sv7Sync::read_from(&bytes), Some(sync));
+        assert_eq!(Sv7Sync::read_from(&bytes[..bytes.len() - 1]), None);
     }
 }
 

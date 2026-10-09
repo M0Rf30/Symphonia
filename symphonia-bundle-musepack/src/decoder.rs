@@ -23,7 +23,8 @@ use symphonia_core::packet::PacketRef;
 use symphonia_core::support_audio_codec;
 
 use crate::bits::BitReader;
-use crate::decoder_core::{Decoder as Core, FRAME_LENGTH};
+use crate::decoder_core::{Decoder as Core, Sv7Sync, FRAME_LENGTH};
+use crate::demuxer::{PACKET_TAG_NOISE, PACKET_TAG_PLAIN, PACKET_TAG_SYNC};
 
 /// Musepack (SV7/SV8) decoder.
 pub struct MpcDecoder {
@@ -37,30 +38,27 @@ pub struct MpcDecoder {
     scratch: Vec<f32>,
 }
 
+/// The part of `AudioCodecParameters::extra_data` the decoder uses (see
+/// `demuxer::encode_extra_data`; the trailing sample counts it also carries are only relevant to
+/// the demuxer, which turns them into packet trims).
 struct ExtraData {
     stream_version: u32,
     max_band: i32,
     ms: bool,
     channels: u32,
     block_pwr: u8,
-    decoder_samples: u64,
-    beg_silence: u64,
 }
 
 fn parse_extra_data(data: &[u8]) -> Result<ExtraData> {
     if data.len() < 21 {
         return decode_error("musepack: extra data too short");
     }
-    let decoder_samples = u64::from_le_bytes(data[5..13].try_into().unwrap());
-    let beg_silence = u64::from_le_bytes(data[13..21].try_into().unwrap());
     Ok(ExtraData {
         stream_version: u32::from(data[0]),
         max_band: i32::from(data[1]),
         ms: data[2] != 0,
         channels: u32::from(data[3]),
         block_pwr: data[4],
-        decoder_samples,
-        beg_silence,
     })
 }
 
@@ -80,8 +78,7 @@ impl MpcDecoder {
         let channels =
             params.channels.clone().ok_or(Error::DecodeError("musepack: missing channels"))?;
 
-        let mut core = Core::new(extra.stream_version, extra.max_band, extra.ms, extra.channels);
-        core.set_total_samples(extra.decoder_samples, extra.beg_silence);
+        let core = Core::new(extra.stream_version, extra.max_band, extra.ms, extra.channels);
 
         let spec = symphonia_core::audio::AudioSpec::new(sample_rate, channels);
         let max_frames = (1usize << extra.block_pwr.min(20)) * FRAME_LENGTH;
@@ -100,42 +97,62 @@ impl MpcDecoder {
     }
 
     fn decode_inner(&mut self, packet: &PacketRef<'_>) -> Result<()> {
-        let data = packet.data;
         let channels = self.channels;
 
-        let block_frames: u64 =
+        // Every packet starts with a tag byte, optionally followed by decoder state that the
+        // demuxer recovered for a seek (SV7: scale factors and noise generator, SV8: noise
+        // generator; everything else is rewritten by each packet).
+        let (&tag, mut data) =
+            packet.data.split_first().ok_or(Error::DecodeError("musepack: empty packet"))?;
+        match tag {
+            PACKET_TAG_PLAIN => (),
+            PACKET_TAG_SYNC if self.stream_version < 8 => {
+                let sync = Sv7Sync::read_from(data)
+                    .ok_or(Error::DecodeError("musepack: truncated SV7 state"))?;
+                self.core.set_sv7_sync(&sync);
+                data = &data[Sv7Sync::ENCODED_LEN..];
+            }
+            PACKET_TAG_NOISE if self.stream_version >= 8 => {
+                let state = data.get(..8).ok_or(Error::DecodeError("musepack: truncated state"))?;
+                let word = |i: usize| u32::from_le_bytes(state[i..i + 4].try_into().unwrap());
+                self.core.set_noise_state([word(0), word(4)]);
+                data = &data[8..];
+            }
+            _ => return decode_error("musepack: invalid packet tag"),
+        }
+
+        // The demuxer sizes `dur + trim_start + trim_end` to the number of frames actually
+        // present (the last SV8 packet may hold fewer than `2^block_pwr`).
+        let max_frames: u64 =
             if self.stream_version >= 8 { 1u64 << self.block_pwr.min(20) } else { 1 };
+        let block_frames = match packet.block_dur().get() {
+            0 => max_frames,
+            dur => dur.div_ceil(FRAME_LENGTH as u64).min(max_frames),
+        };
 
         self.buf.clear();
 
         let mut r = BitReader::new(data);
         for i in 0..block_frames {
-            self.scratch.iter_mut().for_each(|s| *s = 0.0);
             let is_key_frame = i == 0;
-            let result = self.core.decode_frame(&mut r, is_key_frame, &mut self.scratch);
-            if result.samples == 0 {
-                continue;
+            if !self.core.decode_frame(&mut r, is_key_frame, &mut self.scratch) {
+                return decode_error("musepack: frame buffer too small");
             }
             let start = self.buf.frames();
-            self.buf.render_uninit(Some(result.samples));
+            self.buf.render_uninit(Some(FRAME_LENGTH));
             for ch in 0..channels {
                 if let Some(plane) = self.buf.plane_mut(ch) {
-                    for (n, sample) in plane[start..start + result.samples].iter_mut().enumerate()
-                    {
+                    for (n, sample) in plane[start..start + FRAME_LENGTH].iter_mut().enumerate() {
                         *sample = self.scratch[n * channels + ch];
                     }
                 }
             }
         }
 
-        // Gapless trimming is inherent to `decoder_core::Decoder::decode_frame` (it mirrors
-        // libmpcdec's own encoder-delay/padding handling exactly, via `samples_to_skip` and the
-        // stream's total sample count -- see `decoder_core.rs`), so by the time execution
-        // reaches here the buffer already contains exactly the audible samples for this packet.
-        // `opts.gapless` has no additional effect for this codec (there is no "untrimmed" mode to
-        // fall back to, unlike e.g. MP3's post-hoc `AudioBuffer::trim`), which we document rather
-        // than silently ignore.
-        let _ = self.opts.gapless;
+        // Delay, padding and seek pre-roll are all expressed by the demuxer as packet trims.
+        if self.opts.gapless {
+            self.buf.trim(packet.trim_start.get() as usize, packet.trim_end.get() as usize);
+        }
 
         Ok(())
     }
@@ -147,27 +164,11 @@ impl AudioDecoder for MpcDecoder {
     }
 
     fn reset(&mut self) {
-        // Recreate the core decoder, but preserve stream configuration. Any seek that landed us
-        // here is frame-accurate (see `demuxer::sv7`/`demuxer::sv8`'s `seek`), and for SV8 every
-        // packet's first frame is a self-contained "key frame" (`is_key_frame == true` forces a
-        // fresh `Max_used_Band`/`DSCF_Flag` independent of any prior decoder state -- see
-        // `decoder_core::Decoder::read_bitstream_sv8`), so a fresh decoder is always valid there.
-        //
-        // For SV7, band-to-band deltas are frame-local, but scale-factor (SCF) deltas persist
-        // across frames with no independent "key frame" concept; libmpcdec's own seek
-        // (`mpc_demux_seek_sample_inner`) handles this by calling `mpc_decoder_reset_scf(d, 1)`
-        // (a neutral, non-zero baseline) before resuming decode at an arbitrary frame, which we
-        // replicate here.
-        let params = self.params.clone();
-        if let Some(extra) = params.extra_data.as_ref().and_then(|d| parse_extra_data(d).ok()) {
-            let mut core =
-                Core::new(extra.stream_version, extra.max_band, extra.ms, extra.channels);
-            core.set_total_samples(extra.decoder_samples, extra.beg_silence);
-            if extra.stream_version == 7 {
-                core.reset_scf(1);
-            }
-            self.core = core;
-        }
+        // Nothing to do: every packet carries all the state needed to decode it, so a seek needs
+        // no help from the caller. SV8 packets start with a key frame; the first SV7 packet
+        // after a seek is tagged with the scale-factor state recovered by the demuxer (see
+        // `Sv7Sync`); and the synthesis filter's history is flushed by the pre-roll packet the
+        // demuxer emits (and trims away entirely) before the first audible one.
         self.buf.clear();
     }
 
