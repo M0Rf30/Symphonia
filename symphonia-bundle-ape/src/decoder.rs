@@ -21,18 +21,37 @@ const DEFAULT_MAX_FRAMES_PER_PACKET: u64 = 73728 * 4;
 
 /// Monkey's Audio (APE) decoder.
 ///
-/// This wraps `ape_decoder::FrameDecoder`, a stateful frame decoder purpose-built for external
-/// demuxer integration: it only decodes already-demuxed compressed frame bytes and holds no I/O
-/// of its own. All demuxing (header/seek-table parsing, frame boundary lookup) is done by
+/// This wraps `mac::frame::FrameDecoder`, a stateful frame decoder that only decodes
+/// already-demuxed compressed frame bytes and holds no I/O of its own. All demuxing (header/seek-table parsing, frame boundary lookup) is done by
 /// [`crate::ApeReader`].
 pub struct ApeDecoder {
     params: AudioCodecParameters,
     /// Decoded audio, normalized to 32-bit width regardless of the source bit depth (matching the
     /// convention used by the FLAC and ALAC decoders in this workspace).
     buf: AudioBuffer<i32>,
-    frame_decoder: ape_decoder::FrameDecoder,
+    frame_decoder: crate::mac::frame::FrameDecoder,
     channels: u16,
     bits_per_sample: u16,
+}
+
+/// Convert interleaved PCM bytes of `BYTES` bytes per sample to the planes of `buf`.
+///
+/// `pcm` holds at least as many blocks as the buffer has frames.
+fn deinterleave<const BYTES: usize>(
+    buf: &mut AudioBuffer<i32>,
+    pcm: &[u8],
+    ch_count: usize,
+    convert: impl Fn([u8; BYTES]) -> i32,
+) {
+    for ch in 0..ch_count {
+        let plane = buf.plane_mut(ch).expect("channel count matches buffer spec");
+        let offset = ch * BYTES;
+        for (sample, block) in plane.iter_mut().zip(pcm.chunks_exact(ch_count * BYTES)) {
+            let bytes: [u8; BYTES] =
+                block[offset..offset + BYTES].try_into().expect("a sample is BYTES bytes");
+            *sample = convert(bytes);
+        }
+    }
 }
 
 impl ApeDecoder {
@@ -61,7 +80,7 @@ impl ApeDecoder {
         let channels_count = u16::from_le_bytes([extra[4], extra[5]]);
 
         let frame_decoder =
-            ape_decoder::FrameDecoder::new(version, channels_count, bits_per_sample, compression_level)
+            crate::mac::frame::FrameDecoder::new(version, channels_count, bits_per_sample, compression_level)
                 .map_err(map_ape_error)?;
 
         let spec = AudioSpec::new(sample_rate, channels);
@@ -91,72 +110,44 @@ impl ApeDecoder {
         self.buf.clear();
         self.buf.render_uninit(Some(frame_blocks));
 
+        // The samples are normalized to 32-bit width (left-justified), matching the FLAC/ALAC
+        // convention, as they are converted from the interleaved little-endian PCM bytes.
         match self.bits_per_sample {
             8 => {
                 if pcm_bytes.len() < frame_blocks * ch_count {
                     return decode_error("ape: pcm data too short for 8-bit");
                 }
-                for ch in 0..ch_count {
-                    let plane = self.buf.plane_mut(ch).expect("channel count matches buffer spec");
-                    for (frame, sample) in plane.iter_mut().enumerate() {
-                        // APE "unprepare" biases 8-bit samples by +128 (silence = 128), which is
-                        // exactly Symphonia's unsigned 8-bit PCM convention; no rebias needed.
-                        *sample = i32::from(pcm_bytes[frame * ch_count + ch]) - 128;
-                    }
-                }
+                // APE "unprepare" biases 8-bit samples by +128 (silence = 128), which is exactly
+                // Symphonia's unsigned 8-bit PCM convention; the samples are re-centered here.
+                deinterleave::<1>(&mut self.buf, &pcm_bytes, ch_count, |b| {
+                    (u32::from(b[0]) << 24).wrapping_sub(0x8000_0000) as i32
+                });
             }
             16 => {
                 if pcm_bytes.len() < frame_blocks * ch_count * 2 {
                     return decode_error("ape: pcm data too short for 16-bit");
                 }
-                for ch in 0..ch_count {
-                    let plane = self.buf.plane_mut(ch).expect("channel count matches buffer spec");
-                    for (frame, sample) in plane.iter_mut().enumerate() {
-                        let off = (frame * ch_count + ch) * 2;
-                        *sample = i32::from(i16::from_le_bytes([pcm_bytes[off], pcm_bytes[off + 1]]));
-                    }
-                }
+                deinterleave::<2>(&mut self.buf, &pcm_bytes, ch_count, |b| {
+                    i32::from(i16::from_le_bytes(b)) << 16
+                });
             }
             24 => {
                 if pcm_bytes.len() < frame_blocks * ch_count * 3 {
                     return decode_error("ape: pcm data too short for 24-bit");
                 }
-                for ch in 0..ch_count {
-                    let plane = self.buf.plane_mut(ch).expect("channel count matches buffer spec");
-                    for (frame, sample) in plane.iter_mut().enumerate() {
-                        let off = (frame * ch_count + ch) * 3;
-                        let raw = u32::from(pcm_bytes[off])
-                            | (u32::from(pcm_bytes[off + 1]) << 8)
-                            | (u32::from(pcm_bytes[off + 2]) << 16);
-                        // Sign-extend the 24-bit value to 32 bits.
-                        *sample = ((raw << 8) as i32) >> 8;
-                    }
-                }
+                deinterleave::<3>(&mut self.buf, &pcm_bytes, ch_count, |b| {
+                    // The 24-bit sample, sign-extended to 32 bits and shifted up by 8 bits.
+                    ((u32::from(b[0]) << 8) | (u32::from(b[1]) << 16) | (u32::from(b[2]) << 24))
+                        as i32
+                });
             }
             32 => {
                 if pcm_bytes.len() < frame_blocks * ch_count * 4 {
                     return decode_error("ape: pcm data too short for 32-bit");
                 }
-                for ch in 0..ch_count {
-                    let plane = self.buf.plane_mut(ch).expect("channel count matches buffer spec");
-                    for (frame, sample) in plane.iter_mut().enumerate() {
-                        let off = (frame * ch_count + ch) * 4;
-                        *sample = i32::from_le_bytes([
-                            pcm_bytes[off],
-                            pcm_bytes[off + 1],
-                            pcm_bytes[off + 2],
-                            pcm_bytes[off + 3],
-                        ]);
-                    }
-                }
+                deinterleave::<4>(&mut self.buf, &pcm_bytes, ch_count, i32::from_le_bytes);
             }
             _ => return unsupported_error("ape: unsupported bit depth"),
-        }
-
-        // Normalize samples to 32-bit width (left-justify), matching the FLAC/ALAC convention.
-        if self.bits_per_sample < 32 {
-            let shift = 32 - u32::from(self.bits_per_sample);
-            self.buf.apply(|sample| sample << shift);
         }
 
         Ok(())
@@ -170,7 +161,7 @@ impl AudioDecoder for ApeDecoder {
 
     fn reset(&mut self) {
         // APE frames are independently decodable (predictors/entropy/range coder are reset at
-        // the start of each frame by `ape_decoder::FrameDecoder`), so there is no persistent
+        // the start of each frame by `FrameDecoder`), so there is no persistent
         // state to clear here.
     }
 

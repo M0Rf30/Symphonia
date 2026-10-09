@@ -2,8 +2,8 @@
 // derivation, against a synthetic in-memory APE header (no compressed audio frame data).
 //
 // A full end-to-end decode test would require a real, non-trivial `.ape` fixture that isn't
-// available in this repository; `ape_decoder::FrameDecoder` itself is exhaustively tested
-// upstream (see the `ape-decoder` crate).
+// available in this repository; the end-to-end decode is covered by the sample-gated golden
+// hashes in `ape_golden.rs`.
 
 use std::io::Cursor;
 
@@ -17,7 +17,7 @@ use symphonia_core::io::{MediaSourceStream, MediaSourceStreamOptions, ScopedStre
 /// A minimal, valid current-format (version 3990) APE descriptor + header, with no seek table,
 /// no WAV header data, and no frame data (`total_frames = 1`, `blocks_per_frame =
 /// final_frame_blocks = sample_rate = 44100`, 16-bit stereo). This is enough for
-/// `ape_decoder::format::parse` to succeed and derive a 1 second duration.
+/// `mac::format::parse` to succeed and derive a 1 second duration.
 const SYNTHETIC_APE_HEADER: [u8; 76] = [
     0x4d, 0x41, 0x43, 0x20, 0x96, 0x0f, 0x00, 0x00, 0x34, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
