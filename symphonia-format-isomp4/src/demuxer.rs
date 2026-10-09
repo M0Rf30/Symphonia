@@ -55,7 +55,12 @@ pub struct TrackState {
     /// all audio tracks. For HE-AAC (SBR), the timescale of a track may be the core codec rate
     /// while the decoded output has twice the sample rate.
     frames_per_tick: u64,
-    /// How to pre-roll the decoder after an accurate seek, so that the decoder's internal state
+    /// The time base of the media (sample table) timestamps, which differs from the time base of
+    /// the track if `frames_per_tick` is not 1.
+    media_time_base: TimeBase,
+    /// The nominal duration of a sample in the sample table: the most common one.
+    stts_nominal: Option<u64>,
+    /// How to pre-roll the decoder after a seek, so that the decoder's internal state
     /// converges before the seek target.
     seek_preroll: SeekPreroll,
 }
@@ -75,7 +80,8 @@ impl TrackState {
             track.with_codec_params(codec_params);
         }
 
-        // Populate timing information.
+        // Populate timing information. This is revised below if the number of decoded frames per
+        // tick of the media timescale is not 1.
         track
             .with_time_base(TimeBase::from_recip(timespan.timescale))
             .with_duration(timespan.duration);
@@ -104,6 +110,22 @@ impl TrackState {
         if let Some(frames_per_tick) = frames_per_tick {
             // The total number of frames, including any delay and padding.
             let total_frames = timespan.duration.get().saturating_mul(frames_per_tick);
+
+            // If a tick of the media timescale is more than one decoded frame (e.g., HE-AAC, where
+            // the media timescale is the sample rate of the core codec), express the timeline of
+            // the track in decoded frames: the same unit as the delay, padding, number of frames,
+            // and the trim of packets.
+            if frames_per_tick > 1 {
+                if let Some(timescale) = u32::try_from(frames_per_tick)
+                    .ok()
+                    .and_then(|ratio| timespan.timescale.get().checked_mul(ratio))
+                    .and_then(NonZero::new)
+                {
+                    track
+                        .with_time_base(TimeBase::from_recip(timescale))
+                        .with_duration(Duration::new(total_frames));
+                }
+            }
 
             track.with_num_frames(total_frames);
 
@@ -153,6 +175,8 @@ impl TrackState {
             next_sample: 0,
             next_sample_pos: 0,
             frames_per_tick: frames_per_tick.unwrap_or(1),
+            media_time_base: TimeBase::from_recip(timespan.timescale),
+            stts_nominal: nominal_sample_delta(trak),
             seek_preroll: SeekPreroll::new(&track),
         };
 
@@ -160,7 +184,7 @@ impl TrackState {
     }
 }
 
-/// How to pre-roll a decoder after an accurate seek.
+/// How to pre-roll a decoder after a seek.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum SeekPreroll {
     /// Start decoding at the sample containing the seek target.
@@ -186,13 +210,17 @@ impl SeekPreroll {
         }
     }
 
-    /// Get the number of the sample to start decoding from to reach `target`, where `first` is
-    /// the number of the first sample of the segment and `from_start` is true if that segment
-    /// starts at the beginning of the track.
+    /// Get the number of the sample to start decoding from to reach `target`, where `from_start`
+    /// is true if the segment containing the target starts at the beginning of the track.
     fn start_sample(self, target: u32, from_start: bool) -> u32 {
         match self {
             SeekPreroll::None => target,
-            // The SBR pre-roll is aligned to the stream start, which is only known for a segment
+            // The state of an SBR decoder is a function of the frames since the start of the
+            // stream (the noise phase), so audio is only correct if decoding starts at a frame
+            // from which a reset decoder converges. Therefore, an SBR stream is pre-rolled
+            // regardless of the seek mode.
+            //
+            // The pre-roll is aligned to the stream start, which is only known for a segment
             // that starts the track. Otherwise, use the maximum pre-roll.
             SeekPreroll::Aac { sbr: true } if !from_start => {
                 target.saturating_sub(AAC_SEEK_MAX_PREROLL_FRAMES as u32)
@@ -239,6 +267,21 @@ fn derive_gapless_from_elst(
 
     Some(GaplessInfo { delay, padding })
 }
+
+/// Gets the nominal duration of a sample in the sample table of a track: the most common one.
+fn nominal_sample_delta(trak: &TrakAtom) -> Option<u64> {
+    trak.mdia
+        .minf
+        .stbl
+        .stts
+        .entries
+        .iter()
+        .max_by_key(|entry| entry.sample_count)
+        .map(|entry| u64::from(entry.sample_delta))
+}
+
+/// The number of leading samples of a track that may be shortened to signal an encoder delay.
+const MAX_SHORTENED_LEADING_SAMPLES: u32 = 4;
 
 /// Gets if the decoder of a track outputs exactly the number of frames that is signalled in the
 /// bitstream of each packet, regardless of the duration in the sample table.
@@ -692,9 +735,9 @@ impl<'s> IsoMp4Reader<'s> {
         // TODO: Consider returning samples based on lowest byte position in the track instead of
         // timestamp. This may be important if video tracks are ever decoded (i.e., DTS vs. PTS).
 
-        for (state, track) in self.track_states.iter().zip(&self.tracks) {
-            // Get the timebase of the track used to calculate the presentation time.
-            let tb = track.time_base.expect("track always created with a timebase");
+        for state in self.track_states.iter() {
+            // Get the timebase of the media timestamps used to calculate the presentation time.
+            let tb = state.media_time_base;
 
             // Get the next timestamp for the next sample of the current track. The next sample may
             // be in a future segment.
@@ -840,29 +883,19 @@ impl<'s> IsoMp4Reader<'s> {
         Ok(false)
     }
 
-    fn seek_track_by_time(
-        &mut self,
-        track_num: usize,
-        time: Time,
-        accurate: bool,
-    ) -> Result<SeekedTo> {
+    fn seek_track_by_time(&mut self, track_num: usize, time: Time) -> Result<SeekedTo> {
         // Convert time to timestamp for the track.
         if let Some(track) = self.tracks.get(track_num) {
             let tb = track.time_base.expect("track always created with a timebase");
             let ts = tb.calc_timestamp(time).ok_or(Error::SeekError(SeekErrorKind::OutOfRange))?;
-            self.seek_track_by_ts(track_num, ts, accurate)
+            self.seek_track_by_ts(track_num, ts)
         }
         else {
             seek_error(SeekErrorKind::Unseekable)
         }
     }
 
-    fn seek_track_by_ts(
-        &mut self,
-        track_num: usize,
-        ts: Timestamp,
-        accurate: bool,
-    ) -> Result<SeekedTo> {
+    fn seek_track_by_ts(&mut self, track_num: usize, ts: Timestamp) -> Result<SeekedTo> {
         debug!("seeking track_num={track_num} to frame_ts={ts}");
 
         struct SeekLocation {
@@ -875,13 +908,21 @@ impl<'s> IsoMp4Reader<'s> {
             return seek_error(SeekErrorKind::OutOfRange);
         }
 
+        // The timestamp of the seek is on the timeline of the packets of the track: in decoded
+        // frames, and excluding the encoder delay. The timestamps of the samples in the sample
+        // table are in ticks of the media timescale, and include the delay.
+        let delay = u64::from(self.tracks[track_num].delay.unwrap_or(0));
+        let frames_per_tick = self.track_states[track_num].frames_per_tick;
+
+        let media_ts = (ts.get() as u64).saturating_add(delay) / frames_per_tick;
+
         let mut seg_skip = 0;
 
         let seek_loc = 'locate: loop {
             // Iterate over all segments and attempt to find the segment and sample number that
             // contains the desired timestamp. Skip segments already examined.
             for (seg_idx, seg) in self.segs.iter().enumerate().skip(seg_skip) {
-                if let Some(sample_num) = seg.ts_sample(track_num, ts.get() as u64)? {
+                if let Some(sample_num) = seg.ts_sample(track_num, media_ts)? {
                     break 'locate SeekLocation { seg_idx, sample_num };
                 }
 
@@ -897,17 +938,15 @@ impl<'s> IsoMp4Reader<'s> {
 
         let seg = &self.segs[seek_loc.seg_idx];
 
-        // For an accurate seek, start decoding a number of samples before the target sample so
-        // that the decoder has converged by the time the target is reached. The pre-roll is
-        // limited to the segment containing the target sample.
-        let sample_num = if accurate {
-            self.track_states[track_num]
-                .seek_preroll
-                .start_sample(seek_loc.sample_num, seek_loc.seg_idx == 0)
-        }
-        else {
-            seek_loc.sample_num
-        };
+        // Start decoding a number of samples before the target sample so that the decoder has
+        // converged by the time the target is reached. This is done for coarse seeks as well: a
+        // decoder started at the target sample outputs wrong audio (at best a glitch, for AAC
+        // without SBR the first frame; for SBR until the state has settled, with the wrong noise
+        // phase forever) and, in particular, a seek to the start would not be the same as playing
+        // from the start. The pre-roll is limited to the segment containing the target sample.
+        let sample_num = self.track_states[track_num]
+            .seek_preroll
+            .start_sample(seek_loc.sample_num, seek_loc.seg_idx == 0);
 
         // Get the sample timing.
         let timing = match seg.sample_timing(track_num, sample_num)? {
@@ -915,9 +954,13 @@ impl<'s> IsoMp4Reader<'s> {
             None => return seek_error(SeekErrorKind::OutOfRange),
         };
 
-        // Try to convert the sample timing to a timestamp.
-        let actual_ts = match Timestamp::try_from(timing.ts) {
-            Ok(ts) => ts,
+        // Convert the sample timing to a timestamp on the timeline of the packets.
+        let actual_ts = match i64::try_from(timing.ts)
+            .ok()
+            .and_then(|ts| ts.checked_mul(i64::try_from(frames_per_tick).ok()?))
+            .and_then(|ts| ts.checked_sub(i64::try_from(delay).ok()?))
+        {
+            Some(ts) => Timestamp::new(ts),
             _ => return seek_error(SeekErrorKind::OutOfRange),
         };
 
@@ -1008,6 +1051,9 @@ impl FormatReader for IsoMp4Reader<'_> {
             }
         };
 
+        // The index of the sample.
+        let sample_idx = self.track_states[next_sample_info.track_num].next_sample;
+
         // Get the position and length information of the next sample.
         let sample_info = match self.consume_next_sample(&next_sample_info)? {
             Some(s) => s,
@@ -1034,14 +1080,7 @@ impl FormatReader for IsoMp4Reader<'_> {
         //
         // Codecs that signal the number of frames of every packet in the bitstream (ALAC, FLAC)
         // already output only the shortened number of frames, so there is nothing to trim.
-        let stts_nominal = self.moov.traks[next_sample_info.track_num]
-            .mdia
-            .minf
-            .stbl
-            .stts
-            .entries
-            .first()
-            .map(|entry| u64::from(entry.sample_delta));
+        let stts_nominal = self.track_states[next_sample_info.track_num].stts_nominal;
 
         let nominal_dur = nominal_packet_dur(
             decoder_signals_frame_count(&track.codec_params),
@@ -1053,25 +1092,42 @@ impl FormatReader for IsoMp4Reader<'_> {
         // of frames needs to be trimmed.
         let is_shortened = track.num_frames.is_some() && nominal_dur > next_sample_info.dur;
 
+        // The timeline of the track is in decoded frames, which are `frames_per_tick` per tick of
+        // the media timescale.
+        let frames_per_tick = self.track_states[next_sample_info.track_num].frames_per_tick;
+        let ratio = i64::try_from(frames_per_tick).unwrap_or(1);
+
+        let media_pts = Timestamp::new(next_sample_info.ts.get().saturating_mul(ratio));
+
+        // A shortened sample at the start of the track encodes an encoder delay (e.g., Nero
+        // encodes the priming samples of HE-AAC with shortened durations, in the absence of an
+        // edit list): the valid frames are the last ones of the decoded block, which therefore
+        // starts before the timestamp of the sample.
+        let is_leading_shortened = is_shortened
+            && sample_idx < MAX_SHORTENED_LEADING_SAMPLES
+            && track.duration.is_none_or(|dur| {
+                let end = media_pts.get() as u64 + next_sample_info.dur.get() * frames_per_tick;
+                end < dur.get()
+            });
+
         if delay == 0 && track.padding.unwrap_or(0) == 0 && !is_shortened {
             return Ok(Some(Packet::new(
                 next_sample_info.track_id,
-                next_sample_info.ts,
-                next_sample_info.dur,
+                media_pts,
+                Duration::new(next_sample_info.dur.get().saturating_mul(frames_per_tick)),
                 data,
             )));
         }
 
-        // The timeline of the delay, padding, and trim is in decoded frames, which are
-        // `frames_per_tick` per tick of the track's timebase.
-        let frames_per_tick = self.track_states[next_sample_info.track_num].frames_per_tick;
-        let ratio = i64::try_from(frames_per_tick).unwrap_or(1);
-
         // Shift the presentation timeline so that sample 0 corresponds to the first valid
         // (non-delay) frame, then let `trimmed_dur` compute trim_start/trim_end from the shifted
         // PTS and the track's valid frame count.
-        let pts = Timestamp::new(next_sample_info.ts.get().saturating_mul(ratio))
-            .saturating_sub(Duration::new(delay));
+        let mut pts = media_pts.saturating_sub(Duration::new(delay));
+
+        if is_leading_shortened {
+            let missing = nominal_dur.get().saturating_sub(next_sample_info.dur.get());
+            pts = pts.saturating_sub(Duration::new(missing.saturating_mul(frames_per_tick)));
+        }
 
         let block_dur = Duration::new(nominal_dur.get().saturating_mul(frames_per_tick));
 
@@ -1080,19 +1136,12 @@ impl FormatReader for IsoMp4Reader<'_> {
             .map(Duration::from)
             .and_then(|dur| dur.timestamp_from(Timestamp::ZERO));
 
-        let mut packet = PacketBuilder::new()
+        let packet = PacketBuilder::new()
             .track_id(next_sample_info.track_id)
             .pts(pts)
             .trimmed_dur(block_dur, end_pts)
             .data(data)
             .build();
-
-        if frames_per_tick > 1 {
-            // Convert the packet's timestamp and duration back to timebase ticks. The trim
-            // durations remain in decoded frames.
-            packet.pts = Timestamp::new(packet.pts.get().div_euclid(ratio));
-            packet.dur = Duration::new(packet.dur.get().div_ceil(frames_per_tick));
-        }
 
         Ok(Some(packet))
     }
@@ -1109,13 +1158,10 @@ impl FormatReader for IsoMp4Reader<'_> {
         &self.tracks
     }
 
-    fn seek(&mut self, mode: SeekMode, to: SeekTo) -> Result<SeekedTo> {
+    fn seek(&mut self, _mode: SeekMode, to: SeekTo) -> Result<SeekedTo> {
         if self.tracks.is_empty() {
             return seek_error(SeekErrorKind::Unseekable);
         }
-
-        // Only an accurate seek pre-rolls the decoder.
-        let accurate = mode == SeekMode::Accurate;
 
         match to {
             SeekTo::Timestamp { ts, track_id } => {
@@ -1136,12 +1182,12 @@ impl FormatReader for IsoMp4Reader<'_> {
                     // Seek all tracks excluding the primary track to the desired time.
                     for t in 0..self.track_states.len() {
                         if t != track_num {
-                            self.seek_track_by_time(t, time, accurate)?;
+                            self.seek_track_by_time(t, time)?;
                         }
                     }
 
                     // Seek the primary track and return the result.
-                    self.seek_track_by_ts(track_num, ts, accurate)
+                    self.seek_track_by_ts(track_num, ts)
                 }
                 else {
                     seek_error(SeekErrorKind::InvalidTrack)
@@ -1162,12 +1208,12 @@ impl FormatReader for IsoMp4Reader<'_> {
                 // Seek all tracks excluding the selected track and discard the result.
                 for t in 0..self.track_states.len() {
                     if t != track_num {
-                        self.seek_track_by_time(t, time, accurate)?;
+                        self.seek_track_by_time(t, time)?;
                     }
                 }
 
                 // Seek the primary track and return the result.
-                self.seek_track_by_time(track_num, time, accurate)
+                self.seek_track_by_time(track_num, time)
             }
         }
     }
@@ -1216,3 +1262,245 @@ impl From<AtomError> for Error {
 //         ((duration as u128 * dst_timescale.get() as u128) / src_timescale.get() as u128) as u64,
 //     )
 // }
+
+#[cfg(test)]
+mod aac_timeline_tests {
+    use std::io::Cursor;
+
+    use symphonia_core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
+    use symphonia_core::io::MediaSourceStream;
+    use symphonia_core::units::Timestamp;
+
+    use crate::IsoMp4Reader;
+
+    fn atom(fourcc: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut buf = (body.len() as u32 + 8).to_be_bytes().to_vec();
+        buf.extend_from_slice(fourcc);
+        buf.extend_from_slice(body);
+        buf
+    }
+
+    /// An `esds` atom for AAC with the given audio specific config.
+    fn esds(asc: &[u8]) -> Vec<u8> {
+        // Object type, stream type, buffer size (3), max bitrate (4), average bitrate (4).
+        let mut dec_config = vec![0x40, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        dec_config.extend_from_slice(&[0x05, asc.len() as u8]);
+        dec_config.extend_from_slice(asc);
+
+        let mut es = vec![0, 1, 0];
+        es.extend_from_slice(&[0x04, dec_config.len() as u8]);
+        es.extend_from_slice(&dec_config);
+        es.extend_from_slice(&[0x06, 0x01, 0x02]);
+
+        let mut body = vec![0; 4];
+        body.extend_from_slice(&[0x03, es.len() as u8]);
+        body.extend_from_slice(&es);
+        atom(b"esds", &body)
+    }
+
+    /// Build an MP4 with one AAC track. Every sample is 4 bytes and has its index as its first
+    /// byte. `stts` is a list of (count, delta) and `elst` an optional (media_time,
+    /// segment_duration) edit, both in ticks of `timescale`.
+    fn mp4(asc: &[u8], timescale: u32, stts: &[(u32, u32)], elst: Option<(i32, u32)>) -> Vec<u8> {
+        let n_samples: u32 = stts.iter().map(|(count, _)| count).sum();
+        let duration: u32 = stts.iter().map(|(count, delta)| count * delta).sum();
+
+        let mut entry = vec![0; 6];
+        entry.extend_from_slice(&1u16.to_be_bytes());
+        entry.extend_from_slice(&[0; 8]);
+        entry.extend_from_slice(&2u16.to_be_bytes());
+        entry.extend_from_slice(&16u16.to_be_bytes());
+        entry.extend_from_slice(&[0; 4]);
+        entry.extend_from_slice(&((timescale.min(65535)) << 16).to_be_bytes());
+        entry.extend_from_slice(&esds(asc));
+
+        let mut stsd = vec![0; 4];
+        stsd.extend_from_slice(&1u32.to_be_bytes());
+        stsd.extend_from_slice(&atom(b"mp4a", &entry));
+
+        let mut stts_body = vec![0; 4];
+        stts_body.extend_from_slice(&(stts.len() as u32).to_be_bytes());
+        for (count, delta) in stts {
+            stts_body.extend_from_slice(&count.to_be_bytes());
+            stts_body.extend_from_slice(&delta.to_be_bytes());
+        }
+
+        let mut stsc = vec![0; 4];
+        stsc.extend_from_slice(&1u32.to_be_bytes());
+        for v in [1u32, n_samples, 1] {
+            stsc.extend_from_slice(&v.to_be_bytes());
+        }
+
+        let mut stsz = vec![0; 4];
+        stsz.extend_from_slice(&4u32.to_be_bytes());
+        stsz.extend_from_slice(&n_samples.to_be_bytes());
+
+        let build = |chunk_offset: u32| {
+            let mut stco = vec![0; 4];
+            stco.extend_from_slice(&1u32.to_be_bytes());
+            stco.extend_from_slice(&chunk_offset.to_be_bytes());
+
+            let stbl = atom(
+                b"stbl",
+                &[
+                    atom(b"stsd", &stsd),
+                    atom(b"stts", &stts_body),
+                    atom(b"stsc", &stsc),
+                    atom(b"stsz", &stsz),
+                    atom(b"stco", &stco),
+                ]
+                .concat(),
+            );
+
+            let minf = atom(b"minf", &[atom(b"smhd", &[0; 8]), stbl].concat());
+
+            let mut mdhd = vec![0; 4];
+            mdhd.extend_from_slice(&[0; 8]);
+            mdhd.extend_from_slice(&timescale.to_be_bytes());
+            mdhd.extend_from_slice(&duration.to_be_bytes());
+            mdhd.extend_from_slice(&[0; 4]);
+
+            let mut hdlr = vec![0; 8];
+            hdlr.extend_from_slice(b"soun");
+            hdlr.extend_from_slice(&[0; 12]);
+
+            let mdia = atom(b"mdia", &[atom(b"mdhd", &mdhd), atom(b"hdlr", &hdlr), minf].concat());
+
+            let mut tkhd = vec![0; 4];
+            tkhd.extend_from_slice(&[0; 8]);
+            tkhd.extend_from_slice(&1u32.to_be_bytes());
+            tkhd.extend_from_slice(&[0; 8]);
+            tkhd.extend_from_slice(&[0; 14]);
+
+            let mut trak = vec![atom(b"tkhd", &tkhd)];
+
+            if let Some((media_time, segment_duration)) = elst {
+                let mut elst = vec![0; 4];
+                elst.extend_from_slice(&1u32.to_be_bytes());
+                elst.extend_from_slice(&segment_duration.to_be_bytes());
+                elst.extend_from_slice(&media_time.to_be_bytes());
+                elst.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+                trak.push(atom(b"edts", &atom(b"elst", &elst)));
+            }
+
+            trak.push(mdia);
+
+            let mut mvhd = vec![0; 4];
+            mvhd.extend_from_slice(&[0; 8]);
+            mvhd.extend_from_slice(&timescale.to_be_bytes());
+            mvhd.extend_from_slice(&duration.to_be_bytes());
+            mvhd.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+            mvhd.extend_from_slice(&0x0100u16.to_be_bytes());
+
+            let moov =
+                atom(b"moov", &[atom(b"mvhd", &mvhd), atom(b"trak", &trak.concat())].concat());
+
+            let mut ftyp = b"M4A ".to_vec();
+            ftyp.extend_from_slice(&[0; 4]);
+            ftyp.extend_from_slice(b"M4A mp42");
+
+            [atom(b"ftyp", &ftyp), moov].concat()
+        };
+
+        // The chunk offset is the length of everything that precedes the media data (mdat header
+        // included), which does not depend on its value.
+        let head_len = build(0).len() as u32 + 8;
+        let mut data = build(head_len);
+
+        let mut mdat = vec![];
+        for i in 0..n_samples {
+            mdat.extend_from_slice(&[i as u8, 0, 0, 0]);
+        }
+        data.extend_from_slice(&atom(b"mdat", &mdat));
+        data
+    }
+
+    fn open(data: Vec<u8>) -> IsoMp4Reader<'static> {
+        let mss = MediaSourceStream::new(Box::new(Cursor::new(data)), Default::default());
+        IsoMp4Reader::try_new(mss, FormatOptions::default()).expect("mp4")
+    }
+
+    /// HE-AAC v1: 22.05 kHz stereo core, SBR at 44.1 kHz.
+    const HE_AAC_ASC: [u8; 5] = [0x13, 0x90, 0x56, 0xe5, 0xa0];
+
+    #[test]
+    fn he_aac_timeline_is_in_decoded_frames() {
+        // 200 samples of 1024 ticks, with an edit that removes 2048 ticks from the start and
+        // 2048 from the end.
+        let data = mp4(&HE_AAC_ASC, 22_050, &[(200, 1024)], Some((2048, 200 * 1024 - 4096)));
+        let mut reader = open(data);
+
+        let track = &reader.tracks()[0];
+        let tb = track.time_base.expect("time base");
+        assert_eq!((tb.numer.get(), tb.denom.get()), (1, 44_100));
+        assert_eq!(track.duration.map(|d| d.get()), Some(200 * 2048));
+        assert_eq!(track.delay, Some(4096));
+        assert_eq!(track.padding, Some(4096));
+        assert_eq!(track.num_frames, Some(200 * 2048 - 8192));
+
+        // The first 2 samples (4096 frames) are the delay.
+        let p = reader.next_packet().unwrap().unwrap();
+        assert_eq!((p.pts.get(), p.dur.get(), p.trim_start.get()), (-4096, 0, 2048));
+        let p = reader.next_packet().unwrap().unwrap();
+        assert_eq!((p.pts.get(), p.dur.get(), p.trim_start.get()), (-2048, 0, 2048));
+        let p = reader.next_packet().unwrap().unwrap();
+        assert_eq!((p.pts.get(), p.dur.get(), p.trim_start.get()), (0, 2048, 0));
+    }
+
+    #[test]
+    fn he_aac_seek_starts_before_the_target_at_an_aligned_sample() {
+        let data = mp4(&HE_AAC_ASC, 22_050, &[(200, 1024)], Some((2048, 200 * 1024 - 4096)));
+        let mut reader = open(data);
+
+        // The position is on the timeline of the packets, which starts after the delay: 4 s is
+        // sample (4 * 44100 + 4096) / 2048 = 88.
+        let ts = Timestamp::new(4 * 44_100);
+
+        for mode in [SeekMode::Accurate, SeekMode::Coarse] {
+            let seeked = reader.seek(mode, SeekTo::Timestamp { ts, track_id: 1 }).unwrap();
+
+            // Start at the sample that is a multiple of 16, at least 41 samples before: 32.
+            assert_eq!(seeked.required_ts, ts);
+            assert_eq!(seeked.actual_ts.get(), 32 * 2048 - 4096);
+
+            let p = reader.next_packet().unwrap().unwrap();
+            assert_eq!(p.pts, seeked.actual_ts);
+            assert_eq!(&p.data[..1], &[32]);
+        }
+
+        // A seek to the start is the same as playing from the start.
+        let seeked = reader
+            .seek(SeekMode::Coarse, SeekTo::Timestamp { ts: Timestamp::new(0), track_id: 1 })
+            .unwrap();
+        assert_eq!(seeked.actual_ts.get(), -4096);
+        assert_eq!(&reader.next_packet().unwrap().unwrap().data[..1], &[0]);
+    }
+
+    #[test]
+    fn nero_shortened_leading_samples_encode_the_delay() {
+        // Nero encodes the priming of HE-AAC without an edit list, as shortened leading samples:
+        // 2048 frame samples of 0, 512, then full length ones, and a shortened last sample.
+        let data = mp4(&HE_AAC_ASC, 44_100, &[(1, 0), (1, 512), (20, 2048), (1, 762)], None);
+        let mut reader = open(data);
+
+        let track = &reader.tracks()[0];
+        assert_eq!(track.num_frames, Some(512 + 20 * 2048 + 762));
+
+        // The valid frames of the decoded block are the last ones.
+        let p = reader.next_packet().unwrap().unwrap();
+        assert_eq!((p.pts.get(), p.dur.get(), p.trim_start.get()), (-2048, 0, 2048));
+        let p = reader.next_packet().unwrap().unwrap();
+        assert_eq!((p.pts.get(), p.dur.get(), p.trim_start.get()), (-1536, 512, 1536));
+        // From then on the packets are placed at their timestamps.
+        let p = reader.next_packet().unwrap().unwrap();
+        assert_eq!((p.pts.get(), p.dur.get(), p.trim_start.get()), (512, 2048, 0));
+
+        // The last sample is shortened at the end.
+        let mut last = None;
+        while let Some(p) = reader.next_packet().unwrap() {
+            last = Some(p);
+        }
+        let last = last.unwrap();
+        assert_eq!((last.dur.get(), last.trim_start.get(), last.trim_end.get()), (762, 0, 1286));
+    }
+}
