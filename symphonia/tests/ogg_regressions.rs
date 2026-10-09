@@ -375,12 +375,86 @@ fn opus_timeline_excludes_pre_skip() {
         let n = (4800 * channels).min(full.len() - required * channels);
         let snr = snr_db(&full[required * channels..][..n], &got[..n]);
         println!("seek {secs}s: SNR vs continuous decode = {snr:.1} dB");
-        // A seek to the start must be exact. Elsewhere the decoder state has only had the 80 ms
-        // pre-roll to converge, so it is not bit-exact; but a misaligned (even by one frame)
-        // noise signal would score ~0 dB.
-        let min_snr = if secs == 0.0 { 100.0 } else { 20.0 };
+        // The seek pre-roll of a CELT-only Opus stream (1.5 s) re-converges the decoder: the
+        // output is bit-identical to a continuous decode (an 80 ms pre-roll is not enough). A
+        // misaligned (even by one frame) noise signal would score ~0 dB.
+        let min_snr = 100.0;
         assert!(snr > min_snr, "seek to {secs}s: SNR {snr:.1} dB");
     }
+}
+
+/// An Opus stream that contains SILK frames is seeked with a 10 s pre-roll (the SILK decoder
+/// converges slowly, if at all), found out while reading the page of the seek if the stream is
+/// not known to contain SILK yet. The output after the seek is then as close to a continuous
+/// decode as libopus' own cold start gets.
+#[test]
+fn opus_silk_seek_uses_long_pre_roll() {
+    if !have_encoder("libopus") {
+        eprintln!("libopus not available; skipping");
+        return;
+    }
+
+    let path = fixtures_dir().join("opus_silk_seek.opus");
+    run_ffmpeg(&[
+        "-y",
+        "-v",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "anoisesrc=d=14:c=pink:r=48000:a=0.05,aformat=channel_layouts=mono",
+        "-c:a",
+        "libopus",
+        "-application",
+        "voip",
+        "-cutoff",
+        "8000",
+        "-b:a",
+        "24k",
+        path.to_str().unwrap(),
+    ]);
+
+    let (full, channels) = decode_all(&path);
+    assert_eq!(channels, 1);
+
+    let mut format = open(&path);
+    let mut decoder = make_decoder(format.as_ref());
+
+    for secs in [12.0, 13.0] {
+        let required = (secs * 48_000.0) as usize;
+        let seeked = format
+            .seek(
+                SeekMode::Accurate,
+                SeekTo::Time { time: Time::try_from_secs_f64(secs).unwrap(), track_id: None },
+            )
+            .expect("seek failed");
+        assert_eq!(seeked.required_ts.get(), required as i64);
+
+        // The first seek of the stream had not seen a SILK packet when it began. The pre-roll is
+        // 10 s (480000 frames) whichever the seek: the landing packet is within one 20 ms packet.
+        let pre_roll = seeked.required_ts.get() - seeked.actual_ts.get();
+        assert!((480_000..480_000 + 960).contains(&pre_roll), "pre-roll {pre_roll} at {secs}s");
+
+        decoder.reset();
+        let (first_pos, got) =
+            read_after_seek(format.as_mut(), decoder.as_mut(), required as i64, 4800, 1);
+        assert_eq!(first_pos, Some(required as i64));
+
+        let n = 4800.min(full.len() - required);
+        let snr = snr_db(&full[required..][..n], &got[..n]);
+        println!("silk seek {secs}s: SNR vs continuous decode = {snr:.1} dB");
+        assert!(snr > 35.0, "seek to {secs}s: SNR {snr:.1} dB");
+    }
+
+    // A seek to a position closer to the start than the pre-roll starts at the beginning, which
+    // is exact.
+    let seeked = format
+        .seek(
+            SeekMode::Accurate,
+            SeekTo::Time { time: Time::try_from_secs_f64(3.0).unwrap(), track_id: None },
+        )
+        .expect("seek failed");
+    assert_eq!(seeked.actual_ts.get(), -312);
 }
 
 /// Cross-checks the externally generated multichannel samples against `ffmpeg`. Set

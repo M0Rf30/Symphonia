@@ -82,11 +82,14 @@ pub struct OpusPacketParser {
     /// Remaining `pre_skip` samples (at 48 kHz) still to be reported as discard. Reaches (and
     /// stays at) zero once the stream's mandatory start trim has been fully accounted for.
     remaining_pre_skip: u64,
+    /// Whether any SILK-only or Hybrid packet has been seen. Such streams need a much longer seek
+    /// pre-roll to converge than CELT-only streams (see `symphonia_common::xiph::audio::opus`).
+    silk_seen: bool,
 }
 
 impl OpusPacketParser {
     fn new(pre_skip: u16) -> Self {
-        OpusPacketParser { remaining_pre_skip: u64::from(pre_skip) }
+        OpusPacketParser { remaining_pre_skip: u64::from(pre_skip), silk_seen: false }
     }
 }
 
@@ -101,6 +104,7 @@ impl PacketParser for OpusPacketParser {
                 return (Duration::ZERO, Duration::ZERO);
             }
         };
+        self.silk_seen |= opus::toc_has_silk(*toc_byte);
         // The configuration number is the 5 most significant bits. Shift out 3 least significant
         // bits.
         let configuration_number = toc_byte >> 3; // max 2^5-1 = 31
@@ -183,7 +187,10 @@ impl Mapper for OpusMapper {
 
     fn reset_at_start(&mut self) {
         // The seek landed on the first bitstream page. The mandatory pre-skip applies again.
+        // What has been learned about the stream's contents is kept.
+        let silk_seen = self.parser.silk_seen;
         self.parser = OpusPacketParser::new(self.pre_skip);
+        self.parser.silk_seen = silk_seen;
     }
 
     fn absgp_to_ts(&self, absgp: u64) -> Timestamp {
@@ -195,16 +202,19 @@ impl Mapper for OpusMapper {
     }
 
     fn max_rap_period(&self) -> Duration {
-        // RFC 7845 section 4.6: to fully re-converge its internal state (SILK LPC/LTP history,
-        // CELT MDCT overlap, post-filter memory) after a `reset`, an Opus decoder must decode,
-        // and discard, at least 80ms of audio immediately preceding any seek target. Opus's Ogg
-        // mapping always operates at a fixed 48kHz granule-position rate (independent of the
-        // stream's actual encoded sample rate), so 80ms is exactly 3840 samples. `OggReader::
-        // do_seek` (via `LogicalStream::max_rap_period`) already subtracts this from the
-        // requested timestamp before seeking, and returns the resulting earlier `actual_ts` to
-        // the caller (the same mechanism `VorbisMapper` uses for its lapped-transform pre-roll)
-        // so the caller can decode-and-discard the gap up to `required_ts`.
-        Duration::new(3840)
+        // RFC 7845 section 4.6 requires at least 80 ms (3840 samples at the fixed 48 kHz
+        // granule rate) of decoded and discarded audio before a seek target so that the decoder
+        // state (SILK LPC/LTP history, CELT MDCT overlap, post-filter memory, energy prediction)
+        // is re-converged. 80 ms only gets close, though: a CELT stream is bit-identical to a
+        // continuous decode after about one second, and SILK needs seconds and, on loud
+        // material, never fully converges (not even in libopus). So use a longer pre-roll,
+        // chosen by whether SILK/Hybrid packets have been seen (`OggReader::do_seek` repeats the
+        // seek if reading the landing page reveals SILK in a stream believed to be CELT-only).
+        // It is subtracted from the requested timestamp before seeking, and the resulting earlier
+        // `actual_ts` is returned so that the caller can decode-and-discard the gap up to
+        // `required_ts` (the same mechanism `VorbisMapper` uses for its lapped-transform
+        // pre-roll).
+        Duration::new(opus::seek_preroll(self.parser.silk_seen))
     }
 
     fn track(&self) -> &Track {
@@ -249,5 +259,56 @@ impl Mapper for OpusMapper {
                 Ok(MapResult::Unknown)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mapper() -> Box<dyn Mapper> {
+        let mut head = b"OpusHead".to_vec();
+        head.extend_from_slice(&[1, 2]);
+        head.extend_from_slice(&312u16.to_le_bytes());
+        head.extend_from_slice(&48_000u32.to_le_bytes());
+        head.extend_from_slice(&0i16.to_le_bytes());
+        head.push(0);
+
+        let mut mapper = detect(1, &head).unwrap().expect("opus mapper");
+
+        // The comment header.
+        let mut tags = b"OpusTags".to_vec();
+        tags.extend_from_slice(&[0; 8]);
+        mapper.map_packet(&tags).unwrap();
+        mapper
+    }
+
+    /// The seek pre-roll is 1.5 s until a SILK or Hybrid packet has been seen, and then 10 s.
+    #[test]
+    fn seek_pre_roll_depends_on_silk_packets() {
+        let mut mapper = mapper();
+        assert_eq!(mapper.max_rap_period(), Duration::new(72_000));
+
+        // CELT-only: configurations 16..=31.
+        for toc in [0x80u8, 0xf8, 0xfc] {
+            mapper.map_packet(&[toc, 0, 0]).unwrap();
+        }
+        assert_eq!(mapper.max_rap_period(), Duration::new(72_000));
+
+        // Hybrid (configuration 13).
+        mapper.map_packet(&[0x68, 0, 0]).unwrap();
+        assert_eq!(mapper.max_rap_period(), Duration::new(480_000));
+
+        // What has been learned is kept when the seek lands on the first page of the stream.
+        mapper.reset_at_start();
+        assert_eq!(mapper.max_rap_period(), Duration::new(480_000));
+    }
+
+    #[test]
+    fn silk_only_packet_selects_the_long_pre_roll() {
+        let mut mapper = mapper();
+        // SILK-only wideband 20 ms (configuration 9).
+        mapper.map_packet(&[0x48, 0, 0]).unwrap();
+        assert_eq!(mapper.max_rap_period(), Duration::new(480_000));
     }
 }

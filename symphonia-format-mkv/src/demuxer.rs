@@ -22,6 +22,7 @@ use symphonia_core::support_format;
 use symphonia_core::units::TimeBase;
 
 use log::{info, warn};
+use symphonia_common::xiph::audio::opus;
 use symphonia_metadata::utils::images::try_get_image_info;
 
 use crate::codecs::make_track_codec_params;
@@ -156,7 +157,12 @@ pub struct TrackState {
     /// The amount of lead-in (in Matroska ticks) a decoder needs to fully re-converge its
     /// internal state after a random seek before the decoded output is usable (Matroska
     /// `SeekPreRoll`). Mandatory for Opus per RFC 7845 section 4.6 (>= 80ms/3840 samples).
+    /// See [`Self::effective_seek_pre_roll`].
     pub(crate) seek_pre_roll: MatroskaTicks,
+    /// `true` if the track is Opus.
+    is_opus: bool,
+    /// `true` if an Opus track has been seen to contain SILK or Hybrid packets.
+    silk_seen: bool,
     /// The track's sample rate, if known (audio tracks only). Used to convert `codec_delay`
     /// and `DiscardPadding` into an exact sample count for gapless trimming.
     pub(crate) sample_rate: Option<u32>,
@@ -173,6 +179,25 @@ pub struct TrackState {
     pts_tolerance: u64,
     /// The grid of expected timestamps for blocks, if the track has a constant frame duration.
     grid: Option<PtsGrid>,
+}
+
+impl TrackState {
+    /// Get the pre-roll to use when seeking the track.
+    ///
+    /// For Opus the 80 ms signalled by the container (RFC 7845 section 4.6) only brings a reset
+    /// decoder close to a continuous decode. Use the longer pre-roll that makes the output
+    /// identical (CELT) or as close as it gets (SILK), see
+    /// `symphonia_common::xiph::audio::opus::SEEK_PREROLL_CELT`/`SEEK_PREROLL_SILK`.
+    fn effective_seek_pre_roll(&self) -> MatroskaTicks {
+        if !self.is_opus {
+            return self.seek_pre_roll;
+        }
+
+        let frames = opus::seek_preroll(self.silk_seen);
+        let nanos = u128::from(frames) * 1_000_000_000 / 48_000;
+
+        self.seek_pre_roll.max(MatroskaTicks::from(u64::try_from(nanos).unwrap_or(u64::MAX)))
+    }
 }
 
 /// A grid of the timestamps at which the blocks of a track are expected to start.
@@ -606,6 +631,8 @@ impl<'s> MkvReader<'s> {
                 else {
                     default_seek_pre_roll(&track.codec_id)
                 },
+                is_opus: track.codec_id == "A_OPUS",
+                silk_seen: false,
                 pts_tolerance: nanos_to_ticks(
                     i128::from(info.timestamp_scale.get()),
                     track_time_base,
@@ -868,7 +895,32 @@ impl<'s> MkvReader<'s> {
         let cluster_state = self.current_cluster;
         let frames = std::mem::take(&mut self.frames);
 
-        match self.seek_track_by_ts(id, tb, ts) {
+        let mut result = self.seek_track_by_ts(id, tb, ts);
+
+        // Reading the frames of the seek may reveal that an Opus track contains SILK frames,
+        // which need a longer pre-roll than a CELT-only track. If so, seek again.
+        if result.is_ok() {
+            if let Some(state) = self.track_states.get_mut(&id) {
+                let before = state.effective_seek_pre_roll();
+
+                if state.is_opus
+                    && !state.silk_seen
+                    && self.frames.iter().any(|frame| {
+                        frame.track_num == id
+                            && frame.data.first().is_some_and(|&b| opus::toc_has_silk(b))
+                    })
+                {
+                    state.silk_seen = true;
+                }
+
+                if state.effective_seek_pre_roll() > before && self.is_seekable {
+                    log::debug!("seek: pre-roll grew, seeking again");
+                    result = self.seek_track_by_ts(id, tb, ts);
+                }
+            }
+        }
+
+        match result {
             Err(err) => {
                 // Restore saved iterator, cluster, and frame queue states.
                 self.iter.restore_state(iter_state)?;
@@ -893,12 +945,14 @@ impl<'s> MkvReader<'s> {
         // Matroska/WebM signals a codec-specific `SeekPreRoll` (in Matroska ticks). RFC 7845
         // section 4.6 mandates at least 80ms/3840 samples for Opus: after a `reset`, the decoder
         // must decode (and discard) that much audio before its internal state (SILK LPC/LTP
-        // history, CELT MDCT overlap, post-filter memory) has fully re-converged. Back the seek
+        // history, CELT MDCT overlap, post-filter memory) has re-converged. For Opus, a longer
+        // pre-roll is used (see `TrackState::effective_seek_pre_roll`). Back the seek
         // target off by this amount so both the cue lookup and the forward frame scan below land
         // on an earlier packet; `actual_ts` in the returned `SeekedTo` will be <= `required_ts`
         // and the caller is expected to decode-and-discard the difference — the same contract
         // `symphonia-format-ogg` uses for Vorbis's/Opus's own pre-roll via `max_rap_period`.
-        let target_ts = ts.saturating_sub(state.seek_pre_roll.into_track_ticks(tb).into_dur());
+        let target_ts =
+            ts.saturating_sub(state.effective_seek_pre_roll().into_track_ticks(tb).into_dur());
 
         // Cue points carry the raw timestamp of the block they reference, whereas the timestamps
         // of frames (and therefore the seek target) are shifted back by the codec delay. Shift the
@@ -1193,6 +1247,16 @@ impl FormatReader for MkvReader<'_> {
                 // Samples to be discarded from the start of the packet: first, any negative
                 // `DiscardPadding` of the block.
                 let mut trim_start = frame.trim_start;
+
+                // Remember if an Opus track contains SILK, which needs a longer seek pre-roll.
+                if let Some(state) = self.track_states.get_mut(&frame.track_num) {
+                    if state.is_opus
+                        && !state.silk_seen
+                        && frame.data.first().is_some_and(|&b| opus::toc_has_silk(b))
+                    {
+                        state.silk_seen = true;
+                    }
+                }
 
                 if let Some(state) = self.track_states.get(&frame.track_num) {
                     // Block timestamps are only as precise as the segment's timestamp scale

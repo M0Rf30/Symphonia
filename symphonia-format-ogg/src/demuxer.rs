@@ -365,6 +365,39 @@ impl<'s> OggReader<'s> {
     }
 
     fn do_seek(&mut self, serial: u32, required_ts: Timestamp) -> Result<SeekedTo> {
+        // The maximum duration between two random access points of the stream being seeked.
+        let mut rap = match self.streams.get(&serial) {
+            Some(s) => s.max_rap_period(),
+            None => return decode_error("ogg: serial not found in streams"),
+        };
+
+        loop {
+            let seeked = self.do_seek_with_rap(serial, required_ts, rap)?;
+
+            // Reading the pages of the seek may reveal something about the stream that changes
+            // its random access period (e.g. a stream believed to be CELT-only is found to
+            // contain SILK frames, which need a longer pre-roll). If so, seek again with the
+            // updated period.
+            let new_rap = match self.streams.get(&serial) {
+                Some(s) => s.max_rap_period(),
+                None => return Ok(seeked),
+            };
+
+            if new_rap <= rap {
+                return Ok(seeked);
+            }
+
+            debug!("seek: random access period grew from {rap} to {new_rap}, seeking again");
+            rap = new_rap;
+        }
+    }
+
+    fn do_seek_with_rap(
+        &mut self,
+        serial: u32,
+        required_ts: Timestamp,
+        rap: Duration,
+    ) -> Result<SeekedTo> {
         // The stream being seeked.
         let stream = match self.streams.get_mut(&serial) {
             Some(s) => s,
@@ -374,7 +407,7 @@ impl<'s> OggReader<'s> {
         // Subtract the maximum duration between random access points from the required timestamp.
         // This ensures any frames that need to be consumed or discarded by the decoder on reset
         // are dealt with before the required timestamp.
-        let target_ts = required_ts.saturating_sub(stream.max_rap_period());
+        let target_ts = required_ts.saturating_sub(rap);
 
         debug!("seek: target_ts={target_ts} (rap={})", required_ts.saturating_delta(target_ts));
 

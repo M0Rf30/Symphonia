@@ -211,17 +211,24 @@ impl Track {
 struct Block {
     /// The absolute timestamp of the block in milliseconds.
     ts: i64,
-    /// The length of the block's data. The first byte of the data is the index of the block.
+    /// The length of the block's data. The first byte of the data is the index of the block
+    /// unless `fill` is set.
     len: usize,
     /// The duration of the block in milliseconds. Forces a block group.
     duration: Option<u64>,
     /// The discard padding of the block in nanoseconds. Forces a block group.
     padding: Option<i64>,
+    /// The byte the data of the block is filled with, instead of the index of the block.
+    fill: Option<u8>,
 }
 
 impl Block {
     fn new(ts: i64, len: usize) -> Self {
-        Block { ts, len, duration: None, padding: None }
+        Block { ts, len, duration: None, padding: None, fill: None }
+    }
+
+    fn filled(ts: i64, len: usize, fill: u8) -> Self {
+        Block { fill: Some(fill), ..Block::new(ts, len) }
     }
 }
 
@@ -269,7 +276,7 @@ impl File {
 
                 if blk.duration.is_some() || blk.padding.is_some() {
                     payload.push(0x00);
-                    payload.extend(vec![index; blk.len]);
+                    payload.extend(vec![blk.fill.unwrap_or(index); blk.len]);
 
                     let mut group = vec![el(&[0xa1], &payload)];
                     if let Some(dur) = blk.duration {
@@ -282,7 +289,7 @@ impl File {
                 }
                 else {
                     payload.push(0x80);
-                    payload.extend(vec![index; blk.len]);
+                    payload.extend(vec![blk.fill.unwrap_or(index); blk.len]);
                     data.extend(el(&[0xa3], &payload));
                 }
 
@@ -539,7 +546,7 @@ fn lossless_block_timestamps_are_sample_exact() {
     let blocks = (0..10i64)
         .map(|i| {
             let ts = (i * 4096 * 1000 + 22050) / 44100;
-            Block { ts, len: 100, duration: Some(93), padding: None }
+            Block { ts, len: 100, duration: Some(93), padding: None, fill: None }
         })
         .collect();
     file.clusters.push((0, blocks));
@@ -575,7 +582,13 @@ fn opus_file() -> File {
     let mut blocks: Vec<Block> =
         [0, 21, 41, 61, 81].iter().map(|&ts| Block::new(ts, 100)).collect();
 
-    blocks.push(Block { ts: 101, len: 100, duration: Some(7), padding: Some(13_500_000) });
+    blocks.push(Block {
+        ts: 101,
+        len: 100,
+        duration: Some(7),
+        padding: Some(13_500_000),
+        fill: None,
+    });
 
     file.clusters.push((0, blocks));
     file
@@ -612,22 +625,53 @@ fn opus_delay_and_discard_padding_are_trimmed() {
     assert_eq!((first.pts.get(), first.trim_start.get()), (-312, 312));
 }
 
-#[test]
-fn opus_seek_backs_off_by_the_seek_pre_roll() {
+/// The table-of-contents bytes of a CELT-only (configuration 31) and a SILK-only (configuration 9)
+/// 20ms Opus packet.
+const TOC_CELT: u8 = 0xf8;
+const TOC_SILK: u8 = 0x48;
+
+fn opus_with_toc(toc: u8) -> MkvReader<'static> {
     let mut file = File::default();
 
-    // 100 packets of 20ms with exact timestamps.
-    file.clusters.push((0, (0..100).map(|i| Block::new(i * 20, 100)).collect()));
+    // 600 packets of 20ms (12s) with exact timestamps.
+    file.clusters.push((0, (0..600).map(|i| Block::filled(i * 20, 100, toc)).collect()));
 
-    let mut reader = open(file.to_bytes(&Track::opus()));
+    open(file.to_bytes(&Track::opus()))
+}
 
-    // 1s is 48000 samples. The pre-skip is 312 samples, and the pre-roll is 3840 samples (80ms).
-    let seeked = seek_time(&mut reader, 1000).unwrap();
-    assert_eq!(seeked.required_ts.get(), 48000);
-    // The last packet that starts before 48000 - 3840 = 44160 (the packet that starts at
-    // 920ms - 6.5ms = 43848 samples).
-    assert_eq!(seeked.actual_ts.get(), 920 * 48 - 312);
-    assert_eq!(reader.next_packet().unwrap().unwrap().data[0], 46);
+#[test]
+fn opus_celt_seek_backs_off_by_1_5_seconds() {
+    let mut reader = opus_with_toc(TOC_CELT);
+
+    // 11s is 528000 samples. The pre-skip is 312 samples, and the pre-roll of CELT is 1.5s (72000
+    // samples).
+    let seeked = seek_time(&mut reader, 11_000).unwrap();
+    assert_eq!(seeked.required_ts.get(), 528_000);
+    // The last packet that starts before 528000 - 72000 = 456000 (the packet that starts at
+    // 9500ms - 6.5ms = 455688 samples).
+    assert_eq!(seeked.actual_ts.get(), 9500 * 48 - 312);
+
+    // Near the start, the seek is clamped to the first packet.
+    let seeked = seek_time(&mut reader, 500).unwrap();
+    assert_eq!(seeked.actual_ts.get(), -312);
+}
+
+#[test]
+fn opus_silk_seek_backs_off_by_10_seconds() {
+    let mut reader = opus_with_toc(TOC_SILK);
+
+    // Nothing is known about the contents of the stream when the first seek begins, so it first
+    // lands with the pre-roll of CELT, finds a SILK packet there, and seeks again with the
+    // pre-roll of SILK (10s, 480000 samples): the last packet that starts before 528000 - 480000 =
+    // 48000 (the packet that starts at 1000ms - 6.5ms = 47688 samples).
+    let seeked = seek_time(&mut reader, 11_000).unwrap();
+    assert_eq!(seeked.required_ts.get(), 528_000);
+    assert_eq!(seeked.actual_ts.get(), 1000 * 48 - 312);
+    assert_eq!(reader.next_packet().unwrap().unwrap().pts.get(), 1000 * 48 - 312);
+
+    // Subsequent seeks use the pre-roll of SILK directly.
+    let seeked = seek_time(&mut reader, 6_000).unwrap();
+    assert_eq!(seeked.actual_ts.get(), 0 - 312);
 }
 
 #[test]
