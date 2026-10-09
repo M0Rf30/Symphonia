@@ -118,9 +118,9 @@ fn adpcm_seeks_land_on_packets() {
 
 #[test]
 fn mpeg_in_wave_seeks_land_on_frames() {
-    // One MPEG frame is 24-26 ms.
-    check_seeks("wav/wav_mp3.wav", 0.03);
-    check_seeks("mp2/mp2_in_wav.wav", 0.03);
+    // One MPEG frame is 24-26 ms. Seeks land some frames earlier, to pre-roll the decoder.
+    check_seeks("wav/wav_mp3.wav", 0.3);
+    check_seeks("mp2/mp2_in_wav.wav", 0.3);
 }
 
 #[test]
