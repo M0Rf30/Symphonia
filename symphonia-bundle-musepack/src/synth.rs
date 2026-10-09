@@ -62,6 +62,21 @@ pub static DI_OPT: [[f32; 16]; 32] = [
     [d(-26), d(-208), d(-401), d(-2063), d(-4788), d(-7134), d(-35640), d(-74992), d(39336), d(-5959), d(5517), d(-2000), d(519), d(-218), d(31), d(1)],
 ];
 
+/// `DI_OPT` transposed to `[tap][lane]` for the loop-interchanged synthesis.
+static DI_T: [[f32; 32]; 16] = {
+    let mut t = [[0.0f32; 32]; 16];
+    let mut k = 0;
+    while k < 32 {
+        let mut j = 0;
+        while j < 16 {
+            t[j][k] = DI_OPT[k][j];
+            j += 1;
+        }
+        k += 1;
+    }
+    t
+};
+
 /// Ported from libmpcdec `synth_filter.c` (`mpc_compute_new_V`).
 ///
 /// Fills the 64-element window `p_v` from the 32 subband samples `p_sample` using the
@@ -314,14 +329,19 @@ pub fn synth_channel(
         pv_base -= 64;
         compute_new_v(samples, &mut history[pv_base..pv_base + 64]);
 
-        for k in 0..32 {
-            let idx = pv_base + k;
-            let coeffs = &DI_OPT[k];
-            let mut acc = 0.0f32;
-            for (j, &off) in OFFSETS.iter().enumerate() {
-                acc += history[idx + off] * coeffs[j];
+        // Loop interchange: accumulate all 32 lanes per tap. Each lane still sums taps j = 0..16
+        // in ascending order starting from 0.0, so the result is bit-identical to the
+        // lane-serial form, but the 32 independent accumulators can be vectorized.
+        let mut acc = [0.0f32; 32];
+        for (j, &off) in OFFSETS.iter().enumerate() {
+            let src = &history[pv_base + off..pv_base + off + 32];
+            let c = &DI_T[j];
+            for k in 0..32 {
+                acc[k] += src[k] * c[k];
             }
-            out[(n * 32 + k) * channels + channel_offset] = acc;
+        }
+        for (k, &a) in acc.iter().enumerate() {
+            out[(n * 32 + k) * channels + channel_offset] = a;
         }
     }
     debug_assert_eq!(pv_base, 0);
@@ -357,4 +377,79 @@ pub fn random_int(r1: &mut u32, r2: &mut u32) -> u32 {
     *r1 = (t3 >> 1) | t1;
     *r2 = (t4 << 1) | t2;
     *r1 ^ *r2
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The original lane-serial synthesis loop, kept as the bit-exactness reference for the
+    /// loop-interchanged [`synth_channel`].
+    fn synth_channel_ref(
+        history: &mut [f32],
+        y: &[[f32; 32]; 36],
+        out: &mut [f32],
+        channels: usize,
+        channel_offset: usize,
+    ) {
+        history.copy_within(0..960, V_MEM);
+        const OFFSETS: [usize; 16] =
+            [0, 96, 128, 224, 256, 352, 384, 480, 512, 608, 640, 736, 768, 864, 896, 992];
+        let mut pv_base = V_MEM;
+        for (n, samples) in y.iter().enumerate() {
+            pv_base -= 64;
+            compute_new_v(samples, &mut history[pv_base..pv_base + 64]);
+            for k in 0..32 {
+                let idx = pv_base + k;
+                let mut acc = 0.0f32;
+                for (j, &off) in OFFSETS.iter().enumerate() {
+                    acc += history[idx + off] * DI_OPT[k][j];
+                }
+                out[(n * 32 + k) * channels + channel_offset] = acc;
+            }
+        }
+    }
+
+    fn pseudo_random_y(seed: &mut u64) -> [[f32; 32]; 36] {
+        let mut y = [[0.0f32; 32]; 36];
+        for row in y.iter_mut() {
+            for v in row.iter_mut() {
+                *seed ^= *seed << 13;
+                *seed ^= *seed >> 7;
+                *seed ^= *seed << 17;
+                *v = ((*seed >> 11) as f32 / (1u64 << 53) as f32 - 0.5) * 8.0;
+            }
+        }
+        y
+    }
+
+    #[test]
+    fn transposed_table_matches_di_opt() {
+        for k in 0..32 {
+            for j in 0..16 {
+                assert_eq!(DI_T[j][k].to_bits(), DI_OPT[k][j].to_bits());
+            }
+        }
+    }
+
+    #[test]
+    fn interchanged_synthesis_is_bit_identical() {
+        let mut seed = 0x1234_5678_9ABC_DEF1u64;
+        let mut h_new = vec![0.0f32; V_BUF_LEN];
+        let mut h_ref = vec![0.0f32; V_BUF_LEN];
+        let mut o_new = vec![0.0f32; 36 * 32 * 2];
+        let mut o_ref = vec![0.0f32; 36 * 32 * 2];
+        // Several consecutive frames so the carried-over history is exercised, in both a
+        // stereo-interleaved and a planar layout.
+        for frame in 0..6 {
+            let y = pseudo_random_y(&mut seed);
+            let (channels, offset) = if frame % 2 == 0 { (2, 1) } else { (1, 0) };
+            synth_channel(&mut h_new, &y, &mut o_new, channels, offset);
+            synth_channel_ref(&mut h_ref, &y, &mut o_ref, channels, offset);
+            let a: Vec<u32> = o_new.iter().map(|v| v.to_bits()).collect();
+            let b: Vec<u32> = o_ref.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(a, b, "frame {frame}");
+            assert_eq!(h_new, h_ref);
+        }
+    }
 }

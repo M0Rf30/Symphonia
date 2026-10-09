@@ -11,19 +11,21 @@
 //! impls) and is not ported from libmpcdec; the actual decode algorithm lives in
 //! `decoder_core.rs`, `synth.rs`, `requant.rs`, `bits.rs` and `huffman/`.
 
-use symphonia_core::audio::{AsGenericAudioBufferRef, Audio, AudioBuffer, AudioMut, GenericAudioBufferRef};
+use symphonia_core::audio::{
+    AsGenericAudioBufferRef, Audio, AudioBuffer, AudioMut, GenericAudioBufferRef,
+};
 use symphonia_core::codecs::CodecInfo;
 use symphonia_core::codecs::audio::well_known::CODEC_ID_MUSEPACK;
 use symphonia_core::codecs::audio::{
     AudioCodecParameters, AudioDecoder, AudioDecoderOptions, FinalizeResult,
 };
 use symphonia_core::codecs::registry::{RegisterableAudioDecoder, SupportedAudioCodec};
-use symphonia_core::errors::{decode_error, Error, Result};
+use symphonia_core::errors::{Error, Result, decode_error};
 use symphonia_core::packet::PacketRef;
 use symphonia_core::support_audio_codec;
 
 use crate::bits::BitReader;
-use crate::decoder_core::{Decoder as Core, Sv7Sync, FRAME_LENGTH};
+use crate::decoder_core::{Decoder as Core, FRAME_LENGTH, Sv7Sync};
 use crate::demuxer::{PACKET_TAG_NOISE, PACKET_TAG_PLAIN, PACKET_TAG_SYNC};
 
 /// Musepack (SV7/SV8) decoder.
@@ -35,7 +37,6 @@ pub struct MpcDecoder {
     block_pwr: u8,
     channels: usize,
     buf: AudioBuffer<f32>,
-    scratch: Vec<f32>,
 }
 
 /// The part of `AudioCodecParameters::extra_data` the decoder uses (see
@@ -67,10 +68,8 @@ impl MpcDecoder {
         if params.codec != CODEC_ID_MUSEPACK {
             return decode_error("musepack: invalid codec");
         }
-        let extra = params
-            .extra_data
-            .as_ref()
-            .ok_or(Error::DecodeError("musepack: missing extra data"))?;
+        let extra =
+            params.extra_data.as_ref().ok_or(Error::DecodeError("musepack: missing extra data"))?;
         let extra = parse_extra_data(extra)?;
 
         let sample_rate =
@@ -92,7 +91,6 @@ impl MpcDecoder {
             block_pwr: extra.block_pwr,
             channels: extra.channels as usize,
             buf,
-            scratch: vec![0.0; FRAME_LENGTH * extra.channels.max(1) as usize],
         })
     }
 
@@ -135,17 +133,30 @@ impl MpcDecoder {
         let mut r = BitReader::new(data);
         for i in 0..block_frames {
             let is_key_frame = i == 0;
-            if !self.core.decode_frame(&mut r, is_key_frame, &mut self.scratch) {
-                return decode_error("musepack: frame buffer too small");
-            }
             let start = self.buf.frames();
             self.buf.render_uninit(Some(FRAME_LENGTH));
-            for ch in 0..channels {
-                if let Some(plane) = self.buf.plane_mut(ch) {
-                    for (n, sample) in plane[start..start + FRAME_LENGTH].iter_mut().enumerate() {
-                        *sample = self.scratch[n * channels + ch];
-                    }
+            let end = start + FRAME_LENGTH;
+            let ok = if channels > 1 {
+                match self.buf.plane_pair_mut(0, 1) {
+                    Some((l, r_plane)) => self.core.decode_frame(
+                        &mut r,
+                        is_key_frame,
+                        &mut l[start..end],
+                        Some(&mut r_plane[start..end]),
+                    ),
+                    None => false,
                 }
+            }
+            else {
+                match self.buf.plane_mut(0) {
+                    Some(l) => {
+                        self.core.decode_frame(&mut r, is_key_frame, &mut l[start..end], None)
+                    }
+                    None => false,
+                }
+            };
+            if !ok {
+                return decode_error("musepack: frame buffer too small");
             }
         }
 
