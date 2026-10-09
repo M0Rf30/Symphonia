@@ -63,10 +63,12 @@ impl Stream {
     fn read(&mut self, max_frames: usize) -> Vec<f32> {
         let mut out = Vec::new();
         while out.len() < max_frames * self.channels {
-            let Some(packet) = self.reader.next_packet().unwrap() else {
+            let Some(packet) = self.reader.next_packet().unwrap()
+            else {
                 break;
             };
-            let GenericAudioBufferRef::F32(buf) = self.decoder.decode(&packet).unwrap() else {
+            let GenericAudioBufferRef::F32(buf) = self.decoder.decode(&packet).unwrap()
+            else {
                 panic!("not f32");
             };
             for i in 0..buf.frames() {
@@ -262,7 +264,10 @@ fn sv7_synthetic_packets_describe_the_stream() {
         while let Some(p) = s.reader.next_packet().unwrap() {
             assert_eq!(p.pts.get(), (n * FRAME) as i64 - SYNTH_DELAY as i64, "pts of packet {n}");
             assert_eq!(p.block_dur().get(), FRAME);
-            let GenericAudioBufferRef::F32(buf) = s.decoder.decode(&p).unwrap() else { panic!() };
+            let GenericAudioBufferRef::F32(buf) = s.decoder.decode(&p).unwrap()
+            else {
+                panic!()
+            };
             assert_eq!(buf.frames() as u64, p.dur.get(), "packet {n} output matches its duration");
             total += p.dur.get();
             n += 1;
@@ -349,7 +354,12 @@ fn block(key: &[u8; 2], payload: &[u8]) -> Vec<u8> {
 /// Builds an SV8 file of `packets` `AP` blocks (`2^block_pwr` frames each, the last one short)
 /// of pseudo-random payload. The stream claims `encoder_pns` noise substitution, which the random
 /// payloads then use at will (`Res == -1`).
-fn synthetic_sv8(block_pwr: u32, beg_silence: u64, packets: u64, pns_flag: Option<bool>) -> Vec<u8> {
+fn synthetic_sv8(
+    block_pwr: u32,
+    beg_silence: u64,
+    packets: u64,
+    pns_flag: Option<bool>,
+) -> Vec<u8> {
     let mut rng = 0x1234_5678_9ABC_DEF1u64 ^ (packets << 8) ^ u64::from(block_pwr);
     let mut next = move || {
         rng ^= rng << 13;
@@ -472,7 +482,10 @@ fn sv8_packets_describe_the_stream() {
             assert_eq!(p.pts.get(), e, "packets are contiguous");
         }
         expected_pts = Some(p.pts.get() + p.block_dur().get() as i64);
-        let GenericAudioBufferRef::F32(buf) = s.decoder.decode(&p).unwrap() else { panic!() };
+        let GenericAudioBufferRef::F32(buf) = s.decoder.decode(&p).unwrap()
+        else {
+            panic!()
+        };
         assert_eq!(buf.frames() as u64, p.dur.get());
         total += p.dur.get();
     }
@@ -488,11 +501,13 @@ fn sv8_packets_describe_the_stream() {
 /// only, but the reference decode is of the whole file.
 #[test]
 fn real_file_seek_matches_linear_decode() {
-    let Ok(path) = std::env::var("MUSEPACK_SEEK_SAMPLE") else {
+    let Ok(path) = std::env::var("MUSEPACK_SEEK_SAMPLE")
+    else {
         eprintln!("skipping: MUSEPACK_SEEK_SAMPLE not set");
         return;
     };
-    let Ok(bytes) = std::fs::read(&path) else {
+    let Ok(bytes) = std::fs::read(&path)
+    else {
         eprintln!("skipping: {path} not readable");
         return;
     };
