@@ -155,26 +155,57 @@ struct ScannedFrame {
     main_data_len: usize,
 }
 
-/// Returns true if the buffered stream begins with an MPEG program stream (MPEG-PS) pack header
-/// (`00 00 01 BA`). MPEG audio elementary stream frames are found inside the PES packets of such a
-/// stream, but the stream is not an MPEG audio stream: the audio data is interleaved with PES
-/// headers, and so decoding it as one would produce garbage.
+/// The number of bytes before a candidate MPEG audio frame that are searched for MPEG program
+/// stream start codes.
+const PS_LOOKBACK_LEN: usize = 4096;
+
+/// Returns true if the buffered stream is an MPEG program stream (MPEG-PS). MPEG audio frames are
+/// found inside the PES packets of such a stream, but the stream is not an MPEG audio stream: the
+/// audio data is interleaved with PES headers, and so decoding it as one would produce garbage.
 ///
-/// The start of the stream must still be buffered, otherwise this returns false. The position of
-/// the stream is restored.
+/// The stream is a program stream if either:
+/// * it begins with a pack header (`00 00 01 BA`), if the start of the stream is still buffered, or
+/// * a PS/PES start code (`00 00 01` followed by a pack, system, or stream id) is found in the
+///   buffered bytes just before the current position. This catches the probe scanning ahead to
+///   an MPEG audio frame inside a PES packet after the start of the stream was dropped from the
+///   buffer. Frames of an elementary stream do not contain start codes in practice.
+///
+/// The position of the stream is restored.
 fn is_mpeg_ps_stream(reader: &mut MediaSourceStream<'_>) -> bool {
     let pos = reader.pos();
 
-    if reader.seek_buffered(0) != 0 {
+    // Look at the start of the stream.
+    if reader.seek_buffered(0) == 0 {
+        let mut buf = [0u8; 5];
+
+        let is_ps = reader.read_buf_exact(&mut buf).is_ok()
+            && buf[..4] == [0x00, 0x00, 0x01, 0xba]
+            // MPEG-2 PS: '01' marker bits. MPEG-1 PS: '0010' marker bits.
+            && (buf[4] & 0xc0 == 0x40 || buf[4] & 0xf0 == 0x20);
+
         reader.seek_buffered(pos);
-        return false;
+
+        if is_ps {
+            return true;
+        }
     }
 
-    let mut buf = [0u8; 5];
-    let is_ps = reader.read_buf_exact(&mut buf).is_ok()
-        && buf[..4] == [0x00, 0x00, 0x01, 0xba]
-        // MPEG-2 PS: '01' marker bits. MPEG-1 PS: '0010' marker bits.
-        && (buf[4] & 0xc0 == 0x40 || buf[4] & 0xf0 == 0x20);
+    // Look at the bytes before the current position.
+    let back = (pos as usize).min(PS_LOOKBACK_LEN);
+    let mut buf = [0u8; PS_LOOKBACK_LEN];
+
+    let is_ps = if back >= 4 && reader.seek_buffered(pos - back as u64) == pos - back as u64 {
+        reader.read_buf_exact(&mut buf[..back]).is_ok()
+            && buf[..back].windows(4).any(|w| {
+                w[..3] == [0x00, 0x00, 0x01]
+                    // Pack header, system header, program stream map, private stream 1, padding,
+                    // private stream 2, audio streams, video streams.
+                    && matches!(w[3], 0xba..=0xbf | 0xc0..=0xef)
+            })
+    }
+    else {
+        false
+    };
 
     reader.seek_buffered(pos);
 
