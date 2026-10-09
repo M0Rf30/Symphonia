@@ -75,6 +75,38 @@ pub static SWB_OFFSET_96K_LONG: [usize; 41 + 1] = [
     144, 156, 172, 188, 212, 240, 276, 320, 384, 448, 512, 576, 640, 704, 768, 832, 896, 960, 1024,
 ];
 
+/// The scale factor band offsets of AAC LD and ELD (ISO/IEC 14496-3 §4.5.? tables of the
+/// scalefactor bands for the frame lengths of 512 and 480 samples).
+pub static SWB_OFFSET_512_48K: [usize; 36 + 1] = [
+    0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 68, 76, 84, 92, 100, 112, 124,
+    136, 148, 164, 184, 208, 236, 268, 300, 332, 364, 396, 428, 460, 512,
+];
+
+pub static SWB_OFFSET_512_32K: [usize; 37 + 1] = [
+    0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 64, 72, 80, 88, 96, 108, 120, 132,
+    144, 160, 176, 192, 212, 236, 260, 288, 320, 352, 384, 416, 448, 480, 512,
+];
+
+pub static SWB_OFFSET_512_24K: [usize; 31 + 1] = [
+    0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 52, 60, 68, 80, 92, 104, 120, 140, 164, 192, 224,
+    256, 288, 320, 352, 384, 416, 448, 480, 512,
+];
+
+pub static SWB_OFFSET_480_48K: [usize; 35 + 1] = [
+    0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 64, 72, 80, 88, 96, 108, 120, 132,
+    144, 156, 172, 188, 212, 240, 272, 304, 336, 368, 400, 432, 480,
+];
+
+pub static SWB_OFFSET_480_32K: [usize; 37 + 1] = [
+    0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 72, 80, 88, 96, 104, 112, 124,
+    136, 148, 164, 180, 200, 224, 256, 288, 320, 352, 384, 416, 448, 480,
+];
+
+pub static SWB_OFFSET_480_24K: [usize; 30 + 1] = [
+    0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 52, 60, 68, 80, 92, 104, 120, 140, 164, 192, 224,
+    256, 288, 320, 352, 384, 416, 448, 480,
+];
+
 /// A Linear Congruential Generator (LCG) pseudo-random number generator from Numerical Recipes.
 #[derive(Clone)]
 pub struct Lcg {
@@ -99,6 +131,10 @@ pub struct GASubbandInfo {
     pub min_srate: u32,
     pub long_bands: &'static [usize],
     pub short_bands: &'static [usize],
+    /// The maximum number of bands TNS applies to in a long window, for the frame lengths of AAC
+    /// LD and ELD (480 and 512). Zero for 1024 sample frames, where it depends on the sampling
+    /// frequency index only.
+    pub tns_max_long_bands: usize,
 }
 
 impl GASubbandInfo {
@@ -109,6 +145,27 @@ impl GASubbandInfo {
             }
         }
         unreachable!()
+    }
+
+    /// Get the scale factor bands for AAC LD and ELD, which have frame lengths of 512 or 480
+    /// samples, and a window of one block (there are no short windows).
+    ///
+    /// The tables are defined for sampling frequencies of 22.05 kHz and above. Lower ones use the
+    /// tables of 22.05 kHz and 24 kHz.
+    pub fn find_ld(srate: u32, frame_len: usize) -> Option<GASubbandInfo> {
+        let (long_bands, tns_max_long_bands): (&'static [usize], usize) = match (frame_len, srate) {
+            (512, 46009..) => (&SWB_OFFSET_512_48K, 31),
+            (512, 37566..) => (&SWB_OFFSET_512_48K, 32),
+            (512, 27713..) => (&SWB_OFFSET_512_32K, 37),
+            (512, _) => (&SWB_OFFSET_512_24K, 31),
+            (480, 46009..) => (&SWB_OFFSET_480_48K, 31),
+            (480, 37566..) => (&SWB_OFFSET_480_48K, 32),
+            (480, 27713..) => (&SWB_OFFSET_480_32K, 37),
+            (480, _) => (&SWB_OFFSET_480_24K, 30),
+            _ => return None,
+        };
+
+        Some(GASubbandInfo { min_srate: 0, long_bands, short_bands: &[], tns_max_long_bands })
     }
 
     pub fn find_idx(srate: u32) -> usize {
@@ -126,61 +183,73 @@ static AAC_SUBBAND_INFO: [GASubbandInfo; 12] = [
         min_srate: 92017,
         long_bands: &SWB_OFFSET_96K_LONG,
         short_bands: &SWB_OFFSET_64K_SHORT,
+        tns_max_long_bands: 0,
     }, //96K
     GASubbandInfo {
         min_srate: 75132,
         long_bands: &SWB_OFFSET_96K_LONG,
         short_bands: &SWB_OFFSET_64K_SHORT,
+        tns_max_long_bands: 0,
     }, //88.2K
     GASubbandInfo {
         min_srate: 55426,
         long_bands: &SWB_OFFSET_64K_LONG,
         short_bands: &SWB_OFFSET_64K_SHORT,
+        tns_max_long_bands: 0,
     }, //64K
     GASubbandInfo {
         min_srate: 46009,
         long_bands: &SWB_OFFSET_48K_LONG,
         short_bands: &SWB_OFFSET_48K_SHORT,
+        tns_max_long_bands: 0,
     }, //48K
     GASubbandInfo {
         min_srate: 37566,
         long_bands: &SWB_OFFSET_48K_LONG,
         short_bands: &SWB_OFFSET_48K_SHORT,
+        tns_max_long_bands: 0,
     }, //44.1K
     GASubbandInfo {
         min_srate: 27713,
         long_bands: &SWB_OFFSET_32K_LONG,
         short_bands: &SWB_OFFSET_48K_SHORT,
+        tns_max_long_bands: 0,
     }, //32K
     GASubbandInfo {
         min_srate: 23004,
         long_bands: &SWB_OFFSET_24K_LONG,
         short_bands: &SWB_OFFSET_24K_SHORT,
+        tns_max_long_bands: 0,
     }, //24K
     GASubbandInfo {
         min_srate: 18783,
         long_bands: &SWB_OFFSET_24K_LONG,
         short_bands: &SWB_OFFSET_24K_SHORT,
+        tns_max_long_bands: 0,
     }, //22.05K
     GASubbandInfo {
         min_srate: 13856,
         long_bands: &SWB_OFFSET_16K_LONG,
         short_bands: &SWB_OFFSET_16K_SHORT,
+        tns_max_long_bands: 0,
     }, //16K
     GASubbandInfo {
         min_srate: 11502,
         long_bands: &SWB_OFFSET_16K_LONG,
         short_bands: &SWB_OFFSET_16K_SHORT,
+        tns_max_long_bands: 0,
     }, //12K
     GASubbandInfo {
         min_srate: 9391,
         long_bands: &SWB_OFFSET_16K_LONG,
         short_bands: &SWB_OFFSET_16K_SHORT,
+        tns_max_long_bands: 0,
     }, //11.025K
     GASubbandInfo {
         min_srate: 0,
         long_bands: &SWB_OFFSET_8K_LONG,
         short_bands: &SWB_OFFSET_8K_SHORT,
+        tns_max_long_bands: 0,
     }, //8K
 ];
 

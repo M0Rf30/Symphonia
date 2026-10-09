@@ -35,6 +35,7 @@ mod codebooks;
 mod common;
 mod cpe;
 mod dsp;
+mod eld_window;
 mod ics;
 mod sbr;
 mod window;
@@ -230,8 +231,28 @@ impl AacDecoder {
                 );
             }
         }
-        if asc.object_type != AudioObjectType::Lc || asc.samples != 1024 {
+        let supported = match asc.object_type {
+            AudioObjectType::Lc => asc.samples == 1024,
+            AudioObjectType::ErAacLd | AudioObjectType::ErAacEld => {
+                asc.samples == 512 || asc.samples == 480
+            }
+            _ => false,
+        };
+
+        if !supported {
             return unsupported_error("aac: aac too complex");
+        }
+
+        // AAC LD and ELD: the tools for error resilience are not supported. SBR is supported
+        // only for AAC-LC, and parametric stereo only with it.
+        let is_er = matches!(asc.object_type, AudioObjectType::ErAacLd | AudioObjectType::ErAacEld);
+
+        if is_er && asc.er_resilience {
+            return unsupported_error("aac: error resilience tools");
+        }
+
+        if is_er && asc.sbr_present {
+            return unsupported_error("aac: sbr with aac ld or eld");
         }
 
         // Map each expected syntactic element (`SCE`/`CPE`/`LFE`), in bitstream order, onto its
@@ -303,7 +324,17 @@ impl AacDecoder {
             .with_channels(out_channels)
             .with_sample_rate(sbr.as_ref().map_or(asc.sample_rate, |s| s.fs_sbr));
 
-        let sbinfo = GASubbandInfo::find(asc.sample_rate);
+        let dsp = dsp::Dsp::new_for(asc.object_type, asc.samples);
+
+        let sbinfo = if is_er {
+            match GASubbandInfo::find_ld(asc.sample_rate, asc.samples) {
+                Some(sbinfo) => sbinfo,
+                None => return unsupported_error("aac: unsupported frame length"),
+            }
+        }
+        else {
+            GASubbandInfo::find(asc.sample_rate)
+        };
 
         // The pre-SBR/PS "core" buffer stays at the core channel count (mono for a PS
         // stream) — only `sbr.buf` (the tool's own output buffer) is ever widened to stereo;
@@ -315,7 +346,7 @@ impl AacDecoder {
             pairs: Vec::new(),
             lcg: Lcg::new(PNS_SEED),
             elem_targets,
-            dsp: dsp::Dsp::new(),
+            dsp,
             sbinfo,
             params,
             buf,
@@ -359,7 +390,12 @@ impl AacDecoder {
 
     fn set_pair(&mut self, pair_no: usize, channel: usize, pair: bool) -> Result<()> {
         if self.pairs.len() <= pair_no {
-            self.pairs.push(cpe::ChannelPair::new(pair, channel, self.sbinfo));
+            self.pairs.push(cpe::ChannelPair::new(
+                pair,
+                channel,
+                self.sbinfo,
+                self.asc.object_type,
+            ));
         }
         else {
             validate!(self.pairs[pair_no].channel == channel);
@@ -542,6 +578,53 @@ impl AacDecoder {
     ) -> Result<()> {
         let (cur_pair, sbr_ext, _) = self.parse_ga(bs, data)?;
 
+        self.synth_block(cur_pair, sbr_ext)
+    }
+
+    /// Parse a `raw_data_block()` of AAC LD or ELD (an `er_raw_data_block()`): the channel
+    /// elements of the channel configuration, in order, without element identifiers. Returns the
+    /// number of channel elements and their SBR payloads.
+    #[allow(clippy::type_complexity)]
+    fn parse_er<B: ReadBitsLtr + FiniteBitStream>(
+        &mut self,
+        bs: &mut B,
+    ) -> Result<(usize, Vec<Option<sbr::extension::SbrExtensionData>>)> {
+        let sbr_ext: Vec<Option<sbr::extension::SbrExtensionData>> =
+            vec![None; self.elem_targets.len()];
+
+        for idx in 0..self.elem_targets.len() {
+            let (is_pair, indices) = self.elem_targets[idx];
+
+            self.set_pair(idx, indices[0], is_pair)?;
+
+            // The `element_instance_tag`: AAC ELD has none.
+            if self.asc.object_type != AudioObjectType::ErAacEld {
+                bs.ignore_bits(4)?;
+            }
+
+            if is_pair {
+                self.pairs[idx].decode_ga_cpe(bs, &mut self.lcg, self.asc.object_type)?;
+            }
+            else {
+                self.pairs[idx].decode_ga_sce(bs, &mut self.lcg, self.asc.object_type)?;
+            }
+        }
+
+        Ok((self.elem_targets.len(), sbr_ext))
+    }
+
+    fn decode_er<B: ReadBitsLtr + FiniteBitStream>(&mut self, bs: &mut B) -> Result<()> {
+        let (cur_pair, sbr_ext) = self.parse_er(bs)?;
+
+        self.synth_block(cur_pair, sbr_ext)
+    }
+
+    /// Synthesise the audio of the `cur_pair` channel elements that were parsed.
+    fn synth_block(
+        &mut self,
+        cur_pair: usize,
+        sbr_ext: Vec<Option<sbr::extension::SbrExtensionData>>,
+    ) -> Result<()> {
         let rate_idx = GASubbandInfo::find_idx(self.asc.sample_rate);
         for pair in 0..cur_pair {
             self.pairs[pair].synth_audio(&mut self.dsp, &mut self.buf, rate_idx);
@@ -651,6 +734,7 @@ impl AacDecoder {
         // Choose decode step based on the object type.
         match self.asc.object_type {
             AudioObjectType::Lc => self.decode_ga(&mut bs, packet.data)?,
+            AudioObjectType::ErAacLd | AudioObjectType::ErAacEld => self.decode_er(&mut bs)?,
             _ => return unsupported_error("aac: object type"),
         }
 
@@ -740,13 +824,19 @@ impl RegisterableAudioDecoder for AacDecoder {
     }
 
     fn supported_codecs() -> &'static [SupportedAudioCodec] {
-        use symphonia_core::codecs::audio::well_known::profiles::CODEC_PROFILE_AAC_LC;
+        use symphonia_core::codecs::audio::well_known::profiles::{
+            CODEC_PROFILE_AAC_ELD, CODEC_PROFILE_AAC_LC, CODEC_PROFILE_AAC_LD,
+        };
 
         &[support_audio_codec!(
             CODEC_ID_AAC,
             "aac",
             "Advanced Audio Coding",
-            &[codec_profile!(CODEC_PROFILE_AAC_LC, "aac-lc", "Low Complexity"),]
+            &[
+                codec_profile!(CODEC_PROFILE_AAC_LC, "aac-lc", "Low Complexity"),
+                codec_profile!(CODEC_PROFILE_AAC_LD, "aac-ld", "Low Delay"),
+                codec_profile!(CODEC_PROFILE_AAC_ELD, "aac-eld", "Enhanced Low Delay"),
+            ]
         )]
     }
 }
