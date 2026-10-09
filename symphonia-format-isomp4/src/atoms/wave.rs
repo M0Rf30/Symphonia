@@ -6,25 +6,33 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use crate::atoms::stsd::AudioSampleEntry;
-use crate::atoms::{Atom, AtomHeader, AtomIterator, AtomType, EsdsAtom, ReadAtom, Result};
+use crate::atoms::{
+    AlacAtom, Atom, AtomHeader, AtomIterator, AtomType, EsdsAtom, ReadAtom, Result,
+};
 
 #[allow(dead_code)]
 #[derive(Debug)]
 pub struct WaveAtom {
     pub esds: Option<EsdsAtom>,
+    pub alac: Option<AlacAtom>,
 }
 
 impl Atom for WaveAtom {
     fn read<R: ReadAtom>(it: &mut AtomIterator<R>, _header: &AtomHeader) -> Result<Self> {
         let mut esds = None;
+        let mut alac = None;
 
         while let Some(header) = it.next_header()? {
-            if header.atom_type == AtomType::Esds {
-                esds = Some(it.read_atom::<EsdsAtom>()?);
+            match header.atom_type {
+                AtomType::Esds => esds = Some(it.read_atom::<EsdsAtom>()?),
+                // QuickTime stores the ALAC magic cookie in an `alac` atom nested within `wave`
+                // (alongside the `frma` format atom) rather than directly within the sample entry.
+                AtomType::AudioSampleEntryAlac => alac = Some(it.read_atom::<AlacAtom>()?),
+                _ => (),
             }
         }
 
-        Ok(WaveAtom { esds })
+        Ok(WaveAtom { esds, alac })
     }
 }
 
@@ -32,6 +40,10 @@ impl WaveAtom {
     pub fn fill_audio_sample_entry(self, entry: &mut AudioSampleEntry) -> Result<()> {
         if let Some(esds) = self.esds {
             esds.fill_audio_sample_entry(entry)?;
+        }
+
+        if let Some(alac) = self.alac {
+            alac.fill_audio_sample_entry(entry);
         }
 
         Ok(())

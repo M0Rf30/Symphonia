@@ -8,6 +8,7 @@
 use symphonia_core::codecs::CodecParameters;
 use symphonia_core::support_format;
 
+use symphonia_core::codecs::audio::well_known::CODEC_ID_AAC;
 use symphonia_core::errors::{
     Error, Result, SeekErrorKind, decode_error, seek_error, unsupported_error,
 };
@@ -15,7 +16,7 @@ use symphonia_core::formats::prelude::*;
 use symphonia_core::formats::probe::{ProbeFormatData, ProbeableFormat, Score, Scoreable};
 use symphonia_core::formats::well_known::FORMAT_ID_ISOMP4;
 use symphonia_core::io::*;
-use symphonia_core::meta::{Metadata, MetadataLog};
+use symphonia_core::meta::{ChapterGroup, Metadata, MetadataLog};
 use symphonia_core::units::Time;
 
 use std::collections::HashMap;
@@ -25,6 +26,10 @@ use std::sync::Arc;
 
 use crate::atoms::{AtomError, AtomIterator, AtomType, ReadAtom};
 use crate::atoms::{FtypAtom, GaplessInfo, MetaAtom, MoofAtom, MoovAtom, SidxAtom, TrakAtom};
+use symphonia_common::mpeg::audio::{
+    AAC_SEEK_MAX_PREROLL_FRAMES, AudioSpecificConfig, aac_seek_start_frame,
+};
+
 use crate::stream::*;
 
 use log::{debug, info, trace, warn};
@@ -46,6 +51,13 @@ pub struct TrackState {
     next_sample: u32,
     /// The current sample byte position relative to the start of the track.
     next_sample_pos: u64,
+    /// The number of decoded audio frames per tick of the track's timebase. This is 1 for almost
+    /// all audio tracks. For HE-AAC (SBR), the timescale of a track may be the core codec rate
+    /// while the decoded output has twice the sample rate.
+    frames_per_tick: u64,
+    /// How to pre-roll the decoder after an accurate seek, so that the decoder's internal state
+    /// converges before the seek target.
+    seek_preroll: SeekPreroll,
 }
 
 impl TrackState {
@@ -72,26 +84,36 @@ impl TrackState {
         // number of frames is equal to the duration. This is the case for almost all audio tracks.
         // If not, there is no generic, low overhead, & precise way to determine the number of
         // frames.
-        let is_audio_frame_accurate = if let Some(CodecParameters::Audio(audio)) =
-            &track.codec_params
-        {
-            audio.sample_rate.is_some_and(|sample_rate| sample_rate == timespan.timescale.get())
-        }
-        else {
-            false
+        //
+        // The exception is an AAC track with SBR whose timescale is the core codec rate: the
+        // sample rate of its codec parameters is the (integer multiple) SBR output rate, and each
+        // tick of the timescale is that many decoded frames.
+        let frames_per_tick = match &track.codec_params {
+            Some(CodecParameters::Audio(audio)) => match audio.sample_rate {
+                Some(rate) if rate == timespan.timescale.get() => Some(1),
+                Some(rate)
+                    if audio.codec == CODEC_ID_AAC && rate % timespan.timescale.get() == 0 =>
+                {
+                    Some(u64::from(rate / timespan.timescale.get()))
+                }
+                _ => None,
+            },
+            _ => None,
         };
 
-        if is_audio_frame_accurate {
-            track.with_num_frames(timespan.duration.get());
+        if let Some(frames_per_tick) = frames_per_tick {
+            // The total number of frames, including any delay and padding.
+            let total_frames = timespan.duration.get().saturating_mul(frames_per_tick);
+
+            track.with_num_frames(total_frames);
 
             // Derive gapless (encoder delay/padding) information for the track. An iTunes
             // `iTunSMPB` freeform tag, if present, takes precedence over the edit list since it is
             // the more explicit and widely honoured source (matching common player behaviour).
-            let elst_gapless = trak
-                .edts
-                .as_ref()
-                .and_then(|edts| edts.elst.as_ref())
-                .and_then(|elst| {
+            // Both are expressed in media timescale ticks, whereas the delay and padding of a
+            // track are decoded frames.
+            let elst_gapless =
+                trak.edts.as_ref().and_then(|edts| edts.elst.as_ref()).and_then(|elst| {
                     derive_gapless_from_elst(
                         elst,
                         timespan.duration.get(),
@@ -100,7 +122,15 @@ impl TrackState {
                     )
                 });
 
-            if let Some(gapless) = itunes_gapless.or(elst_gapless) {
+            let gapless = itunes_gapless.or(elst_gapless).and_then(|gapless| {
+                let ratio = u32::try_from(frames_per_tick).ok()?;
+                Some(GaplessInfo {
+                    delay: gapless.delay.checked_mul(ratio)?,
+                    padding: gapless.padding.checked_mul(ratio)?,
+                })
+            });
+
+            if let Some(gapless) = gapless {
                 if gapless.delay > 0 {
                     track.with_delay(gapless.delay);
                 }
@@ -111,7 +141,7 @@ impl TrackState {
                 // Reduce the reported number of frames to exclude delay/padding, matching the
                 // convention used by other demuxers (e.g., mp3, caf).
                 let discard = u64::from(gapless.delay) + u64::from(gapless.padding);
-                let valid_frames = timespan.duration.get().saturating_sub(discard);
+                let valid_frames = total_frames.saturating_sub(discard);
                 track.with_num_frames(valid_frames);
             }
         }
@@ -122,9 +152,55 @@ impl TrackState {
             cur_seg: 0,
             next_sample: 0,
             next_sample_pos: 0,
+            frames_per_tick: frames_per_tick.unwrap_or(1),
+            seek_preroll: SeekPreroll::new(&track),
         };
 
         (state, track)
+    }
+}
+
+/// How to pre-roll a decoder after an accurate seek.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum SeekPreroll {
+    /// Start decoding at the sample containing the seek target.
+    None,
+    /// AAC. Start decoding some samples (packets) before the target. See
+    /// [`aac_seek_start_frame`].
+    Aac { sbr: bool },
+}
+
+impl SeekPreroll {
+    fn new(track: &Track) -> Self {
+        match &track.codec_params {
+            Some(CodecParameters::Audio(audio)) if audio.codec == CODEC_ID_AAC => {
+                let sbr = audio
+                    .extra_data
+                    .as_deref()
+                    .and_then(|extra_data| AudioSpecificConfig::read(extra_data).ok())
+                    .is_some_and(|asc| asc.sbr_present);
+
+                SeekPreroll::Aac { sbr }
+            }
+            _ => SeekPreroll::None,
+        }
+    }
+
+    /// Get the number of the sample to start decoding from to reach `target`, where `first` is
+    /// the number of the first sample of the segment and `from_start` is true if that segment
+    /// starts at the beginning of the track.
+    fn start_sample(self, target: u32, from_start: bool) -> u32 {
+        match self {
+            SeekPreroll::None => target,
+            // The SBR pre-roll is aligned to the stream start, which is only known for a segment
+            // that starts the track. Otherwise, use the maximum pre-roll.
+            SeekPreroll::Aac { sbr: true } if !from_start => {
+                target.saturating_sub(AAC_SEEK_MAX_PREROLL_FRAMES as u32)
+            }
+            SeekPreroll::Aac { sbr } => {
+                u32::try_from(aac_seek_start_frame(u64::from(target), sbr)).unwrap_or(target)
+            }
+        }
     }
 }
 
@@ -208,7 +284,8 @@ mod gapless_tests {
         let total_media_frames = delay + valid_media_frames + padding;
 
         // segment_duration expressed in the movie timescale.
-        let segment_duration = valid_media_frames * u64::from(movie_timescale) / u64::from(media_timescale);
+        let segment_duration =
+            valid_media_frames * u64::from(movie_timescale) / u64::from(media_timescale);
 
         let elst = ElstAtom {
             entries: vec![ElstEntry {
@@ -324,6 +401,8 @@ pub struct IsoMp4Reader<'s> {
     media_info: MediaInfo,
     tracks: Vec<Track>,
     metadata: MetadataLog,
+    /// Chapters from a Nero chapter list (`chpl`) atom, if present.
+    chapters: Option<ChapterGroup>,
     /// Segments of the movie. Sorted in ascending order by sequence number.
     segs: Vec<Box<dyn StreamSegment>>,
     /// State tracker for each track.
@@ -501,13 +580,8 @@ impl<'s> IsoMp4Reader<'s> {
                 TimeSpan::new(trak.mdia.mdhd.timescale, duration)
             };
 
-            let (track_state, track) = TrackState::make(
-                t,
-                trak,
-                &timespan,
-                moov.mvhd.timescale,
-                itunes_gapless,
-            );
+            let (track_state, track) =
+                TrackState::make(t, trak, &timespan, moov.mvhd.timescale, itunes_gapless);
 
             tracks.push(track);
             track_states.push(track_state);
@@ -530,7 +604,18 @@ impl<'s> IsoMp4Reader<'s> {
         media_info.with_time_base(TimeBase::from_recip(moov.mvhd.timescale));
         media_info.with_duration(Duration::new(moov.mvhd.duration));
 
-        Ok(IsoMp4Reader { iter: it, media_info, tracks, metadata, track_states, segs, moov })
+        let chapters = moov.chapters().or(opts.external_data.chapters);
+
+        Ok(IsoMp4Reader {
+            iter: it,
+            media_info,
+            tracks,
+            metadata,
+            chapters,
+            track_states,
+            segs,
+            moov,
+        })
     }
 
     /// Idempotently gets information regarding the next sample of the media stream. This function
@@ -689,19 +774,29 @@ impl<'s> IsoMp4Reader<'s> {
         Ok(false)
     }
 
-    fn seek_track_by_time(&mut self, track_num: usize, time: Time) -> Result<SeekedTo> {
+    fn seek_track_by_time(
+        &mut self,
+        track_num: usize,
+        time: Time,
+        accurate: bool,
+    ) -> Result<SeekedTo> {
         // Convert time to timestamp for the track.
         if let Some(track) = self.tracks.get(track_num) {
             let tb = track.time_base.expect("track always created with a timebase");
             let ts = tb.calc_timestamp(time).ok_or(Error::SeekError(SeekErrorKind::OutOfRange))?;
-            self.seek_track_by_ts(track_num, ts)
+            self.seek_track_by_ts(track_num, ts, accurate)
         }
         else {
             seek_error(SeekErrorKind::Unseekable)
         }
     }
 
-    fn seek_track_by_ts(&mut self, track_num: usize, ts: Timestamp) -> Result<SeekedTo> {
+    fn seek_track_by_ts(
+        &mut self,
+        track_num: usize,
+        ts: Timestamp,
+        accurate: bool,
+    ) -> Result<SeekedTo> {
         debug!("seeking track_num={track_num} to frame_ts={ts}");
 
         struct SeekLocation {
@@ -736,8 +831,20 @@ impl<'s> IsoMp4Reader<'s> {
 
         let seg = &self.segs[seek_loc.seg_idx];
 
+        // For an accurate seek, start decoding a number of samples before the target sample so
+        // that the decoder has converged by the time the target is reached. The pre-roll is
+        // limited to the segment containing the target sample.
+        let sample_num = if accurate {
+            self.track_states[track_num]
+                .seek_preroll
+                .start_sample(seek_loc.sample_num, seek_loc.seg_idx == 0)
+        }
+        else {
+            seek_loc.sample_num
+        };
+
         // Get the sample timing.
-        let timing = match seg.sample_timing(track_num, seek_loc.sample_num)? {
+        let timing = match seg.sample_timing(track_num, sample_num)? {
             Some(t) => t,
             None => return seek_error(SeekErrorKind::OutOfRange),
         };
@@ -749,13 +856,13 @@ impl<'s> IsoMp4Reader<'s> {
         };
 
         // Get the sample information.
-        let data_desc = seg.sample_data(track_num, seek_loc.sample_num, true)?;
+        let data_desc = seg.sample_data(track_num, sample_num, true)?;
 
         // Update the track's next sample information to point to the seeked sample.
         let track = &mut self.track_states[track_num];
 
         track.cur_seg = seek_loc.seg_idx;
-        track.next_sample = seek_loc.sample_num;
+        track.next_sample = sample_num;
         track.next_sample_pos = data_desc.base_pos
             + match data_desc.offset {
                 Some(o) => o,
@@ -852,15 +959,6 @@ impl FormatReader for IsoMp4Reader<'_> {
 
         let delay = u64::from(track.delay.unwrap_or(0));
 
-        if delay == 0 && track.padding.unwrap_or(0) == 0 {
-            return Ok(Some(Packet::new(
-                next_sample_info.track_id,
-                next_sample_info.ts,
-                next_sample_info.dur,
-                data,
-            )));
-        }
-
         // Determine the "nominal" (undivided) per-sample duration used by the sample table. The
         // final `stts` entry is often deliberately shortened to encode the true valid tail
         // duration, but the decoder will still produce a full frame's worth of raw samples; the
@@ -879,24 +977,56 @@ impl FormatReader for IsoMp4Reader<'_> {
             .map(Duration::new)
             .unwrap_or(next_sample_info.dur);
 
+        // Without delay or padding, only a shortened final sample of a track with a known number
+        // of frames needs to be trimmed.
+        let is_shortened = track.num_frames.is_some() && nominal_dur > next_sample_info.dur;
+
+        if delay == 0 && track.padding.unwrap_or(0) == 0 && !is_shortened {
+            return Ok(Some(Packet::new(
+                next_sample_info.track_id,
+                next_sample_info.ts,
+                next_sample_info.dur,
+                data,
+            )));
+        }
+
+        // The timeline of the delay, padding, and trim is in decoded frames, which are
+        // `frames_per_tick` per tick of the track's timebase.
+        let frames_per_tick = self.track_states[next_sample_info.track_num].frames_per_tick;
+        let ratio = i64::try_from(frames_per_tick).unwrap_or(1);
+
         // Shift the presentation timeline so that sample 0 corresponds to the first valid
         // (non-delay) frame, then let `trimmed_dur` compute trim_start/trim_end from the shifted
         // PTS and the track's valid frame count.
-        let pts = next_sample_info.ts.saturating_sub(Duration::new(delay));
+        let pts = Timestamp::new(next_sample_info.ts.get().saturating_mul(ratio))
+            .saturating_sub(Duration::new(delay));
+
+        let block_dur = Duration::new(nominal_dur.get().saturating_mul(frames_per_tick));
 
         let end_pts = track
             .num_frames
             .map(Duration::from)
             .and_then(|dur| dur.timestamp_from(Timestamp::ZERO));
 
-        let packet = PacketBuilder::new()
+        let mut packet = PacketBuilder::new()
             .track_id(next_sample_info.track_id)
             .pts(pts)
-            .trimmed_dur(nominal_dur, end_pts)
+            .trimmed_dur(block_dur, end_pts)
             .data(data)
             .build();
 
+        if frames_per_tick > 1 {
+            // Convert the packet's timestamp and duration back to timebase ticks. The trim
+            // durations remain in decoded frames.
+            packet.pts = Timestamp::new(packet.pts.get().div_euclid(ratio));
+            packet.dur = Duration::new(packet.dur.get().div_ceil(frames_per_tick));
+        }
+
         Ok(Some(packet))
+    }
+
+    fn chapters(&self) -> Option<&ChapterGroup> {
+        self.chapters.as_ref()
     }
 
     fn metadata(&mut self) -> Metadata<'_> {
@@ -907,10 +1037,13 @@ impl FormatReader for IsoMp4Reader<'_> {
         &self.tracks
     }
 
-    fn seek(&mut self, _mode: SeekMode, to: SeekTo) -> Result<SeekedTo> {
+    fn seek(&mut self, mode: SeekMode, to: SeekTo) -> Result<SeekedTo> {
         if self.tracks.is_empty() {
             return seek_error(SeekErrorKind::Unseekable);
         }
+
+        // Only an accurate seek pre-rolls the decoder.
+        let accurate = mode == SeekMode::Accurate;
 
         match to {
             SeekTo::Timestamp { ts, track_id } => {
@@ -931,12 +1064,12 @@ impl FormatReader for IsoMp4Reader<'_> {
                     // Seek all tracks excluding the primary track to the desired time.
                     for t in 0..self.track_states.len() {
                         if t != track_num {
-                            self.seek_track_by_time(t, time)?;
+                            self.seek_track_by_time(t, time, accurate)?;
                         }
                     }
 
                     // Seek the primary track and return the result.
-                    self.seek_track_by_ts(track_num, ts)
+                    self.seek_track_by_ts(track_num, ts, accurate)
                 }
                 else {
                     seek_error(SeekErrorKind::InvalidTrack)
@@ -957,12 +1090,12 @@ impl FormatReader for IsoMp4Reader<'_> {
                 // Seek all tracks excluding the selected track and discard the result.
                 for t in 0..self.track_states.len() {
                     if t != track_num {
-                        self.seek_track_by_time(t, time)?;
+                        self.seek_track_by_time(t, time, accurate)?;
                     }
                 }
 
                 // Seek the primary track and return the result.
-                self.seek_track_by_time(track_num, time)
+                self.seek_track_by_time(track_num, time, accurate)
             }
         }
     }
