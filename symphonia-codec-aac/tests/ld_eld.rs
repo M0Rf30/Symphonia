@@ -137,11 +137,13 @@ fn compare(
 
     for (i, &r) in reference.iter().enumerate().take(n) {
         let expected = f32::from(r);
-        let actual = (samples[start + i] * scale).round().clamp(-32768.0, 32767.0);
+        // A reference of 16 bits is clipped.
+        let clipped = (samples[start + i] * scale).clamp(-32768.0, 32767.0);
+        let actual = clipped.round();
         let diff = (actual - expected).abs();
 
         signal += f64::from(expected) * f64::from(expected);
-        noise += f64::from(samples[start + i] * scale - expected).powi(2);
+        noise += f64::from(clipped - expected).powi(2);
         max_diff = max_diff.max(diff);
     }
 
@@ -255,6 +257,95 @@ fn aac_eld_480_matches_fdk() {
         60.0,
         128.0,
     );
+}
+
+/// AAC-ELD with low delay SBR. The references are the output of FDK's decoder, with its complex
+/// (high quality) QMF mode, which is what this decoder implements, so they agree to within a few
+/// LSBs of 16 bits (FDK is a fixed-point decoder).
+#[test]
+fn aac_eld_sbr_matches_fdk() {
+    // 44.1 kHz mono, core and output at 44.1 kHz (downsampled SBR), 512 samples.
+    check_fixture(
+        include_bytes!("fixtures/aac_eld_sbr_512_mono.bin"),
+        include_bytes!("fixtures/aac_eld_sbr_512_mono.s16"),
+        512,
+        1,
+        44_100,
+        32768.0,
+        75.0,
+        16.0,
+    );
+
+    // 22.05 kHz mono, downsampled SBR. The SBR range has a trailing patch of fewer than 3
+    // subbands that is dropped, which leaves subbands that are a limiter band of their own.
+    check_fixture(
+        include_bytes!("fixtures/aac_eld_sbr_512_mono_22k.bin"),
+        include_bytes!("fixtures/aac_eld_sbr_512_mono_22k.s16"),
+        512,
+        1,
+        22_050,
+        32768.0,
+        75.0,
+        16.0,
+    );
+
+    // 44.1 kHz stereo with SBR at twice the core rate (dual-rate SBR): 1024 samples out of a
+    // 512 sample core frame.
+    check_fixture(
+        include_bytes!("fixtures/aac_eld_sbr_512_dual_stereo.bin"),
+        include_bytes!("fixtures/aac_eld_sbr_512_dual_stereo.s16"),
+        1024,
+        2,
+        44_100,
+        32768.0,
+        75.0,
+        16.0,
+    );
+
+    // 480 sample core frames, with 15 SBR time slots.
+    check_fixture(
+        include_bytes!("fixtures/aac_eld_sbr_480_mono.bin"),
+        include_bytes!("fixtures/aac_eld_sbr_480_mono.s16"),
+        480,
+        1,
+        44_100,
+        32768.0,
+        75.0,
+        16.0,
+    );
+}
+
+/// A truncated or corrupted access unit is an error or some audio, never a panic, and the decoder
+/// recovers on the next one.
+#[test]
+fn aac_eld_sbr_survives_damaged_access_units() {
+    let (asc_bytes, aus) = parse_bin(include_bytes!("fixtures/aac_eld_sbr_512_dual_stereo.bin"));
+    let params = params_of(&asc_bytes);
+    let mut decoder = AacDecoder::try_new(&params, &AudioDecoderOptions::default()).unwrap();
+
+    let decode = |decoder: &mut AacDecoder, i: usize, data: Vec<u8>| {
+        let packet = Packet::new(
+            0,
+            Timestamp::new((i * 1024) as i64),
+            Duration::new(1024),
+            data.into_boxed_slice(),
+        );
+        decoder.decode(&packet).map(|_| ())
+    };
+
+    for (i, au) in aus.iter().enumerate() {
+        // Truncated at every length in some range, and with a flipped byte.
+        for len in [1, 2, au.len() / 4, au.len() / 2, au.len() - 1] {
+            let _ = decode(&mut decoder, i, au[..len].to_vec());
+        }
+
+        let mut damaged = au.clone();
+        let mid = damaged.len() * 3 / 4;
+        damaged[mid] ^= 0x5a;
+        let _ = decode(&mut decoder, i, damaged);
+
+        decode(&mut decoder, i, au.clone()).expect("an intact access unit decodes");
+    }
 }
 
 /// The audio specific config of AAC-LD (`ld`) or AAC-ELD at 44.1 kHz, with the channel

@@ -24,9 +24,20 @@ of 512 and 480 samples, for any channel configuration of 1-7. Their low overlap 
 delay filterbank, and their scale factor bands and syntax (which has no element identifiers and
 puts the TNS data after the gain control flag) are implemented. The error resilience tools
 (Huffman codeword reordering, reversible variable length coding, and virtual codebooks), LTP in
-AAC-LD, and low delay SBR (`ldSbrPresentFlag`) of AAC-ELD are not supported, and such streams are
-rejected as unsupported. The scale factor band tables of AAC-LD and AAC-ELD are those of 22.05
-kHz and above of the standard: lower sampling frequencies use those of 22.05 kHz and 24 kHz.
+AAC-LD, and SBR with AAC-LD are not supported, and such streams are rejected as unsupported. The
+scale factor band tables of AAC-LD and AAC-ELD are those of 22.05 kHz and above of the standard:
+lower sampling frequencies use those of 22.05 kHz and 24 kHz.
+
+AAC-ELD with low delay SBR (`ldSbrPresentFlag`) is decoded with the complex-valued (high quality)
+tool, at the core rate (`ldSbrSamplingRate` 0, downsampled SBR) or at twice the core rate (dual-rate
+SBR), with 16 or 15 QMF time slots per frame for core frames of 512 or 480 samples. Low delay SBR
+has its own filterbanks (the CLDFB, with a 320 or 640 tap non-symmetric prototype filter), a
+shorter time grid syntax (a fixed grid, or one with a transient position), and no overlap with the
+previous frame. Its payloads follow the channel elements of every frame, one for each single or
+channel pair element, with the SBR header of the config until a payload transmits another. The
+CRC of the SBR payloads is not verified. Seeking in streams with low delay SBR starts decoding
+from a multiple of 32 (512 samples) or 512 (480 samples) frames from the start of the stream, so
+that the noise phase of the SBR is that of a continuous decode.
 
 ## Transports
 
@@ -45,7 +56,7 @@ find one, the codec parameters report the decoder output (twice the core rate, s
 Parametric Stereo), the audio specific config of the parameters signals the extension, and the
 timeline (packet timestamps and durations, duration, seek positions) is in decoded frames, as it is
 for MP4. SBR can only be found in streams of a core rate of at most 32 kHz, which are
-AAC-LC with a predefined channel configuration (or the program of an ADIF header).
+AAC-LC with a predefined channel configuration or a program config element.
 
 ## Attribution
 

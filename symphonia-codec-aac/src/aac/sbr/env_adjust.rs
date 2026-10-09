@@ -124,6 +124,8 @@ pub struct EnvParams<'a> {
     /// `true` if the decoder was restarted partway into a stream (e.g. after a seek), rather
     /// than at the start of the stream. See [`adjust`].
     pub resumed: bool,
+    /// `RATE`: the QMF slots per envelope time slot (2 for ordinary SBR, 1 for low delay SBR).
+    pub rate: i32,
     /// §4.6.18.8 low-power mode: ×2 energy estimation, no gain
     /// smoothing, aliasing reduction, real-only noise, and the
     /// modified sinusoid injection.
@@ -188,7 +190,7 @@ pub fn adjust(
         return Err(Error::SbrFreqBandInvalid);
     }
 
-    let rate = 2i32; // RATE (§4.6.18.2.5)
+    let rate = p.rate; // RATE (§4.6.18.2.5)
     let i0 = rate * p.t_e[0];
     let i_end = rate * p.t_e[l_e];
     let n_cols = usize::try_from(i_end - i0).map_err(|_| Error::SbrFreqBandInvalid)?;
@@ -697,6 +699,7 @@ mod tests {
             limiter_gains: 3,
             reset: false,
             resumed: false,
+            rate: 2,
             low_power: false,
             deg_patched: None,
         }

@@ -76,6 +76,7 @@ use super::bits::BitReader;
 
 use super::IdSynEle;
 use super::element::SbrElement;
+use super::grid::GridSyntax;
 use super::header::SbrHeader;
 use super::error::{SbrError as Error, SbrResult as Result};
 
@@ -201,6 +202,50 @@ impl SbrExtensionData {
             fs_sbr,
             cnt,
         )
+    }
+
+    /// Parse the `sbr_extension_data()` of low delay SBR (ELD), which follows the channel
+    /// elements of the `er_raw_data_block()` of its SCE or CPE directly, with no
+    /// `extension_type` nibble and no byte count: `[crc]`, `bs_header_flag`, `[sbr_header()]`,
+    /// then the `sbr_data()` with the grid syntax of low delay SBR.
+    ///
+    /// `crc_flag` is the `ldSbrCrcFlag` of the ELD config, and `num_time_slots` the number of
+    /// QMF time slots of a frame (15 or 16). The CRC is not verified.
+    pub fn parse_eld(
+        reader: &mut BitReader<'_>,
+        id_aac: IdSynEle,
+        crc_flag: bool,
+        fs_sbr: u32,
+        num_time_slots: usize,
+        prev_header: Option<SbrHeader>,
+    ) -> Result<Self> {
+        let start = reader.bit_position();
+
+        let crc = if crc_flag { Some(read(reader, SBR_CRC_BITS)? as u16) } else { None };
+
+        let header_present = read_flag(reader)?;
+        let header = if header_present {
+            SbrHeader::parse(reader)?
+        } else {
+            prev_header.ok_or(Error::SbrFreqBandInvalid)?
+        };
+
+        let bands = header.derive_bands(fs_sbr)?;
+        let syntax = GridSyntax::Eld { num_time_slots };
+        let element = match id_aac {
+            IdSynEle::Sce => SbrElement::parse_single_with(reader, &bands, header.amp_res, syntax)?,
+            IdSynEle::Cpe => SbrElement::parse_pair_with(reader, &bands, header.amp_res, syntax)?,
+            _ => return Err(Error::SbrFreqBandInvalid),
+        };
+
+        Ok(SbrExtensionData {
+            crc,
+            crc_region: None,
+            header_present,
+            header,
+            element,
+            num_sbr_bits: reader.bit_position() - start,
+        })
     }
 
     /// Shared tail of the two parse entries: `sbr_header()` (when
@@ -412,6 +457,100 @@ mod tests {
         assert_eq!(sbr.element.channels.len(), 1);
         assert_eq!(sbr.element.channels[0].envelope.data[0][0], 33);
         assert_eq!(sbr.element.channels[0].noise.data[0][0], 10);
+    }
+
+    /// The body of a single-channel element with the grid syntax of low delay SBR: a single
+    /// `FIXFIX` envelope that carries its own `bs_amp_res` (clear: 7-bit start values).
+    fn write_minimal_eld_sce(w: &mut BitWriter, bands: &HiLoTables) {
+        let n_high = bands.n_high();
+        let n_q = bands.n_q();
+        w.write_bit(false); // bs_data_extra
+        w.write_bit(false); // bs_frame_class: FIXFIX
+        w.write_u32(0, 2); // 2^0 = 1 env
+        w.write_bit(false); // bs_amp_res
+        w.write_bit(true); // freq_res[0] high
+        w.write_bit(false); // df_env[0]
+        w.write_bit(false); // df_noise[0]
+        for _ in 0..n_q {
+            w.write_u32(1, 2); // invf modes
+        }
+        let (_, (f_huff, f_lav)) =
+            env_tables(SbrHuffContext { coupling: false, ch: false, amp_res: false });
+        w.write_u32(33, 7); // env start value
+        for i in 1..n_high {
+            push_code(w, f_huff, (i + f_lav as usize) % f_huff.len());
+        }
+        let (_, (nf, nfl)) =
+            noise_tables(SbrHuffContext { coupling: false, ch: false, amp_res: false });
+        w.write_u32(10, 5); // noise start
+        for i in 1..n_q {
+            push_code(w, nf, (i + nfl as usize) % nf.len());
+        }
+        w.write_bit(false); // bs_add_harmonic_flag
+        w.write_bit(false); // bs_extended_data
+    }
+
+    #[test]
+    fn eld_payload_has_the_grid_syntax_of_low_delay_sbr() {
+        let bands = header_bands();
+
+        // With a CRC field and a header, and the `amp_res` of the grid replacing that of the
+        // header (set).
+        let mut w = BitWriter::new();
+        w.write_u32(0x155, SBR_CRC_BITS);
+        w.write_bit(true); // bs_header_flag
+        write_header(&mut w, true);
+        write_minimal_eld_sce(&mut w, &bands);
+        let bytes = w.finish();
+
+        let mut r = BitReader::new(&bytes);
+        let sbr =
+            SbrExtensionData::parse_eld(&mut r, IdSynEle::Sce, true, FS_SBR, 16, None).unwrap();
+        assert_eq!(sbr.crc, Some(0x155));
+        assert!(sbr.header_present);
+        assert!(sbr.header.amp_res);
+        let ch = &sbr.element.channels[0];
+        assert_eq!(ch.grid.amp_res_frame, Some(false));
+        assert_eq!(ch.envelope.data[0][0], 33);
+        assert_eq!(ch.noise.data[0][0], 10);
+        // All the bits of the payload were consumed (to the end of its last byte).
+        assert!(bytes.len() as u64 * 8 - r.bit_position() < 8);
+
+        // Without a CRC, and with the header of an earlier payload.
+        let mut w = BitWriter::new();
+        w.write_bit(false); // bs_header_flag
+        write_minimal_eld_sce(&mut w, &bands);
+        let bytes = w.finish();
+
+        let mut hw = BitWriter::new();
+        write_header(&mut hw, true);
+        let hbytes = hw.finish();
+        let header = SbrHeader::parse(&mut BitReader::new(&hbytes)).unwrap();
+
+        let sbr = SbrExtensionData::parse_eld(
+            &mut BitReader::new(&bytes),
+            IdSynEle::Sce,
+            false,
+            FS_SBR,
+            16,
+            Some(header),
+        )
+        .unwrap();
+        assert!(!sbr.header_present);
+        assert_eq!(sbr.header, header);
+
+        // No header to reuse.
+        assert!(
+            SbrExtensionData::parse_eld(
+                &mut BitReader::new(&bytes),
+                IdSynEle::Sce,
+                false,
+                FS_SBR,
+                16,
+                None,
+            )
+            .is_err()
+        );
     }
 
     #[test]

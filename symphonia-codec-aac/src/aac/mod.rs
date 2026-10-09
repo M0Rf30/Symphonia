@@ -87,6 +87,9 @@ struct SbrRuntime {
     /// the core rate for the §4.6.18.4.3 downsampled-output mode (selected when the ASC signals
     /// an extension sampling frequency equal to the core rate).
     fs_sbr: u32,
+    /// The sample rate that the SBR frequency band tables and the patching are derived for: twice
+    /// the core rate, also when the output has the sample rate of the core (downsampled SBR).
+    band_rate: u32,
     /// `true` if the §4.6.18.4.3 downsampled-output mode is selected.
     downsampled: bool,
     /// One SBR decoder + header-reuse state per [`AacDecoder::elem_targets`] entry (SCE/CPE),
@@ -95,6 +98,18 @@ struct SbrRuntime {
     /// Output buffer at `fs_sbr`: `2 ×` the core `AudioBuffer`'s capacity, or the same capacity in
     /// the downsampled SBR mode.
     buf: AudioBuffer<f32>,
+    /// Set for the low delay SBR of AAC-ELD: its payloads follow the channel elements of every
+    /// `er_raw_data_block()`.
+    eld: Option<EldSbr>,
+}
+
+/// The low delay SBR of an AAC-ELD stream.
+#[derive(Clone, Copy)]
+struct EldSbr {
+    /// The SBR payloads are protected by a CRC (`ldSbrCrcFlag`).
+    crc: bool,
+    /// The length of a core frame, 512 or 480.
+    core_samples: usize,
 }
 
 struct SbrElemState {
@@ -113,11 +128,13 @@ impl SbrRuntime {
         core_samples: usize,
         elem_targets: &[(bool, [usize; 2])],
     ) -> Result<Self> {
+        let band_rate = if downsampled { fs_sbr * 2 } else { fs_sbr };
+
         let elems = elem_targets
             .iter()
             .map(|(is_pair, _)| {
                 let mut decoder =
-                    sbr::decoder::SbrDecoder::new(fs_sbr, if *is_pair { 2 } else { 1 })?;
+                    sbr::decoder::SbrDecoder::new(band_rate, if *is_pair { 2 } else { 1 })?;
                 decoder.set_downsampled(downsampled)?;
                 Ok(SbrElemState { decoder, prev_header: None })
             })
@@ -126,7 +143,47 @@ impl SbrRuntime {
         let out_samples = if downsampled { core_samples } else { core_samples * 2 };
         let buf = AudioBuffer::new(AudioSpec::new(fs_sbr, channels), out_samples);
 
-        Ok(SbrRuntime { fs_sbr, downsampled, elems, buf })
+        Ok(SbrRuntime { fs_sbr, band_rate, downsampled, elems, buf, eld: None })
+    }
+
+    /// The SBR state of an AAC-ELD stream with low delay SBR. The `sbr_header()` of each
+    /// element is that of the ELD config, until a payload carries another one.
+    fn new_eld(
+        fs_sbr: u32,
+        channels: Channels,
+        core_samples: usize,
+        elem_targets: &[(bool, [usize; 2])],
+        cfg: &symphonia_common::mpeg::audio::EldSbrConfig,
+    ) -> Result<Self> {
+        let downsampled = !cfg.dual_rate;
+        let band_rate = if downsampled { fs_sbr * 2 } else { fs_sbr };
+
+        let elems = elem_targets
+            .iter()
+            .enumerate()
+            .map(|(idx, (is_pair, _))| {
+                let decoder = sbr::decoder::SbrDecoder::new_eld(
+                    band_rate,
+                    if *is_pair { 2 } else { 1 },
+                    core_samples,
+                    downsampled,
+                )?;
+                let prev_header = cfg.headers.get(idx).map(sbr::header::SbrHeader::from_eld_config);
+                Ok(SbrElemState { decoder, prev_header })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let out_samples = if downsampled { core_samples } else { core_samples * 2 };
+        let buf = AudioBuffer::new(AudioSpec::new(fs_sbr, channels), out_samples);
+
+        Ok(SbrRuntime {
+            fs_sbr,
+            band_rate,
+            downsampled,
+            elems,
+            buf,
+            eld: Some(EldSbr { crc: cfg.crc, core_samples }),
+        })
     }
 
     /// Reset the signal state of every element's SBR decoder (analysis/synthesis filterbanks,
@@ -135,8 +192,19 @@ impl SbrRuntime {
     /// it is what allows a header-less payload (header reuse) to be decoded after a seek.
     fn reset(&mut self, elem_targets: &[(bool, [usize; 2])]) {
         for (elem, (is_pair, _)) in self.elems.iter_mut().zip(elem_targets) {
-            let decoder = sbr::decoder::SbrDecoder::new(self.fs_sbr, if *is_pair { 2 } else { 1 })
-                .and_then(|mut decoder| decoder.set_downsampled(self.downsampled).map(|_| decoder));
+            let n_ch = if *is_pair { 2 } else { 1 };
+            let decoder =
+                match self.eld {
+                    Some(eld) => sbr::decoder::SbrDecoder::new_eld(
+                        self.band_rate,
+                        n_ch,
+                        eld.core_samples,
+                        self.downsampled,
+                    ),
+                    None => sbr::decoder::SbrDecoder::new(self.band_rate, n_ch).and_then(
+                        |mut decoder| decoder.set_downsampled(self.downsampled).map(|_| decoder),
+                    ),
+                };
 
             if let Ok(mut decoder) = decoder {
                 // The decoder is restarted at a frame the demuxer chose to start from, which is
@@ -251,8 +319,16 @@ impl AacDecoder {
             return unsupported_error("aac: error resilience tools");
         }
 
-        if is_er && asc.sbr_present {
-            return unsupported_error("aac: sbr with aac ld or eld");
+        // SBR with AAC LD, and the HE-AAC v2 parametric stereo tool with ELD, are not defined.
+        if asc.object_type == AudioObjectType::ErAacLd && asc.sbr_present {
+            return unsupported_error("aac: sbr with aac ld");
+        }
+
+        if asc.object_type == AudioObjectType::ErAacEld
+            && asc.sbr_present
+            && (asc.eld_sbr.is_none() || asc.ps_present)
+        {
+            return unsupported_error("aac: sbr with aac eld");
         }
 
         // Map each expected syntactic element (`SCE`/`CPE`/`LFE`), in bitstream order, onto its
@@ -304,7 +380,17 @@ impl AacDecoder {
         // read `codec_params().sample_rate` once at open time need a follow-up fix to also
         // consult the first decoded buffer's spec, mirroring how they already do for channel
         // count.
-        let sbr = if asc.sbr_present {
+        let sbr = if let Some(eld) = &asc.eld_sbr {
+            // The low delay SBR of AAC-ELD.
+            Some(SbrRuntime::new_eld(
+                asc.output_sample_rate(),
+                out_channels.clone(),
+                asc.samples,
+                &elem_targets,
+                eld,
+            )?)
+        }
+        else if asc.sbr_present {
             // An SBR output rate equal to the core rate selects the downsampled SBR mode.
             let fs_sbr = asc.output_sample_rate();
             let downsampled = fs_sbr == asc.sample_rate;
@@ -534,7 +620,7 @@ impl AacDecoder {
                                 &mut sbr_bs,
                                 id_aac,
                                 crc_flag,
-                                sbr.fs_sbr,
+                                sbr.band_rate,
                                 Some(count as u32),
                                 prev_header,
                             )?;
@@ -588,8 +674,9 @@ impl AacDecoder {
     fn parse_er<B: ReadBitsLtr + FiniteBitStream>(
         &mut self,
         bs: &mut B,
+        data: &[u8],
     ) -> Result<(usize, Vec<Option<sbr::extension::SbrExtensionData>>)> {
-        let sbr_ext: Vec<Option<sbr::extension::SbrExtensionData>> =
+        let mut sbr_ext: Vec<Option<sbr::extension::SbrExtensionData>> =
             vec![None; self.elem_targets.len()];
 
         for idx in 0..self.elem_targets.len() {
@@ -610,11 +697,54 @@ impl AacDecoder {
             }
         }
 
+        // The payloads of low delay SBR follow all the channel elements, one for each SCE and
+        // CPE, in order.
+        if let Some(eld) = self.sbr.as_ref().and_then(|sbr| sbr.eld) {
+            if !self.syntax_only {
+                let num_time_slots = if eld.core_samples == 480 { 15 } else { 16 };
+
+                for idx in 0..self.elem_targets.len() {
+                    let id_aac = if self.elem_targets[idx].0 {
+                        sbr::IdSynEle::Cpe
+                    }
+                    else {
+                        sbr::IdSynEle::Sce
+                    };
+
+                    let payload_start = (data.len() as u64) * 8 - bs.bits_left();
+
+                    let sbr = self.sbr.as_mut().expect("checked above");
+
+                    let mut sbr_bs = sbr::bits::BitReader::new(data);
+                    sbr_bs.ignore_bits(u32::try_from(payload_start).unwrap_or(u32::MAX))?;
+
+                    let ext = sbr::extension::SbrExtensionData::parse_eld(
+                        &mut sbr_bs,
+                        id_aac,
+                        eld.crc,
+                        sbr.band_rate,
+                        num_time_slots,
+                        sbr.elems[idx].prev_header,
+                    )?;
+
+                    let consumed = sbr_bs.bit_position() - payload_start;
+                    bs.ignore_bits(u32::try_from(consumed).unwrap_or(0))?;
+
+                    sbr.elems[idx].prev_header = Some(ext.header);
+                    sbr_ext[idx] = Some(ext);
+                }
+            }
+        }
+
         Ok((self.elem_targets.len(), sbr_ext))
     }
 
-    fn decode_er<B: ReadBitsLtr + FiniteBitStream>(&mut self, bs: &mut B) -> Result<()> {
-        let (cur_pair, sbr_ext) = self.parse_er(bs)?;
+    fn decode_er<B: ReadBitsLtr + FiniteBitStream>(
+        &mut self,
+        bs: &mut B,
+        data: &[u8],
+    ) -> Result<()> {
+        let (cur_pair, sbr_ext) = self.parse_er(bs, data)?;
 
         self.synth_block(cur_pair, sbr_ext)
     }
@@ -734,7 +864,9 @@ impl AacDecoder {
         // Choose decode step based on the object type.
         match self.asc.object_type {
             AudioObjectType::Lc => self.decode_ga(&mut bs, packet.data)?,
-            AudioObjectType::ErAacLd | AudioObjectType::ErAacEld => self.decode_er(&mut bs)?,
+            AudioObjectType::ErAacLd | AudioObjectType::ErAacEld => {
+                self.decode_er(&mut bs, packet.data)?
+            }
             _ => return unsupported_error("aac: object type"),
         }
 

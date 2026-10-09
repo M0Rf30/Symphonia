@@ -231,6 +231,8 @@ mod tests {
             rel_bord_1: vec![],
             pointer: 0,
             amp_res_override: true,
+            ld_borders: None,
+            amp_res_frame: None,
         };
         let dtdf = SbrDtdf {
             df_env: vec![false], // frequency direction
@@ -277,6 +279,8 @@ mod tests {
             rel_bord_1: vec![],
             pointer: 0,
             amp_res_override: false,
+            ld_borders: None,
+            amp_res_frame: None,
         };
         let dtdf = SbrDtdf {
             df_env: vec![true], // time direction → no start value
@@ -317,6 +321,8 @@ mod tests {
             rel_bord_1: vec![],
             pointer: 0,
             amp_res_override: false,
+            ld_borders: None,
+            amp_res_frame: None,
         };
         let dtdf = SbrDtdf {
             df_env: vec![false, false],
@@ -372,6 +378,8 @@ mod tests {
             rel_bord_1: vec![],
             pointer: 0,
             amp_res_override: false,
+            ld_borders: None,
+            amp_res_frame: None,
         };
         let dtdf = SbrDtdf {
             df_env: vec![false],
@@ -408,6 +416,8 @@ mod tests {
             rel_bord_1: vec![],
             pointer: 0,
             amp_res_override: false,
+            ld_borders: None,
+            amp_res_frame: None,
         };
         let dtdf = SbrDtdf {
             df_env: vec![false],
