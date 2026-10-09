@@ -249,6 +249,8 @@ pub struct SbrDecoder {
     /// Set once the first frame is processed (mode switches are then
     /// rejected — the QMF synthesis state is rate-specific).
     started: bool,
+    /// The decoder was restarted partway into a stream (see [`Self::set_resumed`]).
+    resumed: bool,
     channels: Vec<ChannelState>,
     /// Annex 8.A parametric stereo state, created when a
     /// single-channel element first carries a PS extension. Holds the
@@ -281,6 +283,7 @@ impl SbrDecoder {
             low_power: false,
             k0: 0,
             started: false,
+            resumed: false,
             channels: (0..num_channels)
                 .map(|_| ChannelState::new(false, false))
                 .collect(),
@@ -308,6 +311,13 @@ impl SbrDecoder {
             self.rebuild_banks();
         }
         Ok(())
+    }
+
+    /// Mark the decoder as restarted partway into a stream, at a frame that is a multiple of 16
+    /// frames from the start of the stream (e.g. after a seek). The noise and sinusoid phase
+    /// then start from the frame's leading border rather than from 0, as in a continuous decode.
+    pub fn set_resumed(&mut self) {
+        self.resumed = true;
     }
 
     /// `true` ⇔ the §4.6.18.4.3 downsampled output mode is selected.
@@ -561,6 +571,7 @@ impl SbrDecoder {
                 smoothing_mode: ext.header.smoothing_mode,
                 limiter_gains: ext.header.limiter_gains,
                 reset,
+                resumed: self.resumed,
                 low_power: self.low_power,
                 deg_patched: dp.as_deref(),
             };

@@ -121,6 +121,9 @@ pub struct EnvParams<'a> {
     pub limiter_gains: u8,
     /// The §4.6.18.3.3 reset flag (header band geometry changed).
     pub reset: bool,
+    /// `true` if the decoder was restarted partway into a stream (e.g. after a seek), rather
+    /// than at the start of the stream. See [`adjust`].
+    pub resumed: bool,
     /// §4.6.18.8 low-power mode: ×2 energy estimation, no gain
     /// smoothing, aliasing reduction, real-only noise, and the
     /// modified sinusoid injection.
@@ -196,8 +199,19 @@ pub fn adjust(
     }
 
     if p.reset || !st.started {
-        st.index_noise = 0;
-        st.index_sine = 0;
+        // The noise and sinusoid phase indices run on from the previous frame's, advancing by
+        // one per processed QMF column (per band for noise). The columns processed so far are
+        // all of the previous frames' `numTimeSlots * RATE`, plus the `i0` columns by which the
+        // first envelope of this frame leads into it. A decoder restarted at the beginning of a
+        // 16 frame period, where the phase repeats, therefore only needs to account for `i0`.
+        let (noise, sine) = if p.resumed && !st.started {
+            let lead = usize::try_from(i0).unwrap_or(0);
+            ((m_cnt * lead) % 512, lead % 4)
+        } else {
+            (0, 0)
+        };
+        st.index_noise = noise;
+        st.index_sine = sine;
         st.s_index_prev.clear();
         st.g_temp_tail.clear();
         st.q_temp_tail.clear();
@@ -682,6 +696,7 @@ mod tests {
             smoothing_mode: true,
             limiter_gains: 3,
             reset: false,
+            resumed: false,
             low_power: false,
             deg_patched: None,
         }
@@ -822,6 +837,52 @@ mod tests {
         let got2 = y2[T_HF_ADJ][8];
         assert!((got2.re - expect * v_re2).abs() < 1e-9);
         assert!((got2.im - expect * v_im2).abs() < 1e-9);
+    }
+
+    /// A decoder resumed partway into a stream starts its noise and sinusoid phases at the
+    /// frame's leading border, rather than 0.
+    #[test]
+    fn resumed_noise_phase_starts_at_the_leading_border() {
+        let b = bands();
+        let lim = [8, 16];
+        // The first envelope starts 1 slot (2 columns) into the frame.
+        let t_e = [1, 17];
+        let t_q = [1, 17];
+        let fr = [true];
+        let e_orig = vec![vec![64.0; 4]];
+        let q_orig = vec![vec![1.0]];
+        let x = vec![[Complex::default(); 64]; 48];
+
+        let mut p = params(&b, &lim, &t_e, &t_q, &fr, &e_orig, &q_orig, &[]);
+        let mut fresh = EnvAdjustState::new();
+        let y_fresh = adjust(&x, &p, &mut fresh).unwrap();
+
+        p.resumed = true;
+        let mut resumed = EnvAdjustState::new();
+        let y_resumed = adjust(&x, &p, &mut resumed).unwrap();
+
+        let i0 = 2;
+        let m_cnt = 8;
+
+        // A fresh decoder starts at index 0, a resumed one `M * i0` columns in.
+        assert_eq!(resumed.index_noise, (fresh.index_noise + m_cnt * i0) % 512);
+        assert_eq!(resumed.index_sine, (fresh.index_sine + i0) % 4);
+
+        let qm = (64.0f64 / 2.0).sqrt() * 2.0f64.sqrt();
+        let (v_re, v_im) = NOISE_TABLE[1];
+        let got = y_fresh[T_HF_ADJ + i0][8];
+        assert!((got.re - qm * v_re).abs() < 1e-9 && (got.im - qm * v_im).abs() < 1e-9);
+
+        let (v_re, v_im) = NOISE_TABLE[m_cnt * i0 + 1];
+        let got = y_resumed[T_HF_ADJ + i0][8];
+        assert!((got.re - qm * v_re).abs() < 1e-9 && (got.im - qm * v_im).abs() < 1e-9);
+
+        // A header reset after the start of the stream restarts the phases at 0 again.
+        p.reset = true;
+        let mut st = EnvAdjustState::default();
+        st.started = true;
+        adjust(&x, &p, &mut st).unwrap();
+        assert_eq!(st.index_noise, fresh.index_noise);
     }
 
     /// An additional sinusoid lands in the middle subband of its

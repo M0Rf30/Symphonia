@@ -786,14 +786,15 @@ pub const AAC_SEEK_MAX_PREROLL_FRAMES: u64 = 56;
 /// the start of the stream (the last SBR reset).
 ///
 /// * AAC-LC needs the previous frame for the MDCT overlap-add.
-/// * With SBR (HE-AAC), the decoder state is also a function of the number of frames since the
-///   last SBR reset (the noise and sinusoid phase indices run through a 512 entry table, with a
-///   period of at most 16 frames). The envelope, gain, and filterbank state take about 8 frames
-///   to settle, and the delta coded envelopes only resynchronise at the next frame coded
-///   independently of its predecessor, which encoders insert regularly. So, decode from the
-///   multiple of 16 frames that is at least 41 frames before the target (the first frames may
-///   start at a frame that is not independent), up to 56 frames in total. This converges to the
-///   continuous decode exactly for most streams.
+/// * With SBR (HE-AAC), the noise and sinusoid phase indices run through a 512 entry table with
+///   a period of at most 16 frames, which the decoder restarts at the position given by the
+///   leading border of the first frame it decodes. This is only correct for a frame that is a
+///   multiple of 16 frames from the start of the stream. The envelope, gain, and filterbank
+///   state take about 8 frames to settle, and the delta coded envelopes only resynchronise at
+///   the next frame coded independently of its predecessor, which encoders insert regularly
+///   (but, e.g., Nero's less often than FDK's). So, decode from the multiple of 16 frames that
+///   is at least 41 frames before the target, up to 56 frames in total. This converges to the
+///   continuous decode exactly for the HE-AAC v1 and v2 streams of FDK and Nero tested.
 pub fn aac_seek_start_frame(target: u64, sbr: bool) -> u64 {
     const SBR_PHASE_PERIOD: u64 = 16;
     const SBR_PREROLL_FRAMES: u64 = 41;

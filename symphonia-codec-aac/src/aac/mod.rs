@@ -133,7 +133,10 @@ impl SbrRuntime {
             let decoder = sbr::decoder::SbrDecoder::new(self.fs_sbr, if *is_pair { 2 } else { 1 })
                 .and_then(|mut decoder| decoder.set_downsampled(self.downsampled).map(|_| decoder));
 
-            if let Ok(decoder) = decoder {
+            if let Ok(mut decoder) = decoder {
+                // The decoder is restarted at a frame the demuxer chose to start from, which is
+                // at the start of a 16 frame period of the stream.
+                decoder.set_resumed();
                 elem.decoder = decoder;
             }
         }

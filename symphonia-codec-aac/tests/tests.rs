@@ -504,5 +504,7 @@ fn sample_accurate_seek_converges_aac_lc() {
 
 #[test]
 fn sample_accurate_seek_converges_he_aac() {
-    check_accurate_seek_converges("heaac_nero_sample.mp4", 1e-4);
+    for name in ["heaac_nero_sample.mp4", "heaac_v1_fdk_m4a.m4a", "heaac_v2_fdk_m4a.m4a"] {
+        check_accurate_seek_converges(name, 1e-4);
+    }
 }
