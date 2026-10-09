@@ -85,6 +85,15 @@ fn main() {
     opts.gapless = std::env::var_os("GAPLESS").is_some();
     let mut decoder = AacDecoder::try_new(&params, &opts).expect("decoder");
 
+    // Optionally write the audio specific config and the access units as a `bin` file.
+    let mut bin = std::env::var_os("DUMP_BIN").map(|path| {
+        let mut bin = BufWriter::new(File::create(path).expect("create bin"));
+        let asc = params.extra_data.as_deref().expect("audio specific config");
+        bin.write_all(&(asc.len() as u16).to_be_bytes()).unwrap();
+        bin.write_all(asc).unwrap();
+        bin
+    });
+
     let mut out = BufWriter::new(File::create(output).expect("create output"));
     let mut total = 0usize;
     let mut n_packets = 0usize;
@@ -105,6 +114,11 @@ fn main() {
         }
         n_packets += 1;
         last_end = Some(packet.pts.get() + packet.dur.get() as i64);
+
+        if let Some(bin) = bin.as_mut() {
+            bin.write_all(&(packet.data.len() as u16).to_be_bytes()).unwrap();
+            bin.write_all(&packet.data).unwrap();
+        }
 
         match decoder.decode(&packet) {
             Ok(buf) => {

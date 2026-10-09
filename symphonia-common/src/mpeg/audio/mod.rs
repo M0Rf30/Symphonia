@@ -1055,6 +1055,22 @@ pub const AAC_SEEK_MAX_PREROLL_FRAMES: u64 = 56;
 ///   is at least 41 frames before the target, up to 56 frames in total. This converges to the
 ///   continuous decode exactly for the HE-AAC v1 and v2 streams of FDK and Nero tested.
 pub fn aac_seek_start_frame(target: u64, sbr: bool) -> u64 {
+    aac_seek_start_frame_with_overlap(target, sbr, 1)
+}
+
+/// The number of previous frames whose spectra the output of a frame of an object type depends on
+/// (the overlap of its filterbank): one for AAC-LC and AAC-LD, and three for AAC-ELD, whose
+/// window spans four frames.
+pub fn aac_overlap_frames(object_type: AudioObjectType) -> u64 {
+    match object_type {
+        AudioObjectType::ErAacEld => 3,
+        _ => 1,
+    }
+}
+
+/// As [`aac_seek_start_frame`], for a stream whose filterbank overlaps `overlap` previous frames
+/// (see [`aac_overlap_frames`]).
+pub fn aac_seek_start_frame_with_overlap(target: u64, sbr: bool, overlap: u64) -> u64 {
     const SBR_PHASE_PERIOD: u64 = 16;
     const SBR_PREROLL_FRAMES: u64 = 41;
 
@@ -1062,7 +1078,7 @@ pub fn aac_seek_start_frame(target: u64, sbr: bool) -> u64 {
         (target.saturating_sub(SBR_PREROLL_FRAMES) / SBR_PHASE_PERIOD) * SBR_PHASE_PERIOD
     }
     else {
-        target.saturating_sub(1)
+        target.saturating_sub(overlap)
     }
 }
 
@@ -1133,6 +1149,11 @@ mod tests {
     fn aac_seek_start_frames() {
         assert_eq!(aac_seek_start_frame(0, false), 0);
         assert_eq!(aac_seek_start_frame(100, false), 99);
+        assert_eq!(aac_seek_start_frame_with_overlap(100, false, 3), 97);
+        assert_eq!(aac_seek_start_frame_with_overlap(2, false, 3), 0);
+        assert_eq!(aac_overlap_frames(AudioObjectType::ErAacEld), 3);
+        assert_eq!(aac_overlap_frames(AudioObjectType::ErAacLd), 1);
+        assert_eq!(aac_overlap_frames(AudioObjectType::Lc), 1);
         assert_eq!(aac_seek_start_frame(5, true), 0);
         assert_eq!(aac_seek_start_frame(79, true), 32);
         assert_eq!(aac_seek_start_frame(100, true), 48);

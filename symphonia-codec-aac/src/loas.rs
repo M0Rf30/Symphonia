@@ -29,9 +29,6 @@ use crate::implicit_sbr::{
     MAX_IMPLICIT_SBR_CORE_RATE, MAX_PROBE_BLOCKS, detect, may_have_implicit_sbr, with_explicit_sbr,
 };
 
-/// The number of samples per AAC frame (at the core sample rate).
-const SAMPLES_PER_AAC_PACKET: Duration = Duration::new(1024);
-
 /// The 11-bit LOAS sync word `0x2b7` and the 13 bit length that follows it.
 const LOAS_SYNC_MASK: u16 = 0xffe0;
 const LOAS_SYNC: u16 = 0x56e0;
@@ -284,6 +281,8 @@ pub struct LoasReader<'s> {
     pending: VecDeque<Packet>,
     /// True if the stream uses SBR.
     sbr: bool,
+    /// The number of previous frames the output of a frame depends on.
+    overlap: u64,
     /// The duration of a packet in decoded frames: 1024 per frame of the core codec, doubled for
     /// dual-rate SBR.
     packet_dur: Duration,
@@ -387,7 +386,7 @@ impl<'s> LoasReader<'s> {
         // The timeline of the track is in decoded frames, which are `ratio` per frame of the core
         // codec.
         let ratio = u64::from(asc.output_sample_rate() / asc.sample_rate).max(1);
-        let packet_dur = Duration::new(SAMPLES_PER_AAC_PACKET.get() * ratio);
+        let packet_dur = Duration::new(asc.samples as u64 * ratio);
 
         let mut codec_params = AudioCodecParameters::new();
 
@@ -437,6 +436,7 @@ impl<'s> LoasReader<'s> {
             first_frame_pos,
             next_packet_ts,
             sbr: asc.sbr_present,
+            overlap: aac_overlap_frames(asc.object_type),
             config: stream_config,
             pending,
             packet_dur,
@@ -675,8 +675,10 @@ impl FormatReader for LoasReader<'_> {
         let sbr = self.may_use_sbr();
         let packet_dur = self.packet_dur.get();
         let required_frame = u64::try_from(required_ts.get()).unwrap_or(0) / packet_dur;
-        let mut start_ts =
-            Timestamp::new((aac_seek_start_frame(required_frame, sbr) * packet_dur) as i64);
+        let mut start_ts = Timestamp::new(
+            (aac_seek_start_frame_with_overlap(required_frame, sbr, self.overlap) * packet_dur)
+                as i64,
+        );
 
         // If the frame to start from is before the next packet, attempt to seek to the start of
         // the stream.

@@ -543,3 +543,135 @@ fn adts_does_not_claim_ld() {
         }
     }
 }
+
+/// Builds a LOAS stream (audioMuxVersion 0, one raw data block per frame, the stream mux config in
+/// every frame) from an audio specific config of `asc_bits` bits and access units.
+fn loas_stream(asc: &[u8], asc_bits: usize, aus: &[Vec<u8>]) -> Vec<u8> {
+    let mut stream = vec![];
+
+    for au in aus {
+        let mut bw = BitWriter::default();
+
+        bw.put(0, 1); // useSameStreamMux
+        bw.put(0, 1); // audioMuxVersion
+        bw.put(1, 1); // allStreamsSameTimeFraming
+        bw.put(0, 6); // numSubFrames
+        bw.put(0, 4); // numProgram - 1
+        bw.put(0, 3); // numLayer - 1
+
+        for i in 0..asc_bits {
+            bw.put(u32::from((asc[i / 8] >> (7 - i % 8)) & 1), 1);
+        }
+
+        bw.put(0, 3); // frameLengthType
+        bw.put(0xff, 8); // latmBufferFullness
+        bw.put(0, 1); // otherDataPresent
+        bw.put(0, 1); // crcCheckPresent
+
+        // PayloadLengthInfo
+        let mut len = au.len();
+        while len >= 255 {
+            bw.put(255, 8);
+            len -= 255;
+        }
+        bw.put(len as u32, 8);
+
+        for &byte in au {
+            bw.put(u32::from(byte), 8);
+        }
+
+        let len = bw.bytes.len();
+        stream.extend_from_slice(&[0x56, 0xe0 | (len >> 8) as u8, len as u8]);
+        stream.extend_from_slice(&bw.bytes);
+    }
+
+    stream
+}
+
+#[test]
+fn loas_streams_of_ld_and_eld_have_the_frame_length_and_overlap() {
+    use symphonia_codec_aac::LoasReader;
+    use symphonia_core::formats::{FormatReader, SeekMode, SeekTo};
+
+    // (fixture, the number of bits of the audio specific config)
+    for (name, bin, asc_bits, overlap) in [
+        ("ld", &include_bytes!("fixtures/aac_ld_512_mono.bin")[..], 22, 1),
+        ("eld", &include_bytes!("fixtures/aac_eld_512_mono.bin")[..], 30, 3),
+    ] {
+        let (asc, aus) = parse_bin(bin);
+
+        let stream = loas_stream(&asc, asc_bits, &aus);
+        let mss =
+            MediaSourceStream::new(Box::new(std::io::Cursor::new(stream)), Default::default());
+        let mut reader = LoasReader::try_probe_new(mss, Default::default()).unwrap();
+
+        let track = reader.tracks()[0].clone();
+        let Some(symphonia_core::codecs::CodecParameters::Audio(params)) =
+            track.codec_params.clone()
+        else {
+            panic!("expected audio codec parameters");
+        };
+
+        assert_eq!(params.sample_rate, Some(44_100), "{name}");
+        assert_eq!(params.channels.as_ref().map(|c| c.count()), Some(1), "{name}");
+        assert!(params.profile.is_some(), "{name}");
+
+        // The packets have the frame length of the codec.
+        let mut packets = vec![];
+        while let Some(packet) = reader.next_packet().unwrap() {
+            assert_eq!(packet.dur.get(), 512, "{name}");
+            assert_eq!(packet.pts.get(), packets.len() as i64 * 512, "{name}");
+            packets.push(packet.data.to_vec());
+        }
+        assert_eq!(packets, aus, "{name}");
+
+        // The decoder converges to a continuous decode after a seek: it starts the number of
+        // frames of the overlap of the filterbank before the target.
+        let (continuous, _) = decode_all(&params, 512, &aus);
+
+        let seeked = reader
+            .seek(
+                SeekMode::Accurate,
+                SeekTo::Timestamp { ts: Timestamp::new(30 * 512 + 100), track_id: 0 },
+            )
+            .unwrap();
+
+        assert_eq!(seeked.actual_ts.get(), (30 - overlap) * 512, "{name}");
+
+        let mut seeked_aus = vec![];
+        while let Some(packet) = reader.next_packet().unwrap() {
+            seeked_aus.push(packet.data.to_vec());
+        }
+
+        // Frames from the target on are those of the continuous decode.
+        let first = (30 - overlap) as usize;
+        let mut decoder = AacDecoder::try_new(&params, &AudioDecoderOptions::default()).unwrap();
+
+        for (i, au) in seeked_aus.iter().enumerate() {
+            let packet = Packet::new(
+                0,
+                Timestamp::new(((first + i) * 512) as i64),
+                Duration::new(512),
+                au.clone().into_boxed_slice(),
+            );
+
+            let GenericAudioBufferRef::F32(buf) = decoder.decode(&packet).unwrap()
+            else {
+                panic!("expected f32 samples");
+            };
+
+            if first + i >= 30 {
+                let expected = &continuous[(first + i) * 512..(first + i + 1) * 512];
+                let max_err = buf
+                    .plane(0)
+                    .unwrap()
+                    .iter()
+                    .zip(expected)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0, f32::max);
+
+                assert!(max_err < 1e-6, "{name}: frame {} differs by {max_err}", first + i);
+            }
+        }
+    }
+}

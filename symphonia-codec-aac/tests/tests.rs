@@ -538,3 +538,11 @@ fn sample_accurate_seek_converges_he_aac() {
         check_accurate_seek_converges(name, 1e-4);
     }
 }
+
+#[test]
+fn sample_accurate_seek_converges_aac_ld_and_eld() {
+    // The filterbank of AAC ELD spans four frames, that of AAC LD two.
+    for name in ["aac_ld_fdk.m4a", "aac_eld_fdk.m4a"] {
+        check_accurate_seek_converges(name, 1e-6);
+    }
+}
