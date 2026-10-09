@@ -10,7 +10,6 @@
 use std::fs::File;
 use std::time::{Duration, Instant};
 
-use symphonia::core::audio::Audio;
 use symphonia::core::codecs::audio::AudioDecoderOptions;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, TrackType};

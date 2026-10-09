@@ -7,7 +7,6 @@
 
 use std::cmp;
 use std::convert::TryInto;
-use std::num::Wrapping;
 
 use symphonia_common::xiph::audio::flac::StreamInfo;
 use symphonia_core::audio::{
@@ -484,9 +483,15 @@ fn decode_linear<B: ReadBitsLtr>(bs: &mut B, bps: u32, order: u32, buf: &mut [i3
 
         // Helper function to dispatch to a predictor with a maximum order of N.
         #[inline(always)]
-        fn lpc<const N: usize>(order: u32, coeffs: &[i32; 32], coeff_shift: i32, buf: &mut [i32]) {
+        fn lpc<const N: usize>(
+            order: u32,
+            coeffs: &[i32; 32],
+            coeff_shift: i32,
+            bps: u32,
+            buf: &mut [i32],
+        ) {
             let coeffs_n = (&coeffs[32 - N..32]).try_into().expect("slice has exactly N elements");
-            lpc_predict::<N>(order as usize, coeffs_n, coeff_shift as u32, buf);
+            lpc_predict::<N>(order as usize, coeffs_n, coeff_shift as u32, bps, buf);
         }
 
         // Pick the best length linear predictor to use based on the order. Most FLAC streams use
@@ -495,12 +500,12 @@ fn decode_linear<B: ReadBitsLtr>(bs: &mut B, bps: u32, order: u32, buf: &mut [i3
         // then there will be wasted computations. On the other hand, it is not worth the code bloat
         // to specialize for every order <= 12.
         match order {
-            0..=4 => lpc::<4>(order, &qlp_coeffs, qlp_coeff_shift, buf),
-            5..=6 => lpc::<6>(order, &qlp_coeffs, qlp_coeff_shift, buf),
-            7..=8 => lpc::<8>(order, &qlp_coeffs, qlp_coeff_shift, buf),
-            9..=10 => lpc::<10>(order, &qlp_coeffs, qlp_coeff_shift, buf),
-            11..=12 => lpc::<12>(order, &qlp_coeffs, qlp_coeff_shift, buf),
-            _ => lpc::<32>(order, &qlp_coeffs, qlp_coeff_shift, buf),
+            0..=4 => lpc::<4>(order, &qlp_coeffs, qlp_coeff_shift, bps, buf),
+            5..=6 => lpc::<6>(order, &qlp_coeffs, qlp_coeff_shift, bps, buf),
+            7..=8 => lpc::<8>(order, &qlp_coeffs, qlp_coeff_shift, bps, buf),
+            9..=10 => lpc::<10>(order, &qlp_coeffs, qlp_coeff_shift, bps, buf),
+            11..=12 => lpc::<12>(order, &qlp_coeffs, qlp_coeff_shift, bps, buf),
+            _ => lpc::<32>(order, &qlp_coeffs, qlp_coeff_shift, bps, buf),
         };
     }
     else {
@@ -666,6 +671,10 @@ fn fixed_predict(order: u32, buf: &mut [i32]) {
     // The Fixed Predictor is just a hard-coded version of the Linear Predictor up to order 4 and
     // with fixed coefficients. Some cases may be simplified such as orders 0 and 1. For orders 2
     // through 4, use the same IIR-style algorithm as the Linear Predictor.
+    //
+    // The prediction is only ever truncated to 32 bits and added to the residual, and wrapping
+    // 32-bit arithmetic is a ring homomorphism of wrapping 64-bit arithmetic, so it is not
+    // necessary to widen to 64 bits.
     match order {
         // A 0th order predictor always predicts 0, and therefore adds nothing to any of the samples
         // in buf. Do nothing.
@@ -680,29 +689,30 @@ fn fixed_predict(order: u32, buf: &mut [i32]) {
         // A 2nd order predictor uses the polynomial: s(i) = 2*s(i-1) - 1*s(i-2).
         2 => {
             for i in 2..buf.len() {
-                let a = Wrapping(-1) * Wrapping(i64::from(buf[i - 2]));
-                let b = Wrapping(2) * Wrapping(i64::from(buf[i - 1]));
-                buf[i] = buf[i].wrapping_add((a + b).0 as i32);
+                let p = buf[i - 1].wrapping_mul(2).wrapping_sub(buf[i - 2]);
+                buf[i] = buf[i].wrapping_add(p);
             }
         }
         // A 3rd order predictor uses the polynomial: s(i) = 3*s(i-1) - 3*s(i-2) + 1*s(i-3).
         3 => {
             for i in 3..buf.len() {
-                let a = Wrapping(1) * Wrapping(i64::from(buf[i - 3]));
-                let b = Wrapping(-3) * Wrapping(i64::from(buf[i - 2]));
-                let c = Wrapping(3) * Wrapping(i64::from(buf[i - 1]));
-                buf[i] = buf[i].wrapping_add((a + b + c).0 as i32);
+                let p = buf[i - 1]
+                    .wrapping_mul(3)
+                    .wrapping_sub(buf[i - 2].wrapping_mul(3))
+                    .wrapping_add(buf[i - 3]);
+                buf[i] = buf[i].wrapping_add(p);
             }
         }
         // A 4th order predictor uses the polynomial:
         // s(i) = 4*s(i-1) - 6*s(i-2) + 4*s(i-3) - 1*s(i-4).
         4 => {
             for i in 4..buf.len() {
-                let a = Wrapping(-1) * Wrapping(i64::from(buf[i - 4]));
-                let b = Wrapping(4) * Wrapping(i64::from(buf[i - 3]));
-                let c = Wrapping(-6) * Wrapping(i64::from(buf[i - 2]));
-                let d = Wrapping(4) * Wrapping(i64::from(buf[i - 1]));
-                buf[i] = buf[i].wrapping_add((a + b + c + d).0 as i32);
+                let p = buf[i - 1]
+                    .wrapping_mul(4)
+                    .wrapping_sub(buf[i - 2].wrapping_mul(6))
+                    .wrapping_add(buf[i - 3].wrapping_mul(4))
+                    .wrapping_sub(buf[i - 4]);
+                buf[i] = buf[i].wrapping_add(p);
             }
         }
         _ => unreachable!(),
@@ -712,41 +722,229 @@ fn fixed_predict(order: u32, buf: &mut [i32]) {
 /// Generalized Linear Predictive Coding (LPC) decoder. The exact number of coefficients given is
 /// specified by `order`. Coefficients must be stored in reverse order in `coeffs` with the first
 /// coefficient at index 31. Coefficients at indices less than 31 - `order` must be 0.
-/// It is expected that the first `order` samples in `buf` are warm-up samples.
-fn lpc_predict<const N: usize>(order: usize, coeffs: &[i32; N], coeff_shift: u32, buf: &mut [i32]) {
+/// It is expected that the first `order` samples in `buf` are warm-up samples, and that they (and
+/// any valid reconstructed sample) fit in `bps` bits.
+///
+/// Where it can be proven that no intermediate value overflows, a 32-bit predictor is used,
+/// otherwise a 64-bit predictor is used. Both produce identical results for all inputs.
+#[inline(always)]
+fn lpc_predict<const N: usize>(
+    order: usize,
+    coeffs: &[i32; N],
+    coeff_shift: u32,
+    bps: u32,
+    buf: &mut [i32],
+) {
+    // The 32-bit predictor needs a native packed 32-bit multiply to be faster than the 64-bit
+    // predictor. Baseline x86-64 (SSE2) lacks one, so emulating it is a net loss there.
+    const NATIVE_MUL_I32X4: bool = cfg!(any(
+        target_feature = "sse4.1",
+        target_arch = "aarch64",
+        all(target_arch = "arm", target_feature = "neon")
+    ));
+
+    if NATIVE_MUL_I32X4 {
+        lpc_predict_narrow::<N>(order, coeffs, coeff_shift, bps, buf);
+    }
+    else {
+        lpc_predict_wide::<N>(order, coeffs, coeff_shift, buf, order);
+    }
+}
+
+/// Linear Predictive Coding (LPC) decoder using 32-bit arithmetic when it is provably exact, see
+/// [`lpc_predict`].
+fn lpc_predict_narrow<const N: usize>(
+    order: usize,
+    coeffs: &[i32; N],
+    coeff_shift: u32,
+    bps: u32,
+    buf: &mut [i32],
+) {
     // Order must be less than or equal to the number of coefficients.
     debug_assert!(order <= coeffs.len());
 
     // Order must be less than to equal to the number of samples the buffer can hold.
     debug_assert!(order <= buf.len());
 
+    // Samples of a valid stream are within [-m, m). With the sum of the magnitudes of all
+    // coefficients known, the magnitude of a prediction is bounded by `abs_sum * m`. If that fits
+    // in an i32, then the prediction can be computed exactly with 32-bit (wrapping) arithmetic
+    // while the inputs are in range.
+    let m = 1i64 << (bps.clamp(1, 32) - 1);
+    let abs_sum: i64 = coeffs.iter().map(|&c| i64::from(c.unsigned_abs())).sum();
+
+    if abs_sum * m > i64::from(i32::MAX) {
+        lpc_predict_wide::<N>(order, coeffs, coeff_shift, buf, order);
+        return;
+    }
+
+    // The coefficients in order of increasing lag (distance to the predicted sample).
+    let mut lag_coeffs = *coeffs;
+    lag_coeffs.reverse();
+
+    // The filter is evaluated in transposed form: `partial[j]` is the part of the prediction of
+    // sample `i + j` that is already known from samples before `i`. Each new sample contributes
+    // to all the following N predictions at once, and the state stays in registers rather than
+    // being reloaded from the sample buffer (which was just written to).
+    let mut partial = [0i32; N];
+
+    for i in 0..buf.len() {
+        let sample = if i < order {
+            buf[i]
+        }
+        else {
+            let sample = buf[i].wrapping_add(partial[0] >> coeff_shift);
+            buf[i] = sample;
+
+            // If this sample is out of range, then the bound no longer holds for the following
+            // samples. Finish the block with the wide predictor.
+            if i64::from(sample) < -m || i64::from(sample) >= m {
+                lpc_predict_wide::<N>(order, coeffs, coeff_shift, buf, i + 1);
+                return;
+            }
+
+            sample
+        };
+
+        let mut next = [0i32; N];
+        for j in 0..N - 1 {
+            next[j] = partial[j + 1].wrapping_add(lag_coeffs[j].wrapping_mul(sample));
+        }
+        next[N - 1] = lag_coeffs[N - 1].wrapping_mul(sample);
+        partial = next;
+    }
+}
+
+/// 64-bit Linear Predictive Coding (LPC) decoder, predicting samples `from..` where `from` is at
+/// least `order`. See [`lpc_predict`].
+fn lpc_predict_wide<const N: usize>(
+    order: usize,
+    coeffs: &[i32; N],
+    coeff_shift: u32,
+    buf: &mut [i32],
+    from: usize,
+) {
     // The main, efficient, predictor loop needs N previous samples to run. Since order <= N,
     // calculate enough samples to reach N.
-    let n_prefill = cmp::min(N, buf.len()) - order;
-
-    for i in order..order + n_prefill {
+    for i in from..cmp::min(N, buf.len()) {
         let predicted = coeffs[N - order..N]
             .iter()
             .zip(&buf[i - order..i])
             .map(|(&c, &sample)| c as i64 * sample as i64)
             .sum::<i64>();
 
-        buf[i] += (predicted >> coeff_shift) as i32;
-    }
-
-    // If the pre-fill operation filled the entire sample buffer, return immediately.
-    if buf.len() <= N {
-        return;
+        buf[i] = buf[i].wrapping_add((predicted >> coeff_shift) as i32);
     }
 
     // Main predictor loop. Calculate each sample by applying what is essentially an IIR filter.
-    for i in N..buf.len() {
+    for i in cmp::max(from, N)..buf.len() {
         let predicted = coeffs
             .iter()
             .zip(&buf[i - N..i])
             .map(|(&c, &s)| i64::from(c) * i64::from(s))
             .sum::<i64>();
 
-        buf[i] += (predicted >> coeff_shift) as i32;
+        buf[i] = buf[i].wrapping_add((predicted >> coeff_shift) as i32);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fixed_predict, lpc_predict, lpc_predict_narrow};
+
+    struct XorShift(u64);
+
+    impl XorShift {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: u64) -> u64 {
+            (self.next() >> 11) % n
+        }
+    }
+
+    /// The straightforward 64-bit predictor all optimized predictors must match exactly.
+    fn lpc_reference(order: usize, coeffs: &[i32], shift: u32, buf: &mut [i32]) {
+        let n = coeffs.len();
+        for i in order..buf.len() {
+            let taps = order.min(i);
+            let predicted: i64 =
+                (0..taps).map(|k| i64::from(coeffs[n - 1 - k]) * i64::from(buf[i - 1 - k])).sum();
+            buf[i] = buf[i].wrapping_add((predicted >> shift) as i32);
+        }
+    }
+
+    fn check_lpc<const N: usize>(rng: &mut XorShift) {
+        for _ in 0..3000 {
+            let order = 1 + rng.below(N as u64) as usize;
+            let bps = [4, 8, 12, 16, 20, 24, 32][rng.below(7) as usize];
+            let precision = 1 + rng.below(15) as u32;
+            let shift = rng.below(16) as u32;
+            let len = order + rng.below(100) as usize;
+
+            // Occasionally use tiny coefficients so the 32-bit predictor is eligible at high bps.
+            let coeff_bits = if rng.below(2) == 0 { precision } else { precision.min(5) };
+            let mut coeffs = [0i32; N];
+            for c in coeffs.iter_mut().rev().take(order) {
+                let v = rng.next() as u32 >> (32 - coeff_bits);
+                *c = ((v << (32 - coeff_bits)) as i32) >> (32 - coeff_bits);
+            }
+
+            // Residuals are either small, bps wide (valid-ish), or arbitrary (corrupt stream).
+            let res_bits = [1, bps.min(32), 32][rng.below(3) as usize];
+            let mut buf: Vec<i32> = (0..len)
+                .map(|i| {
+                    let bits = if i < order { bps } else { res_bits };
+                    ((rng.next() as u32 >> (32 - bits)) << (32 - bits)) as i32 >> (32 - bits)
+                })
+                .collect();
+
+            let mut expected = buf.clone();
+            lpc_reference(order, &coeffs, shift, &mut expected);
+            let mut narrow = buf.clone();
+            lpc_predict::<N>(order, &coeffs, shift, bps, &mut buf);
+            lpc_predict_narrow::<N>(order, &coeffs, shift, bps, &mut narrow);
+            assert_eq!(buf, expected, "N={N} order={order} bps={bps} shift={shift}");
+            assert_eq!(narrow, expected, "narrow N={N} order={order} bps={bps} shift={shift}");
+        }
+    }
+
+    #[test]
+    fn verify_lpc_predict_matches_reference() {
+        let mut rng = XorShift(0x2545_f491_4f6c_dd1d);
+        check_lpc::<4>(&mut rng);
+        check_lpc::<6>(&mut rng);
+        check_lpc::<8>(&mut rng);
+        check_lpc::<12>(&mut rng);
+        check_lpc::<32>(&mut rng);
+    }
+
+    #[test]
+    fn verify_fixed_predict_matches_reference() {
+        let mut rng = XorShift(0x9e37_79b9_7f4a_7c15);
+        const COEFFS: [&[i64]; 5] = [&[], &[1], &[-1, 2], &[1, -3, 3], &[-1, 4, -6, 4]];
+
+        for _ in 0..2000 {
+            let order = rng.below(5) as usize;
+            let len = order + rng.below(64) as usize;
+            let mut buf: Vec<i32> = (0..len).map(|_| rng.next() as i32).collect();
+
+            let mut expected = buf.clone();
+            for i in order..len {
+                let p: i64 = COEFFS[order]
+                    .iter()
+                    .enumerate()
+                    .map(|(k, &c)| c * i64::from(expected[i - order + k]))
+                    .sum();
+                expected[i] = expected[i].wrapping_add(p as i32);
+            }
+
+            fixed_predict(order as u32, &mut buf);
+            assert_eq!(buf, expected, "order={order}");
+        }
     }
 }
