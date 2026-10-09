@@ -29,14 +29,14 @@ impl DffInfoParser {
                     let data = reader.read_boxed_slice_exact(count as usize)?;
                     let s = String::from_utf8_lossy(&data).trim().to_string();
                     if !s.is_empty() { self.metadata.add_tag(Tag::new(RawTag::new(key, s))); }
-                    let header_and_count: u64 = 4 + count as u64;
+                    let header_and_count: u64 = 4 + u64::from(count);
                     if sub > header_and_count { reader.ignore_bytes(sub - header_and_count)?; }
                 }
                 _ => { reader.ignore_bytes(sub)?; }
             }
             let pad = sub & 1;
             if pad == 1 { reader.ignore_bytes(1)?; }
-            consumed += 12 + sub + pad;
+            consumed = consumed.saturating_add(12).saturating_add(sub).saturating_add(pad);
         }
         Ok(())
     }
@@ -60,7 +60,7 @@ impl DffInfoParser {
             if !s.is_empty() { self.metadata.add_tag(Tag::new(RawTag::new("COMMENT", s))); }
             let pad = count & 1;
             if pad == 1 { reader.ignore_bytes(1)?; }
-            consumed += 14 + count as u64 + pad as u64;
+            consumed = consumed.saturating_add(14 + u64::from(count) + u64::from(pad));
         }
         Ok(())
     }

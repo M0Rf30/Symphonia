@@ -483,3 +483,144 @@ fn test_dff_metadata_diin_comt() {
         "COMMENT value did not contain 'Hello': {:?}", comment_tag.raw.value
     );
 }
+
+// ---------------------------------------------------------------------------
+// Padding, seeking, and robustness regression tests
+// ---------------------------------------------------------------------------
+
+/// DSF: the zero padding of the last block of each channel is not part of the packet data.
+#[test]
+fn test_dsf_trailing_padding_is_not_emitted() {
+    // block=16 bytes per channel, 2 channels; 4 block groups. Channel 0 of block group g is filled
+    // with 0xA0+g, and channel 1 with 0xB0+g. sample_count=500: the last block holds 500-3*128=116
+    // DSD samples per channel = 15 bytes (14.5), then padding.
+    let mut data = Vec::new();
+    for g in 0..4u8 {
+        data.extend_from_slice(&[0xA0 + g; 16]);
+        data.extend_from_slice(&[0xB0 + g; 16]);
+    }
+    let raw = build_dsf(2, 2, 2822400, 16, 500, &data);
+    let mut reader = DsfReader::try_new(create_stream(raw), Default::default()).unwrap();
+
+    let mut packets = Vec::new();
+    while let Some(p) = reader.next_packet().unwrap() {
+        packets.push(p);
+    }
+
+    assert_eq!(packets.len(), 4);
+
+    // Full blocks are not changed.
+    for (g, p) in packets[..3].iter().enumerate() {
+        assert_eq!(p.dur.get(), 128);
+        assert_eq!(p.pts.get(), g as i64 * 128);
+        assert_eq!(p.data.len(), 32);
+    }
+
+    // The last packet only contains the bytes of the valid samples of each channel (planar).
+    let last = &packets[3];
+    assert_eq!(last.dur.get(), 116);
+    assert_eq!(last.pts.get(), 3 * 128);
+    let mut expected = vec![0xA3u8; 15];
+    expected.extend_from_slice(&[0xB3u8; 15]);
+    assert_eq!(&last.data[..], &expected[..]);
+
+    // The size of the data matches the number of samples: 8 DSD samples per byte per channel.
+    let total_bytes_per_channel: usize = packets.iter().map(|p| p.data.len() / 2).sum();
+    assert_eq!(total_bytes_per_channel, 500usize.div_ceil(8));
+}
+
+/// DSF: a sample count that is a multiple of the block size has no padding to trim.
+#[test]
+fn test_dsf_exact_blocks_are_not_trimmed() {
+    let raw = build_dsf(2, 2, 2822400, 16, 256, &[0x55u8; 64]);
+    let mut reader = DsfReader::try_new(create_stream(raw), Default::default()).unwrap();
+
+    let mut n = 0;
+    while let Some(p) = reader.next_packet().unwrap() {
+        assert_eq!(p.data.len(), 32);
+        assert_eq!(p.dur.get(), 128);
+        n += 1;
+    }
+    assert_eq!(n, 2);
+}
+
+/// DSF/DFF: a zero sample rate is rejected rather than panicking.
+#[test]
+fn test_zero_sample_rate_is_rejected() {
+    let raw = build_dsf(2, 2, 0, 16, 256, &[0u8; 64]);
+    assert!(DsfReader::try_new(create_stream(raw), Default::default()).is_err());
+
+    let raw = build_dff(2, 0, &[b"SLFT", b"SRGT"], &[0u8; 64], &[]);
+    assert!(DffReader::try_new(create_stream(raw), Default::default()).is_err());
+}
+
+/// DSF: a zero block size is rejected, even if the rest of the file is well-formed.
+#[test]
+fn test_dsf_zero_block_size_with_data_is_rejected() {
+    let raw = build_dsf(2, 2, 2822400, 0, 256, &[0u8; 64]);
+    assert!(DsfReader::try_new(create_stream(raw), Default::default()).is_err());
+}
+
+/// DFF: seeking accounts for the byte-interleaved channels. Timestamps are in DSD samples per
+/// channel, and 8 samples of one channel are a byte, so a stereo seek of N samples is N/8*2 bytes.
+#[test]
+fn test_dff_seek_is_in_samples_per_channel() {
+    // 2 channels, interleaved: byte n of the data is n as u8.
+    let data: Vec<u8> = (0..=255u8).collect();
+    let raw = build_dff(2, 2822400, &[b"SLFT", b"SRGT"], &data, &[]);
+    let mut reader = DffReader::try_new(create_stream(raw), Default::default()).unwrap();
+
+    let result = reader
+        .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(803), track_id: 0 })
+        .unwrap();
+
+    // 803 / 8 = 100 bytes per channel (800 samples), so 200 bytes in.
+    assert_eq!(result.required_ts.get(), 803);
+    assert_eq!(result.actual_ts.get(), 800);
+
+    let packet = reader.next_packet().unwrap().unwrap();
+    assert_eq!(packet.pts.get(), 800);
+    assert_eq!(packet.data[0], 200);
+    // The first byte is for the first channel.
+    assert_eq!(packet.data.len() % 2, 0);
+
+    // Beyond the end of the data is out-of-range.
+    assert!(reader
+        .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(1024), track_id: 0 })
+        .is_err());
+    assert!(reader
+        .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(-1), track_id: 0 })
+        .is_err());
+}
+
+/// DSF: the requested timestamp is reported as is.
+#[test]
+fn test_dsf_seek_reports_required_ts() {
+    let raw = build_dsf(2, 2, 2822400, 16, 512, &[0u8; 128]);
+    let mut reader = DsfReader::try_new(create_stream(raw), Default::default()).unwrap();
+
+    let result = reader
+        .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(200), track_id: 0 })
+        .unwrap();
+    assert_eq!(result.required_ts.get(), 200);
+    assert_eq!(result.actual_ts.get(), 128);
+
+    assert!(reader
+        .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(-5), track_id: 0 })
+        .is_err());
+}
+
+/// The timeline of the tracks is in DSD samples per channel, at the DSD rate, for both formats.
+#[test]
+fn test_timeline_is_in_dsd_samples() {
+    let raw = build_dsf(2, 2, 2822400, 4096, 2822400, &vec![0u8; 4096 * 2 * 87]);
+    let reader = DsfReader::try_new(create_stream(raw), Default::default()).unwrap();
+    let track = &reader.tracks()[0];
+    let audio = track.codec_params.as_ref().unwrap().audio().unwrap();
+
+    assert_eq!(audio.sample_rate, Some(2822400));
+    assert_eq!(track.num_frames, Some(2822400));
+    let tb = track.time_base.unwrap();
+    assert_eq!(tb.calc_time(Timestamp::new(2822400)).unwrap().as_secs_f64(), 1.0);
+}
+
