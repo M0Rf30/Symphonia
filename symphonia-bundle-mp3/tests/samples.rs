@@ -384,6 +384,157 @@ fn verify_free_format() {
     check_seeks("mp3/mp3_free_format.mp3", &BOTH);
 }
 
+/// Decode `path` with gapless playback enabled, from `required_ts` (a timestamp or time) after a
+/// seek. Returns the frames at and after the required timestamp, and the timestamp of the first.
+fn gapless_seek_decode(
+    reader: &mut MpaReader<'_>,
+    decoder: &mut MpaDecoder,
+    mode: SeekMode,
+    to: SeekTo,
+    required_ts: i64,
+    n: usize,
+) -> Vec<f32> {
+    let seeked = reader.seek(mode, to).unwrap();
+    assert_eq!(seeked.required_ts.get(), required_ts);
+    assert!(seeked.actual_ts.get() <= required_ts);
+
+    decoder.reset();
+
+    let mut out = Vec::new();
+    let mut first_pkt = true;
+
+    while out.len() < n * 2 {
+        let Some(packet) = reader.next_packet().unwrap()
+        else {
+            break;
+        };
+
+        // The packet at the seeked-to timestamp comes first.
+        if first_pkt {
+            assert_eq!(packet.pts, seeked.actual_ts);
+            first_pkt = false;
+        }
+
+        let Ok(decoded) = decoder.decode(&packet)
+        else {
+            continue;
+        };
+
+        // The frames of the packet after trimming begin at the packet's timestamp plus the frames
+        // trimmed from its start.
+        let ts = packet.pts.get() + packet.trim_start.get() as i64;
+        let mut samples = Vec::new();
+        decoded.copy_to_vec_interleaved(&mut samples);
+        assert_eq!(samples.len() / 2, packet.dur.get() as usize);
+
+        let skip = (required_ts - ts).max(0) as usize;
+
+        if skip * 2 < samples.len() {
+            out.extend_from_slice(&samples[skip * 2..]);
+        }
+    }
+
+    out.truncate(n * 2);
+    out
+}
+
+/// Read the samples of a 32-bit float WAVE file.
+fn read_f32_wav(path: &std::path::Path) -> Vec<f32> {
+    let data = std::fs::read(path).unwrap();
+    let pos = data.windows(4).position(|w| w == b"data").unwrap();
+    data[pos + 8..].chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect()
+}
+
+#[test]
+fn verify_free_format_seeks_match_independent_decoder() {
+    let Some(path) = sample_path("mp3/mp3_free_format.mp3")
+    else {
+        return;
+    };
+
+    // Use the output of `mpg123`, if it is installed, as the reference. Otherwise use a continuous
+    // decode.
+    let wav = std::env::temp_dir().join("symphonia_mp3_free_format_ref.wav");
+
+    let mpg123 = std::process::Command::new("mpg123")
+        .args(["-q", "--float", "-w"])
+        .arg(&wav)
+        .arg(&path)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+
+    let opts = AudioDecoderOptions::default();
+
+    let (mut reader, _) = open(&path, FormatOptions::default());
+    let mut decoder = MpaDecoder::try_new(
+        reader.tracks()[0].codec_params.as_ref().unwrap().audio().unwrap(),
+        &opts,
+    )
+    .unwrap();
+
+    let num_frames = reader.tracks()[0].num_frames.unwrap() as i64;
+
+    // The continuous decode with gapless playback.
+    let mut reference: Vec<f32> = Vec::new();
+
+    while let Some(packet) = reader.next_packet().unwrap() {
+        let decoded = decoder.decode(&packet).unwrap();
+        let mut samples = Vec::new();
+        decoded.copy_to_vec_interleaved(&mut samples);
+        reference.extend_from_slice(&samples);
+    }
+
+    assert_eq!(reference.len() as i64 / 2, num_frames);
+
+    // The independent decoder agrees with the continuous decode (to within 16-bit rounding).
+    if mpg123 {
+        let independent = read_f32_wav(&wav);
+        let n = independent.len().min(reference.len());
+        assert!(n > 2 * 1_000_000);
+
+        let err = independent[..n]
+            .iter()
+            .zip(&reference[..n])
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+
+        assert!(err < 1e-3, "max error vs mpg123 = {err}");
+
+        reference = independent;
+    }
+
+    let total = reference.len() as i64 / 2;
+
+    let positions =
+        [0, 1000, total / 4, total / 2, total * 9 / 10, total - 44100, total / 3 + 17, 5];
+
+    for mode in [SeekMode::Accurate, SeekMode::Coarse] {
+        for pos in positions.into_iter().chain([total / 2, 0]) {
+            // Seek by time as well as by timestamp. A time may not convert back to the exact
+            // timestamp.
+            let tb = reader.tracks()[0].time_base.unwrap();
+            let time = tb.calc_time(Timestamp::new(pos)).unwrap();
+            let time_ts = tb.calc_timestamp(time).unwrap().get();
+
+            for (to, pos) in [
+                (SeekTo::Timestamp { ts: Timestamp::new(pos), track_id: 0 }, pos),
+                (SeekTo::Time { time, track_id: Some(0) }, time_ts),
+            ] {
+                let n = 8192.min((total - pos) as usize);
+                let out = gapless_seek_decode(&mut reader, &mut decoder, mode, to, pos, n);
+                let expected = &reference[pos as usize * 2..(pos as usize + n) * 2];
+
+                assert_eq!(out.len(), expected.len(), "{mode:?} @ {pos}");
+
+                let err = out.iter().zip(expected).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+
+                assert!(err < 1e-3, "{mode:?} @ {pos}: max error vs reference = {err}");
+            }
+        }
+    }
+}
+
 /// Run the seek checks on every MPEG audio file in the samples directory. Files that cannot be
 /// decoded without error are skipped. This takes a while, so it is only run on request.
 #[test]
