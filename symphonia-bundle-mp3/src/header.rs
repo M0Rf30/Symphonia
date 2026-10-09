@@ -357,12 +357,33 @@ pub fn find_free_format_len(buf: &[u8]) -> Option<usize> {
             }
         };
 
-        if ok {
+        // The bit-rate of a free-format stream must be within the range of the layer. This rejects
+        // data that merely repeats a frame header word at a regular interval.
+        if ok && free_format_bitrate_in_range(first, base) {
             return Some(base);
         }
     }
 
     None
+}
+
+/// Check that the bit-rate implied by a free-format frame length (excluding padding, including the
+/// header) does not exceed the highest bit-rate of the version and layer of the frame header.
+fn free_format_bitrate_in_range(header: u32, len: usize) -> bool {
+    let max_bitrate = match ((header >> 19) & 0x3, (header >> 17) & 0x3) {
+        // MPEG 1.
+        (0b11, 0b11) => 448_000,
+        (0b11, 0b10) => 384_000,
+        (0b11, _) => 320_000,
+        // MPEG 2 and 2.5.
+        (_, 0b11) => 256_000,
+        (_, _) => 160_000,
+    };
+
+    match parse_frame_header_free(header, Some(len)) {
+        Ok(header) => header.bitrate <= max_bitrate,
+        Err(_) => false,
+    }
 }
 
 /// Synchronize the stream to the start of the next MPEG audio frame header, then read and return
@@ -379,4 +400,42 @@ pub fn read_frame_header<B: ReadBytes>(reader: &mut B) -> Result<FrameHeader> {
 #[inline]
 pub fn read_frame_header_word_no_sync<B: ReadBytes>(reader: &mut B) -> Result<u32> {
     Ok(reader.read_be_u32()?)
+}
+
+#[cfg(test)]
+mod free_format_tests {
+    use super::find_free_format_len;
+
+    /// A buffer with the same 4-byte header repeated every `len` bytes.
+    fn repeated_header(header: u32, len: usize, n: usize) -> Vec<u8> {
+        let mut buf = vec![0x11u8; len * n + 8];
+        for i in 0..n {
+            buf[i * len..i * len + 4].copy_from_slice(&header.to_be_bytes());
+        }
+        buf
+    }
+
+    #[test]
+    fn finds_the_length_of_free_format_frames() {
+        // MPEG 1 layer 3, 44.1 kHz, free-format, 417 byte frames (128 kbps).
+        let buf = repeated_header(0xfffb_0000, 417, 8);
+        assert_eq!(find_free_format_len(&buf), Some(417));
+    }
+
+    #[test]
+    fn rejects_a_bit_rate_beyond_the_layer_maximum() {
+        // A layer 1 header repeated every 1024 bytes is 940 kbps at 44.1 kHz, more than the
+        // 448 kbps maximum of layer 1. Such regular repetitions are found in data that is not
+        // MPEG audio at all (e.g. the padding of other formats).
+        let buf = repeated_header(0xffff_0000, 1024, 8);
+        assert_eq!(find_free_format_len(&buf), None);
+
+        // A layer 3 header every 1024 bytes is 313 kbps at 44.1 kHz, which is within range...
+        let buf = repeated_header(0xfffb_0000, 1024, 8);
+        assert_eq!(find_free_format_len(&buf), Some(1024));
+
+        // ...but every 1500 bytes is 459 kbps, more than the 320 kbps maximum of layer 3.
+        let buf = repeated_header(0xfffb_0000, 1500, 8);
+        assert_eq!(find_free_format_len(&buf), None);
+    }
 }
