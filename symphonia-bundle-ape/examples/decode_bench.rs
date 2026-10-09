@@ -30,7 +30,8 @@ fn decode(path: &str) -> (u64, u32, f64) {
         panic!("not audio");
     };
     let rate = params.sample_rate.unwrap_or(44100);
-    let mut decoder = ApeDecoder::try_new(&params, &AudioDecoderOptions::default()).unwrap();
+    let mut decoder =
+        ApeDecoder::try_new(&params, &AudioDecoderOptions::default()).expect("decoder");
     let mut frames = 0u64;
     let mut busy = std::time::Duration::ZERO;
     loop {

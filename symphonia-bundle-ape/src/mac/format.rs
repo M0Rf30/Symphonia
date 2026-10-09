@@ -570,7 +570,7 @@ pub fn parse<R: Read + Seek>(reader: &mut R) -> ApeResult<ApeFileInfo> {
 
     // Read seek table (u32 entries, then convert to u64)
     let seek_table_elements = (descriptor.seek_table_bytes / 4) as i32;
-    if seek_table_elements < 0 || seek_table_elements > 1_000_000 {
+    if !(0..=1_000_000).contains(&seek_table_elements) {
         return Err(ApeError::InvalidFormat("seek table too large"));
     }
     if file_bytes > 0 && (seek_table_elements as u64) > file_bytes / 4 {
@@ -689,7 +689,7 @@ impl ApeFileInfo {
             // require more work. This matches the SDK pattern.
             let end = self.file_bytes.saturating_sub(self.descriptor.terminating_data_bytes as u64);
             let start = self.seek_byte(frame_idx);
-            if end > start { end - start } else { 0 }
+            end.saturating_sub(start)
         }
     }
 

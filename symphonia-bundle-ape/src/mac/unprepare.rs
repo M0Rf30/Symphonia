@@ -247,7 +247,7 @@ mod tests {
     fn stereo_16bit_basic() {
         // X=100, Y=20 -> first = 100 - 10 = 90, second = 90 + 20 = 110
         let mut out = [0u8; 4];
-        unprepare_stereo(16, &[100], &[20], &mut out).unwrap();
+        unprepare_stereo(16, &[100], &[20], &mut out).expect("valid samples");
         assert_eq!(i16::from_le_bytes([out[0], out[1]]), 90);
         assert_eq!(i16::from_le_bytes([out[2], out[3]]), 110);
     }
@@ -262,7 +262,7 @@ mod tests {
     #[test]
     fn mono_8bit() {
         let mut out = [0u8; 3];
-        unprepare_mono(8, &[0, -128, 127], &mut out).unwrap();
+        unprepare_mono(8, &[0, -128, 127], &mut out).expect("valid samples");
         assert_eq!(out, [128u8, 0u8, 255u8]);
     }
 
@@ -270,14 +270,14 @@ mod tests {
     fn stereo_8bit_wrapping() {
         // X=0, Y=0 -> first = (0 - 0 + 128) as u8 = 128, second = (128 + 0) as u8 = 128
         let mut out = [0u8; 2];
-        unprepare_stereo(8, &[0], &[0], &mut out).unwrap();
+        unprepare_stereo(8, &[0], &[0], &mut out).expect("valid samples");
         assert_eq!(out, [128u8, 128u8]);
     }
 
     #[test]
     fn stereo_32bit() {
         let mut out = [0u8; 8];
-        unprepare_stereo(32, &[1000], &[200], &mut out).unwrap();
+        unprepare_stereo(32, &[1000], &[200], &mut out).expect("valid samples");
         assert_eq!(i32::from_le_bytes([out[0], out[1], out[2], out[3]]), 1000 - 100);
         assert_eq!(i32::from_le_bytes([out[4], out[5], out[6], out[7]]), 900 + 200);
     }
@@ -285,7 +285,7 @@ mod tests {
     #[test]
     fn mono_24bit_negative() {
         let mut out = [0u8; 3];
-        unprepare_mono(24, &[-1], &mut out).unwrap();
+        unprepare_mono(24, &[-1], &mut out).expect("valid samples");
         // -1 + 0x800000 = 0x7FFFFF, | 0x800000 = 0xFFFFFF
         assert_eq!(out, [0xFF, 0xFF, 0xFF]);
     }
@@ -294,7 +294,7 @@ mod tests {
     fn multichannel_seven_channels_leaves_channel_six_silent() {
         let channels: Vec<Vec<i32>> = (1..=7).map(|v| vec![v]).collect();
         let mut out = [0u8; 14];
-        unprepare_multichannel(16, &channels, 1, &mut out).unwrap();
+        unprepare_multichannel(16, &channels, 1, &mut out).expect("valid samples");
         let samples: Vec<i16> =
             out.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
         // (1, 2) -> (1 - 1, 0 + 2), (3, 4) passthrough, (5, 6) -> (5 - 3, 2 + 6), 7th is 0.

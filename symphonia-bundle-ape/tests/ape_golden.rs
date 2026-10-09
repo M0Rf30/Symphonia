@@ -44,7 +44,7 @@ fn feed(h: &mut Fnv, buf: &GenericAudioBufferRef<'_>) {
     let nch = b.spec().channels().count();
     for i in 0..n {
         for ch in 0..nch {
-            h.write(&b.plane(ch).unwrap()[i].to_le_bytes());
+            h.write(&b.plane(ch).expect("plane")[i].to_le_bytes());
         }
     }
 }
@@ -54,7 +54,7 @@ fn feed(h: &mut Fnv, buf: &GenericAudioBufferRef<'_>) {
 fn hash_file(path: &Path) -> (u64, u64) {
     let mut h = Fnv::new();
     let mut frames = 0u64;
-    let file = File::open(path).unwrap();
+    let file = File::open(path).expect("open");
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut reader = match ApeReader::try_new(mss, FormatOptions::default()) {
         Ok(r) => r,
@@ -111,7 +111,7 @@ fn all_hashes(samples: &Path) -> Vec<(String, u64, u64)> {
     let mut out = Vec::new();
     for sub in ["ape", "tags", "corrupt", "tagfuzz"] {
         for f in ape_files(&samples.join(sub)) {
-            let name = format!("{sub}/{}", f.file_name().unwrap().to_string_lossy());
+            let name = format!("{sub}/{}", f.file_name().expect("file name").to_string_lossy());
             let (h, n) = hash_file(&f);
             out.push((name, h, n));
         }

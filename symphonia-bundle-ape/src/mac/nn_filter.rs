@@ -205,9 +205,9 @@ impl NnFilter16 {
         // 1. Dot product over history, and 3. adapt the weights -- CRITICAL: the adaptation
         // direction is the sign of the INPUT (the residual), NOT the output. Both are done in
         // one pass over the weights.
-        let weights: &mut [i16; N] = (&mut self.weights[..N]).try_into().unwrap();
-        let input_hist: &[i16; N] = (&self.hist[pos - N..pos]).try_into().unwrap();
-        let delta_hist: &[i16; N] = (&self.delta[pos - N..pos]).try_into().unwrap();
+        let weights: &mut [i16; N] = (&mut self.weights[..N]).try_into().expect("N weights");
+        let input_hist: &[i16; N] = (&self.hist[pos - N..pos]).try_into().expect("N samples");
+        let delta_hist: &[i16; N] = (&self.delta[pos - N..pos]).try_into().expect("N deltas");
         let dot_product = if BRANCH {
             if input < 0 {
                 dot_adapt_16::<N, false>(input_hist, weights, delta_hist)
@@ -445,4 +445,287 @@ pub fn create_filters_32(compression_level: u32, version: i32) -> Vec<NnFilter32
         .iter()
         .map(|&(order, shift)| NnFilter32::new(order, shift, version))
         .collect()
+}
+
+// ===================================================================
+// Tests
+// ===================================================================
+
+/// Straightforward implementations of the filters, written after the reference decoder, to test
+/// the optimised filters against.
+#[cfg(test)]
+pub(crate) mod reference {
+    /// Clamp an i32 value to i16 range using the C++ bit-trick.
+    fn get_saturated_short_from_i32(value: i32) -> i16 {
+        let s = value as i16;
+        if i32::from(s) != value { ((value >> 31) ^ 0x7FFF) as i16 } else { s }
+    }
+
+    /// Clamp an i64 value to i16 range using the C++ bit-trick.
+    fn get_saturated_short_from_i64(value: i64) -> i16 {
+        let s = value as i16;
+        if i64::from(s) != value { ((value >> 63) ^ 0x7FFF) as i16 } else { s }
+    }
+
+    /// A filter of the 16-bit path; the buffers grow instead of rolling.
+    pub struct NnFilter16 {
+        order: usize,
+        shift: u32,
+        one_shifted: i32,
+        new_delta: bool,
+        pub interim_mode: bool,
+        weights: Vec<i16>,
+        hist: Vec<i16>,
+        delta: Vec<i16>,
+        running_average: i32,
+    }
+
+    impl NnFilter16 {
+        pub fn new(order: usize, shift: u32, version: i32) -> Self {
+            NnFilter16 {
+                order,
+                shift,
+                one_shifted: 1 << (shift - 1),
+                new_delta: version == -1 || version >= 3980,
+                interim_mode: false,
+                weights: vec![0; order],
+                hist: vec![0; order],
+                delta: vec![0; order],
+                running_average: 0,
+            }
+        }
+
+        pub fn decompress(&mut self, input: i32) -> i32 {
+            let n = self.hist.len();
+            let mut dot: i32 = 0;
+            for i in 0..self.order {
+                dot = dot.wrapping_add(
+                    i32::from(self.hist[n - self.order + i]) * i32::from(self.weights[i]),
+                );
+            }
+            let output: i32 = if self.interim_mode {
+                input.wrapping_add(
+                    ((i64::from(dot) + i64::from(self.one_shifted)) >> self.shift) as i32,
+                )
+            }
+            else {
+                input.wrapping_add(dot.wrapping_add(self.one_shifted) >> self.shift)
+            };
+
+            for i in 0..self.order {
+                let d = self.delta[n - self.order + i];
+                if input < 0 {
+                    self.weights[i] = self.weights[i].wrapping_add(d);
+                }
+                else if input > 0 {
+                    self.weights[i] = self.weights[i].wrapping_sub(d);
+                }
+            }
+
+            if self.new_delta {
+                let abs_value = output.wrapping_abs();
+                let ra = self.running_average;
+                let value = if abs_value > ra.wrapping_mul(3) {
+                    (((output >> 25) & 64) - 32) as i16
+                }
+                else if abs_value > ra.wrapping_mul(4) / 3 {
+                    (((output >> 26) & 32) - 16) as i16
+                }
+                else if abs_value > 0 {
+                    (((output >> 27) & 16) - 8) as i16
+                }
+                else {
+                    0
+                };
+                self.delta.push(value);
+                self.running_average = ra.wrapping_add(abs_value.wrapping_sub(ra) / 16);
+                let m = self.delta.len() - 1;
+                self.delta[m - 1] >>= 1;
+                self.delta[m - 2] >>= 1;
+                self.delta[m - 8] >>= 1;
+            }
+            else {
+                self.delta.push(if output == 0 { 0 } else { (((output >> 28) & 8) - 4) as i16 });
+                let m = self.delta.len() - 1;
+                self.delta[m - 4] >>= 1;
+                self.delta[m - 8] >>= 1;
+            }
+
+            self.hist.push(get_saturated_short_from_i32(output));
+            output
+        }
+    }
+
+    /// A filter of the 32-bit path; the buffers grow instead of rolling.
+    pub struct NnFilter32 {
+        order: usize,
+        shift: u32,
+        one_shifted: i32,
+        new_delta: bool,
+        weights: Vec<i32>,
+        hist: Vec<i32>,
+        delta: Vec<i32>,
+        running_average: i64,
+    }
+
+    impl NnFilter32 {
+        pub fn new(order: usize, shift: u32, version: i32) -> Self {
+            NnFilter32 {
+                order,
+                shift,
+                one_shifted: 1 << (shift - 1),
+                new_delta: version == -1 || version >= 3980,
+                weights: vec![0; order],
+                hist: vec![0; order],
+                delta: vec![0; order],
+                running_average: 0,
+            }
+        }
+
+        pub fn decompress(&mut self, input: i64) -> i64 {
+            let n = self.hist.len();
+            let mut dot: i64 = 0;
+            for i in 0..self.order {
+                let temp: i32 = self.hist[n - self.order + i].wrapping_mul(self.weights[i]);
+                dot = dot.wrapping_add(i64::from(temp));
+            }
+            let output: i64 =
+                input.wrapping_add(dot.wrapping_add(i64::from(self.one_shifted)) >> self.shift);
+
+            for i in 0..self.order {
+                let d = self.delta[n - self.order + i];
+                if input < 0 {
+                    self.weights[i] = self.weights[i].wrapping_add(d);
+                }
+                else if input > 0 {
+                    self.weights[i] = self.weights[i].wrapping_sub(d);
+                }
+            }
+
+            if self.new_delta {
+                let abs_value = output.wrapping_abs();
+                let ra = self.running_average;
+                let value = if abs_value > ra.wrapping_mul(3) {
+                    (((output >> 25) & 64) - 32) as i32
+                }
+                else if abs_value > ra.wrapping_mul(4) / 3 {
+                    (((output >> 26) & 32) - 16) as i32
+                }
+                else if abs_value > 0 {
+                    (((output >> 27) & 16) - 8) as i32
+                }
+                else {
+                    0
+                };
+                self.delta.push(value);
+                self.running_average = ra.wrapping_add(abs_value.wrapping_sub(ra) / 16);
+                let m = self.delta.len() - 1;
+                self.delta[m - 1] >>= 1;
+                self.delta[m - 2] >>= 1;
+                self.delta[m - 8] >>= 1;
+            }
+            else {
+                self.delta.push(if output == 0 { 0 } else { (((output >> 28) & 8) - 4) as i32 });
+                let m = self.delta.len() - 1;
+                self.delta[m - 4] >>= 1;
+                self.delta[m - 8] >>= 1;
+            }
+
+            self.hist.push(i32::from(get_saturated_short_from_i64(output)));
+            output
+        }
+    }
+
+    /// A small deterministic generator of test signals.
+    pub struct Rng(pub u64);
+
+    impl Rng {
+        pub fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        /// A residual-like value: mostly small, sometimes large, sometimes extreme.
+        pub fn residual(&mut self, scale: i64) -> i64 {
+            let r = self.next();
+            match r % 64 {
+                0 => (self.next() as i32) as i64,
+                1 => i64::from(i32::MAX) - (r >> 8) as i64 % 3,
+                2 => i64::from(i32::MIN) + (r >> 8) as i64 % 3,
+                3..=8 => 0,
+                _ => (self.next() % (2 * scale as u64 + 1)) as i64 - scale,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reference::{self, Rng};
+    use super::*;
+
+    const ORDERS: [(usize, u32); 5] = [(16, 11), (32, 10), (64, 11), (256, 13), (1280, 15)];
+
+    #[test]
+    fn filters_16_match_the_reference() {
+        for (seed, (order, shift)) in ORDERS.into_iter().enumerate() {
+            for version in [3990, 3970] {
+                for scale in [10, 3000, 1 << 20] {
+                    let mut rng = Rng(0x9e37_79b9 + seed as u64);
+                    let mut fast = NnFilter16::new(order, shift, version);
+                    let mut slow = reference::NnFilter16::new(order, shift, version);
+                    for i in 0..3000 {
+                        // Switch to the interim mode half way through (as the decoder does when
+                        // a frame is decoded a second time).
+                        if i == 1500 {
+                            fast.set_interim_mode(true);
+                            slow.interim_mode = true;
+                        }
+                        let input = rng.residual(scale) as i32;
+                        assert_eq!(
+                            fast.step(input),
+                            slow.decompress(input),
+                            "order {order}, version {version}, scale {scale}, sample {i}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn filters_16_are_reset_by_flush() {
+        for (order, shift) in ORDERS {
+            let mut rng = Rng(7);
+            let input: Vec<i32> = (0..1200).map(|_| rng.residual(500) as i32).collect();
+            let mut filter = NnFilter16::new(order, shift, 3990);
+            let first: Vec<i32> = input.iter().map(|&v| filter.step(v)).collect();
+            filter.flush();
+            let second: Vec<i32> = input.iter().map(|&v| filter.step(v)).collect();
+            assert_eq!(first, second, "order {order}");
+        }
+    }
+
+    #[test]
+    fn filters_32_match_the_reference() {
+        for (seed, (order, shift)) in ORDERS.into_iter().enumerate() {
+            for version in [3990, 3970] {
+                for scale in [10, 3000, 1 << 20] {
+                    let mut rng = Rng(0x1234_5679 + seed as u64);
+                    let mut fast = NnFilter32::new(order, shift, version);
+                    let mut slow = reference::NnFilter32::new(order, shift, version);
+                    for i in 0..3000 {
+                        let input = rng.residual(scale);
+                        assert_eq!(
+                            fast.step(input),
+                            slow.decompress(input),
+                            "order {order}, version {version}, scale {scale}, sample {i}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

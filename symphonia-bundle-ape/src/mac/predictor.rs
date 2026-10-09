@@ -399,3 +399,302 @@ impl Predictor3950_32 {
         self.stage2.step(n_a, n_b)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mac::nn_filter::reference::{self, Rng};
+
+    /// The sign function of the reference: -1 for positive values and 1 for negative values (only
+    /// looking at bit 31 of the value), 0 for 0.
+    fn ref_sign(value: i64) -> i64 {
+        if value != 0 { ((value >> 30) & 2) - 1 } else { 0 }
+    }
+
+    /// A predictor of the reference: the roll buffers are replaced by buffers that grow, so that
+    /// the history is accessed with offsets from the current position.
+    struct ReferencePredictor {
+        wide: bool,
+        interim_mode: bool,
+        nn: Vec<reference::NnFilter16>,
+        // Indexes are `cur + 8 + offset`: the first 8 elements are the zero history.
+        pred_a: Vec<i32>,
+        pred_b: Vec<i32>,
+        adapt_a: Vec<i32>,
+        adapt_b: Vec<i32>,
+        ma: [i32; 8],
+        mb: [i32; 8],
+        filter_a: i32,
+        filter_b: i32,
+        last_value_a: i32,
+        cur: usize,
+    }
+
+    impl ReferencePredictor {
+        fn new(level: u32, version: i32, bits: u16) -> Self {
+            let nn = filter_configs_for_test(level)
+                .iter()
+                .map(|&(order, shift)| reference::NnFilter16::new(order, shift, version))
+                .collect();
+            ReferencePredictor {
+                wide: bits > 16,
+                interim_mode: false,
+                nn,
+                pred_a: vec![0; 9],
+                pred_b: vec![0; 9],
+                adapt_a: vec![0; 9],
+                adapt_b: vec![0; 9],
+                ma: [360, 317, -109, 98, 0, 0, 0, 0],
+                mb: [0; 8],
+                filter_a: 0,
+                filter_b: 0,
+                last_value_a: 0,
+                cur: 0,
+            }
+        }
+
+        fn set_interim_mode(&mut self) {
+            self.interim_mode = true;
+            for f in &mut self.nn {
+                f.interim_mode = true;
+            }
+        }
+
+        fn decompress_value(&mut self, n_a: i64, n_b: i32) -> i32 {
+            let mut n_a = n_a as i32;
+            for f in self.nn.iter_mut().rev() {
+                n_a = f.decompress(n_a);
+            }
+
+            let c = self.cur + 8;
+            // Make room for the current slot.
+            self.pred_a.resize(c + 1, 0);
+            self.pred_b.resize(c + 1, 0);
+            self.adapt_a.resize(c + 1, 0);
+            self.adapt_b.resize(c + 1, 0);
+
+            self.pred_a[c] = self.last_value_a;
+            self.pred_a[c - 1] = self.pred_a[c].wrapping_sub(self.pred_a[c - 1]);
+
+            // ScaledFirstOrderFilter::compress
+            let compressed_b = n_b.wrapping_sub(((i64::from(self.filter_b) * 31) >> 5) as i32);
+            self.filter_b = n_b;
+            self.pred_b[c] = compressed_b;
+            self.pred_b[c - 1] = self.pred_b[c].wrapping_sub(self.pred_b[c - 1]);
+
+            let a = |k: usize| self.pred_a[c - k];
+            let b = |k: usize| self.pred_b[c - k];
+            let n_current_a: i32 = if self.wide {
+                let pred_a: i64 = (0..4).map(|k| i64::from(a(k)) * i64::from(self.ma[k])).sum();
+                let pred_b: i64 = (0..5).map(|k| i64::from(b(k)) * i64::from(self.mb[k])).sum();
+                if self.interim_mode {
+                    n_a.wrapping_add(((pred_a + (pred_b >> 1)) >> 10) as i32)
+                }
+                else {
+                    n_a.wrapping_add(((pred_a as i32).wrapping_add((pred_b as i32) >> 1)) >> 10)
+                }
+            }
+            else {
+                let mut pred_a: i32 = 0;
+                for k in 0..4 {
+                    pred_a = pred_a.wrapping_add(a(k).wrapping_mul(self.ma[k]));
+                }
+                let mut pred_b: i32 = 0;
+                for k in 0..5 {
+                    pred_b = pred_b.wrapping_add(b(k).wrapping_mul(self.mb[k]));
+                }
+                n_a.wrapping_add(pred_a.wrapping_add(pred_b >> 1) >> 10)
+            };
+
+            self.adapt_a[c] = ref_sign(i64::from(a(0))) as i32;
+            self.adapt_a[c - 1] = ref_sign(i64::from(a(1))) as i32;
+            self.adapt_b[c] = ref_sign(i64::from(b(0))) as i32;
+            self.adapt_b[c - 1] = ref_sign(i64::from(b(1))) as i32;
+
+            let adapt_dir: i32 = i32::from(n_a < 0) - i32::from(n_a > 0);
+            for k in 0..4 {
+                self.ma[k] = self.ma[k].wrapping_add(self.adapt_a[c - k].wrapping_mul(adapt_dir));
+            }
+            for k in 0..5 {
+                self.mb[k] = self.mb[k].wrapping_add(self.adapt_b[c - k].wrapping_mul(adapt_dir));
+            }
+
+            let result = n_current_a.wrapping_add(((i64::from(self.filter_a) * 31) >> 5) as i32);
+            self.filter_a = result;
+            self.last_value_a = n_current_a;
+            self.cur += 1;
+            result
+        }
+    }
+
+    fn filter_configs_for_test(level: u32) -> &'static [(usize, u32)] {
+        match level {
+            2000 => &[(16, 11)],
+            3000 => &[(64, 11)],
+            4000 => &[(256, 13), (32, 10)],
+            5000 => &[(1280, 15), (256, 13), (16, 11)],
+            _ => &[],
+        }
+    }
+
+    #[test]
+    fn predictor_matches_the_reference() {
+        for (seed, level) in [1000u32, 2000, 3000, 4000, 5000].into_iter().enumerate() {
+            for (version, bits) in [(3990, 16), (3990, 8), (3990, 24), (3950, 16)] {
+                for scale in [20, 3000, 1 << 22] {
+                    let mut rng = Rng(0xabcd_ef01 + seed as u64 * 31 + scale as u64);
+                    let mut fast = Predictor3950::new(level, version, bits);
+                    let mut slow = ReferencePredictor::new(level, version, bits);
+                    let mut last_x = 0;
+                    for i in 0..4000 {
+                        if i == 2000 && bits > 16 {
+                            fast.set_interim_mode(true);
+                            slow.set_interim_mode();
+                        }
+                        let n = rng.residual(scale);
+                        // The cross-channel value is a value that has gone through the filter.
+                        let got = fast.decompress_value(n, last_x);
+                        let want = slow.decompress_value(n, last_x);
+                        assert_eq!(
+                            got, want,
+                            "level {level}, version {version}, bits {bits}, scale {scale}, sample {i}"
+                        );
+                        last_x = got;
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn predictor_is_reset_by_flush() {
+        let mut rng = Rng(99);
+        let input: Vec<i64> = (0..3000).map(|_| rng.residual(300)).collect();
+        let mut predictor = Predictor3950::new(5000, 3990, 16);
+        let run = |p: &mut Predictor3950| {
+            let mut last = 0;
+            input
+                .iter()
+                .map(|&v| {
+                    last = p.decompress_value(v, last);
+                    last
+                })
+                .collect::<Vec<i32>>()
+        };
+        let first = run(&mut predictor);
+        predictor.flush();
+        assert_eq!(first, run(&mut predictor));
+    }
+
+    /// The predictor of the 32-bit path of the reference.
+    struct ReferencePredictor32 {
+        nn: Vec<reference::NnFilter32>,
+        pred_a: Vec<i64>,
+        pred_b: Vec<i64>,
+        adapt_a: Vec<i64>,
+        adapt_b: Vec<i64>,
+        ma: [i64; 8],
+        mb: [i64; 8],
+        filter_a: i32,
+        filter_b: i32,
+        last_value_a: i64,
+        cur: usize,
+    }
+
+    impl ReferencePredictor32 {
+        fn new(level: u32, version: i32) -> Self {
+            let nn = filter_configs_for_test(level)
+                .iter()
+                .map(|&(order, shift)| reference::NnFilter32::new(order, shift, version))
+                .collect();
+            ReferencePredictor32 {
+                nn,
+                pred_a: vec![0; 9],
+                pred_b: vec![0; 9],
+                adapt_a: vec![0; 9],
+                adapt_b: vec![0; 9],
+                ma: [360, 317, -109, 98, 0, 0, 0, 0],
+                mb: [0; 8],
+                filter_a: 0,
+                filter_b: 0,
+                last_value_a: 0,
+                cur: 0,
+            }
+        }
+
+        fn decompress_value(&mut self, n_a: i64, n_b: i32) -> i32 {
+            let mut n_a = n_a;
+            for f in self.nn.iter_mut().rev() {
+                n_a = f.decompress(n_a);
+            }
+
+            let c = self.cur + 8;
+            self.pred_a.resize(c + 1, 0);
+            self.pred_b.resize(c + 1, 0);
+            self.adapt_a.resize(c + 1, 0);
+            self.adapt_b.resize(c + 1, 0);
+
+            self.pred_a[c] = self.last_value_a;
+            self.pred_a[c - 1] = self.pred_a[c].wrapping_sub(self.pred_a[c - 1]);
+
+            let compressed_b = n_b.wrapping_sub(((i64::from(self.filter_b) * 31) >> 5) as i32);
+            self.filter_b = n_b;
+            self.pred_b[c] = i64::from(compressed_b);
+            self.pred_b[c - 1] = self.pred_b[c].wrapping_sub(self.pred_b[c - 1]);
+
+            let mut pred_a: i64 = 0;
+            for k in 0..4 {
+                pred_a = pred_a.wrapping_add(self.pred_a[c - k].wrapping_mul(self.ma[k]));
+            }
+            let mut pred_b: i64 = 0;
+            for k in 0..5 {
+                pred_b = pred_b.wrapping_add(self.pred_b[c - k].wrapping_mul(self.mb[k]));
+            }
+            let n_current_a: i64 = n_a.wrapping_add(pred_a.wrapping_add(pred_b >> 1) >> 10);
+
+            self.adapt_a[c] = ref_sign(self.pred_a[c]);
+            self.adapt_a[c - 1] = ref_sign(self.pred_a[c - 1]);
+            self.adapt_b[c] = ref_sign(self.pred_b[c]);
+            self.adapt_b[c - 1] = ref_sign(self.pred_b[c - 1]);
+
+            let adapt_dir: i64 = i64::from(n_a < 0) - i64::from(n_a > 0);
+            for k in 0..4 {
+                self.ma[k] = self.ma[k].wrapping_add(self.adapt_a[c - k].wrapping_mul(adapt_dir));
+            }
+            for k in 0..5 {
+                self.mb[k] = self.mb[k].wrapping_add(self.adapt_b[c - k].wrapping_mul(adapt_dir));
+            }
+
+            let result =
+                (n_current_a as i32).wrapping_add(((i64::from(self.filter_a) * 31) >> 5) as i32);
+            self.filter_a = result;
+            self.last_value_a = n_current_a;
+            self.cur += 1;
+            result
+        }
+    }
+
+    #[test]
+    fn predictor_32_matches_the_reference() {
+        for (seed, level) in [1000u32, 2000, 3000, 4000, 5000].into_iter().enumerate() {
+            for version in [3990, 3950] {
+                for scale in [20, 3000, 1 << 22] {
+                    let mut rng = Rng(0x7777_0001 + seed as u64 * 17 + scale as u64);
+                    let mut fast = Predictor3950_32::new(level, version);
+                    let mut slow = ReferencePredictor32::new(level, version);
+                    let mut last_x = 0;
+                    for i in 0..4000 {
+                        let n = rng.residual(scale);
+                        let got = fast.decompress_value(n, last_x);
+                        let want = slow.decompress_value(n, last_x);
+                        assert_eq!(
+                            got, want,
+                            "level {level}, version {version}, scale {scale}, sample {i}"
+                        );
+                        last_x = got;
+                    }
+                }
+            }
+        }
+    }
+}

@@ -26,6 +26,7 @@ const OVERFLOW_PIVOT_VALUE: u32 = 32768;
 // Probability tables (version >= 3990 only)
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::large_const_arrays)]
 const RANGE_TOTAL_2: [u32; 65] = [
     0, 19578, 36160, 48417, 56323, 60899, 63265, 64435, 64971, 65232, 65351, 65416, 65447, 65466,
     65476, 65482, 65485, 65488, 65490, 65491, 65492, 65493, 65494, 65495, 65496, 65497, 65498,
@@ -292,7 +293,7 @@ impl RangeCoder {
             // Large pivot: split into two smaller range-coded values
             let pivot_value_bits: u32 = 32 - pivot_value.leading_zeros();
 
-            let shift = if pivot_value_bits >= 16 { pivot_value_bits - 16 } else { 0 };
+            let shift = pivot_value_bits.saturating_sub(16);
             let split_factor: u32 = 1u32 << shift;
 
             let pivot_value_a: u32 = (pivot_value / split_factor).wrapping_add(1);

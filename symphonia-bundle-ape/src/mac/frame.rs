@@ -391,3 +391,86 @@ fn decode_frame_impl<P: Predictor>(
 
     Ok(pcm)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A frame that is flagged as silent: the checksum and the special codes, then the (unused)
+    /// range coder bytes.
+    fn silent_frame(pcm: &[u8], special_codes: u32) -> Vec<u8> {
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&(ape_crc(pcm) | 0x8000_0000).to_le_bytes());
+        frame.extend_from_slice(&special_codes.to_le_bytes());
+        frame.extend_from_slice(&[0; 16]);
+        frame
+    }
+
+    #[test]
+    fn decodes_silent_frames() {
+        // (channels, bits, special codes, the silent sample bytes)
+        let cases: [(u16, u16, u32, &[u8]); 7] = [
+            (1, 16, SPECIAL_FRAME_MONO_SILENCE as u32, &[0, 0]),
+            (1, 8, SPECIAL_FRAME_MONO_SILENCE as u32, &[128]),
+            (1, 24, SPECIAL_FRAME_MONO_SILENCE as u32, &[0, 0, 0]),
+            (2, 16, 3, &[0, 0, 0, 0]),
+            (2, 8, 3, &[128, 128]),
+            (2, 24, 3, &[0; 6]),
+            (2, 32, 3, &[0; 8]),
+        ];
+        // Block counts around the size of the blocks the frame is decoded in.
+        for blocks in [0, 1, CHUNK - 1, CHUNK, CHUNK + 1, 3 * CHUNK + 7] {
+            for (channels, bits, special_codes, sample) in cases {
+                let pcm: Vec<u8> =
+                    sample.iter().copied().cycle().take(blocks * sample.len()).collect();
+                let frame = silent_frame(&pcm, special_codes);
+                let mut decoder =
+                    FrameDecoder::new(3990, channels, bits, 2000).expect("valid frame");
+                let decoded = decoder.decode_frame(&frame, 0, blocks).expect("valid frame");
+                assert_eq!(decoded, pcm, "{channels} channels, {bits} bits, {blocks} blocks");
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_a_wrong_checksum() {
+        let frame = silent_frame(&[0; 8], 3);
+        let mut decoder = FrameDecoder::new(3990, 2, 16, 2000).expect("valid frame");
+        assert!(matches!(decoder.decode_frame(&frame, 0, 3), Err(ApeError::InvalidChecksum)));
+        assert!(decoder.decode_frame(&frame, 0, 2).is_ok());
+    }
+
+    #[test]
+    fn decodes_a_frame_after_an_alignment_prefix() {
+        let pcm = [0u8; 16];
+        let header = silent_frame(&pcm, 3);
+
+        // The frame starts 3 stream bytes in. The stream bytes are the file bytes of every group
+        // of four in reverse order.
+        let mut file = vec![0u8; header.len() + 4];
+        for k in 0..header.len() {
+            file[(3 + k) ^ 3] = header[k ^ 3];
+        }
+
+        let mut decoder = FrameDecoder::new(3990, 2, 16, 2000).expect("valid parameters");
+        assert_eq!(decoder.decode_frame(&file, 3, 4).expect("valid frame"), pcm);
+    }
+
+    #[test]
+    fn rejects_invalid_parameters() {
+        assert!(matches!(
+            FrameDecoder::new(3940, 2, 16, 2000),
+            Err(ApeError::UnsupportedVersion(3940))
+        ));
+        assert!(FrameDecoder::new(3990, 0, 16, 2000).is_err());
+        assert!(FrameDecoder::new(3990, 2, 12, 2000).is_err());
+    }
+
+    #[test]
+    fn a_32_bit_frame_of_more_than_two_channels_has_no_output() {
+        // The 32-bit path only decodes mono and stereo, and the checksum of no data is 0.
+        let frame = silent_frame(&[], 0);
+        let mut decoder = FrameDecoder::new(3990, 3, 32, 2000).expect("valid frame");
+        assert!(decoder.decode_frame(&frame, 0, 10).expect("valid frame").is_empty());
+    }
+}
