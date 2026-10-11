@@ -711,8 +711,25 @@ impl<'s> Id3v2Reader<'s> {
 }
 
 impl Scoreable for Id3v2Reader<'_> {
-    fn score(_src: ScopedStream<&mut MediaSourceStream<'_>>) -> Result<Score> {
-        Ok(Score::Supported(255))
+    /// Accept only a structurally valid tag header, so `ID3` bytes inside junk, padding or picture
+    /// data are not mistaken for a tag (which would fail reading and hide the audio after it).
+    fn score(mut src: ScopedStream<&mut MediaSourceStream<'_>>) -> Result<Score> {
+        let mut hdr = [0u8; 10];
+        src.read_buf_exact(&mut hdr)?;
+
+        let [b'I', b'D', b'3', major, minor, flags, size @ ..] = hdr
+        else {
+            return Ok(Score::Unsupported);
+        };
+
+        let valid = (2..=4).contains(&major)
+            && minor != 0xff
+            // ID3v2.2 compression is undefined and therefore unreadable.
+            && !(major == 2 && flags & 0x40 != 0)
+            // The tag size is a syncsafe integer: the high bit of every byte is clear.
+            && size.iter().all(|b| b & 0x80 == 0);
+
+        Ok(if valid { Score::Supported(255) } else { Score::Unsupported })
     }
 }
 
