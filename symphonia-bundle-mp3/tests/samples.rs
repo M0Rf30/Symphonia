@@ -320,18 +320,33 @@ fn verify_duration_excludes_trailing_tags() {
     }
 }
 
+/// The metadata of an ID3v2 tag appended to the stream is read by the probe, not the demuxer.
 #[test]
 fn verify_trailing_id3v2_is_read() {
+    use symphonia_core::formats::probe::{Hint, Probe};
+    use symphonia_core::meta::MetadataOptions;
+    use symphonia_metadata::id3v2::Id3v2TrailingReader;
+
     let Some(path) = sample_path("tags/id3v2_4_at_end_footer.mp3")
     else {
         return;
     };
 
-    let (mut reader, _) = open(&path, FormatOptions::default());
+    let mut probe = Probe::new();
+    probe.register_format::<MpaReader<'_>>();
+    probe.register_metadata::<Id3v2TrailingReader<'_>>();
+
+    let file = File::open(&path).unwrap();
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut reader = probe
+        .probe(&Hint::new(), mss, FormatOptions::default(), MetadataOptions::default())
+        .unwrap();
 
     let metadata = reader.metadata();
     let revision = metadata.current().expect("the appended tag is read");
     assert!(!revision.media.tags.is_empty());
+    // The tag is only read once.
+    assert!(metadata.is_latest());
 }
 
 #[test]

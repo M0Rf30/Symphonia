@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::str;
 
 use symphonia_core::errors::{Result, decode_error};
-use symphonia_core::io::{BufReader, FiniteStream, ReadBytes};
+use symphonia_core::io::{BufReader, ReadBytes};
 use symphonia_core::meta::RawTagSubField;
 use symphonia_core::meta::{Chapter, RawValue, Tag, Visual};
 
@@ -323,7 +323,7 @@ lazy_static! {
             m.insert(b"POSS", (read_poss_frame, None));
             m.insert(b"PRIV", (read_priv_frame, None));
             m.insert(b"RBUF", (read_raw_frame, None));
-            m.insert(b"RVA2", (read_raw_frame, None));
+            m.insert(b"RVA2", (read_rva2_frame, None));
             m.insert(b"RVAD", (read_raw_frame, None));
             m.insert(b"RVRB", (read_raw_frame, None));
             m.insert(b"SEEK", (skip_frame, None));
@@ -336,7 +336,7 @@ lazy_static! {
             m.insert(b"TCOM", (read_text_frame, Some(parse_composer)));
             m.insert(b"TCON", (read_text_frame, Some(parse_id3v2_genre)));
             m.insert(b"TCOP", (read_text_frame, Some(parse_copyright)));
-            m.insert(b"TDAT", (read_text_frame, Some(parse_recording_date)));
+            m.insert(b"TDAT", (read_text_frame, None)); // DDMM, combined with TYER by the tag reader.
             m.insert(b"TDEN", (read_text_frame, Some(parse_encoding_date)));
             m.insert(b"TDLY", (read_text_frame, None));
             m.insert(b"TDOR", (read_text_frame, Some(parse_original_release_date)));
@@ -354,7 +354,7 @@ lazy_static! {
             m.insert(b"TKEY", (read_text_frame, Some(parse_initial_key)));
             m.insert(b"TLAN", (read_text_frame, Some(parse_language)));
             m.insert(b"TLEN", (read_text_frame, None));
-            m.insert(b"TMCL", (read_text_frame, None));
+            m.insert(b"TMCL", (read_tmcl_frame, None));
             m.insert(b"TMED", (read_text_frame, Some(parse_media_format)));
             m.insert(b"TMOO", (read_text_frame, Some(parse_mood)));
             m.insert(b"TOAL", (read_text_frame, Some(parse_original_album)));
@@ -371,7 +371,7 @@ lazy_static! {
             m.insert(b"TPRO", (read_text_frame, Some(parse_production_copyright)));
             m.insert(b"TPUB", (read_text_frame, Some(parse_label)));
             m.insert(b"TRCK", (read_text_frame, Some(parse_track_number)));
-            m.insert(b"TRDA", (read_text_frame, Some(parse_recording_date))); // TODO: Dates
+            m.insert(b"TRDA", (read_text_frame, None)); // Free-form recording dates.
             m.insert(b"TRSN", (read_text_frame, Some(parse_internet_radio_name)));
             m.insert(b"TRSO", (read_text_frame, Some(parse_internet_radio_owner)));
             m.insert(b"TSIZ", (read_text_frame, None));
@@ -465,24 +465,93 @@ fn find_legacy_frame_reader(id: [u8; 3]) -> (FrameReader, Option<RawTagParser>) 
     }
 }
 
-/// Read an ID3v2.2 frame.
-pub fn read_id3v2p2_frame<B: ReadBytes>(reader: &mut B) -> Result<FrameResult> {
-    let id = reader.read_triple_bytes()?;
+/// Gets the bytes of a frame stream that have not been read yet, without consuming them.
+fn peek_remaining<'a>(reader: &mut BufReader<'a>) -> &'a [u8] {
+    let rest = reader.read_buf_bytes_available_ref();
+    *reader = BufReader::new(rest);
+    rest
+}
 
-    // Check if the frame id contains valid characters. If it does not, then assume the rest of the
-    // tag is padding. As per the specification, padding should be all 0s, but there are some tags
-    // which don't obey the specification.
-    if !validate_frame_id(&id) {
+/// Returns `true` if `rest`, the bytes of a tag that follow a frame, are consistent with the frame
+/// having ended correctly: the end of the tag, a frame header, or padding.
+fn is_frame_boundary(rest: &[u8], major_version: u8) -> bool {
+    let id_len = if major_version == 2 { 3 } else { 4 };
+
+    // The end of the tag, or too few bytes remain for another frame.
+    rest.len() < min_frame_size(major_version) as usize
+        || validate_frame_id(&rest[..id_len])
+        || rest.iter().all(|&b| b == 0)
+}
+
+/// Skip over a frame body of `size` bytes if, and only if, the size is plausible: it does not
+/// overrun the tag, and is followed by another frame, padding, or the end of the tag. Returns
+/// `true` if the body was skipped.
+fn try_skip_frame(reader: &mut BufReader<'_>, major_version: u8, size: u64) -> bool {
+    let rest = peek_remaining(reader);
+
+    match usize::try_from(size) {
+        Ok(size) if size <= rest.len() && is_frame_boundary(&rest[size..], major_version) => {
+            reader.ignore_bytes(size as u64).is_ok()
+        }
+        _ => false,
+    }
+}
+
+/// Skip a frame that has a malformed header (e.g., unused flag bits are set) but a plausible size,
+/// so that the frames following it can still be read. If the size is not plausible, the structure
+/// of the tag has been lost and an error is returned.
+fn skip_malformed_frame(
+    reader: &mut BufReader<'_>,
+    major_version: u8,
+    id: &[u8],
+    size: u64,
+    reason: &str,
+) -> Result<FrameResult> {
+    if try_skip_frame(reader, major_version, size) {
+        warn!("'{}' was skipped because {reason}", from_ascii(id));
+        Ok(FrameResult::Skipped)
+    }
+    else {
+        decode_error("id3v2: the frame header is malformed and the frame cannot be skipped")
+    }
+}
+
+/// Handle a frame ID that is not valid, and not all 0s. The frame is skipped if it appears to be
+/// a frame with a plausible size, otherwise it is assumed to be non-conforming padding.
+fn recover_from_invalid_frame_id(
+    reader: &mut BufReader<'_>,
+    major_version: u8,
+    id: &[u8],
+    size: u64,
+) -> FrameResult {
+    if try_skip_frame(reader, major_version, size) {
+        warn!("a frame with the invalid id {id:02x?} was skipped");
+        FrameResult::Skipped
+    }
+    else {
         // As per the specification, padding should be all 0s, but there are some tags which don't
         // obey the specification.
-        if id != [0, 0, 0] {
-            warn!("padding bytes not zero");
-        }
+        warn!("padding bytes not zero");
+        FrameResult::Padding
+    }
+}
 
+/// Read an ID3v2.2 frame.
+pub fn read_id3v2p2_frame(reader: &mut BufReader<'_>) -> Result<FrameResult> {
+    let id = reader.read_triple_bytes()?;
+
+    // As per the specification, padding is all 0s.
+    if id == [0, 0, 0] {
         return Ok(FrameResult::Padding);
     }
 
     let size = u64::from(reader.read_be_u24()?);
+
+    // Check if the frame id contains valid characters. If it does not, then either the frame is
+    // not valid, or the rest of the tag is padding.
+    if !validate_frame_id(&id) {
+        return Ok(recover_from_invalid_frame_id(reader, 2, &id, size));
+    }
 
     // Find a reader for the frame.
     let (read_frame, raw_tag_parser) = find_legacy_frame_reader(id);
@@ -493,14 +562,14 @@ pub fn read_id3v2p2_frame<B: ReadBytes>(reader: &mut B) -> Result<FrameResult> {
         return Ok(FrameResult::Skipped);
     }
 
-    // Read the frame body into a frame buffer.
-    let data = reader.read_boxed_slice_exact(size as usize)?;
+    // Read the frame body.
+    let data = reader.read_buf_bytes_ref(size as usize)?;
 
     // Prepare frame information for the frame reader.
     let info = FrameInfo::new(&id, 2, raw_tag_parser);
 
     // An error while reading the frame from the frame buffer is not fatal.
-    match read_frame(BufReader::new(&data), &info) {
+    match read_frame(BufReader::new(data), &info) {
         Ok(result) => Ok(result),
         Err(err) => {
             // On error, skip the frame.
@@ -511,19 +580,11 @@ pub fn read_id3v2p2_frame<B: ReadBytes>(reader: &mut B) -> Result<FrameResult> {
 }
 
 /// Read an ID3v2.3 frame.
-pub fn read_id3v2p3_frame<B: ReadBytes>(reader: &mut B) -> Result<FrameResult> {
+pub fn read_id3v2p3_frame(reader: &mut BufReader<'_>) -> Result<FrameResult> {
     let id = reader.read_quad_bytes()?;
 
-    // Check if the frame id contains valid characters. If it does not, then assume the rest of the
-    // tag is padding. As per the specification, padding should be all 0s, but there are some tags
-    // which don't obey the specification.
-    if !validate_frame_id(&id) {
-        // As per the specification, padding should be all 0s, but there are some tags which don't
-        // obey the specification.
-        if id != [0, 0, 0, 0] {
-            warn!("padding bytes not zero");
-        }
-
+    // As per the specification, padding is all 0s.
+    if id == [0, 0, 0, 0] {
         return Ok(FrameResult::Padding);
     }
 
@@ -533,9 +594,22 @@ pub fn read_id3v2p3_frame<B: ReadBytes>(reader: &mut B) -> Result<FrameResult> {
     // Frame-specific flags.
     let flags = reader.read_be_u16()?;
 
-    // Unused flag bits must be cleared.
+    // Check if the frame id contains valid characters. If it does not, then either the frame is
+    // not valid, or the rest of the tag is padding.
+    if !validate_frame_id(&id) {
+        return Ok(recover_from_invalid_frame_id(reader, 3, &id, u64::from(size)));
+    }
+
+    // Unused flag bits must be cleared. A frame that does not obey this is skipped, if the frames
+    // that follow it can be found.
     if flags & 0x1f1f != 0x0 {
-        return decode_error("id3v2: unused flag bits are not cleared");
+        return skip_malformed_frame(
+            reader,
+            3,
+            &id,
+            u64::from(size),
+            "unused flag bits are not cleared",
+        );
     }
 
     // Frame-specific flags that are important for reading.
@@ -549,9 +623,15 @@ pub fn read_id3v2p3_frame<B: ReadBytes>(reader: &mut B) -> Result<FrameResult> {
         + if is_encrypted { 1 } else { 0 } // 1-byte encryption ID.
         + if is_grouped { 1 } else { 0 }; // 1-byte group ID.
 
-    // If the frame size is too small for the extended header, there is a fatal framing error.
+    // If the frame size is too small for the extended header, the frame is malformed.
     if size < flag_data_size {
-        return decode_error("id3v2: the frame is too small");
+        return skip_malformed_frame(
+            reader,
+            3,
+            &id,
+            u64::from(size),
+            "it is too small for its flags",
+        );
     }
 
     // The size of the frame's body.
@@ -574,20 +654,28 @@ pub fn read_id3v2p3_frame<B: ReadBytes>(reader: &mut B) -> Result<FrameResult> {
         return Ok(FrameResult::Skipped);
     }
 
-    // Read the frame body into a frame buffer.
-    let mut data = reader.read_boxed_slice_exact(data_size as usize)?;
+    // Read the frame body.
+    let data = reader.read_buf_bytes_ref(data_size as usize)?;
 
     // If the frame body has been compressed, decompress it. Compression is applied before
     // encryption, so an encrypted frame body cannot be decompressed.
-    if is_compressed && !is_encrypted {
-        match inflate_frame_body(&data, decompressed_size) {
-            Some(buf) => data = buf.into_boxed_slice(),
+    let decompressed;
+
+    let data = if is_compressed && !is_encrypted {
+        match inflate_frame_body(data, decompressed_size) {
+            Some(buf) => {
+                decompressed = buf;
+                &decompressed[..]
+            }
             None => {
                 warn!("'{}' was skipped because it could not be decompressed", from_ascii(&id));
                 return Ok(FrameResult::Skipped);
             }
         }
     }
+    else {
+        data
+    };
 
     // Find a reader for the frame. If the frame is encrypted, then the frame is provided as a
     // binary buffer.
@@ -598,7 +686,7 @@ pub fn read_id3v2p3_frame<B: ReadBytes>(reader: &mut B) -> Result<FrameResult> {
     let info = FrameInfo::new(&id, 3, raw_tag_parser);
 
     // Read the frame from the frame buffer. An error here is not fatal.
-    match read_frame(BufReader::new(&data), &info) {
+    match read_frame(BufReader::new(data), &info) {
         Ok(mut result) => {
             // Add the sub-fields to the tag if the frame is grouped or encrypted.
             if is_grouped || is_encrypted {
@@ -614,31 +702,69 @@ pub fn read_id3v2p3_frame<B: ReadBytes>(reader: &mut B) -> Result<FrameResult> {
     }
 }
 
+/// Determine the size of an ID3v2.4 frame from its 4 size bytes.
+///
+/// The size should be a syncsafe integer, but a number of widely used writers store a plain
+/// big-endian integer instead. `after_header` are the bytes of the tag that follow the frame
+/// header. Like other readers, the size is interpreted as syncsafe unless that cannot be correct:
+///
+///  * If any size byte has its most significant bit set, the size cannot be syncsafe.
+///  * If the syncsafe size does not end at a frame, padding, or the end of the tag, but the plain
+///    size does, then the plain size is used.
+fn id3v2p4_frame_size(raw: [u8; 4], after_header: &[u8]) -> u32 {
+    let plain = u32::from_be_bytes(raw);
+
+    if raw.iter().any(|b| b & 0x80 != 0) {
+        return plain;
+    }
+
+    let syncsafe = raw.iter().fold(0u32, |size, &b| (size << 7) | u32::from(b));
+
+    // The two interpretations are the same for sizes below 128.
+    if plain == syncsafe {
+        return syncsafe;
+    }
+
+    let ends_at_boundary = |size: u32| {
+        after_header.get(size as usize..).is_some_and(|rest| is_frame_boundary(rest, 4))
+    };
+
+    if !ends_at_boundary(syncsafe) && ends_at_boundary(plain) { plain } else { syncsafe }
+}
+
 /// Read an ID3v2.4 frame.
-pub fn read_id3v2p4_frame<B: ReadBytes + FiniteStream>(reader: &mut B) -> Result<FrameResult> {
+pub fn read_id3v2p4_frame(reader: &mut BufReader<'_>) -> Result<FrameResult> {
     let id = reader.read_quad_bytes()?;
 
-    // Check if the frame id contains valid characters. If it does not, then assume the rest of the
-    // tag is padding.
-    if !validate_frame_id(&id) {
-        // As per the specification, padding should be all 0s, but there are some tags which don't
-        // obey the specification.
-        if id != [0, 0, 0, 0] {
-            warn!("padding bytes not zero");
-        }
-
+    // As per the specification, padding is all 0s.
+    if id == [0, 0, 0, 0] {
         return Ok(FrameResult::Padding);
     }
 
     // The size of the frame after encryption, compression, and unsynchronisation.
-    let size = read_syncsafe_leq32(reader, 28)?;
+    let size_bytes = reader.read_quad_bytes()?;
 
     // Frame-specific flags.
     let flags = reader.read_be_u16()?;
 
-    // Unused flag bits must be cleared.
+    let size = id3v2p4_frame_size(size_bytes, peek_remaining(reader));
+
+    // Check if the frame id contains valid characters. If it does not, then either the frame is
+    // not valid, or the rest of the tag is padding.
+    if !validate_frame_id(&id) {
+        return Ok(recover_from_invalid_frame_id(reader, 4, &id, u64::from(size)));
+    }
+
+    // Unused flag bits must be cleared. A frame that does not obey this is skipped, if the frames
+    // that follow it can be found.
     if flags & 0x8fb0 != 0x0 {
-        return decode_error("id3v2: unused flag bits are not cleared");
+        return skip_malformed_frame(
+            reader,
+            4,
+            &id,
+            u64::from(size),
+            "unused flag bits are not cleared",
+        );
     }
 
     // Frame-specific flags that are important for reading.
@@ -660,9 +786,15 @@ pub fn read_id3v2p4_frame<B: ReadBytes + FiniteStream>(reader: &mut B) -> Result
         + if is_encrypted { 1 } else { 0 } // 1-byte encryption ID.
         + if has_indicated_size { 4 } else { 0 }; // 4-byte data length indicator.
 
-    // If the frame size is too small for the extended header, there is a fatal framing error.
+    // If the frame size is too small for the extended header, the frame is malformed.
     if size < flag_data_size {
-        return decode_error("id3v2: the frame is too small");
+        return skip_malformed_frame(
+            reader,
+            4,
+            &id,
+            u64::from(size),
+            "it is too small for its flags",
+        );
     }
 
     // The size of the frame's body.
@@ -692,8 +824,8 @@ pub fn read_id3v2p4_frame<B: ReadBytes + FiniteStream>(reader: &mut B) -> Result
         return Ok(FrameResult::Skipped);
     }
 
-    // Read the frame body into a frame buffer.
-    let mut data = reader.read_boxed_slice_exact(data_size as usize)?;
+    // Read the frame body.
+    let data = reader.read_buf_bytes_ref(data_size as usize)?;
 
     // Find a reader for the frame. If the frame is encrypted, then the frame is provided as a
     // binary buffer.
@@ -704,8 +836,16 @@ pub fn read_id3v2p4_frame<B: ReadBytes + FiniteStream>(reader: &mut B) -> Result
     let info = FrameInfo::new(&id, 4, raw_tag_parser);
 
     // If the frame body has been unsynchronised, decode the unsynchronised data back to it's
-    // unencoded form in-place before parsing.
-    let body: &[u8] = if is_unsynchronised { decode_unsynchronisation(&mut data) } else { &data };
+    // unencoded form before parsing.
+    let mut unsynchronised;
+
+    let body: &[u8] = if is_unsynchronised {
+        unsynchronised = data.to_vec();
+        decode_unsynchronisation(&mut unsynchronised)
+    }
+    else {
+        data
+    };
 
     // If the frame body has been compressed, decompress it. Compression is applied before
     // encryption, so an encrypted frame body cannot be decompressed.

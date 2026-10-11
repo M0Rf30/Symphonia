@@ -446,21 +446,22 @@ fn parse_bool(v: Arc<String>) -> Option<bool> {
     }
 }
 
-/// Parse a string in the format "NUM/TOTAL" or "NUM" into a pair of optional integers.
+/// Parse a string in the format "NUM/TOTAL", "NUM/", or "NUM" into a pair of optional integers.
+/// Whitespace around the numbers and the separator is ignored, and leading zeros are accepted.
 fn parse_m_of_n(v: Arc<String>) -> (Option<u64>, Option<u64>) {
-    use regex_lite::Regex;
+    let is_digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
 
-    let re = Regex::new(r"^(?P<m>[0-9]+)(/(?P<n>[0-9]+))?$").expect("valid regex");
+    let (m, n) = match v.split_once('/') {
+        Some((m, n)) => (m.trim(), n.trim()),
+        None => (v.trim(), ""),
+    };
 
-    let mut opt_m = None;
-    let mut opt_n = None;
-
-    if let Some(caps) = re.captures(v.as_str()) {
-        opt_m = caps.name("m").and_then(|m| m.as_str().parse::<u64>().ok());
-        opt_n = caps.name("n").and_then(|n| n.as_str().parse::<u64>().ok());
+    // The number is required, and the total, if present, must be numeric.
+    if !is_digits(m) || !(n.is_empty() || is_digits(n)) {
+        return (None, None);
     }
 
-    (opt_m, opt_n)
+    (m.parse::<u64>().ok(), n.parse::<u64>().ok())
 }
 
 #[cfg(test)]
@@ -489,6 +490,17 @@ mod tests {
         assert_eq!(parse_m_of_n(arc_string("1/2/")), (None, None));
         assert_eq!(parse_m_of_n(arc_string("1/2/2")), (None, None));
         assert_eq!(parse_m_of_n(arc_string("1/99999999999999999999999999999999")), (Some(1), None));
+    }
+
+    #[test]
+    fn verify_parse_m_of_n_whitespace() {
+        assert_eq!(parse_m_of_n(arc_string("3 / 12")), (Some(3), Some(12)));
+        assert_eq!(parse_m_of_n(arc_string(" 3")), (Some(3), None));
+        assert_eq!(parse_m_of_n(arc_string("3/")), (Some(3), None));
+        assert_eq!(parse_m_of_n(arc_string("03/12 ")), (Some(3), Some(12)));
+        assert_eq!(parse_m_of_n(arc_string("3 x / 12")), (None, None));
+        assert_eq!(parse_m_of_n(arc_string(" / 12")), (None, None));
+        assert_eq!(parse_m_of_n(arc_string("3/1 2")), (None, None));
     }
 
     #[test]

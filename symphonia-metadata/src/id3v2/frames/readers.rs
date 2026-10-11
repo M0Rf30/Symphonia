@@ -821,65 +821,141 @@ pub fn read_text_frame(mut reader: BufReader<'_>, frame: &FrameInfo<'_>) -> Resu
     Ok(map_raw_tag(RawTag::new(frame.id, text), frame.raw_tag_parser))
 }
 
-/// Reads a `TIPL` (involved people frame).
+/// Reads a `TIPL`/`IPLS` (involved people list) frame.
 pub fn read_tipl_frame(mut reader: BufReader<'_>, frame: &FrameInfo<'_>) -> Result<FrameResult> {
     // The first byte of the frame is the encoding.
     let encoding = read_encoding(&mut reader)?;
     // Read 1 or more strings.
     let text = read_string_list(&mut reader, encoding)?;
 
-    // This frame should contain a list of pairs, where the first item in each pair is the function,
-    // and the second item is the person (or persons) involved in that function.
-    //
-    // Parsing this frame into standard tags could be error prone. If any of the following criteria
-    // are not met, then the frame will be treated as a text frame with no standard tag(s) assigned:
-    //
-    //   1. The raw value MUST be a string list.
-    //   2. The string list MUST contain an even number of elements.
-    //   3. For each pair, the first item MUST map to a raw tag parser.
-    //
-    // Pre-validate these conditions to prevent doing extra work in the case all conditions do not
-    // match.
-    let is_parseable = match text {
-        RawValue::StringList(ref list) if list.len() % 2 == 0 => {
-            list.chunks_exact(2).all(|pair| TIPL_FUNC_PARSERS.contains_key(pair[0].as_str()))
-        }
-        _ => false,
-    };
+    // The frame contains a list of pairs, where the first item in each pair is the function, and
+    // the second item is the person (or persons) involved in that function. Pairs with a function
+    // that has no standard tag are only kept in the raw tag.
+    Ok(map_credit_pairs(RawTag::new(frame.id, text), |func| {
+        TIPL_FUNC_PARSERS.get(func.to_ascii_lowercase().as_str()).copied()
+    }))
+}
 
-    let raw = RawTag::new(frame.id, text);
+/// Reads a `TMCL` (musician credits list) frame.
+pub fn read_tmcl_frame(mut reader: BufReader<'_>, frame: &FrameInfo<'_>) -> Result<FrameResult> {
+    // The first byte of the frame is the encoding.
+    let encoding = read_encoding(&mut reader)?;
+    // Read 1 or more strings.
+    let text = read_string_list(&mut reader, encoding)?;
 
-    if is_parseable {
-        // Return standard tags per function.
-        let mut tags: SmallVec<[Tag; 2]> = Default::default();
+    // The frame contains a list of pairs, where the first item in each pair is the instrument (or
+    // role), and the second item is the musician. Every musician is a performer. The role is
+    // retained in the raw tag.
+    Ok(map_credit_pairs(RawTag::new(frame.id, text), |_| Some(parse_performer as RawTagParser)))
+}
 
-        if let RawValue::StringList(list) = &raw.value {
-            // Iterate over all pairs, and parse them into standard tags.
+/// Maps a raw tag containing a list of (role, person) pairs to standard tags. `parser_for_role`
+/// returns the parser to apply to the person for a role, if any. If no pair can be mapped, or the
+/// list is not a list of pairs, the raw tag is returned as-is.
+fn map_credit_pairs(
+    raw: RawTag,
+    parser_for_role: impl Fn(&str) -> Option<RawTagParser>,
+) -> FrameResult {
+    let mut tags: SmallVec<[Tag; 2]> = Default::default();
+
+    if let RawValue::StringList(list) = &raw.value {
+        if list.len() % 2 == 0 {
             for pair in list.chunks_exact(2) {
-                // Safety: Pre-checked above all pairs can be parsed.
-                let parser = TIPL_FUNC_PARSERS
-                    .get(pair[0].as_str())
-                    .expect("pre-checked that pair key exists in TIPL_FUNC_PARSERS");
+                let person = pair[1].trim();
 
-                // Parse raw value into standard tag.
-                match parser(Arc::new(pair[1].clone())) {
-                    [Some(std), None] => tags.push(Tag::new_std(raw.clone(), std)),
-                    [None, Some(std)] => tags.push(Tag::new_std(raw.clone(), std)),
-                    [Some(std0), Some(std1)] => {
-                        tags.push(Tag::new_std(raw.clone(), std0));
-                        tags.push(Tag::new_std(raw.clone(), std1));
+                if person.is_empty() {
+                    continue;
+                }
+
+                if let Some(parser) = parser_for_role(pair[0].trim()) {
+                    for std in parser(Arc::new(person.to_string())).into_iter().flatten() {
+                        tags.push(Tag::new_std(raw.clone(), std));
                     }
-                    _ => debug!("tipl frame pair value failed to parse into standard tag"),
                 }
             }
         }
-
-        Ok(FrameResult::MultipleTags(tags))
     }
-    else {
-        // Return as text frame.
+
+    if tags.is_empty() { FrameResult::Tag(Tag::new(raw)) } else { FrameResult::MultipleTags(tags) }
+}
+
+/// Reads a `RVA2` (relative volume adjustment 2) frame. The master channel adjustment of a frame
+/// identified as "track" or "album" is mapped to the ReplayGain gain and peak standard tags.
+pub fn read_rva2_frame(mut reader: BufReader<'_>, frame: &FrameInfo<'_>) -> Result<FrameResult> {
+    let data = reader.read_buf_bytes_available_ref();
+    let raw = RawTag::new(frame.id, data);
+
+    let mut tags: SmallVec<[Tag; 2]> = Default::default();
+
+    if let Some((id, gain, peak)) = parse_rva2_master(data) {
+        let gain = Arc::new(format!("{gain:.2} dB"));
+        let peak = peak.map(|peak| Arc::new(format!("{peak:.6}")));
+
+        let (gain_tag, peak_tag) = if id.eq_ignore_ascii_case("track") {
+            (
+                Some(StandardTag::ReplayGainTrackGain(gain)),
+                peak.map(StandardTag::ReplayGainTrackPeak),
+            )
+        }
+        else if id.eq_ignore_ascii_case("album") {
+            (
+                Some(StandardTag::ReplayGainAlbumGain(gain)),
+                peak.map(StandardTag::ReplayGainAlbumPeak),
+            )
+        }
+        else {
+            (None, None)
+        };
+
+        for std in [gain_tag, peak_tag].into_iter().flatten() {
+            tags.push(Tag::new_std(raw.clone(), std));
+        }
+    }
+
+    if tags.is_empty() {
         Ok(FrameResult::Tag(Tag::new(raw)))
     }
+    else {
+        Ok(FrameResult::MultipleTags(tags))
+    }
+}
+
+/// Parses the identification and master channel adjustment of a `RVA2` frame body. Returns the
+/// identification, the adjustment in dB, and the peak normalised to full scale (if present).
+fn parse_rva2_master(data: &[u8]) -> Option<(String, f64, Option<f64>)> {
+    // The identification is a null-terminated ISO-8859-1 string.
+    let end = data.iter().position(|&b| b == 0)?;
+    let id: String = data[..end].iter().map(|&b| char::from(b)).collect();
+    let mut rest = &data[end + 1..];
+
+    // Each channel: type (1 byte), adjustment (i16, 1/512 dB), peak bits (1 byte), then the peak
+    // volume in ceil(bits / 8) bytes.
+    while rest.len() >= 4 {
+        let channel_type = rest[0];
+        let adjustment = i16::from_be_bytes([rest[1], rest[2]]);
+        let peak_bytes = usize::from(rest[3]).div_ceil(8);
+
+        let peak_data = rest.get(4..4 + peak_bytes)?;
+
+        // Channel type 1 is the master volume.
+        if channel_type == 1 {
+            let peak = if peak_bytes > 0 && peak_bytes <= 8 {
+                // The peak is a big-endian fixed-point value where full scale is half the range of
+                // the bytes used to store it.
+                let value = peak_data.iter().fold(0u64, |acc, &b| (acc << 8) | u64::from(b));
+                Some(value as f64 / (1u64 << (8 * peak_bytes - 1)) as f64)
+            }
+            else {
+                None
+            };
+
+            return Some((id, f64::from(adjustment) / 512.0, peak));
+        }
+
+        rest = &rest[4 + peak_bytes..];
+    }
+
+    None
 }
 
 /// Reads a `TXXX` (user defined) text frame.
@@ -1099,7 +1175,16 @@ lazy_static! {
         m.insert("asin", parse_ident_asin);
         m.insert("barcode", parse_ident_barcode);
         m.insert("catalognumber", parse_ident_catalog_number);
+        m.insert("albumsort", parse_sort_album);
+        m.insert("artistsort", parse_sort_artist);
+        m.insert("arranger", parse_arranger);
         m.insert("composersort", parse_sort_composer);
+        m.insert("conductor", parse_conductor);
+        m.insert("grouping", parse_grouping);
+        m.insert("label", parse_label);
+        m.insert("lyricist", parse_lyricist);
+        m.insert("mood", parse_mood);
+        m.insert("movementname", parse_movement_name);
         m.insert("itunesadvistory", parse_itunes_content_advisory);
         m.insert("license", parse_license);
         m.insert("musicbrainz album artist id", parse_musicbrainz_album_artist_id);
@@ -1114,7 +1199,12 @@ lazy_static! {
         m.insert("musicbrainz release group id", parse_musicbrainz_release_group_id);
         m.insert("musicbrainz release track id", parse_musicbrainz_release_track_id);
         m.insert("musicbrainz trm id", parse_musicbrainz_trm_id);
+        m.insert("originaldate", parse_original_release_date);
+        m.insert("originalyear", parse_original_release_year);
+        m.insert("performer", parse_performer);
+        m.insert("publisher", parse_label);
         m.insert("musicbrainz work id", parse_musicbrainz_work_id);
+        m.insert("remixer", parse_remixer);
         m.insert("releasedate", parse_release_date);
         m.insert("replaygain_album_gain", parse_replaygain_album_gain);
         m.insert("replaygain_album_peak", parse_replaygain_album_peak);
@@ -1124,6 +1214,8 @@ lazy_static! {
         m.insert("replaygain_track_peak", parse_replaygain_track_peak);
         m.insert("replaygain_track_range", parse_replaygain_track_range);
         m.insert("script", parse_script);
+        m.insert("subtitle", parse_track_subtitle);
+        m.insert("titlesort", parse_sort_track_title);
         m.insert("work", parse_work);
         m.insert("writer", parse_writer);
         m
@@ -1135,10 +1227,15 @@ lazy_static! {
     static ref TIPL_FUNC_PARSERS: RawTagParserMap = {
         let mut m: RawTagParserMap = HashMap::new();
         m.insert("arranger", parse_arranger);
-        m.insert("engineer", parse_engineer);
+        m.insert("composer", parse_composer);
+        m.insert("conductor", parse_conductor);
         m.insert("dj-mix", parse_mix_dj);
+        m.insert("engineer", parse_engineer);
+        m.insert("lyricist", parse_lyricist);
         m.insert("mix", parse_mix_engineer);
+        m.insert("performer", parse_performer);
         m.insert("producer", parse_producer);
+        m.insert("remixer", parse_remixer);
         m
     };
 }

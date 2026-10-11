@@ -9,9 +9,12 @@
 
 use std::collections::HashMap;
 use std::io::{Seek, SeekFrom};
+use std::ops::Range;
 
 use symphonia_core::errors::{Result, decode_error, unsupported_error};
-use symphonia_core::formats::probe::{ProbeMetadataData, ProbeableMetadata, Score, Scoreable};
+use symphonia_core::formats::probe::{
+    Anchors, ProbeMetadataData, ProbeableMetadata, Score, Scoreable,
+};
 use symphonia_core::io::*;
 use symphonia_core::meta::well_known::METADATA_ID_ID3V2;
 use symphonia_core::meta::{
@@ -23,10 +26,14 @@ use symphonia_core::support_metadata;
 use log::{debug, trace, warn};
 
 mod frames;
+mod legacy_date;
 mod unsync;
 
+#[cfg(test)]
+mod content_tests;
+
 use frames::*;
-use unsync::{UnsyncStream, read_syncsafe_leq32};
+use unsync::{decode_unsynchronisation, read_syncsafe_leq32};
 
 #[derive(Debug)]
 #[allow(clippy::enum_variant_names)]
@@ -161,7 +168,7 @@ fn read_id3v2_header<B: ReadBytes>(reader: &mut B) -> Result<Header> {
 }
 
 /// Read the extended header of an ID3v2.3 tag.
-fn read_id3v2p3_extended_header<B: ReadBytes>(reader: &mut B) -> Result<ExtendedHeader> {
+fn read_id3v2p3_extended_header(reader: &mut BufReader<'_>) -> Result<ExtendedHeader> {
     let size = reader.read_be_u32()?;
     let flags = reader.read_be_u16()?;
     let padding_size = reader.read_be_u32()?;
@@ -177,23 +184,62 @@ fn read_id3v2p3_extended_header<B: ReadBytes>(reader: &mut B) -> Result<Extended
         restrictions: None,
     };
 
-    // CRC32 flag.
-    if size == 10 && flags & 0x8000 != 0 {
-        header.crc32 = Some(reader.read_be_u32()?);
+    // An extended header with a size of 10 always has space for a CRC32, even if the CRC32 flag is
+    // clear. Skip it either way so the frames that follow are found.
+    if size == 10 {
+        let crc32 = reader.read_be_u32()?;
+
+        // CRC32 flag.
+        if flags & 0x8000 != 0 {
+            header.crc32 = Some(crc32);
+        }
     }
 
     Ok(header)
 }
 
 /// Read the extended header of an ID3v2.4 tag.
-fn read_id3v2p4_extended_header<B: ReadBytes>(reader: &mut B) -> Result<ExtendedHeader> {
-    let _size = read_syncsafe_leq32(reader, 28)?;
+fn read_id3v2p4_extended_header(reader: &mut BufReader<'_>) -> Result<ExtendedHeader> {
+    // The size of the extended header, including the size field itself.
+    let size = read_syncsafe_leq32(reader, 28)?;
 
-    if reader.read_u8()? != 1 {
-        return decode_error("id3v2: extended flags should have a length of 1");
+    // The smallest extended header is the size field, the number of flag bytes, and one flag byte.
+    let Some(len) = size.checked_sub(4).filter(|&len| len >= 2)
+    else {
+        return decode_error("id3v2: invalid extended header size");
+    };
+
+    // Read the remainder of the extended header at once. A malformed or unrecognized field can then
+    // not cause the frames that follow the extended header to be missed.
+    let data = reader.read_buf_bytes_ref(len as usize)?;
+
+    match parse_id3v2p4_extended_flags(&mut BufReader::new(data)) {
+        Ok(header) => Ok(header),
+        Err(err) => {
+            warn!("id3v2: ignoring a malformed extended header: {err}");
+
+            Ok(ExtendedHeader {
+                padding_size: None,
+                crc32: None,
+                is_update: Some(false),
+                restrictions: None,
+            })
+        }
+    }
+}
+
+/// Parse the flags, and flag data, of an ID3v2.4 extended header.
+fn parse_id3v2p4_extended_flags(reader: &mut BufReader<'_>) -> Result<ExtendedHeader> {
+    // The number of flag bytes. Only the first flag byte is defined.
+    let num_flag_bytes = reader.read_u8()?;
+
+    if num_flag_bytes == 0 {
+        return decode_error("id3v2: extended flags should have a length of at least 1");
     }
 
     let flags = reader.read_u8()?;
+
+    reader.ignore_bytes(u64::from(num_flag_bytes - 1))?;
 
     let mut header = ExtendedHeader {
         padding_size: None,
@@ -202,11 +248,15 @@ fn read_id3v2p4_extended_header<B: ReadBytes>(reader: &mut B) -> Result<Extended
         restrictions: None,
     };
 
-    // Tag is an update flag.
+    // Tag is an update flag. The flag has no data, so the length is 0. Some writers give the flag
+    // a length of 1, and a data byte.
     if flags & 0x40 != 0x0 {
-        let len = reader.read_u8()?;
-        if len != 1 {
-            return decode_error("id3v2: is update extended flag has invalid size");
+        match reader.read_u8()? {
+            0 => (),
+            1 => {
+                reader.read_u8()?;
+            }
+            _ => return decode_error("id3v2: is update extended flag has invalid size"),
         }
 
         header.is_update = Some(true);
@@ -279,17 +329,19 @@ fn read_id3v2p4_extended_header<B: ReadBytes>(reader: &mut B) -> Result<Extended
     Ok(header)
 }
 
-fn read_id3v2_body<B: ReadBytes + FiniteStream>(
-    reader: &mut B,
+fn read_id3v2_body(
+    data: &[u8],
     header: &Header,
     metadata: &mut MetadataBuilder,
     side_data: &mut Vec<MetadataSideData>,
 ) -> Result<()> {
+    let mut reader = BufReader::new(data);
+
     // If there is an extended header, read and parse it based on the major version of the tag.
     if header.has_extended_header {
         let extended = match header.major_version {
-            3 => read_id3v2p3_extended_header(reader)?,
-            4 => read_id3v2p4_extended_header(reader)?,
+            3 => read_id3v2p3_extended_header(&mut reader)?,
+            4 => read_id3v2p4_extended_header(&mut reader)?,
             _ => unreachable!(),
         };
         trace!("{:#?}", extended);
@@ -298,13 +350,15 @@ fn read_id3v2_body<B: ReadBytes + FiniteStream>(
     let min_frame_size = min_frame_size(header.major_version);
 
     let mut chap_builder: ChapterGroupBuilder = Default::default();
+    let mut legacy_dates = legacy_date::LegacyDates::default();
 
-    loop {
+    // Read frames until there is not enough bytes available in the ID3v2 tag for another frame.
+    while reader.bytes_available() >= min_frame_size {
         // Read frames based on the major version of the tag.
         let frame = match header.major_version {
-            2 => read_id3v2p2_frame(reader),
-            3 => read_id3v2p3_frame(reader),
-            4 => read_id3v2p4_frame(reader),
+            2 => read_id3v2p2_frame(&mut reader),
+            3 => read_id3v2p3_frame(&mut reader),
+            4 => read_id3v2p4_frame(&mut reader),
             _ => break,
         };
 
@@ -315,11 +369,13 @@ fn read_id3v2_body<B: ReadBytes + FiniteStream>(
             Ok(FrameResult::Padding) => break,
             // A frame was parsed into a tag, add it to the tag collection.
             Ok(FrameResult::Tag(tag)) => {
+                legacy_dates.observe(&tag);
                 metadata.add_tag(tag);
             }
             // A frame was parsed into multiple tags, add them all to the tag collection.
             Ok(FrameResult::MultipleTags(tags)) => {
                 for tag in tags {
+                    legacy_dates.observe(&tag);
                     metadata.add_tag(tag);
                 }
             }
@@ -344,11 +400,11 @@ fn read_id3v2_body<B: ReadBytes + FiniteStream>(
                 break;
             }
         };
+    }
 
-        // Read frames until there is not enough bytes available in the ID3v2 tag for another frame.
-        if reader.bytes_available() < min_frame_size {
-            break;
-        }
+    // Combine the v2.2/v2.3 year, date, and time frames into a single recording date.
+    if let Some(tag) = legacy_dates.finish() {
+        metadata.add_tag(tag);
     }
 
     // Compile table of contents and chapter frames into a set of Cues.
@@ -359,6 +415,41 @@ fn read_id3v2_body<B: ReadBytes + FiniteStream>(
     Ok(())
 }
 
+/// Read up to `len` bytes of tag data. Fewer bytes are returned if the stream ends first, so that
+/// the frames of a truncated tag can still be read.
+fn read_tag_data<B: ReadBytes>(reader: &mut B, len: u64) -> Result<Vec<u8>> {
+    // The size of the tag is untrusted. Grow the buffer as data is actually read instead of
+    // allocating it all up-front.
+    const CHUNK_LEN: usize = 64 * 1024;
+
+    let mut data = Vec::new();
+    let mut remaining = len;
+
+    while remaining > 0 {
+        let start = data.len();
+        let chunk_len = remaining.min(CHUNK_LEN as u64) as usize;
+
+        data.resize(start + chunk_len, 0);
+
+        let read = match reader.read_buf(&mut data[start..]) {
+            Ok(read) => read,
+            Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => 0,
+            Err(err) => return Err(err.into()),
+        };
+
+        data.truncate(start + read);
+
+        // The end of the stream.
+        if read == 0 {
+            break;
+        }
+
+        remaining -= read as u64;
+    }
+
+    Ok(data)
+}
+
 pub(crate) fn read_id3v2<B: ReadBytes>(
     reader: &mut B,
     metadata: &mut MetadataBuilder,
@@ -367,35 +458,33 @@ pub(crate) fn read_id3v2<B: ReadBytes>(
     // Read the (sorta) version agnostic tag header.
     let header = read_id3v2_header(reader)?;
 
-    // If the unsynchronisation flag is set in the header, all tag data must be passed through the
-    // unsynchronisation decoder before being read for verions < 4 of ID3v2.
-    let mut scoped = if header.unsynchronisation && header.major_version < 4 {
-        let mut unsync = UnsyncStream::new(ScopedStream::new(reader, u64::from(header.size)));
+    // Read the tag. If the stream ends before the size of the tag is reached, the tag is truncated.
+    // Keep the frames that are complete rather than discarding the whole tag.
+    let mut data = read_tag_data(reader, u64::from(header.size))?;
 
-        read_id3v2_body(&mut unsync, &header, metadata, side_data)?;
+    let is_truncated = (data.len() as u64) < u64::from(header.size);
 
-        unsync.into_inner()
+    if is_truncated {
+        warn!("id3v2 tag is truncated: {} of {} bytes", data.len(), header.size);
     }
-    // Otherwise, read the data as-is. Individual frames may be unsynchronised for major versions
-    // >= 4.
+
+    // If the unsynchronisation flag is set in the header, all tag data must be passed through the
+    // unsynchronisation decoder before being read for verions < 4 of ID3v2. Otherwise, read the
+    // data as-is. Individual frames may be unsynchronised for major versions >= 4.
+    let body: &[u8] = if header.unsynchronisation && header.major_version < 4 {
+        decode_unsynchronisation(&mut data)
+    }
     else {
-        let mut scoped = ScopedStream::new(reader, u64::from(header.size));
-
-        read_id3v2_body(&mut scoped, &header, metadata, side_data)?;
-
-        scoped
+        &data
     };
 
-    // Ignore any remaining data in the tag.
-    scoped.ignore()?;
+    read_id3v2_body(body, &header, metadata, side_data)?;
 
     // If the header indicates the tag has a footer, it immediately follows the tag. The footer is
     // a copy of the header, so it carries no additional information. Skip it so that the reader is
     // positioned at the end of the tag. The tag has already been read at this point, so a
     // truncated footer is not an error.
-    if header.has_footer {
-        let reader = scoped.into_inner();
-
+    if header.has_footer && !is_truncated {
         if let Err(err) = reader.ignore_bytes(ID3V2_HEADER_LEN) {
             debug!("failed to skip id3v2 footer: {err}");
         }
@@ -408,7 +497,8 @@ pub(crate) fn read_id3v2<B: ReadBytes>(
 pub struct TrailingId3v2 {
     /// The absolute byte position of the first byte of the tag (the "ID3" marker).
     pub start: u64,
-    /// The absolute byte position immediately following the last byte of the tag (its footer).
+    /// The absolute byte position immediately following the last byte of the tag (its footer, if
+    /// it has one).
     pub end: u64,
     /// The decoded metadata.
     pub metadata: MetadataBuffer,
@@ -420,17 +510,197 @@ const ID3V2_HEADER_LEN: u64 = 10;
 /// The length of an ID3v1 tag in bytes.
 const ID3V1_TAG_LEN: u64 = 128;
 
-/// Locate and read an ID3v2.4 tag that has been appended to the end of a stream.
+/// The length of an APEv2 header or footer in bytes.
+const APE_HEADER_LEN: u64 = 32;
+
+/// The maximum number of bytes at the end of a stream that are searched for the header of an
+/// appended ID3v2 tag that has no footer.
+const TRAILING_SEARCH_LEN: u64 = 256 * 1024;
+
+/// Read `buf.len()` bytes at the absolute position `pos`.
+fn read_at(mss: &mut MediaSourceStream<'_>, pos: u64, buf: &mut [u8]) -> Option<()> {
+    mss.seek(SeekFrom::Start(pos)).ok()?;
+    mss.read_buf_exact(buf).ok()
+}
+
+/// If an APEv1 or APEv2 tag ends at `end`, get the position where it starts.
+fn ape_tag_start(mss: &mut MediaSourceStream<'_>, end: u64) -> Option<u64> {
+    let mut footer = [0u8; APE_HEADER_LEN as usize];
+    read_at(mss, end.checked_sub(APE_HEADER_LEN)?, &mut footer)?;
+
+    if &footer[..8] != b"APETAGEX" {
+        return None;
+    }
+
+    // The size includes the footer and the items, but not the header.
+    let size = u64::from(u32::from_le_bytes(footer[12..16].try_into().ok()?));
+    let flags = u32::from_le_bytes(footer[20..24].try_into().ok()?);
+
+    // Bit 31 indicates the tag contains a header. Bit 29 would indicate this is the header itself,
+    // which is not valid for a footer.
+    let has_header = flags & (1 << 31) != 0;
+    let is_header = flags & (1 << 29) != 0;
+
+    if is_header || size < APE_HEADER_LEN {
+        return None;
+    }
+
+    end.checked_sub(size + if has_header { APE_HEADER_LEN } else { 0 })
+}
+
+/// Get the positions at which an ID3v2 tag appended to a stream of `len` bytes may end: the end of
+/// the stream, before an ID3v1 tag, or before an APE tag (which may itself be before an ID3v1 tag).
+fn trailing_tag_ends(mss: &mut MediaSourceStream<'_>, len: u64) -> Vec<u64> {
+    let mut ends = vec![len];
+
+    if let Some(pos) = len.checked_sub(ID3V1_TAG_LEN) {
+        let mut marker = [0u8; 3];
+
+        if read_at(mss, pos, &mut marker).is_some() && marker == *b"TAG" {
+            ends.push(pos);
+        }
+    }
+
+    for i in 0..ends.len() {
+        if let Some(start) = ape_tag_start(mss, ends[i]) {
+            ends.push(start);
+        }
+    }
+
+    ends
+}
+
+/// If an ID3v2.4 tag with a footer ends at `end`, get the position where it starts.
+fn id3v2_footer_tag_start(mss: &mut MediaSourceStream<'_>, end: u64) -> Option<u64> {
+    // The smallest possible tag is a header and a footer.
+    let footer_pos = end.checked_sub(ID3V2_HEADER_LEN)?;
+
+    let mut footer = [0u8; ID3V2_HEADER_LEN as usize];
+    read_at(mss, footer_pos, &mut footer)?;
+
+    // The footer is the same as the header, but with the "3DI" marker.
+    if footer[0..3] != *b"3DI" || footer[3] != 4 || footer[5] & 0x10 == 0 {
+        return None;
+    }
+
+    // The size of the tag, excluding the header and footer, is syncsafe encoded.
+    if footer[6..10].iter().any(|b| b & 0x80 != 0) {
+        return None;
+    }
+
+    let size = footer[6..10].iter().fold(0u64, |size, &b| (size << 7) | u64::from(b));
+
+    // Find the start of the tag, and ensure it exists.
+    let start = footer_pos.checked_sub(size)?.checked_sub(ID3V2_HEADER_LEN)?;
+
+    let mut header = [0u8; ID3V2_HEADER_LEN as usize];
+    read_at(mss, start, &mut header)?;
+
+    // The header must mirror the footer.
+    (header[0..3] == *b"ID3" && header[3..] == footer[3..]).then_some(start)
+}
+
+/// Search the last `TRAILING_SEARCH_LEN` bytes of a stream of `len` bytes for the header of a tag
+/// that ends at one of `ends`. Returns the position of the start and the end of the tag.
 ///
-/// An appended tag can be found because, unlike a prepended tag, it ends with a footer ("3DI")
-/// that mirrors the tag's header and gives the size of the tag. If the stream ends with an ID3v1
-/// tag, the footer is searched for immediately before it.
+/// This is how an appended tag without a footer (ID3v2.2 and ID3v2.3 tags, and ID3v2.4 tags
+/// without the optional footer) is found. It is unlikely that the bytes of any other data in the
+/// stream would form a valid header with a size that ends exactly at the end of the stream.
+fn id3v2_search_trailing_header(
+    mss: &mut MediaSourceStream<'_>,
+    len: u64,
+    ends: &[u64],
+) -> Option<(u64, u64)> {
+    let buf_start = len.saturating_sub(TRAILING_SEARCH_LEN);
+
+    let mut buf = vec![0u8; usize::try_from(len - buf_start).ok()?];
+    read_at(mss, buf_start, &mut buf)?;
+
+    // Search backwards so that the tag nearest to the end is preferred.
+    let last = buf.len().checked_sub(ID3V2_HEADER_LEN as usize)?;
+
+    for i in (0..=last).rev() {
+        let hdr = &buf[i..i + ID3V2_HEADER_LEN as usize];
+
+        if hdr[0..3] != *b"ID3" {
+            continue;
+        }
+
+        let [major, minor, flags] = [hdr[3], hdr[4], hdr[5]];
+
+        // The version and size must be valid. The size is syncsafe encoded.
+        if !(2..=4).contains(&major) || minor == 0xff || hdr[6..10].iter().any(|b| b & 0x80 != 0) {
+            continue;
+        }
+
+        let size = hdr[6..10].iter().fold(0u64, |size, &b| (size << 7) | u64::from(b));
+        let footer_len = if major >= 4 && flags & 0x10 != 0 { ID3V2_HEADER_LEN } else { 0 };
+
+        let start = buf_start + i as u64;
+        let end = start + ID3V2_HEADER_LEN + size + footer_len;
+
+        if !ends.contains(&end) {
+            continue;
+        }
+
+        // A tag in the "id3 " chunk of a RIFF or AIFF stream is read by the container, so is not a
+        // tag that was appended to the stream.
+        if i >= 8 && buf[i - 8..i - 4].eq_ignore_ascii_case(b"id3 ") {
+            continue;
+        }
+
+        return Some((start, end));
+    }
+
+    None
+}
+
+fn find_trailing_id3v2(mss: &mut MediaSourceStream<'_>, len: u64) -> Option<Range<u64>> {
+    let ends = trailing_tag_ends(mss, len);
+
+    // Prefer the tag closest to the end of the stream.
+    ends.iter()
+        .find_map(|&end| id3v2_footer_tag_start(mss, end).map(|start| start..end))
+        .or_else(|| id3v2_search_trailing_header(mss, len, &ends).map(|(start, end)| start..end))
+}
+
+/// Locate an ID3v2 tag that has been appended to the end of a stream, without reading it.
+///
+/// `stream_len` is the total length of the stream in bytes. The stream must be seekable. The
+/// position of the stream is always restored before returning, regardless of the outcome. See
+/// [`read_trailing_id3v2`] for how an appended tag is found.
+///
+/// Returns the range of bytes occupied by the tag, or `None` if one was not found.
+pub fn locate_trailing_id3v2(
+    mss: &mut MediaSourceStream<'_>,
+    stream_len: u64,
+) -> Result<Option<Range<u64>>> {
+    if !mss.is_seekable() {
+        return Ok(None);
+    }
+
+    let init_pos = mss.pos();
+
+    let range = find_trailing_id3v2(mss, stream_len);
+
+    // Restore the position of the stream.
+    mss.seek(SeekFrom::Start(init_pos))?;
+
+    Ok(range)
+}
+
+/// Locate and read an ID3v2 tag that has been appended to the end of a stream.
+///
+/// The tag may directly end the stream, or be followed by an ID3v1 tag and/or an APE tag. An
+/// ID3v2.4 tag with a footer is found by the footer ("3DI") that mirrors the tag's header and gives
+/// the size of the tag. Any other tag does not have a footer, so the last bytes of the stream are
+/// searched for the header of a tag that ends exactly where the stream, or the tags that follow the
+/// ID3v2 tag, begin.
 ///
 /// `stream_len` is the total length of the stream in bytes. The stream must be seekable. The
 /// position of the stream is always restored before returning, regardless of the outcome.
 ///
-/// Returns `Ok(None)` if the stream does not end with a valid ID3v2 tag with a footer, or the tag
-/// could not be read.
+/// Returns `Ok(None)` if a tag was not found, or the tag could not be read.
 pub fn read_trailing_id3v2(
     mss: &mut MediaSourceStream<'_>,
     stream_len: u64,
@@ -441,7 +711,7 @@ pub fn read_trailing_id3v2(
 
     let init_pos = mss.pos();
 
-    let result = find_trailing_id3v2(mss, stream_len);
+    let result = read_located_trailing_id3v2(mss, stream_len);
 
     // Restore the position of the stream.
     mss.seek(SeekFrom::Start(init_pos))?;
@@ -455,78 +725,27 @@ pub fn read_trailing_id3v2(
     }
 }
 
-fn find_trailing_id3v2(
+fn read_located_trailing_id3v2(
     mss: &mut MediaSourceStream<'_>,
     stream_len: u64,
 ) -> Result<Option<TrailingId3v2>> {
-    // The tag may be directly at the end of the stream, or it may be followed by an ID3v1 tag.
-    let mut ends = [Some(stream_len), None];
+    let Some(Range { start, end }) = find_trailing_id3v2(mss, stream_len)
+    else {
+        return Ok(None);
+    };
 
-    if stream_len >= ID3V1_TAG_LEN {
-        mss.seek(SeekFrom::Start(stream_len - ID3V1_TAG_LEN))?;
+    mss.seek(SeekFrom::Start(start))?;
 
-        if mss.read_triple_bytes()? == *b"TAG" {
-            ends[1] = Some(stream_len - ID3V1_TAG_LEN);
-        }
-    }
+    let mut builder = MetadataBuilder::new(ID3V2_METADATA_INFO);
+    let mut side_data = Vec::new();
 
-    // Prefer the tag closest to the end of the stream.
-    for end in ends.into_iter().flatten() {
-        // The smallest possible tag is a header and a footer.
-        let Some(footer_pos) = end.checked_sub(ID3V2_HEADER_LEN)
-        else {
-            continue;
-        };
+    read_id3v2(mss, &mut builder, &mut side_data)?;
 
-        mss.seek(SeekFrom::Start(footer_pos))?;
-
-        let mut footer = [0u8; ID3V2_HEADER_LEN as usize];
-        mss.read_buf_exact(&mut footer)?;
-
-        // The footer is the same as the header, but with the "3DI" marker.
-        if footer[0..3] != *b"3DI" || footer[3] != 4 || footer[5] & 0x10 == 0 {
-            continue;
-        }
-
-        // The size of the tag, excluding the header and footer, is syncsafe encoded.
-        if footer[6..10].iter().any(|b| b & 0x80 != 0) {
-            continue;
-        }
-
-        let size = footer[6..10].iter().fold(0u64, |size, &b| (size << 7) | u64::from(b & 0x7f));
-
-        // Find the start of the tag, and ensure it exists.
-        let Some(start) =
-            footer_pos.checked_sub(size).and_then(|p| p.checked_sub(ID3V2_HEADER_LEN))
-        else {
-            continue;
-        };
-
-        mss.seek(SeekFrom::Start(start))?;
-
-        let mut header = [0u8; ID3V2_HEADER_LEN as usize];
-        mss.read_buf_exact(&mut header)?;
-
-        // The header must mirror the footer.
-        if header[0..3] != *b"ID3" || header[3..] != footer[3..] {
-            continue;
-        }
-
-        mss.seek(SeekFrom::Start(start))?;
-
-        let mut builder = MetadataBuilder::new(ID3V2_METADATA_INFO);
-        let mut side_data = Vec::new();
-
-        read_id3v2(mss, &mut builder, &mut side_data)?;
-
-        return Ok(Some(TrailingId3v2 {
-            start,
-            end,
-            metadata: MetadataBuffer { revision: builder.build(), side_data },
-        }));
-    }
-
-    Ok(None)
+    Ok(Some(TrailingId3v2 {
+        start,
+        end,
+        metadata: MetadataBuffer { revision: builder.build(), side_data },
+    }))
 }
 
 /// The chapter group builder utility validates and builds a `ChapterGroup` from a set of ID3v2
@@ -761,6 +980,77 @@ impl MetadataReader for Id3v2Reader<'_> {
         read_id3v2(&mut self.reader, &mut builder, &mut side_data)?;
 
         Ok(MetadataBuffer { revision: builder.build(), side_data })
+    }
+
+    fn into_inner<'s>(self: Box<Self>) -> MediaSourceStream<'s>
+    where
+        Self: 's,
+    {
+        self.reader
+    }
+}
+
+/// ID3v2 reader for a tag that has been appended to the end of a stream.
+///
+/// Unlike [`Id3v2Reader`], this reader is not found by a marker. Instead, when registered with a
+/// [`Probe`](symphonia_core::formats::probe::Probe), it is run once while probing for trailing
+/// metadata, and locates the tag relative to the end of the stream (see [`read_trailing_id3v2`]).
+/// This allows the metadata of any container format to include an appended ID3v2 tag.
+///
+/// The stream must be seekable and have a known length, otherwise no metadata is read.
+pub struct Id3v2TrailingReader<'s> {
+    reader: MediaSourceStream<'s>,
+}
+
+impl<'s> Id3v2TrailingReader<'s> {
+    pub fn try_new(mss: MediaSourceStream<'s>, _opts: MetadataOptions) -> Result<Self> {
+        Ok(Self { reader: mss })
+    }
+}
+
+impl Scoreable for Id3v2TrailingReader<'_> {
+    /// The reader has no markers, so is never scored.
+    fn score(_src: ScopedStream<&mut MediaSourceStream<'_>>) -> Result<Score> {
+        Ok(Score::Unsupported)
+    }
+}
+
+impl ProbeableMetadata<'_> for Id3v2TrailingReader<'_> {
+    fn try_probe_new(
+        mss: MediaSourceStream<'_>,
+        opts: MetadataOptions,
+    ) -> Result<Box<dyn MetadataReader + '_>>
+    where
+        Self: Sized,
+    {
+        Ok(Box::new(Id3v2TrailingReader::try_new(mss, opts)?))
+    }
+
+    fn probe_data() -> &'static [ProbeMetadataData] {
+        &[support_metadata!(ID3V2_METADATA_INFO, &[], &[], &[], Anchors::TrailingScan)]
+    }
+}
+
+impl MetadataReader for Id3v2TrailingReader<'_> {
+    fn metadata_info(&self) -> &MetadataInfo {
+        &ID3V2_METADATA_INFO
+    }
+
+    fn read_all(&mut self) -> Result<MetadataBuffer> {
+        let len = match self.reader.byte_len() {
+            Some(len) if self.reader.is_seekable() => len,
+            _ => return unsupported_error("id3v2: the stream is not seekable or has no length"),
+        };
+
+        match read_trailing_id3v2(&mut self.reader, len)? {
+            // A tag at the start of the stream is a prepended tag, which is found by the probe
+            // when it scans from the start of the stream.
+            Some(tag) if tag.start > 0 => {
+                debug!("found a trailing id3v2 tag @ {}..{}", tag.start, tag.end);
+                Ok(tag.metadata)
+            }
+            _ => unsupported_error("id3v2: no trailing tag"),
+        }
     }
 
     fn into_inner<'s>(self: Box<Self>) -> MediaSourceStream<'s>
@@ -1172,16 +1462,25 @@ mod tests {
         assert_eq!(titles(&found.metadata.revision.media.tags), ["Trailing"]);
     }
 
-    /// Streams that do not end with a valid tag with a footer yield nothing.
+    /// Streams that do not end with a valid tag yield nothing.
     #[test]
     fn verify_trailing_id3v2_absent_or_invalid() {
         assert!(read_trailing(Vec::new()).is_none());
         assert!(read_trailing(vec![0u8; 300]).is_none());
 
-        // A tag without a footer.
-        let frames = frame_v24(b"TIT2", 0, &utf8_text(&["No footer"]));
+        // A tag without a footer that does not end where the stream ends.
+        let frames = frame_v24(b"TIT2", 0, &utf8_text(&["Not at the end"]));
         let mut stream = vec![0xffu8; 100];
         stream.extend(tag_bytes(4, &frames, false));
+        stream.push(0);
+        assert!(read_trailing(stream).is_none());
+
+        // A tag in the "id3 " chunk at the end of a RIFF stream is read by the container.
+        let tag = tag_bytes(3, &frame_v23(b"TIT2", 0, &utf8_text(&["Chunk"])), false);
+        let mut stream = vec![0xffu8; 100];
+        stream.extend_from_slice(b"id3 ");
+        stream.extend_from_slice(&(tag.len() as u32).to_le_bytes());
+        stream.extend(tag);
         assert!(read_trailing(stream).is_none());
 
         // A footer that claims a size larger than the stream.
@@ -1224,5 +1523,280 @@ mod tests {
             assert_eq!(mss.pos(), tag_len);
             assert_eq!(mss.read_quad_bytes().unwrap(), *b"AUDI");
         }
+    }
+
+    /// A tag with an extended header of the given kind, followed by a TIT2 frame.
+    fn tag_with_extended_header(major: u8, ext: &[u8], title: &str) -> Vec<u8> {
+        let mut body = ext.to_vec();
+
+        body.extend(if major == 4 {
+            frame_v24(b"TIT2", 0, &utf8_text(&[title]))
+        }
+        else {
+            frame_v23(b"TIT2", 0, &utf8_text(&[title]))
+        });
+
+        let mut tag = vec![b'I', b'D', b'3', major, 0, 0x40];
+        tag.extend_from_slice(&syncsafe(body.len()));
+        tag.extend(body);
+        tag
+    }
+
+    /// An ID3v2.4 extended header with the update flag. The flag has no data (a length of 0), but
+    /// some writers give it a data byte.
+    #[test]
+    fn verify_id3v24_extended_header_update_flag() {
+        for flag_data in [&[0u8][..], &[1u8, 0u8][..]] {
+            let mut ext = vec![1, 0x40];
+            ext.extend_from_slice(flag_data);
+
+            let mut header = syncsafe(4 + ext.len()).to_vec();
+            header.extend(ext);
+
+            let tags = read_tags(tag_with_extended_header(4, &header, "Updated"));
+            assert_eq!(titles(&tags), ["Updated"]);
+        }
+    }
+
+    /// The declared size of an ID3v2.4 extended header is used to find the first frame, regardless
+    /// of the fields in the header.
+    #[test]
+    fn verify_id3v24_extended_header_size_is_used() {
+        // CRC32 and restrictions flags, followed by 3 bytes the reader does not know about.
+        let mut ext = vec![1, 0x30, 5, 0, 0, 0, 0, 0, 1, 0x00, 0xaa, 0xbb, 0xcc];
+        let mut header = syncsafe(4 + ext.len()).to_vec();
+        header.append(&mut ext);
+
+        let tags = read_tags(tag_with_extended_header(4, &header, "Sized"));
+        assert_eq!(titles(&tags), ["Sized"]);
+
+        // A malformed field does not prevent the frames from being read.
+        let mut ext = vec![1, 0x20, 9, 0, 0, 0, 0, 0];
+        let mut header = syncsafe(4 + ext.len()).to_vec();
+        header.append(&mut ext);
+
+        let tags = read_tags(tag_with_extended_header(4, &header, "Malformed"));
+        assert_eq!(titles(&tags), ["Malformed"]);
+    }
+
+    /// An ID3v2.3 extended header with a size of 10 has space for a CRC32 even if the CRC32 flag is
+    /// not set.
+    #[test]
+    fn verify_id3v23_extended_header_without_crc() {
+        let ext = [0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0xde, 0xad, 0xbe, 0xef];
+        let tags = read_tags(tag_with_extended_header(3, &ext, "No CRC"));
+        assert_eq!(titles(&tags), ["No CRC"]);
+
+        // With the CRC32 flag set.
+        let ext = [0, 0, 0, 10, 0x80, 0, 0, 0, 0, 0, 0xde, 0xad, 0xbe, 0xef];
+        let tags = read_tags(tag_with_extended_header(3, &ext, "CRC"));
+        assert_eq!(titles(&tags), ["CRC"]);
+
+        // The short extended header.
+        let ext = [0, 0, 0, 6, 0, 0, 0, 0, 0, 0];
+        let tags = read_tags(tag_with_extended_header(3, &ext, "Short"));
+        assert_eq!(titles(&tags), ["Short"]);
+    }
+
+    /// An ID3v2.4 frame with a plain big-endian size instead of a syncsafe size.
+    fn frame_v24_plain(id: &[u8; 4], flags: u16, body: &[u8]) -> Vec<u8> {
+        let mut f = id.to_vec();
+        f.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        f.extend_from_slice(&flags.to_be_bytes());
+        f.extend_from_slice(body);
+        f
+    }
+
+    fn albums(tags: &[Tag]) -> Vec<String> {
+        collect_std(tags, |s| match s {
+            StandardTag::Album(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    /// Some taggers write the frame sizes of ID3v2.4 tags as plain integers instead of syncsafe
+    /// integers. They are read if the syncsafe size does not end at a frame, but the plain size does.
+    #[test]
+    fn verify_id3v24_non_syncsafe_frame_sizes() {
+        // The bodies have sizes where the two representations differ: 200 (the plain size has a
+        // byte with its high bit set), and 256 (neither does, but the sizes are still different).
+        let long_title = "t".repeat(199);
+        let long_album = "a".repeat(255);
+
+        let mut frames = frame_v24_plain(b"TIT2", 0, &utf8_text(&[&long_title]));
+        frames.extend(frame_v24_plain(b"TALB", 0, &utf8_text(&[&long_album])));
+        frames.extend(frame_v24_plain(b"TPE1", 0, &utf8_text(&["Artist"])));
+
+        let tags = read_tags(tag_bytes(4, &frames, false));
+
+        assert_eq!(titles(&tags), [long_title.as_str()]);
+        assert_eq!(albums(&tags), [long_album.as_str()]);
+        assert_eq!(artists(&tags), ["Artist"]);
+
+        // The same frames with correct syncsafe sizes are still read as syncsafe.
+        let mut frames = frame_v24(b"TIT2", 0, &utf8_text(&[&long_title]));
+        frames.extend(frame_v24(b"TALB", 0, &utf8_text(&[&long_album])));
+        frames.extend(frame_v24(b"TPE1", 0, &utf8_text(&["Artist"])));
+
+        let tags = read_tags(tag_bytes(4, &frames, false));
+
+        assert_eq!(titles(&tags), [long_title.as_str()]);
+        assert_eq!(albums(&tags), [long_album.as_str()]);
+        assert_eq!(artists(&tags), ["Artist"]);
+    }
+
+    /// A frame with unused flag bits set is skipped, and the frames after it are still read.
+    #[test]
+    fn verify_frame_with_unused_flag_bits_is_skipped() {
+        for major in [3u8, 4] {
+            let frame = |id: &[u8; 4], flags: u16, value: &str| {
+                let body = utf8_text(&[value]);
+                if major == 3 { frame_v23(id, flags, &body) } else { frame_v24(id, flags, &body) }
+            };
+
+            // Bits that are unused in both versions.
+            let mut frames = frame(b"TIT2", 0x0090, "Bogus");
+            frames.extend(frame(b"TPE1", 0, "Good"));
+            frames.extend(frame(b"TALB", 0, "Album"));
+
+            let tags = read_tags(tag_bytes(major, &frames, false));
+
+            assert!(titles(&tags).is_empty());
+            assert_eq!(artists(&tags), ["Good"]);
+            assert_eq!(albums(&tags), ["Album"]);
+
+            // The frame is the last frame in the tag.
+            let mut frames = frame(b"TPE1", 0, "Good");
+            frames.extend(frame(b"TIT2", 0x0090, "Bogus"));
+
+            let tags = read_tags(tag_bytes(major, &frames, false));
+
+            assert!(titles(&tags).is_empty());
+            assert_eq!(artists(&tags), ["Good"]);
+        }
+    }
+
+    /// A frame with unused flag bits and a size that is not plausible loses the structure of the
+    /// tag, but the frames before it are kept.
+    #[test]
+    fn verify_frame_with_unused_flag_bits_and_bad_size_ends_tag() {
+        let mut frames = frame_v23(b"TPE1", 0, &utf8_text(&["Before"]));
+        frames.extend_from_slice(b"TIT2\x00\x00\x10\x00\x00\x10");
+        frames.extend_from_slice(&utf8_text(&["After"]));
+
+        let tags = read_tags(tag_bytes(3, &frames, false));
+
+        assert!(titles(&tags).is_empty());
+        assert_eq!(artists(&tags), ["Before"]);
+    }
+
+    /// A tag that declares a size larger than the stream keeps the frames that were read in full.
+    #[test]
+    fn verify_truncated_tag_keeps_earlier_frames() {
+        for major in [3u8, 4] {
+            let frame = |id: &[u8; 4], value: &str| {
+                let body = utf8_text(&[value]);
+                if major == 3 { frame_v23(id, 0, &body) } else { frame_v24(id, 0, &body) }
+            };
+
+            let mut frames = frame(b"TPE1", "Complete");
+            frames.extend(frame(b"TIT2", "Cut short"));
+
+            // End the stream part-way through the body of the last frame.
+            let mut tag = tag_bytes(major, &frames, false);
+            tag.truncate(tag.len() - 4);
+
+            let tags = read_tags(tag);
+
+            assert!(titles(&tags).is_empty());
+            assert_eq!(artists(&tags), ["Complete"]);
+
+            // End the stream part-way through the header of the last frame.
+            let mut tag = tag_bytes(major, &frames, false);
+            let cut = tag.len() - (frame(b"TIT2", "Cut short").len() - 6);
+            tag.truncate(cut);
+
+            let tags = read_tags(tag);
+
+            assert!(titles(&tags).is_empty());
+            assert_eq!(artists(&tags), ["Complete"]);
+        }
+    }
+
+    /// An ID3v2.2 frame.
+    fn frame_v22(id: &[u8; 3], body: &[u8]) -> Vec<u8> {
+        let mut f = id.to_vec();
+        f.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+        f.extend_from_slice(body);
+        f
+    }
+
+    /// The tag of the given major version, with a TIT2 (title) frame, and no footer.
+    fn tag_without_footer(major: u8, title: &str) -> Vec<u8> {
+        let body = match major {
+            // ID3v2.2 does not support UTF-8 text, so use ISO-8859-1.
+            2 => frame_v22(b"TT2", &[&[0u8][..], title.as_bytes()].concat()),
+            3 => frame_v23(b"TIT2", 0, &utf8_text(&[title])),
+            _ => frame_v24(b"TIT2", 0, &utf8_text(&[title])),
+        };
+
+        tag_bytes(major, &body, false)
+    }
+
+    /// A tag without a footer that has been appended to a stream is found for all versions, even
+    /// when followed by an ID3v1 or an APE tag.
+    #[test]
+    fn verify_trailing_id3v2_without_footer() {
+        let audio = vec![0xffu8; 700];
+
+        let mut v1 = vec![0u8; 128];
+        v1[..3].copy_from_slice(b"TAG");
+
+        // An empty APEv2 tag, which is just a footer.
+        let mut ape = b"APETAGEX".to_vec();
+        ape.extend_from_slice(&2000u32.to_le_bytes());
+        ape.extend_from_slice(&32u32.to_le_bytes());
+        ape.extend_from_slice(&0u32.to_le_bytes());
+        ape.extend_from_slice(&0u32.to_le_bytes());
+        ape.extend_from_slice(&[0u8; 8]);
+
+        // Stream suffixes that may follow the tag.
+        let ape_v1 = [ape.as_slice(), v1.as_slice()].concat();
+        let suffixes: [&[u8]; 4] = [&[], &v1, &ape, &ape_v1];
+
+        for major in [2u8, 3, 4] {
+            for suffix in suffixes {
+                let tag = tag_without_footer(major, "Appended");
+
+                let mut stream = audio.clone();
+                stream.extend_from_slice(&tag);
+                stream.extend_from_slice(suffix);
+
+                let found = read_trailing(stream).expect("expected a trailing tag");
+                assert_eq!(found.start, audio.len() as u64);
+                assert_eq!(found.end, (audio.len() + tag.len()) as u64);
+                assert_eq!(titles(&found.metadata.revision.media.tags), ["Appended"]);
+            }
+        }
+    }
+
+    /// The location of an appended tag is found without reading it.
+    #[test]
+    fn verify_locate_trailing_id3v2() {
+        let audio = vec![0xffu8; 300];
+        let tag = tag_without_footer(3, "Located");
+
+        let mut stream = audio.clone();
+        stream.extend_from_slice(&tag);
+
+        let len = stream.len() as u64;
+        let mut mss = MediaSourceStream::new(
+            Box::new(Cursor::new(stream)),
+            MediaSourceStreamOptions::default(),
+        );
+
+        let range = locate_trailing_id3v2(&mut mss, len).unwrap().expect("expected a tag");
+        assert_eq!(range, audio.len() as u64..len);
+        assert_eq!(mss.pos(), 0);
     }
 }

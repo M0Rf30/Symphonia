@@ -16,7 +16,7 @@ use symphonia_core::formats::prelude::*;
 use symphonia_core::formats::probe::{ProbeFormatData, ProbeableFormat, Score, Scoreable};
 use symphonia_core::formats::well_known::{FORMAT_ID_MP1, FORMAT_ID_MP2, FORMAT_ID_MP3};
 use symphonia_core::io::*;
-use symphonia_core::meta::{Metadata, MetadataLog, MetadataSideData};
+use symphonia_core::meta::{Metadata, MetadataLog};
 
 use crate::common::{FrameHeader, MpegLayer};
 use crate::header::{self, MAX_MPEG_FRAME_SIZE, MPEG_HEADER_LEN};
@@ -772,28 +772,19 @@ impl<'s> MpaReader<'s> {
             _ => None,
         };
 
-        let mut metadata = opts.external_data.metadata.unwrap_or_default();
-        let mut chapters = opts.external_data.chapters;
+        let metadata = opts.external_data.metadata.unwrap_or_default();
+        let chapters = opts.external_data.chapters;
 
-        // An ID3v2.4 tag may be appended to the audio data. It is the only kind of ID3v2 tag that
-        // can be, and is not found by the probe since it is not at the start of the stream.
+        // An ID3v2 tag may be appended to the audio data. The metadata of the tag is read by the
+        // probe, like any other format, so only find out where the tag begins here since the audio
+        // data ends there, if it didn't already.
         if let Some(len) = mss.byte_len().filter(|_| mss.is_seekable()) {
-            if let Ok(Some(tag)) = id3v2::read_trailing_id3v2(&mut mss, len) {
-                debug!("found a trailing id3v2 tag @ {}..{}", tag.start, tag.end);
+            if let Ok(Some(tag)) = id3v2::locate_trailing_id3v2(&mut mss, len) {
+                if tag.start > first_packet_pos {
+                    debug!("found a trailing id3v2 tag @ {}..{}", tag.start, tag.end);
 
-                metadata.push(tag.metadata.revision);
-
-                for side_data in tag.metadata.side_data {
-                    match side_data {
-                        MetadataSideData::Chapters(group) if chapters.is_none() => {
-                            chapters = Some(group);
-                        }
-                        _ => (),
-                    }
+                    data_end = data_end.map(|end| end.min(tag.start));
                 }
-
-                // The audio data ends where the tag begins, if it didn't already.
-                data_end = data_end.map(|end| end.min(tag.start));
             }
         }
 

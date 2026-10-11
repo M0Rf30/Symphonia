@@ -99,6 +99,16 @@ pub enum Anchors {
     /// Supplemental anchors indicate that the format markers will first be scanned for at the
     /// anchor points, then from the beginning of the stream.
     Supplemental(&'static [u32]),
+    /// Trailing scan readers have no markers, and are not anchored to fixed offsets. Instead, the
+    /// probe instantiates the reader once while probing for trailing metadata, after all fixed
+    /// anchors have been probed, and the reader is itself responsible for locating (by seeking
+    /// relative to the end of the stream) and reading its metadata. The position of the stream when
+    /// the reader is instantiated is unspecified. A reader that does not find metadata should
+    /// return an error from `read_all`.
+    ///
+    /// This is intended for metadata that is appended to a stream but can't be found from a
+    /// fixed offset, such as an ID3v2 tag without a footer.
+    TrailingScan,
 }
 
 /// The probe match specification provides declarative information that is used by a `Probe` to
@@ -192,6 +202,8 @@ impl GenericProbeMatch {
             Anchors::Exclusive(_) => is_trailing_probe,
             // Matches with supplemental anchors should always be tested.
             Anchors::Supplemental(_) => true,
+            // Matches with a trailing scan have no markers, and are instantiated explicitly.
+            Anchors::TrailingScan => false,
         }
     }
 }
@@ -647,6 +659,26 @@ impl Probe {
                     }
                 }
             }
+        }
+
+        // Run the readers that locate their own metadata at the end of the stream.
+        for desc in self.preferred.iter().chain(&self.standard).chain(&self.fallback) {
+            let (Anchors::TrailingScan, ProbeMatch::Metadata { info, factory }) =
+                (desc.anchors, desc.specific)
+            else {
+                continue;
+            };
+
+            trace!("scanning for trailing '{}' metadata", info.short_name);
+
+            let mut reader = factory(mss, meta_opts)?;
+
+            // Not finding any metadata is the common case, and is not noteworthy.
+            if let Err(err) = read_and_append_metadata(&mut reader, fmt_opts) {
+                debug!("no trailing '{}' metadata: {}", info.short_name, err);
+            }
+
+            mss = reader.into_inner();
         }
 
         Ok(mss)

@@ -221,7 +221,7 @@ pub mod default {
         #[cfg(feature = "id3v1")]
         pub use symphonia_metadata::id3v1::Id3v1Reader;
         #[cfg(feature = "id3v2")]
-        pub use symphonia_metadata::id3v2::Id3v2Reader;
+        pub use symphonia_metadata::id3v2::{Id3v2Reader, Id3v2TrailingReader};
 
         pub use symphonia_metadata::embedded;
     }
@@ -381,6 +381,9 @@ pub mod default {
 
         #[cfg(feature = "id3v2")]
         probe.register_metadata::<meta::Id3v2Reader<'_>>();
+
+        #[cfg(feature = "id3v2")]
+        probe.register_metadata::<meta::Id3v2TrailingReader<'_>>();
     }
 }
 
