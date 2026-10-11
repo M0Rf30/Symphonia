@@ -11,9 +11,11 @@ use symphonia_core::{
     audio::{AmbisonicBFormat, ChannelLabel, Channels, Position, layouts},
     codecs::audio::{AudioCodecId, well_known::*},
     errors::{Error, Result, decode_error, unsupported_error},
-    io::{MediaSourceStream, ReadBytes},
+    io::{MediaSourceStream, ReadBytes, ScopedStream},
+    meta::MetadataRevision,
     units::{Duration, Timestamp},
 };
+use symphonia_metadata::embedded::riff::read_riff_id3_chunk;
 
 // CAF audio channel layouts.
 const LAYOUT_TAG_USE_CHANNEL_DESCRIPTIONS: u32 = 0;
@@ -69,6 +71,8 @@ pub enum Chunk {
     /// `artist`, `album`, `title`, `track`). See Apple's CAF specification, "Information Chunk".
     Info(Vec<(String, String)>),
     Free,
+    /// An ID3v2 tag stored in a (non-standard) `ID3 `/`id3 ` chunk.
+    Id3(MetadataRevision),
 }
 
 impl Chunk {
@@ -111,6 +115,26 @@ impl Chunk {
                 }
                 reader.ignore_bytes(chunk_size as u64)?;
                 Chunk::Free
+            }
+            b"ID3 " | b"id3 " => {
+                let Ok(chunk_len) = u64::try_from(chunk_size)
+                else {
+                    return invalid_chunk_size_error("ID3", chunk_size);
+                };
+
+                // Scope the parse to the chunk, and always leave the reader at the next chunk.
+                let mut scoped = ScopedStream::new(&mut *reader, chunk_len);
+                let mut side_data = Vec::new();
+                let rev = read_riff_id3_chunk(&mut scoped, &mut side_data);
+                scoped.ignore()?;
+
+                match rev {
+                    Ok(rev) => Chunk::Id3(rev),
+                    Err(err) => {
+                        warn!("failed to read ID3v2 chunk: {err}");
+                        Chunk::Free
+                    }
+                }
             }
             other => {
                 // Log unsupported chunk types but don't return an error

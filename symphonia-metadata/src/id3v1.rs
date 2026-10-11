@@ -7,24 +7,28 @@
 
 //! An ID3v1 metadata reader.
 
+use std::io::{Seek, SeekFrom};
 use std::sync::Arc;
 
 use symphonia_core::errors::{Result, unsupported_error};
 use symphonia_core::formats::probe::{
     Anchors, ProbeMetadataData, ProbeableMetadata, Score, Scoreable,
 };
-use symphonia_core::io::{MediaSourceStream, ReadBytes, ScopedStream};
+use symphonia_core::io::{MediaSource, MediaSourceStream, ReadBytes, ScopedStream};
 use symphonia_core::meta::well_known::METADATA_ID_ID3V1;
 use symphonia_core::meta::{
     MetadataBuffer, MetadataBuilder, MetadataInfo, MetadataOptions, MetadataReader, StandardTag,
     Tag,
 };
 use symphonia_core::support_metadata;
-use symphonia_core::util::text;
 
-use crate::utils::id3v1::get_genre_name;
+use crate::utils::id3v1::{decode_windows_1252_byte, get_genre_name};
 
-fn read_id3v1<B: ReadBytes>(reader: &mut B, builder: &mut MetadataBuilder) -> Result<()> {
+fn read_id3v1<B: ReadBytes>(
+    reader: &mut B,
+    enhanced: Option<&[u8; ID3V1_ENHANCED_LEN]>,
+    builder: &mut MetadataBuilder,
+) -> Result<()> {
     // Read the "TAG" header.
     let marker = reader.read_triple_bytes()?;
 
@@ -35,17 +39,26 @@ fn read_id3v1<B: ReadBytes>(reader: &mut B, builder: &mut MetadataBuilder) -> Re
     let mut buf = [0u8; 125];
     reader.read_buf_exact(&mut buf)?;
 
-    if let Some(title) = decode_iso8859_buf(&buf[0..30]) {
+    // The enhanced tag extends the title, artist, and album fields to 60 characters each, and
+    // adds a free-text genre. Prefer its values over the ID3v1 values when present.
+    // Layout: "TAG+", title (60), artist (60), album (60), speed (1), genre (30), start time (6),
+    // end time (6).
+    let ext_title = enhanced.and_then(|e| decode_iso8859_buf(&e[4..64]));
+    let ext_artist = enhanced.and_then(|e| decode_iso8859_buf(&e[64..124]));
+    let ext_album = enhanced.and_then(|e| decode_iso8859_buf(&e[124..184]));
+    let ext_genre = enhanced.and_then(|e| decode_iso8859_buf(&e[185..215]));
+
+    if let Some(title) = ext_title.or_else(|| decode_iso8859_buf(&buf[0..30])) {
         let tag = Tag::new_from_parts("TITLE", title.clone(), Some(StandardTag::TrackTitle(title)));
         builder.add_tag(tag);
     }
 
-    if let Some(artist) = decode_iso8859_buf(&buf[30..60]) {
+    if let Some(artist) = ext_artist.or_else(|| decode_iso8859_buf(&buf[30..60])) {
         let tag = Tag::new_from_parts("ARTIST", artist.clone(), Some(StandardTag::Artist(artist)));
         builder.add_tag(tag);
     }
 
-    if let Some(album) = decode_iso8859_buf(&buf[60..90]) {
+    if let Some(album) = ext_album.or_else(|| decode_iso8859_buf(&buf[60..90])) {
         let tag = Tag::new_from_parts("ALBUM", album.clone(), Some(StandardTag::Album(album)));
         builder.add_tag(tag);
     }
@@ -85,8 +98,9 @@ fn read_id3v1<B: ReadBytes>(reader: &mut B, builder: &mut MetadataBuilder) -> Re
         builder.add_tag(tag);
     }
 
-    // Convert the genre index to an actual genre name using the GENRES lookup table.
-    if let Some(genre) = get_genre_name(buf[124]).map(Arc::new) {
+    // Use the free-text genre of the enhanced tag if present. Otherwise, convert the genre index
+    // to an actual genre name using the GENRES lookup table.
+    if let Some(genre) = ext_genre.or_else(|| get_genre_name(buf[124]).map(Arc::new)) {
         let tag = Tag::new_from_parts("GENRE", genre.clone(), Some(StandardTag::Genre(genre)));
         builder.add_tag(tag);
     }
@@ -95,13 +109,51 @@ fn read_id3v1<B: ReadBytes>(reader: &mut B, builder: &mut MetadataBuilder) -> Re
 }
 
 fn decode_iso8859_buf(buf: &[u8]) -> Option<Arc<String>> {
-    // Decode a null-terminated string. ID3v1 does not specify an encoding, so assume ISO-8859-1
-    // such that all characters codes are valid.
-    let text =
-        text::decode_iso8859_1_lossy(buf).take_while(text::filter::not_null).collect::<String>();
+    // Decode a null-terminated string. ID3v1 does not specify an encoding, so assume
+    // ISO-8859-1 (with the C1 range interpreted as Windows-1252, as it is in practice) such that
+    // all characters codes are valid.
+    let text = buf
+        .iter()
+        .copied()
+        .take_while(|&c| c != 0)
+        .map(decode_windows_1252_byte)
+        .collect::<String>();
+
+    // Trailing spaces are padding.
+    let text = text.trim_end_matches(' ');
 
     // Do not return an empty string.
-    if !text.is_empty() { Some(Arc::new(text)) } else { None }
+    if !text.is_empty() { Some(Arc::new(text.to_string())) } else { None }
+}
+
+/// The length of the ID3v1 "enhanced" tag ("TAG+") that may immediately precede an ID3v1 tag.
+const ID3V1_ENHANCED_LEN: usize = 227;
+
+/// Look for an ID3v1 enhanced tag ("TAG+") in the `ID3V1_ENHANCED_LEN` bytes immediately before
+/// the current position, and return it if present. The position of the stream is restored.
+///
+/// Returns `None` if the stream is not seekable, there is not enough data before the ID3v1 tag, or
+/// no enhanced tag is present.
+fn read_enhanced_tag(mss: &mut MediaSourceStream<'_>) -> Result<Option<[u8; ID3V1_ENHANCED_LEN]>> {
+    if !mss.is_seekable() {
+        return Ok(None);
+    }
+
+    let pos = mss.pos();
+
+    let Some(start) = pos.checked_sub(ID3V1_ENHANCED_LEN as u64)
+    else {
+        return Ok(None);
+    };
+
+    let mut buf = [0u8; ID3V1_ENHANCED_LEN];
+
+    let found = mss.seek(SeekFrom::Start(start)).is_ok() && mss.read_buf_exact(&mut buf).is_ok();
+
+    // Restore the position of the stream.
+    mss.seek(SeekFrom::Start(pos))?;
+
+    Ok((found && buf[..4] == *b"TAG+").then_some(buf))
 }
 
 const ID3V1_METADATA_INFO: MetadataInfo =
@@ -147,7 +199,8 @@ impl MetadataReader for Id3v1Reader<'_> {
 
     fn read_all(&mut self) -> Result<MetadataBuffer> {
         let mut builder = MetadataBuilder::new(ID3V1_METADATA_INFO);
-        read_id3v1(&mut self.reader, &mut builder)?;
+        let enhanced = read_enhanced_tag(&mut self.reader)?;
+        read_id3v1(&mut self.reader, enhanced.as_ref(), &mut builder)?;
         Ok(MetadataBuffer { revision: builder.build(), side_data: Vec::new() })
     }
 
@@ -175,7 +228,7 @@ mod tests {
         buf[127] = 13;
 
         let mut builder = MetadataBuilder::new(ID3V1_METADATA_INFO);
-        read_id3v1(&mut BufReader::new(&buf), &mut builder).unwrap();
+        read_id3v1(&mut BufReader::new(&buf), None, &mut builder).unwrap();
         builder.build().media.tags
     }
 
@@ -210,5 +263,157 @@ mod tests {
     #[test]
     fn verify_id3v10_has_no_track_number() {
         assert!(track_numbers(&read_tags([b'x', 5])).is_empty());
+    }
+
+    fn tag_bytes(title: &[u8], genre_idx: u8) -> [u8; 128] {
+        let mut buf = [0u8; 128];
+        buf[..3].copy_from_slice(b"TAG");
+        buf[3..3 + title.len()].copy_from_slice(title);
+        buf[127] = genre_idx;
+        buf
+    }
+
+    fn enhanced_bytes(title: &[u8], artist: &[u8], album: &[u8], genre: &[u8]) -> Vec<u8> {
+        let mut buf = vec![0u8; ID3V1_ENHANCED_LEN];
+        buf[..4].copy_from_slice(b"TAG+");
+        buf[4..4 + title.len()].copy_from_slice(title);
+        buf[64..64 + artist.len()].copy_from_slice(artist);
+        buf[124..124 + album.len()].copy_from_slice(album);
+        buf[185..185 + genre.len()].copy_from_slice(genre);
+        buf
+    }
+
+    /// Read the ID3v1 tag at the end of `stream` through the reader, as the probe would.
+    fn read_stream(stream: Vec<u8>, seekable: bool) -> Vec<Tag> {
+        use std::io::Cursor;
+        use symphonia_core::io::{MediaSourceStreamOptions, ReadOnlySource};
+
+        let start = (stream.len() - 128) as u64;
+        let source: Box<dyn MediaSource> = if seekable {
+            Box::new(Cursor::new(stream))
+        }
+        else {
+            Box::new(ReadOnlySource::new(Cursor::new(stream)))
+        };
+        let mut mss = MediaSourceStream::new(source, MediaSourceStreamOptions::default());
+
+        if seekable {
+            mss.seek(SeekFrom::Start(start)).unwrap();
+        }
+        else {
+            mss.ignore_bytes(start).unwrap();
+        }
+
+        let mut reader = Id3v1Reader::try_new(mss, MetadataOptions::default()).unwrap();
+        let tags = reader.read_all().unwrap().revision.media.tags;
+
+        if seekable {
+            // The stream is positioned immediately after the tag.
+            assert_eq!(Box::new(reader).into_inner().pos(), start + 128);
+        }
+
+        tags
+    }
+
+    fn find_std(tags: &[Tag], f: impl Fn(&StandardTag) -> Option<&Arc<String>>) -> Option<&str> {
+        tags.iter().find_map(|t| t.std.as_ref().and_then(&f)).map(|v| v.as_str())
+    }
+
+    fn title_of(tags: &[Tag]) -> Option<&str> {
+        find_std(tags, |s| match s {
+            StandardTag::TrackTitle(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    fn artist(tags: &[Tag]) -> Option<&str> {
+        find_std(tags, |s| match s {
+            StandardTag::Artist(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    fn genre(tags: &[Tag]) -> Option<&str> {
+        find_std(tags, |s| match s {
+            StandardTag::Genre(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    /// Trailing spaces and NULs are trimmed from text fields.
+    #[test]
+    fn verify_trailing_spaces_are_trimmed() {
+        let mut title = b"Padded Title".to_vec();
+        title.extend_from_slice(&[b' '; 10]);
+        let tags = read_stream(tag_bytes(&title, 255).to_vec(), true);
+        assert_eq!(title_of(&tags), Some("Padded Title"));
+
+        // A field of only spaces is empty.
+        let tags = read_stream(tag_bytes(&[b' '; 30], 255).to_vec(), true);
+        assert_eq!(title_of(&tags), None);
+    }
+
+    /// C1 bytes in ID3v1 text are decoded as Windows-1252.
+    #[test]
+    fn verify_windows_1252_text() {
+        let tags = read_stream(tag_bytes(b"It\x92s \x93x\x94 \x81", 255).to_vec(), true);
+        assert_eq!(title_of(&tags), Some("It\u{2019}s \u{201c}x\u{201d} \u{fffd}"));
+    }
+
+    /// The enhanced tag provides the full title, artist, album and the free-text genre.
+    #[test]
+    fn verify_enhanced_tag() {
+        let full_title = "T".repeat(45);
+        let mut stream = vec![0xffu8; 300];
+        stream.extend(enhanced_bytes(full_title.as_bytes(), b"Long Artist", b"Album", b"Shoegaze"));
+        stream.extend(tag_bytes(&full_title.as_bytes()[..30], 13));
+
+        let tags = read_stream(stream, true);
+
+        assert_eq!(title_of(&tags), Some(full_title.as_str()));
+        assert_eq!(artist(&tags), Some("Long Artist"));
+        assert_eq!(genre(&tags), Some("Shoegaze"));
+    }
+
+    /// An empty enhanced tag field falls back to the ID3v1 field.
+    #[test]
+    fn verify_enhanced_tag_fallback() {
+        let mut stream = vec![0xffu8; 300];
+        stream.extend(enhanced_bytes(b"", b"", b"", b""));
+        stream.extend(tag_bytes(b"Short", 13));
+
+        let tags = read_stream(stream, true);
+
+        assert_eq!(title_of(&tags), Some("Short"));
+        assert_eq!(genre(&tags), Some("Pop"));
+    }
+
+    /// Without a "TAG+" marker, or without enough data before the tag, the enhanced tag is not
+    /// read.
+    #[test]
+    fn verify_no_enhanced_tag() {
+        let mut stream = vec![0xffu8; 300];
+        stream.extend(tag_bytes(b"Short", 13));
+        assert_eq!(title_of(&read_stream(stream, true)), Some("Short"));
+
+        // Fewer than 227 bytes precede the tag.
+        assert_eq!(title_of(&read_stream(tag_bytes(b"Short", 13).to_vec(), true)), Some("Short"));
+        let mut stream = vec![0xffu8; 100];
+        stream.extend(tag_bytes(b"Short", 13));
+        assert_eq!(title_of(&read_stream(stream, true)), Some("Short"));
+    }
+
+    /// A non-seekable stream skips the enhanced tag silently.
+    #[test]
+    fn verify_enhanced_tag_skipped_when_not_seekable() {
+        let full_title = "T".repeat(45);
+        let mut stream = vec![0xffu8; 300];
+        stream.extend(enhanced_bytes(full_title.as_bytes(), b"", b"", b"Shoegaze"));
+        stream.extend(tag_bytes(&full_title.as_bytes()[..30], 13));
+
+        let tags = read_stream(stream, false);
+
+        assert_eq!(title_of(&tags), Some(&full_title[..30]));
+        assert_eq!(genre(&tags), Some("Pop"));
     }
 }

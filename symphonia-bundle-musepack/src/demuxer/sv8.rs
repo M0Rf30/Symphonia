@@ -18,13 +18,13 @@
 
 use std::io::Seek;
 
-use symphonia_core::errors::{decode_error, seek_error, Result, SeekErrorKind};
+use symphonia_core::errors::{Result, SeekErrorKind, decode_error, seek_error};
 use symphonia_core::io::{MediaSource, MediaSourceStream, ReadBytes};
 
 use crate::bits::BitReader;
 use crate::decoder_core::{Decoder as Core, FRAME_LENGTH, SYNTH_DELAY};
 
-use super::{StreamInfo, PACKET_TAG_NOISE, PACKET_TAG_PLAIN};
+use super::{PACKET_TAG_NOISE, PACKET_TAG_PLAIN, StreamInfo};
 
 const SAMPLE_FREQS: [u32; 4] = [44100, 48000, 37800, 32000];
 
@@ -152,9 +152,9 @@ pub(crate) fn read_header(mss: &mut MediaSourceStream<'_>) -> Result<(StreamInfo
     let mut sh_seen = false;
     let mut pns = true;
     let mut seek_table: Option<super::seek_table::SeekTable> = None;
-    // `si.header_position`: byte offset of the "MPCK" magic. This crate does not (yet) skip a
-    // leading ID3v2 tag before probing, so the magic is always at offset 0 in practice.
-    let header_position: u64 = 0;
+    // `si.header_position`: byte offset of the "MPCK" magic, which the caller has just read. A
+    // leading ID3v2 tag is consumed by the probe, so this is not necessarily offset 0.
+    let header_position: u64 = mss.pos().saturating_sub(4);
 
     loop {
         let block_start = mss.pos();
@@ -229,7 +229,8 @@ pub(crate) fn read_header(mss: &mut MediaSourceStream<'_>) -> Result<(StreamInfo
             }
             b"SO" if mss.is_seekable() && seek_table.is_none() => {
                 let resume_pos = mss.pos();
-                if let Some(st) = try_parse_seek_table(mss, &payload, block_start, header_position, &info)
+                if let Some(st) =
+                    try_parse_seek_table(mss, &payload, block_start, header_position, &info)
                 {
                     seek_table = Some(st);
                 }
@@ -387,11 +388,7 @@ impl Sv8State {
     /// substitution), which runs on across packets. Streams that cannot contain noise
     /// substitution (the `EI` block says the encoder's PNS was off) skip this; for all others the
     /// first seek parses (but does not synthesize) every packet once to record the state at each.
-    fn noise_state_at(
-        &mut self,
-        mss: &mut MediaSourceStream<'_>,
-        block: u64,
-    ) -> Option<[u32; 2]> {
+    fn noise_state_at(&mut self, mss: &mut MediaSourceStream<'_>, block: u64) -> Option<[u32; 2]> {
         let cfg = self.noise_cfg.as_ref()?;
         if self.noise_index.is_none() {
             self.noise_index = Some(build_noise_index(mss, self.data_start, cfg));

@@ -643,25 +643,38 @@ fn id3v2_search_trailing_header(
             continue;
         }
 
-        // A tag in the "id3 " chunk of a RIFF or AIFF stream is read by the container, so is not a
-        // tag that was appended to the stream.
-        if i >= 8 && buf[i - 8..i - 4].eq_ignore_ascii_case(b"id3 ") {
-            continue;
-        }
-
         return Some((start, end));
     }
 
     None
 }
 
+/// Whether the tag starting at `start` is the payload of an "ID3 " chunk, which the container
+/// (RIFF/AIFF: 4-byte size after the ID; DSDIFF/CAF: 8-byte size) reads itself.
+fn in_container_id3_chunk(mss: &mut MediaSourceStream<'_>, start: u64) -> bool {
+    let Some(pos) = start.checked_sub(12)
+    else {
+        return start >= 8 && {
+            let mut id = [0u8; 4];
+            read_at(mss, start - 8, &mut id).is_some() && id.eq_ignore_ascii_case(b"id3 ")
+        };
+    };
+    let mut hdr = [0u8; 12];
+    read_at(mss, pos, &mut hdr).is_some()
+        && (hdr[4..8].eq_ignore_ascii_case(b"id3 ") || hdr[0..4].eq_ignore_ascii_case(b"id3 "))
+}
+
 fn find_trailing_id3v2(mss: &mut MediaSourceStream<'_>, len: u64) -> Option<Range<u64>> {
     let ends = trailing_tag_ends(mss, len);
 
-    // Prefer the tag closest to the end of the stream.
-    ends.iter()
+    // Prefer the tag closest to the end of the stream. A tag in a container's ID3 chunk is not an
+    // appended tag.
+    let found = ends
+        .iter()
         .find_map(|&end| id3v2_footer_tag_start(mss, end).map(|start| start..end))
-        .or_else(|| id3v2_search_trailing_header(mss, len, &ends).map(|(start, end)| start..end))
+        .or_else(|| id3v2_search_trailing_header(mss, len, &ends).map(|(start, end)| start..end))?;
+
+    (!in_container_id3_chunk(mss, found.start)).then_some(found)
 }
 
 /// Locate an ID3v2 tag that has been appended to the end of a stream, without reading it.
@@ -1317,6 +1330,28 @@ mod tests {
             StandardTag::TrackTitle(v) => Some(v),
             _ => None,
         })
+    }
+
+    /// Latin-1 (encoding 0) text containing Windows-1252 bytes is decoded as Windows-1252.
+    #[test]
+    fn verify_latin1_text_is_decoded_as_windows_1252() {
+        let mut body = vec![0u8];
+        body.extend_from_slice(b"It\x92s a \x93test\x94");
+        let frames = frame_v23(b"TIT2", 0, &body);
+
+        let tags = read_tags(tag_bytes(3, &frames, false));
+
+        assert_eq!(titles(&tags), ["It\u{2019}s a \u{201c}test\u{201d}"]);
+    }
+
+    /// Bytes undefined in Windows-1252 decode to the replacement character.
+    #[test]
+    fn verify_latin1_undefined_windows_1252_byte() {
+        let frames = frame_v23(b"TIT2", 0, b"\0a\x81b");
+
+        let tags = read_tags(tag_bytes(3, &frames, false));
+
+        assert_eq!(titles(&tags), ["a\u{fffd}b"]);
     }
 
     /// A multi-valued frame yields one standard tag per value, and genre references are resolved.

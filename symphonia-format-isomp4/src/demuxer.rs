@@ -680,6 +680,11 @@ impl<'s> IsoMp4Reader<'s> {
                     // Read the metadata atom and append it to the log.
                     let mut meta = it.read_atom::<MetaAtom>()?;
 
+                    // ID3v2 metadata is pushed first so the preferred ilst metadata is current.
+                    if let Some(rev) = meta.take_id3v2() {
+                        metadata.push(rev);
+                    }
+
                     if let Some(rev) = meta.take_metadata() {
                         metadata.push(rev);
                     }
@@ -734,6 +739,11 @@ impl<'s> IsoMp4Reader<'s> {
             else {
                 info!("stream is segmented without a segment index.");
             }
+        }
+
+        // ID3v2 metadata is pushed first so the preferred ilst metadata is current.
+        if let Some(rev) = moov.take_id3v2() {
+            metadata.push(rev);
         }
 
         if let Some(rev) = moov.take_metadata() {
@@ -1381,6 +1391,17 @@ mod aac_timeline_tests {
     /// byte. `stts` is a list of (count, delta) and `elst` an optional (media_time,
     /// segment_duration) edit, both in ticks of `timescale`.
     fn mp4(asc: &[u8], timescale: u32, stts: &[(u32, u32)], elst: Option<(i32, u32)>) -> Vec<u8> {
+        mp4_with_moov_extra(asc, timescale, stts, elst, &[])
+    }
+
+    /// As `mp4`, with extra atoms (e.g. `udta`) appended to the `moov` atom.
+    fn mp4_with_moov_extra(
+        asc: &[u8],
+        timescale: u32,
+        stts: &[(u32, u32)],
+        elst: Option<(i32, u32)>,
+        moov_extra: &[u8],
+    ) -> Vec<u8> {
         let n_samples: u32 = stts.iter().map(|(count, _)| count).sum();
         let duration: u32 = stts.iter().map(|(count, delta)| count * delta).sum();
 
@@ -1471,8 +1492,11 @@ mod aac_timeline_tests {
             mvhd.extend_from_slice(&0x0001_0000u32.to_be_bytes());
             mvhd.extend_from_slice(&0x0100u16.to_be_bytes());
 
-            let moov =
-                atom(b"moov", &[atom(b"mvhd", &mvhd), atom(b"trak", &trak.concat())].concat());
+            let moov = atom(
+                b"moov",
+                &[atom(b"mvhd", &mvhd), atom(b"trak", &trak.concat()), moov_extra.to_vec()]
+                    .concat(),
+            );
 
             let mut ftyp = b"M4A ".to_vec();
             ftyp.extend_from_slice(&[0; 4]);
@@ -1492,6 +1516,85 @@ mod aac_timeline_tests {
         }
         data.extend_from_slice(&atom(b"mdat", &mdat));
         data
+    }
+
+    const LC_ASC: [u8; 2] = [0x12, 0x10];
+
+    fn id3v23_title_tag(title: &str) -> Vec<u8> {
+        let mut body = vec![3u8];
+        body.extend_from_slice(title.as_bytes());
+        let mut frame = b"TIT2".to_vec();
+        frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&[0, 0]);
+        frame.extend_from_slice(&body);
+        let n = frame.len();
+        let mut tag = vec![b'I', b'D', b'3', 3, 0, 0];
+        tag.extend_from_slice(&[
+            ((n >> 21) & 0x7f) as u8,
+            ((n >> 14) & 0x7f) as u8,
+            ((n >> 7) & 0x7f) as u8,
+            (n & 0x7f) as u8,
+        ]);
+        tag.extend_from_slice(&frame);
+        tag
+    }
+
+    /// An `ID32` box: version/flags, a packed language code ("und"), then the ID3v2 tag.
+    fn id32(title: &str) -> Vec<u8> {
+        let mut body = vec![0; 4];
+        body.extend_from_slice(&0x55c4u16.to_be_bytes());
+        body.extend_from_slice(&id3v23_title_tag(title));
+        atom(b"ID32", &body)
+    }
+
+    fn titles(reader: &mut IsoMp4Reader<'_>) -> Vec<String> {
+        use symphonia_core::meta::StandardTag;
+
+        let mut metadata = reader.metadata();
+        let mut titles = Vec::new();
+        loop {
+            if let Some(rev) = metadata.current() {
+                titles.extend(rev.media.tags.iter().filter_map(|t| match &t.std {
+                    Some(StandardTag::TrackTitle(v)) => Some(v.to_string()),
+                    _ => None,
+                }));
+            }
+            if metadata.pop().is_none() {
+                break;
+            }
+        }
+        titles
+    }
+
+    #[test]
+    fn id32_box_in_udta_meta_is_read() {
+        let mut meta_body = vec![0; 4];
+        meta_body.extend_from_slice(&id32("In meta"));
+        let udta = atom(b"udta", &atom(b"meta", &meta_body));
+
+        let mut reader = open(mp4_with_moov_extra(&LC_ASC, 44_100, &[(10, 1024)], None, &udta));
+        assert_eq!(titles(&mut reader), ["In meta"]);
+        assert_eq!(reader.tracks().len(), 1);
+    }
+
+    #[test]
+    fn id32_box_in_udta_is_read() {
+        let udta = atom(b"udta", &id32("In udta"));
+
+        let mut reader = open(mp4_with_moov_extra(&LC_ASC, 44_100, &[(10, 1024)], None, &udta));
+        assert_eq!(titles(&mut reader), ["In udta"]);
+    }
+
+    #[test]
+    fn malformed_id32_box_is_ignored() {
+        let mut body = vec![0; 4];
+        body.extend_from_slice(&0x55c4u16.to_be_bytes());
+        body.extend_from_slice(b"not an id3 tag");
+        let udta = atom(b"udta", &atom(b"ID32", &body));
+
+        let mut reader = open(mp4_with_moov_extra(&LC_ASC, 44_100, &[(10, 1024)], None, &udta));
+        assert!(titles(&mut reader).is_empty());
+        assert_eq!(reader.tracks().len(), 1);
     }
 
     fn open(data: Vec<u8>) -> IsoMp4Reader<'static> {

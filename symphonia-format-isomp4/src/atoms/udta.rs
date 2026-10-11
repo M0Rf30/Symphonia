@@ -8,7 +8,8 @@
 use symphonia_core::meta::MetadataRevision;
 
 use crate::atoms::{
-    Atom, AtomHeader, AtomIterator, AtomType, ChplAtom, GaplessInfo, MetaAtom, ReadAtom, Result,
+    Atom, AtomHeader, AtomIterator, AtomType, ChplAtom, GaplessInfo, Id32Atom, MetaAtom, ReadAtom,
+    Result,
 };
 
 /// User data atom.
@@ -19,12 +20,19 @@ pub struct UdtaAtom {
     pub meta: Option<MetaAtom>,
     /// Nero chapter list atom.
     pub chpl: Option<ChplAtom>,
+    /// ID3v2 metadata revision from an `ID32` box directly in the user data atom, if present.
+    pub id3v2: Option<MetadataRevision>,
 }
 
 impl UdtaAtom {
     /// If metadata was read, consumes the metadata and returns it.
     pub fn take_metadata(&mut self) -> Option<MetadataRevision> {
         self.meta.as_mut().and_then(|meta| meta.take_metadata())
+    }
+
+    /// If ID3v2 metadata (`ID32` box) was read, consumes the metadata and returns it.
+    pub fn take_id3v2(&mut self) -> Option<MetadataRevision> {
+        self.id3v2.take().or_else(|| self.meta.as_mut().and_then(|meta| meta.take_id3v2()))
     }
 
     /// Get the gapless playback information, if present.
@@ -38,6 +46,7 @@ impl Atom for UdtaAtom {
     fn read<R: ReadAtom>(it: &mut AtomIterator<R>, _header: &AtomHeader) -> Result<Self> {
         let mut meta = None;
         let mut chpl = None;
+        let mut id3v2 = None;
 
         while let Some(header) = it.next_header()? {
             match header.atom_type {
@@ -47,11 +56,14 @@ impl Atom for UdtaAtom {
                 AtomType::ChapterList => {
                     chpl = Some(it.read_atom::<ChplAtom>()?);
                 }
+                AtomType::Id3v2Metadata => {
+                    id3v2 = it.read_atom::<Id32Atom>()?.metadata;
+                }
                 // TODO: Support older QuickTime-style user data lists. Need sample files.
                 _ => (),
             }
         }
 
-        Ok(UdtaAtom { meta, chpl })
+        Ok(UdtaAtom { meta, chpl, id3v2 })
     }
 }

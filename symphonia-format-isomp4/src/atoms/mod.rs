@@ -34,6 +34,7 @@ pub(crate) mod flac;
 pub(crate) mod ftyp;
 pub(crate) mod hdlr;
 pub(crate) mod hvcc;
+pub(crate) mod id32;
 pub(crate) mod ilst;
 pub(crate) mod mdhd;
 pub(crate) mod mdia;
@@ -85,6 +86,7 @@ pub use flac::FlacAtom;
 pub use ftyp::FtypAtom;
 pub use hdlr::HdlrAtom;
 pub use hvcc::HvcCAtom;
+pub use id32::Id32Atom;
 pub use ilst::{GaplessInfo, IlstAtom};
 pub use mdhd::MdhdAtom;
 pub use mdia::MdiaAtom;
@@ -146,6 +148,7 @@ pub enum AtomType {
     AvcConfiguration,
     BitRate,
     ChapterList,
+    Id3v2Metadata,
     ChunkOffset,
     ChunkOffset64,
     CleanAperture,
@@ -315,6 +318,7 @@ impl From<[u8; 4]> for AtomType {
             b"hev1" => AtomType::VisualSampleEntryHev1,
             b"hvc1" => AtomType::VisualSampleEntryHvc1,
             b"hvcC" => AtomType::HevcConfiguration,
+            b"ID32" => AtomType::Id3v2Metadata,
             b"ilst" => AtomType::MetaList,
             b"in24" => AtomType::AudioSampleEntryS24,
             b"in32" => AtomType::AudioSampleEntryS32,

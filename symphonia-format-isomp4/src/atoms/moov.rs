@@ -35,6 +35,11 @@ impl MoovAtom {
         self.udta.as_mut().and_then(|udta| udta.take_metadata())
     }
 
+    /// If ID3v2 metadata (`ID32` box) was read, consumes the metadata and returns it.
+    pub fn take_id3v2(&mut self) -> Option<MetadataRevision> {
+        self.udta.as_mut().and_then(|udta| udta.take_id3v2())
+    }
+
     /// Get the chapters from the Nero chapter list (`chpl`) atom, if present.
     pub fn chapters(&self) -> Option<ChapterGroup> {
         let chpl = self.udta.as_ref()?.chpl.as_ref()?;

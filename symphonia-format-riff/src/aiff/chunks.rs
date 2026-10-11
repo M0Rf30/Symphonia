@@ -18,7 +18,7 @@ use symphonia_core::codecs::audio::well_known::{
     CODEC_ID_PCM_S32LE, CODEC_ID_PCM_U8,
 };
 use symphonia_core::errors::{Result, decode_error, unsupported_error};
-use symphonia_core::io::ReadBytes;
+use symphonia_core::io::{ReadBytes, ScopedStream};
 use symphonia_core::meta::{MetadataRevision, StandardTag, Tag};
 use symphonia_core::util::text;
 use symphonia_metadata::embedded::riff;
@@ -466,9 +466,16 @@ pub struct Id3Chunk {
 }
 
 impl ParseChunk for Id3Chunk {
-    fn parse<B: ReadBytes>(reader: &mut B, _tag: [u8; 4], _len: u32) -> Result<Self> {
+    fn parse<B: ReadBytes>(reader: &mut B, _tag: [u8; 4], len: u32) -> Result<Self> {
+        // The tag must not be read past the end of the chunk.
+        let mut reader = ScopedStream::new(reader, u64::from(len));
+
         let mut side_data = Vec::new();
-        let metadata = riff::read_riff_id3_chunk(reader, &mut side_data)?;
+        let metadata = riff::read_riff_id3_chunk(&mut reader, &mut side_data)?;
+
+        // Skip any unread data in the chunk (e.g., padding).
+        reader.ignore()?;
+
         Ok(Id3Chunk { metadata })
     }
 }
@@ -500,7 +507,7 @@ impl ParseChunkTag for RiffAiffChunks {
             b"NAME" | b"AUTH" | b"(c) " | b"ANNO" => {
                 parser!(RiffAiffChunks::Text, TextChunk, tag, len)
             }
-            b"ID3 " => parser!(RiffAiffChunks::Id3, Id3Chunk, tag, len),
+            b"ID3 " | b"id3 " => parser!(RiffAiffChunks::Id3, Id3Chunk, tag, len),
             _ => None,
         }
     }

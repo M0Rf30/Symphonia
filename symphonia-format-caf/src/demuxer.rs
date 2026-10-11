@@ -600,6 +600,7 @@ impl<'s> CafReader<'s> {
 
                     self.metadata.push(builder.build());
                 }
+                Some(Id3(rev)) => self.metadata.push(rev),
                 Some(Free) | None => {}
             }
 

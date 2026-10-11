@@ -9,13 +9,17 @@ use std::fmt::Debug;
 
 use symphonia_core::meta::MetadataRevision;
 
-use crate::atoms::{Atom, AtomHeader, AtomIterator, AtomType, GaplessInfo, IlstAtom, ReadAtom, Result};
+use crate::atoms::{
+    Atom, AtomHeader, AtomIterator, AtomType, GaplessInfo, Id32Atom, IlstAtom, ReadAtom, Result,
+};
 
 /// User data atom.
 #[allow(dead_code)]
 pub struct MetaAtom {
     /// Metadata revision.
     pub metadata: Option<MetadataRevision>,
+    /// ID3v2 metadata revision from an `ID32` box, if present.
+    pub id3v2: Option<MetadataRevision>,
     /// Gapless playback information, if present.
     pub gapless: Option<GaplessInfo>,
 }
@@ -27,6 +31,11 @@ impl Debug for MetaAtom {
 }
 
 impl MetaAtom {
+    /// If ID3v2 metadata (`ID32` box) was read, consumes the metadata and returns it.
+    pub fn take_id3v2(&mut self) -> Option<MetadataRevision> {
+        self.id3v2.take()
+    }
+
     /// If metadata was read, consumes the metadata and returns it.
     pub fn take_metadata(&mut self) -> Option<MetadataRevision> {
         self.metadata.take()
@@ -40,6 +49,7 @@ impl Atom for MetaAtom {
 
         let mut metadata = None;
         let mut gapless = None;
+        let mut id3v2 = None;
 
         while let Some(header) = it.next_header()? {
             match header.atom_type {
@@ -48,11 +58,14 @@ impl Atom for MetaAtom {
                     gapless = ilst.gapless;
                     metadata = Some(ilst.metadata);
                 }
+                AtomType::Id3v2Metadata => {
+                    id3v2 = it.read_atom::<Id32Atom>()?.metadata;
+                }
                 // TODO: Support country and language lists.
                 _ => (),
             }
         }
 
-        Ok(MetaAtom { metadata, gapless })
+        Ok(MetaAtom { metadata, id3v2, gapless })
     }
 }

@@ -9,7 +9,8 @@ use symphonia_core::errors::{decode_error, seek_error, unsupported_error, Result
 use symphonia_core::formats::prelude::*;
 use symphonia_core::formats::probe::{ProbeFormatData, ProbeableFormat, Score, Scoreable};
 use symphonia_core::io::*;
-use symphonia_core::meta::{Metadata, MetadataLog};
+use symphonia_core::meta::{Metadata, MetadataLog, MetadataRevision, MetadataSideData};
+use symphonia_metadata::embedded::riff::read_riff_id3_chunk;
 use symphonia_core::support_format;
 use symphonia_core::units::{TimeBase, Timestamp, Duration};
 use log::warn;
@@ -114,6 +115,21 @@ impl DffSoundProperties {
     }
 }
 
+fn is_id3_chunk(id: &[u8; 4]) -> bool { id == b"ID3 " || id == b"id3 " }
+
+/// Reads an ID3v2 tag from an `ID3 ` chunk, consuming exactly `chunk_size` bytes. Errors are
+/// logged and the chunk is skipped.
+fn read_id3_chunk(source: &mut MediaSourceStream<'_>, chunk_size: u64, out: &mut Vec<MetadataRevision>) {
+    let mut scoped = ScopedStream::new(&mut *source, chunk_size);
+    let mut side_data = Vec::<MetadataSideData>::new();
+    match read_riff_id3_chunk(&mut scoped, &mut side_data) {
+        Ok(rev) => out.push(rev),
+        Err(e) => warn!("dff: failed to read ID3v2 metadata: {}", e),
+    }
+    // Always leave the stream at the end of the chunk.
+    if let Err(e) = scoped.ignore() { warn!("dff: failed to skip ID3 chunk remainder: {}", e); }
+}
+
 pub struct DffReader<'s> {
     reader: MediaSourceStream<'s>, media_info: MediaInfo, tracks: Vec<Track>,
     metadata: MetadataLog, data_start_pos: u64, data_end_pos: u64, current_pos: u64,
@@ -128,12 +144,14 @@ impl<'s> DffReader<'s> {
         props.validate()?;
 
         let mut info_parser = DffInfoParser::new();
+        let mut id3_revisions = Vec::new();
         let mut data_start_pos = None;
         let mut data_size = None;
         while let Ok(chunk_id) = source.read_quad_bytes() {
             let chunk_size = source.read_be_u64()?;
             if &chunk_id == b"DSD " { data_start_pos = Some(source.pos()); data_size = Some(chunk_size); break; }
-            source.ignore_bytes(chunk_size)?;
+            if is_id3_chunk(&chunk_id) { read_id3_chunk(&mut source, chunk_size, &mut id3_revisions); }
+            else { source.ignore_bytes(chunk_size)?; }
             if chunk_size % 2 == 1 { source.ignore_bytes(1)?; }
         }
         let data_start_pos = match data_start_pos { Some(p) => p, None => return Err(decode_error::<u64>("dff: no data").unwrap_err()), };
@@ -147,6 +165,7 @@ impl<'s> DffReader<'s> {
                 match &chunk_id {
                     b"DIIN" => { if let Err(e) = info_parser.parse_diin(&mut source, chunk_size) { warn!("DFF DIIN: {}", e); } }
                     b"COMT" => { if let Err(e) = info_parser.parse_comt(&mut source, chunk_size) { warn!("DFF COMT: {}", e); } }
+                    id if is_id3_chunk(id) => { read_id3_chunk(&mut source, chunk_size, &mut id3_revisions); }
                     _ => { source.ignore_bytes(chunk_size)?; }
                 }
                 if chunk_size % 2 == 1 { source.ignore_bytes(1)?; }
@@ -168,6 +187,7 @@ impl<'s> DffReader<'s> {
         track.with_codec_params(CodecParameters::Audio(params));
         let mut metadata_log = MetadataLog::default();
         metadata_log.push(info_parser.into_metadata().build());
+        for rev in id3_revisions { metadata_log.push(rev); }
         Ok(DffReader { reader: source, media_info: MediaInfo::new(), tracks: vec![track],
             metadata: metadata_log, data_start_pos, data_end_pos, current_pos: data_start_pos,
             channel_count: props.channel_count })

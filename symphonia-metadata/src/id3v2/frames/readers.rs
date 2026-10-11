@@ -27,6 +27,7 @@ use smallvec::SmallVec;
 
 use crate::id3v2::frames::{FrameResult, Id3v2Chapter, Id3v2TableOfContents};
 use crate::id3v2::sub_fields::*;
+use crate::utils::id3v1::decode_windows_1252_byte;
 use crate::utils::id3v2::get_visual_key_from_picture_type;
 use crate::utils::std_tag::*;
 
@@ -125,10 +126,9 @@ fn decode_id3v2_iso8859_1(buf: &[u8]) -> impl Iterator<Item = char> + '_ {
         match c {
             // C0 control codes excluding line-feed.
             0x00..=0x09 | 0x0b..=0x1f => char::REPLACEMENT_CHARACTER,
-            // C1 control codes.
-            0x80..=0x9f => char::REPLACEMENT_CHARACTER,
-            // All other non-control characters.
-            _ => char::from(c),
+            // Bytes 0x80 to 0x9f are C1 control codes in ISO-8859-1, but in practice are almost
+            // always Windows-1252 text. All other bytes map to the same Unicode code point.
+            _ => decode_windows_1252_byte(c),
         }
     })
 }
@@ -1461,5 +1461,27 @@ mod tests {
             read_string_list(&mut BufReader::new(b"\0\0"), Encoding::Utf8).unwrap(),
             RawValue::StringList(Arc::new(vec!["".to_string(), "".to_string()]))
         );
+    }
+
+    /// ISO-8859-1 text decodes bytes 0x80-0x9f as Windows-1252.
+    #[test]
+    fn verify_decode_iso8859_1_windows_1252() {
+        use super::decode_string_buf;
+
+        assert_eq!(
+            decode_string_buf(b"It\x92s a \x93test\x94", Encoding::Iso8859_1),
+            "It\u{2019}s a \u{201c}test\u{201d}"
+        );
+        assert_eq!(
+            decode_string_buf(b"\x80 \x96 \x97 \x99", Encoding::Iso8859_1),
+            "\u{20ac} \u{2013} \u{2014} \u{2122}"
+        );
+        // The five code points undefined in Windows-1252.
+        assert_eq!(
+            decode_string_buf(b"\x81\x8d\x8f\x90\x9d", Encoding::Iso8859_1),
+            "\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}"
+        );
+        // C0 control codes other than line-feed are still replaced, Latin-1 is unchanged.
+        assert_eq!(decode_string_buf(b"a\x01\nb\xe9", Encoding::Iso8859_1), "a\u{fffd}\nb\u{e9}");
     }
 }

@@ -7,6 +7,26 @@
 
 //! Utilities for ID3v1 defacto-standards used by many metadata formats.
 
+/// Decode a single byte of ISO-8859-1 text that is commonly actually Windows-1252.
+///
+/// Bytes 0x80 to 0x9f, which are C1 control codes in ISO-8859-1, are mapped to their Windows-1252
+/// characters. The five code points undefined in Windows-1252 (0x81, 0x8d, 0x8f, 0x90, 0x9d) map
+/// to U+FFFD. All other bytes map to the Unicode code point of the same value.
+pub fn decode_windows_1252_byte(c: u8) -> char {
+    const C1: [char; 32] = [
+        '\u{20ac}', '\u{fffd}', '\u{201a}', '\u{0192}', '\u{201e}', '\u{2026}', '\u{2020}',
+        '\u{2021}', '\u{02c6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{fffd}',
+        '\u{017d}', '\u{fffd}', '\u{fffd}', '\u{2018}', '\u{2019}', '\u{201c}', '\u{201d}',
+        '\u{2022}', '\u{2013}', '\u{2014}', '\u{02dc}', '\u{2122}', '\u{0161}', '\u{203a}',
+        '\u{0153}', '\u{fffd}', '\u{017e}', '\u{0178}',
+    ];
+
+    match c {
+        0x80..=0x9f => C1[usize::from(c - 0x80)],
+        _ => char::from(c),
+    }
+}
+
 /// Try to get the genre name for the ID3v1 genre number.
 pub fn get_genre_name(num: u8) -> Option<String> {
     GENRES.get(usize::from(num)).map(|genre| genre.to_string())
