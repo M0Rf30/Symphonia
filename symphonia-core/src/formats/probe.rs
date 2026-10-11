@@ -366,6 +366,18 @@ pub struct Probe {
     standard: Vec<GenericProbeMatch>,
     fallback: Vec<GenericProbeMatch>,
     anchors: Vec<u32>,
+    /// Every marker a forward (non-trailing) scan can match, sorted. Checked against the bytes at
+    /// a bloom filter hit before running the per-tier reader search, which is far more expensive.
+    /// Without this, a marker prefix common in padding (e.g. MPEG-PS `00 00 01 BA` in runs of
+    /// zeros) sends every byte position through the full search.
+    forward_markers: Vec<&'static [u8]>,
+    /// For each distinct 2-byte prefix of `forward_markers`, sorted: the prefix and the index of
+    /// the first marker with it.
+    forward_prefixes: Vec<(u16, usize)>,
+    /// The most leading zero bytes of any of `forward_markers`, or `None` if a marker is all
+    /// zeros. Inside a run of zeros, a marker can then only start this many bytes before the end
+    /// of the run, so the rest of the run is skipped without testing each position.
+    zero_run_lookback: Option<u32>,
     opts: ProbeOptions,
 }
 
@@ -465,6 +477,29 @@ impl Probe {
             self.filter.insert(&prefix);
         }
 
+        if candidate.should_test(false) {
+            for &marker in candidate.spec.markers {
+                // Kept sorted so markers sharing leading bytes are contiguous (see
+                // `marker_follows`).
+                if let Err(at) = self.forward_markers.binary_search(&marker) {
+                    self.forward_markers.insert(at, marker);
+                }
+            }
+
+            self.forward_prefixes.clear();
+            for (i, marker) in self.forward_markers.iter().enumerate() {
+                let prefix = u16::from_be_bytes([marker[0], marker[1]]);
+                if self.forward_prefixes.last().is_none_or(|e| e.0 != prefix) {
+                    self.forward_prefixes.push((prefix, i));
+                }
+            }
+
+            self.zero_run_lookback = self.forward_markers.iter().try_fold(0, |max, marker| {
+                let zeros = marker.iter().take_while(|&&b| b == 0).count();
+                (zeros < marker.len()).then(|| max.max(zeros as u32))
+            });
+        }
+
         // Register at the desired tier.
         match tier {
             Tier::Preferred => self.preferred.push(candidate),
@@ -507,11 +542,35 @@ impl Probe {
                     return factory(mss, fmt_opts);
                 }
                 // If metadata was found, instantiate the metadata reader, read the metadata, and
-                // push it onto the metadata log.
+                // push it onto the metadata log. Metadata that fails to read (typically a marker
+                // that is a false match inside junk, padding or picture data) is skipped, and the
+                // scan resumes one byte past its marker instead of failing the whole probe.
                 ProbeMatch::Metadata { factory, .. } => {
+                    let marker_pos = mss.pos();
                     let mut reader = factory(mss, meta_opts)?;
-                    read_and_append_metadata(&mut reader, &mut fmt_opts)?;
+                    let result = read_and_append_metadata(&mut reader, &mut fmt_opts);
+                    let short_name = reader.metadata_info().short_name;
                     mss = reader.into_inner();
+
+                    if let Err(err) = result {
+                        if let Error::IoError(io) = &err {
+                            if io.kind() != std::io::ErrorKind::UnexpectedEof {
+                                return Err(err);
+                            }
+                        }
+
+                        warn!("skipping '{short_name}' metadata at {marker_pos}: {err}");
+
+                        let resume = marker_pos + 1;
+                        if mss.seek_buffered(resume) != resume {
+                            if !mss.is_seekable() {
+                                // The marker is gone from the buffer and cannot be sought back
+                                // to; resume from wherever the reader stopped.
+                                continue;
+                            }
+                            mss.seek(SeekFrom::Start(resume))?;
+                        }
+                    }
                 }
             }
         }
@@ -611,6 +670,28 @@ impl Probe {
                 break;
             }
 
+            // Zero padding is common between metadata and audio. Skip the inside of a run of zeros
+            // in a tight loop, then step back so that every position a marker could still start at
+            // is tested.
+            if win == 0 {
+                if let Some(lookback) = self.zero_run_lookback {
+                    let mut run = 0;
+                    while count + run < self.opts.max_probe_depth {
+                        match mss.read_byte() {
+                            Ok(0) => run += 1,
+                            Ok(_) => {
+                                mss.seek_buffered_rel(-1);
+                                break;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    let back = run.min(lookback);
+                    mss.seek_buffered_rel(-(back as isize));
+                    count += run - back;
+                }
+            }
+
             if count % 4096 == 0 {
                 debug!(
                     "searching for format marker... {}+{} / {} bytes",
@@ -619,8 +700,11 @@ impl Probe {
             }
 
             // Use the bloom filter to check if the the 2-byte window may be a prefix of a
-            // registered marker.
-            if self.filter.may_contain(&win.to_be_bytes()) {
+            // registered marker, then whether a registered marker follows in full. Only then run
+            // the reader search.
+            if self.filter.may_contain(&win.to_be_bytes())
+                && self.marker_follows(mss, win.to_be_bytes())
+            {
                 // Re-align the stream to the start of the marker.
                 mss.seek_buffered_rel(-2);
 
@@ -645,6 +729,53 @@ impl Probe {
         }
 
         unsupported_error("core (probe): no suitable format reader found")
+    }
+
+    /// Returns `true` if the 2-byte `prefix` that was just read starts a forward-scan marker that
+    /// matches in full. The stream position is unchanged.
+    ///
+    /// This runs at every bloom filter hit, which is every byte of a zero run (due to the MPEG-PS
+    /// start code), so it must be cheap: the sorted markers are narrowed one byte at a time, and
+    /// most hits are rejected after reading a single byte.
+    fn marker_follows(&self, mss: &mut MediaSourceStream<'_>, prefix: [u8; 2]) -> bool {
+        // Markers sharing their first `n` bytes are contiguous in the sorted list, and a marker of
+        // length `n` sorts first among them.
+        let narrow = |live: &[&'static [u8]], n: usize, byte: u8| {
+            let lo = live.partition_point(|m| m[n] < byte);
+            let hi = live.partition_point(|m| m[n] <= byte);
+            (lo, hi)
+        };
+
+        let Ok(i) =
+            self.forward_prefixes.binary_search_by_key(&u16::from_be_bytes(prefix), |e| e.0)
+        else {
+            // A bloom filter false positive, or a prefix of trailing-only markers.
+            return false;
+        };
+        let lo = self.forward_prefixes[i].1;
+        let hi = self.forward_prefixes.get(i + 1).map_or(self.forward_markers.len(), |e| e.1);
+        let mut live = &self.forward_markers[lo..hi];
+
+        let mut n = 2;
+        let found = loop {
+            match live.first() {
+                None => break false,
+                Some(m) if m.len() == n => break true,
+                Some(_) => (),
+            }
+
+            let Ok(byte) = mss.read_byte()
+            else {
+                break false;
+            };
+
+            let (lo, hi) = narrow(live, n, byte);
+            live = &live[lo..hi];
+            n += 1;
+        };
+
+        mss.seek_buffered_rel(-((n - 2) as isize));
+        found
     }
 
     /// Find the best reader.
