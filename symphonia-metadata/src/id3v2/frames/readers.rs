@@ -753,8 +753,9 @@ pub fn read_popm_frame(mut reader: BufReader<'_>, frame: &FrameInfo<'_>) -> Resu
     // not. Add the user's email and play counter as sub-fields.
     let raw = RawTag::new_with_sub_fields(frame.id, rating, sub_fields.into_boxed_slice());
 
-    // Create the tag.
-    let tag = Tag::new(raw);
+    // Create the tag. The rating byte (0-255) is mapped to a rating in PPM.
+    let ppm = (u64::from(rating) * 2_000_000 + 255) / 510;
+    let tag = Tag::new_std(raw, StandardTag::Rating(ppm as u32));
 
     Ok(FrameResult::Tag(tag))
 }
