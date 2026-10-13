@@ -19,6 +19,8 @@ mod hybrid_synthesis;
 mod requantize;
 mod stereo;
 
+pub use stereo::IntensityMode;
+
 use crate::{common::*, synthesis};
 
 use common::BlockType;
@@ -217,6 +219,10 @@ struct GranuleChannel {
     /// in length (maximum value 15). For MPEG2 with intensity stereo, a scale factor will not
     /// exceed 5 bits (maximum value 31) in length.
     scalefacs: [u8; 39],
+    /// For the intensity stereo channel of MPEG2/2.5 bitstreams, the largest intensity position
+    /// each scale factor (indexed like `scalefacs`) can carry given its bit length. Used as the
+    /// invalid intensity position by the mp3PRO intensity stereo mode.
+    is_pos_max: [u8; 39],
     /// The starting sample index of the rzero partition, or the count of big_values and count1
     /// samples.
     rzero: usize,
@@ -238,6 +244,7 @@ impl Default for GranuleChannel {
             scalefac_scale: false,
             count1table_select: 0,
             scalefacs: [0; 39],
+            is_pos_max: [31; 39],
             rzero: 0,
         }
     }
@@ -274,6 +281,8 @@ pub struct Layer3 {
     pub overlap: [[[f32; 18]; 32]; 2],
     pub synthesis: [synthesis::SynthesisState; 2],
     pub resevoir: BitResevoir,
+    /// The intensity stereo rule for MPEG2/2.5 bitstreams.
+    pub intensity_mode: IntensityMode,
 }
 
 impl Layer3 {
@@ -309,13 +318,22 @@ impl Layer3 {
         Ok(())
     }
 
-    pub fn new() -> Self {
+    pub fn new(intensity_mode: IntensityMode) -> Self {
         Self {
             samples: [[[0f32; 576]; 2]; 2],
             overlap: [[[0f32; 18]; 32]; 2],
             synthesis: Default::default(),
             resevoir: BitResevoir::new(),
+            intensity_mode,
         }
+    }
+
+    /// The ancillary data of the last decoded frame: the bit reservoir bytes following the
+    /// frame's main data (scale factors and Huffman coded samples). It runs to the end of the
+    /// buffered main data and therefore may include main data of following frames.
+    #[cfg(feature = "mp3pro")]
+    pub fn ancillary_data(&self) -> &[u8] {
+        self.resevoir.bytes_ref()
     }
 
     /// Reads the main_data portion of a MPEG audio frame from a `BitStream` into `FrameData`.
@@ -482,7 +500,7 @@ impl Layer for Layer3 {
                 requantize::requantize(header, &granule.channels[1], &mut self.samples[gr][1]);
 
                 // Apply joint stereo processing if it is used.
-                stereo::stereo(header, granule, &mut self.samples[gr])?;
+                stereo::stereo(header, granule, self.intensity_mode, &mut self.samples[gr])?;
             }
 
             // Each granule will yield 576 samples. After reserving frames, all steps must be
@@ -534,7 +552,7 @@ impl Layer for Layer3 {
 
 #[cfg(test)]
 mod tests {
-    use super::{BitResevoir, Layer3};
+    use super::{BitResevoir, IntensityMode, Layer3};
     use crate::common::{ChannelMode, Emphasis, FrameHeader, MpegLayer, MpegVersion};
 
     use std::sync::{Mutex, Once};
@@ -628,7 +646,7 @@ mod tests {
 
     #[test]
     fn verify_crc_accepts_valid_and_rejects_corrupt_frame() {
-        let mut layer = Layer3::new();
+        let mut layer = Layer3::new(IntensityMode::Iso);
         let header = header();
 
         let mut data = frame();
@@ -671,10 +689,10 @@ mod tests {
 
         // A new decoder state starts over.
         let warnings = logged_warnings(|| {
-            let mut layer = Layer3::new();
+            let mut layer = Layer3::new(IntensityMode::Iso);
             assert_eq!(layer.resevoir.fill(&main_data, 0).unwrap(), 0);
 
-            let mut layer = Layer3::new();
+            let mut layer = Layer3::new(IntensityMode::Iso);
             assert_eq!(layer.resevoir.fill(&main_data, 30).unwrap(), 30);
         });
 

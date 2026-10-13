@@ -28,6 +28,19 @@ const INTENSITY_INV_POS_MPEG1: u8 = 7;
 /// to consider is_pos == 7 invalid for MPEG2 or 2.5.
 const INTENSITY_INV_POS_MPEG2: u8 = 31;
 
+/// The rule deciding which MPEG2/2.5 intensity positions are invalid. A scale factor band with an
+/// invalid intensity position is not intensity stereo coded and falls back to mid-side stereo.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum IntensityMode {
+    /// ISO/IEC 13818-3: only intensity position 31 is invalid.
+    #[default]
+    Iso,
+    /// mp3PRO: the all-ones value of the band's scale factor bit length (`2^slen - 1`) is
+    /// invalid, e.g., 7 for a band with 3-bit scale factors.
+    #[cfg_attr(not(feature = "mp3pro"), allow(dead_code))]
+    Mp3Pro,
+}
+
 lazy_static! {
     /// (Left, right) channel coefficients for decoding intensity stereo in MPEG2 bitstreams.
     ///
@@ -193,11 +206,33 @@ fn is_zero_band(band: &[f32]) -> bool {
     !band.iter().any(|&x| x != 0.0)
 }
 
+/// Get the intensity stereo ratio table and the invalid intensity position of every scale factor
+/// of channel 1 (indexed like `scalefacs`).
+fn intensity_params(
+    header: &FrameHeader,
+    granule: &Granule,
+    mode: IntensityMode,
+) -> (&'static [(f32, f32)], [u8; 39]) {
+    if header.is_mpeg1() {
+        (&INTENSITY_STEREO_RATIOS_MPEG1[..], [INTENSITY_INV_POS_MPEG1; 39])
+    }
+    else {
+        let is_scale = granule.channels[1].scalefac_compress & 1;
+        let table = &INTENSITY_STEREO_RATIOS_MPEG2[usize::from(is_scale)][..];
+
+        match mode {
+            IntensityMode::Iso => (table, [INTENSITY_INV_POS_MPEG2; 39]),
+            IntensityMode::Mp3Pro => (table, granule.channels[1].is_pos_max),
+        }
+    }
+}
+
 /// Decodes all intensity stereo coded bands within an entire long block and returns the intensity
 /// bound.
 fn process_intensity_long_block(
     header: &FrameHeader,
     granule: &Granule,
+    mode: IntensityMode,
     mid_side: bool,
     max_bound: usize,
     ch0: &mut [f32; 576],
@@ -212,30 +247,29 @@ fn process_intensity_long_block(
     // The rzero sample index is the index of last non-zero sample plus 1.
     let rzero = granule.channels[1].rzero;
 
-    // Select the intensity stereo ratios table.
-    let (is_table, is_inv_pos) = if header.is_mpeg1() {
-        (&INTENSITY_STEREO_RATIOS_MPEG1[..], INTENSITY_INV_POS_MPEG1)
-    }
-    else {
-        let is_scale = granule.channels[1].scalefac_compress & 1;
-        (&INTENSITY_STEREO_RATIOS_MPEG2[usize::from(is_scale)][..], INTENSITY_INV_POS_MPEG2)
-    };
+    // Select the intensity stereo ratios table and the invalid intensity positions.
+    let (is_table, is_inv_pos) = intensity_params(header, granule, mode);
 
     let bands = &SFB_LONG_BANDS[header.sample_rate_idx];
 
     // The intensity positions are stored in the right channel (channel 1) scalefactors. The
-    // intensity position for band 21 is not coded and is copied from band 20.
+    // intensity position for band 21 is not coded and is copied from band 20, and so is its
+    // invalid intensity position.
     let mut is_pos = [0; 22];
     is_pos.copy_from_slice(&granule.channels[1].scalefacs[..22]);
     is_pos[21] = is_pos[20];
 
-    // Create an iterator that yields a band start-end pair, and scale-factor.
-    let bands_iter = bands.iter().zip(&bands[1..]).zip(is_pos.iter());
+    let mut is_inv = [0; 22];
+    is_inv.copy_from_slice(&is_inv_pos[..22]);
+    is_inv[21] = is_inv[20];
+
+    // Create an iterator that yields a band start-end pair, scale-factor, and invalid position.
+    let bands_iter = bands.iter().zip(&bands[1..]).zip(is_pos.iter().zip(is_inv.iter()));
 
     let mut bound = max_bound;
 
     // Iterate over each band and decode the intensity stereo coding if the band is zero.
-    for ((&start, &end), &is_pos) in bands_iter.rev() {
+    for ((&start, &end), (&is_pos, &is_inv)) in bands_iter.rev() {
         // Bands starting above rzero are always 0, however bands below it are ambiguous.
         let is_zero_band = start >= rzero || is_zero_band(&ch1[start..end]);
 
@@ -243,7 +277,7 @@ fn process_intensity_long_block(
             process_intensity(
                 is_pos,
                 is_table,
-                is_inv_pos,
+                is_inv,
                 mid_side,
                 &mut ch0[start..end],
                 &mut ch1[start..end],
@@ -262,9 +296,11 @@ fn process_intensity_long_block(
 
 /// Decodes all intensity stereo coded bands within an entire short block and returns the intensity
 /// bound.
+#[allow(clippy::too_many_arguments)]
 fn process_intensity_short_block(
     header: &FrameHeader,
     granule: &Granule,
+    mode: IntensityMode,
     is_mixed: bool,
     mid_side: bool,
     max_bound: usize,
@@ -338,25 +374,23 @@ fn process_intensity_short_block(
         (&SFB_SHORT_BANDS[header.sample_rate_idx][..], None, 39)
     };
 
-    // Select the intensity stereo ratios table based on the bitstream version.
-    let (is_table, is_inv_pos) = if header.is_mpeg1() {
-        (&INTENSITY_STEREO_RATIOS_MPEG1[..], INTENSITY_INV_POS_MPEG1)
-    }
-    else {
-        let is_scale = granule.channels[1].scalefac_compress & 1;
-        (&INTENSITY_STEREO_RATIOS_MPEG2[usize::from(is_scale)][..], INTENSITY_INV_POS_MPEG2)
-    };
+    // Select the intensity stereo ratios table and the invalid intensity positions.
+    let (is_table, is_inv_pos) = intensity_params(header, granule, mode);
 
     // The intensity position for the final band (last three short windows) is not coded and is
     // copied from the previous band. Therefore, the number of coded scale-factors is 3 less than
     // the number of scale-factor indicies (e.g., 35 for a mixed block with 8 long bands and 9 short
-    // bands with 3 windows each, and 36 for a short block).
+    // bands with 3 windows each, and 36 for a short block). The same applies to the invalid
+    // intensity positions.
     let n_coded = sfi - 3;
 
     let mut is_pos = [0; 39];
     is_pos[..n_coded].copy_from_slice(&granule.channels[1].scalefacs[..n_coded]);
     is_pos[n_coded..n_coded + 3]
         .copy_from_slice(&granule.channels[1].scalefacs[n_coded - 3..n_coded]);
+
+    let mut is_inv = is_inv_pos;
+    is_inv.copy_within(n_coded - 3..n_coded, n_coded);
 
     let mut window_is_zero = [true; 3];
 
@@ -384,7 +418,7 @@ fn process_intensity_short_block(
             process_intensity(
                 is_pos[sfi - 1],
                 is_table,
-                is_inv_pos,
+                is_inv[sfi - 1],
                 mid_side,
                 &mut ch0[s2..s3],
                 &mut ch1[s2..s3],
@@ -405,7 +439,7 @@ fn process_intensity_short_block(
             process_intensity(
                 is_pos[sfi - 1],
                 is_table,
-                is_inv_pos,
+                is_inv[sfi - 1],
                 mid_side,
                 &mut ch0[s1..s2],
                 &mut ch1[s1..s2],
@@ -424,7 +458,7 @@ fn process_intensity_short_block(
             process_intensity(
                 is_pos[sfi - 1],
                 is_table,
-                is_inv_pos,
+                is_inv[sfi - 1],
                 mid_side,
                 &mut ch0[s0..s1],
                 &mut ch1[s0..s1],
@@ -465,7 +499,7 @@ fn process_intensity_short_block(
                     process_intensity(
                         is_pos[sfi - 1],
                         is_table,
-                        is_inv_pos,
+                        is_inv[sfi - 1],
                         mid_side,
                         &mut ch0[start..end],
                         &mut ch1[start..end],
@@ -490,6 +524,7 @@ fn process_intensity_short_block(
 pub(super) fn stereo(
     header: &FrameHeader,
     granule: &mut Granule,
+    mode: IntensityMode,
     ch: &mut [[f32; 576]; 2],
 ) -> Result<()> {
     // Determine whether mid-side, and/or intensity stereo coding is used.
@@ -524,10 +559,10 @@ pub(super) fn stereo(
     let is_bound = if intensity {
         // Decode intensity stereo coded bands based on bitstream version and block type.
         match granule.channels[1].block_type {
-            BlockType::Short { is_mixed } => {
-                process_intensity_short_block(header, granule, is_mixed, mid_side, end, ch0, ch1)
-            }
-            _ => process_intensity_long_block(header, granule, mid_side, end, ch0, ch1),
+            BlockType::Short { is_mixed } => process_intensity_short_block(
+                header, granule, mode, is_mixed, mid_side, end, ch0, ch1,
+            ),
+            _ => process_intensity_long_block(header, granule, mode, mid_side, end, ch0, ch1),
         }
     }
     // If intensity stereo coding is not enabled, then all samples are processed with mid-side
@@ -599,7 +634,7 @@ mod tests {
 
                 let expected = ch;
 
-                stereo(&joint_header(true, false), &mut granule, &mut ch)
+                stereo(&joint_header(true, false), &mut granule, IntensityMode::Iso, &mut ch)
                     .unwrap_or_else(|e| panic!("block types ({i}, {j}): {e}"));
 
                 let [left, right] = &ch;
@@ -630,7 +665,12 @@ mod tests {
                     let mut ch = [[0.0f32; 576]; 2];
                     ch[0].fill(1.0);
 
-                    let r = stereo(&joint_header(mid_side, true), &mut granule, &mut ch);
+                    let r = stereo(
+                        &joint_header(mid_side, true),
+                        &mut granule,
+                        IntensityMode::Iso,
+                        &mut ch,
+                    );
 
                     assert!(r.is_ok(), "block types ({i}, {j}), mid-side {mid_side}");
                 }
@@ -654,7 +694,7 @@ mod tests {
         let mut ch = [[0.0f32; 576]; 2];
         ch[0][408..464].fill(1.0);
 
-        stereo(&joint_header(false, true), &mut granule, &mut ch).unwrap();
+        stereo(&joint_header(false, true), &mut granule, IntensityMode::Iso, &mut ch).unwrap();
 
         for (k, (l, r)) in ch[0][408..464].iter().zip(&ch[1][408..464]).enumerate() {
             assert!((l - 0.5).abs() < 1e-6, "left {}: {l}", 408 + k);
@@ -677,11 +717,45 @@ mod tests {
         // The first window of short band 12 (samples 408..464 at 44.1 kHz).
         ch[0][408..464].fill(1.0);
 
-        stereo(&joint_header(false, true), &mut granule, &mut ch).unwrap();
+        stereo(&joint_header(false, true), &mut granule, IntensityMode::Iso, &mut ch).unwrap();
 
         for (k, (l, r)) in ch[0][408..464].iter().zip(&ch[1][408..464]).enumerate() {
             assert!((l - 0.5).abs() < 1e-6, "left {}: {l}", 408 + k);
             assert!((r - 0.5).abs() < 1e-6, "right {}: {r}", 408 + k);
         }
+    }
+
+    /// In MPEG2, an intensity position equal to the all-ones value of the band's scale factor
+    /// length (7 for 3 bits) is invalid in the mp3PRO mode, and the band is mid-side coded. In the
+    /// ISO mode, only 31 is invalid, and the band is intensity coded.
+    #[test]
+    fn verify_mpeg2_intensity_position_limit_of_mp3pro_mode() {
+        let mut header = joint_header(true, true);
+        header.version = crate::common::MpegVersion::Mpeg2;
+        header.sample_rate = 22050;
+        header.sample_rate_idx = 3;
+
+        let decode = |mode| {
+            let mut granule = Granule::default();
+            granule.channels[0].rzero = 576;
+            // Bands with 3-bit intensity positions, all at their largest value.
+            granule.channels[1].scalefacs[..21].fill(7);
+            granule.channels[1].is_pos_max[..21].fill(7);
+
+            let mut ch = [[0.0f32; 576]; 2];
+            ch[0].fill(1.0);
+
+            stereo(&header, &mut granule, mode, &mut ch).unwrap();
+            ch
+        };
+
+        let mid_side = f32::consts::FRAC_1_SQRT_2;
+        let ch = decode(IntensityMode::Mp3Pro);
+        assert!(ch[0].iter().chain(&ch[1]).all(|&x| (x - mid_side).abs() < 1e-6));
+
+        // Intensity position 7: k_l = (2^(-1/4))^4, k_r = 1.
+        let ch = decode(IntensityMode::Iso);
+        assert!(ch[0].iter().all(|&x| (x - 0.5).abs() < 1e-6));
+        assert!(ch[1].iter().all(|&x| (x - 1.0).abs() < 1e-6));
     }
 }

@@ -39,7 +39,11 @@ mod layer1;
 mod layer2;
 #[cfg(feature = "mp3")]
 mod layer3;
+#[cfg(feature = "mp3pro")]
+mod mp3pro;
 
 #[cfg(any(feature = "mp1", feature = "mp2", feature = "mp3"))]
 pub use decoder::MpaDecoder;
 pub use demuxer::MpaReader;
+#[cfg(feature = "mp3pro")]
+pub use mp3pro::Mp3ProDecoder;

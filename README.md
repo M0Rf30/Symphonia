@@ -117,6 +117,7 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | MP1                          | Great     | No      | `mp1`, `mpa` | No      | [`symphonia-bundle-mp3`]   |
 | MP2                          | Great     | No      | `mp2`, `mpa` | No      | [`symphonia-bundle-mp3`]   |
 | MP3                          | Excellent | Yes     | `mp3`, `mpa` | No      | [`symphonia-bundle-mp3`]   |
+| mp3PRO                       | Great     | No      | `mp3pro`     | No      | [`symphonia-bundle-mp3`]   |
 | Musepack                     | -         | -       | `musepack`   | No      | `symphonia-bundle-musepack`|
 | Opus                         | Excellent | Yes     | `opus`       | Yes     | [`symphonia-codec-opus`]   |
 | PCM                          | Excellent | Yes     | `pcm`        | Yes     | [`symphonia-codec-pcm`]    |
@@ -124,6 +125,8 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | WavPack                      | -         | -       | `wavpack`    | No      | `symphonia-codec-wavpack`  |
 
 A `symphonia-bundle-*` package is a combination of a decoder and a native demuxer.
+
+mp3PRO streams decode as plain MP3 by default. The `mp3pro` feature adds `Mp3ProDecoder`, which is not registered in the default codec registry: register it in place of `MpaDecoder` to decode the SBR high band and get output at twice the core sample rate.
 
 [`symphonia-codec-aac`]: https://crates.io/crates/symphonia-codec-aac
 [`symphonia-codec-adpcm`]: https://crates.io/crates/symphonia-codec-adpcm

@@ -12,6 +12,11 @@ use crate::common::{ChannelMode, FrameHeader};
 
 use super::{FrameData, Granule, GranuleChannel, common::*};
 
+/// The largest intensity position of an MPEG2/2.5 intensity stereo channel scale factor band,
+/// indexed by the band's scale factor bit length (slen). It is the all-ones value of slen bits,
+/// except for slen 0, whose band can only carry position 0.
+const MPEG2_IS_POS_MAX: [u8; 6] = [1, 1, 3, 7, 15, 31];
+
 /// Pairs of bit lengths for MPEG version 1 scale factors. For MPEG version 1, there are two
 /// possible bit lengths for scale factors: slen1 and slen2. The first N of bands have scale factors
 /// of bit length slen1, while the remaining bands have length slen2. The value of the switch point,
@@ -418,6 +423,12 @@ pub(super) fn read_scale_factors_mpeg2<B: ReadBitsLtr>(
                 channel.scalefacs[sfb] = bs.read_bits_leq32(slen)? as u8;
             }
             bits_read += slen * n_sfb as u32;
+        }
+
+        // The all-ones value of the band's scale factor length is the largest intensity position
+        // the band can carry. mp3PRO treats it as the invalid intensity position.
+        if is_intensity_stereo {
+            channel.is_pos_max[start..start + n_sfb].fill(MPEG2_IS_POS_MAX[slen as usize]);
         }
 
         start += n_sfb;

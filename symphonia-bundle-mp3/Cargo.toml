@@ -14,10 +14,11 @@ rust-version.workspace = true
 version.workspace = true
 
 [features]
-default = ["mp1", "mp2", "mp3"]
+default = ["mp1", "mp2", "mp3", "mp3pro"]
 mp1 = []
 mp2 = []
 mp3 = []
+mp3pro = ["mp3"]
 
 [dependencies]
 log = { workspace = true }

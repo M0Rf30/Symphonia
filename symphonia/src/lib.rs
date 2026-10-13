@@ -135,6 +135,8 @@ pub mod default {
         pub use symphonia_bundle_ape::ApeDecoder;
         #[cfg(feature = "flac")]
         pub use symphonia_bundle_flac::FlacDecoder;
+        #[cfg(feature = "mp3pro")]
+        pub use symphonia_bundle_mp3::Mp3ProDecoder;
         #[cfg(any(feature = "mp1", feature = "mp2", feature = "mp3"))]
         pub use symphonia_bundle_mp3::MpaDecoder;
         #[cfg(feature = "musepack")]
