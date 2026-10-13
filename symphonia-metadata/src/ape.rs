@@ -7,6 +7,9 @@
 
 //! An APEv1 and APEv2 metadata reader.
 
+#[cfg(feature = "write")]
+pub mod write;
+
 use core::str;
 use std::collections::HashMap;
 use std::io::{Seek, SeekFrom};
@@ -416,7 +419,21 @@ impl MetadataReader for ApeReader<'_> {
                 ApeItemValue::String(value) | ApeItemValue::Locator(value) => {
                     // If the value contains a null-terminator, then the value is actually a list.
                     if value.contains('\0') {
-                        let items = value.split_terminator('\0').map(|s| s.to_string()).collect();
+                        let items: Vec<String> =
+                            value.split_terminator('\0').map(|s| s.to_string()).collect();
+
+                        // The values of a known item are separate tags so that each of them gets
+                        // a standard tag.
+                        if APE_TAG_MAP.contains_key(key_lower.as_str()) {
+                            for value in items {
+                                builder.add_mapped_tags(
+                                    RawTag::new(item.key.clone(), value),
+                                    &APE_TAG_MAP,
+                                );
+                            }
+                            continue;
+                        }
+
                         RawValue::StringList(Arc::new(items))
                     }
                     else {
