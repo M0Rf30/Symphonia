@@ -136,7 +136,7 @@ lazy_static! {
         m.insert("productnumber"                , parse_ident_pn);
         // TODO: Is Publisher a synonym for Label?
         m.insert("publisher"                    , parse_label);
-        m.insert("rating"                       , parse_rating);
+        m.insert("rating"                       , parse_vorbis_rating);
         m.insert("releasecountry"               , parse_release_country);
         m.insert("releasestatus"                , parse_musicbrainz_release_status);
         m.insert("releasetype"                  , parse_musicbrainz_release_type);
@@ -337,6 +337,29 @@ enum ParsedComment {
     ChapterInfo(ChapterInfo),
 }
 
+/// Parse a Vorbis comment rating: an integer on a 0 - 100 scale, or (as written by Quod Libet and
+/// Picard with a fractional scale) a decimal value from 0.0 to 1.0, to PPM.
+fn parse_vorbis_rating(v: Arc<String>) -> StandardTagPair {
+    let v = v.trim();
+
+    let rating = if v.contains('.') {
+        match v.parse::<f64>() {
+            Ok(num) if (0.0..=1.0).contains(&num) => {
+                Some(StandardTag::Rating((num * 1_000_000.0).round() as u32))
+            }
+            _ => None,
+        }
+    }
+    else {
+        match v.parse::<u32>() {
+            Ok(num) if num <= 100 => Some(StandardTag::Rating(num * 10000)),
+            _ => None,
+        }
+    };
+
+    [rating, None]
+}
+
 /// Parse the given Vorbis Comment string into a `Tag`.
 fn parse_vorbis_comment(buf: &[u8]) -> Result<ParsedComment> {
     // Vorbis Comments are stored as <Key>=<Value> pairs where <Key> is a reduced ASCII-only
@@ -407,7 +430,14 @@ pub fn read_vorbis_comment<B: ReadBytes>(
             Ok(parsed) => match parsed {
                 ParsedComment::Tag(raw) => {
                     // Comment was a tag.
-                    builder.add_mapped_tags(raw, &VORBIS_COMMENT_MAP);
+                    // A `RATING:<email>` key is a rating of a specific user.
+                    if raw.key.len() > 7 && raw.key.as_bytes()[..7].eq_ignore_ascii_case(b"rating:")
+                    {
+                        builder.add_mapped_tags_with_parser(raw, parse_vorbis_rating);
+                    }
+                    else {
+                        builder.add_mapped_tags(raw, &VORBIS_COMMENT_MAP);
+                    }
                 }
                 ParsedComment::Visual(visual) => {
                     // Comment was a picture.

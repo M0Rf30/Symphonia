@@ -22,9 +22,11 @@ use symphonia_format_ogg::writer::{build_page, page_crc};
 use symphonia_metadata::embedded::flac::write::{
     BLOCK_TYPE_PADDING, BLOCK_TYPE_PICTURE, BLOCK_TYPE_VORBIS_COMMENT, block_header, picture_block,
 };
-use symphonia_metadata::embedded::vorbis::write::{ExistingComments, comment_body, parse_existing};
+use symphonia_metadata::embedded::vorbis::write::{
+    CommentOptions, ExistingComments, comment_body_with, parse_existing,
+};
 
-use crate::flac::{default_vendor, meta_error};
+use crate::flac::{comment_options, default_vendor, meta_error};
 use crate::{Error, Result, WriteOptions, read_up_to, replace_file};
 
 const PAGE_HEADER_LEN: usize = 27;
@@ -40,9 +42,10 @@ pub(crate) fn write(
     path: &Path,
     tags: &[Tag],
     visuals: &[Visual],
-    _opts: &WriteOptions,
+    opts: &WriteOptions,
 ) -> Result<()> {
-    replace_file(path, |src, out| rewrite(src, out, tags, visuals))
+    let comment_opts = comment_options(opts);
+    replace_file(path, |src, out| rewrite(src, out, tags, visuals, &comment_opts))
 }
 
 /// The codec of the logical stream being tagged.
@@ -314,6 +317,7 @@ fn build_headers(
     headers: &Headers,
     tags: &[Tag],
     visuals: &[Visual],
+    comment_opts: &CommentOptions,
 ) -> Result<(Vec<u8>, Vec<Vec<u8>>)> {
     let malformed = |msg: &str| Error::Malformed(msg.to_string());
 
@@ -336,7 +340,10 @@ fn build_headers(
             let ExistingComments { vendor, preserved, .. } = existing(VORBIS_COMMENT_PREFIX)?;
 
             let mut comment = VORBIS_COMMENT_PREFIX.to_vec();
-            comment.extend(comment_body(&vendor, tags, visuals, &preserved).map_err(meta_error)?);
+            comment.extend(
+                comment_body_with(&vendor, tags, visuals, &preserved, comment_opts)
+                    .map_err(meta_error)?,
+            );
             // The framing bit.
             comment.push(1);
 
@@ -347,7 +354,10 @@ fn build_headers(
             let ExistingComments { vendor, preserved, trailing } = existing(OPUS_COMMENT_PREFIX)?;
 
             let mut comment = OPUS_COMMENT_PREFIX.to_vec();
-            comment.extend(comment_body(&vendor, tags, visuals, &preserved).map_err(meta_error)?);
+            comment.extend(
+                comment_body_with(&vendor, tags, visuals, &preserved, comment_opts)
+                    .map_err(meta_error)?,
+            );
             // Opus tools may append binary padding to the comment header, keep it.
             comment.extend(trailing);
 
@@ -356,7 +366,8 @@ fn build_headers(
         Codec::Speex => {
             let ExistingComments { vendor, preserved, .. } = existing(&[])?;
 
-            let comment = comment_body(&vendor, tags, visuals, &preserved).map_err(meta_error)?;
+            let comment = comment_body_with(&vendor, tags, visuals, &preserved, comment_opts)
+                .map_err(meta_error)?;
 
             let mut packets = vec![comment];
             // The extra headers.
@@ -393,7 +404,8 @@ fn build_headers(
 
             blocks.push((
                 BLOCK_TYPE_VORBIS_COMMENT,
-                comment_body(&vendor, tags, &[], &preserved).map_err(meta_error)?,
+                comment_body_with(&vendor, tags, &[], &preserved, comment_opts)
+                    .map_err(meta_error)?,
             ));
 
             for visual in visuals {
@@ -510,10 +522,11 @@ fn rewrite(
     out: &mut BufWriter<File>,
     tags: &[Tag],
     visuals: &[Visual],
+    comment_opts: &CommentOptions,
 ) -> Result<()> {
     let headers = gather_headers(&mut BufReader::with_capacity(1 << 16, &mut *src))?;
 
-    let (id, packets) = build_headers(&headers, tags, visuals)?;
+    let (id, packets) = build_headers(&headers, tags, visuals, comment_opts)?;
 
     src.seek(SeekFrom::Start(0))?;
 

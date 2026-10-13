@@ -23,6 +23,45 @@ use crate::embedded::flac::write::picture_block;
 use crate::embedded::vorbis::try_parse_chapter_info_key;
 use crate::utils::base64;
 
+/// Options for how tags are written to a Vorbis comment.
+#[derive(Clone, Debug, Default)]
+pub struct CommentOptions {
+    /// The email of the rating's owner. A rating is written as `RATING:<email>` instead of
+    /// `RATING` if set. A rating tag that was read under a `RATING:<other>` key keeps that key.
+    pub rating_email: Option<String>,
+    /// Write ratings as a decimal fraction from 0.0 to 1.0 (`RATING=0.8`) instead of an integer
+    /// from 0 to 100 (`RATING=80`).
+    pub rating_fraction: bool,
+}
+
+/// Gets the key and value of a rating comment.
+fn rating_field(tag: &Tag, ppm: u32, options: &CommentOptions) -> (String, String) {
+    let raw_key = tag.raw.key.as_str();
+
+    let key = if raw_key.len() > 7 && raw_key.as_bytes()[..7].eq_ignore_ascii_case(b"rating:") {
+        raw_key.chars().filter(|c| matches!(c, '\u{20}'..='\u{7d}') && *c != '=').collect()
+    }
+    else if let Some(email) = options.rating_email.as_deref() {
+        format!("RATING:{email}")
+    }
+    else {
+        "RATING".to_string()
+    };
+
+    let value = if options.rating_fraction {
+        let mut s = format!("{:.6}", f64::from(ppm) / 1_000_000.0);
+        while s.ends_with('0') && !s.ends_with(".0") {
+            s.pop();
+        }
+        s
+    }
+    else {
+        (ppm / 10000).to_string()
+    };
+
+    (key, value)
+}
+
 /// The parts of an existing comment header that the tag model cannot represent, and that must
 /// survive a rewrite of the tags.
 #[derive(Clone, Debug, Default)]
@@ -91,7 +130,18 @@ pub fn comment_body(
     embedded_visuals: &[Visual],
     preserved: &[Vec<u8>],
 ) -> Result<Vec<u8>> {
-    let mut comments = encode_tags(tags);
+    comment_body_with(vendor, tags, embedded_visuals, preserved, &CommentOptions::default())
+}
+
+/// Like [`comment_body`], with options for how tags are written.
+pub fn comment_body_with(
+    vendor: &[u8],
+    tags: &[Tag],
+    embedded_visuals: &[Visual],
+    preserved: &[Vec<u8>],
+    options: &CommentOptions,
+) -> Result<Vec<u8>> {
+    let mut comments = encode_tags_with(tags, options);
 
     for visual in embedded_visuals {
         let mut comment = b"METADATA_BLOCK_PICTURE=".to_vec();
@@ -123,6 +173,11 @@ pub fn comment_body(
 /// Encodes tags as `KEY=value` comments. Tags that have no value, and exact duplicates, are
 /// skipped.
 pub fn encode_tags(tags: &[Tag]) -> Vec<Vec<u8>> {
+    encode_tags_with(tags, &CommentOptions::default())
+}
+
+/// Like [`encode_tags`], with options for how tags are written.
+pub fn encode_tags_with(tags: &[Tag], options: &CommentOptions) -> Vec<Vec<u8>> {
     let mut comments = Vec::with_capacity(tags.len());
     let mut seen = HashSet::new();
 
@@ -142,6 +197,12 @@ pub fn encode_tags(tags: &[Tag]) -> Vec<Vec<u8>> {
     };
 
     for tag in tags {
+        if let Some(StandardTag::Rating(ppm)) = tag.std.as_ref() {
+            let (key, value) = rating_field(tag, *ppm, options);
+            push(&key, &value);
+            continue;
+        }
+
         if let Some((key, value)) = tag.std.as_ref().and_then(std_field) {
             push(key, &value);
             continue;
