@@ -212,7 +212,6 @@ impl MetadataReader for Id3v1Reader<'_> {
     }
 }
 
-/// ID3v1 tag serializer.
 #[cfg(feature = "write")]
 pub mod write {
     //! Serialization of an ID3v1.1 tag from tags.
@@ -359,7 +358,9 @@ pub mod write {
         #[test]
         fn verify_long_comment_without_track_uses_30_characters() {
             let buf = serialize(&[std(StandardTag::Comment(s("0123456789012345678901234567890")))]);
-            assert!(read(&buf).contains(&StandardTag::Comment(s("012345678901234567890123456789"))));
+            assert!(
+                read(&buf).contains(&StandardTag::Comment(s("012345678901234567890123456789")))
+            );
             assert_eq!(buf[127], 255);
         }
 

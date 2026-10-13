@@ -83,7 +83,6 @@ pub struct WriteOptions {
     pub reuse_len: Option<usize>,
 }
 
-
 /// A frame of an existing tag that is preserved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RawFrame {
@@ -149,7 +148,9 @@ impl Existing {
         // Skip the extended header.
         if header.ext_header {
             let skip = match header.major {
-                3 => body.get(..4).map(|b| 4 + u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize),
+                3 => {
+                    body.get(..4).map(|b| 4 + u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize)
+                }
                 _ => body.get(..4).map(|b| synchsafe(b) as usize),
             };
 
@@ -318,10 +319,7 @@ fn is_managed(frame: &RawFrame) -> bool {
 fn prefix_len(frame: &RawFrame) -> usize {
     match frame.src_version {
         3 => usize::from(frame.flags & 0x0020 != 0),
-        4 => {
-            usize::from(frame.flags & 0x0040 != 0)
-                + if frame.flags & 0x0001 != 0 { 4 } else { 0 }
-        }
+        4 => usize::from(frame.flags & 0x0040 != 0) + if frame.flags & 0x0001 != 0 { 4 } else { 0 },
         _ => 0,
     }
 }
@@ -424,12 +422,7 @@ fn clean(s: &str) -> String {
 /// Build the body of a text frame (`prefix` is the content that follows the encoding byte and
 /// precedes the text, e.g. the description of a `TXXX` frame) holding `values`. In ID3v2.3, the
 /// values are joined with `JOIN_V23` unless `nul_separated` is set (frames that hold a list).
-fn text_body(
-    version: Version,
-    prefix: &[&str],
-    values: &[String],
-    nul_separated: bool,
-) -> Vec<u8> {
+fn text_body(version: Version, prefix: &[&str], values: &[String], nul_separated: bool) -> Vec<u8> {
     let joined;
     let items: Vec<&str> = if version == Version::V3 && !nul_separated && values.len() > 1 {
         joined = values.iter().map(String::as_str).collect::<Vec<_>>().join(JOIN_V23);
@@ -577,7 +570,10 @@ impl Builder {
     }
 
     fn text(&mut self, id: &str, value: impl Into<String>) {
-        self.add(Key::Text(id.as_bytes().try_into().expect("a frame id has 4 characters")), value.into());
+        self.add(
+            Key::Text(id.as_bytes().try_into().expect("a frame id has 4 characters")),
+            value.into(),
+        );
     }
 
     fn txxx(&mut self, desc: &str, value: impl Into<String>) {
@@ -585,7 +581,10 @@ impl Builder {
     }
 
     fn url(&mut self, id: &str, value: impl Into<String>) {
-        self.add(Key::Url(id.as_bytes().try_into().expect("a frame id has 4 characters")), value.into());
+        self.add(
+            Key::Url(id.as_bytes().try_into().expect("a frame id has 4 characters")),
+            value.into(),
+        );
     }
 
     /// Add a text value of a frame that is ID3v2.4-only, as the TXXX frame the reader also
@@ -724,9 +723,7 @@ impl Builder {
             MusicBrainzAlbumId(v) => self.txxx("MusicBrainz Album Id", v.as_str()),
             MusicBrainzArtistId(v) => self.txxx("MusicBrainz Artist Id", v.as_str()),
             MusicBrainzDiscId(v) => self.txxx("MusicBrainz Disc Id", v.as_str()),
-            MusicBrainzOriginalAlbumId(v) => {
-                self.txxx("MusicBrainz Original Album Id", v.as_str())
-            }
+            MusicBrainzOriginalAlbumId(v) => self.txxx("MusicBrainz Original Album Id", v.as_str()),
             MusicBrainzOriginalArtistId(v) => {
                 self.txxx("MusicBrainz Original Artist Id", v.as_str())
             }
@@ -980,12 +977,13 @@ impl Builder {
 
         // The original release date has no frame in ID3v2.3: Picard writes the year as TORY and
         // the date as a TXXX frame.
-        let original_year = self
-            .original_year
-            .map(|y| format!("{y:04}"))
-            .or_else(|| {
-                self.original_date.as_deref().and_then(|d| d.get(..4)).filter(|y| is_digits(y)).map(String::from)
-            });
+        let original_year = self.original_year.map(|y| format!("{y:04}")).or_else(|| {
+            self.original_date
+                .as_deref()
+                .and_then(|d| d.get(..4))
+                .filter(|y| is_digits(y))
+                .map(String::from)
+        });
 
         if let Some(date) = self.original_date.take() {
             self.txxx("ORIGINALDATE", date);
@@ -1272,7 +1270,8 @@ fn convert_frame(frame: &RawFrame, to: Version) -> Option<OutFrame> {
                 return None;
             }
 
-            let flags = ((frame.flags & 0xe000) >> 1) | if frame.flags & 0x0020 != 0 { 0x0040 } else { 0 };
+            let flags =
+                ((frame.flags & 0xe000) >> 1) | if frame.flags & 0x0020 != 0 { 0x0040 } else { 0 };
             (flags, usize::from(frame.flags & 0x0020 != 0), frame.data.clone())
         }
         (4, Version::V3) => {
@@ -1327,6 +1326,8 @@ fn convert_frame(frame: &RawFrame, to: Version) -> Option<OutFrame> {
 
 /// Convert NUL-separated UTF-8 strings to a UTF-16 text frame body (with the encoding byte).
 fn utf8_text_to_utf16(utf8: &[u8]) -> Vec<u8> {
+    // A terminator after the last string does not start another string.
+    let utf8 = utf8.strip_suffix(&[0]).unwrap_or(utf8);
     let mut out = vec![1];
 
     for (i, part) in utf8.split(|&b| b == 0).enumerate() {
@@ -1418,7 +1419,9 @@ pub fn serialize(
     let needed = 10 + body.len();
 
     let padding = match opts.reuse_len {
-        Some(len) if len >= needed && len - needed <= opts.padding.saturating_mul(2) => len - needed,
+        Some(len) if len >= needed && len - needed <= opts.padding.saturating_mul(2) => {
+            len - needed
+        }
         _ => opts.padding,
     };
 
@@ -1570,7 +1573,9 @@ mod tests {
         let comment = read.iter().find(|t| matches!(t.std, Some(StandardTag::Comment(_)))).unwrap();
         let sub = comment.raw.sub_fields.as_ref().unwrap();
         assert!(sub.iter().any(|f| f.field == COMM_LANGUAGE && f.value == RawValue::from("fra")));
-        assert!(sub.iter().any(|f| f.field == COMM_SHORT_DESCRIPTION && f.value == RawValue::from("d")));
+        assert!(
+            sub.iter().any(|f| f.field == COMM_SHORT_DESCRIPTION && f.value == RawValue::from("d"))
+        );
     }
 
     #[test]
@@ -1622,7 +1627,10 @@ mod tests {
 
         let (read, _) = read_back(&bytes);
         assert!(std_tags(&read).contains(&format!("{:?}", StandardTag::Artist(s("A/B")))));
-        assert!(std_tags(&read).contains(&format!("{:?}", StandardTag::Album(s("\u{65e5}\u{672c}\u{8a9e}")))));
+        assert!(
+            std_tags(&read)
+                .contains(&format!("{:?}", StandardTag::Album(s("\u{65e5}\u{672c}\u{8a9e}"))))
+        );
     }
 
     #[test]
@@ -1685,7 +1693,8 @@ mod tests {
         };
 
         for version in [Version::V3, Version::V4] {
-            let bytes = serialize(&[], std::slice::from_ref(&visual), &Existing::new(), &opts(version));
+            let bytes =
+                serialize(&[], std::slice::from_ref(&visual), &Existing::new(), &opts(version));
             let (tags, visuals) = read_back(&bytes);
             assert!(tags.is_empty());
             assert_eq!(visuals.len(), 1);
@@ -1775,7 +1784,7 @@ mod tests {
         body.extend(frame_v3(b"TPE1", 0, b"\0Old Artist"));
         body.extend(frame_v3(b"PRIV", 0, priv_data));
         body.extend(frame_v3(b"POPM", 0x0020, &[&[9u8][..], popm_data].concat()));
-        body.extend(frame_v3(b"TLEN", 0, b"\0123456"));
+        body.extend(frame_v3(b"TLEN", 0, b"\x00123456"));
         body.extend(frame_v3(b"EQUA", 0, b"\x10abc"));
         body.extend(frame_v3(b"UFID", 0, b"http://musicbrainz.org\0abc"));
         body.extend(frame_v3(b"UFID", 0, b"other\0xyz"));
@@ -1820,7 +1829,11 @@ mod tests {
     fn verify_v4_frames_convert_to_v3() {
         let mut body = Vec::new();
         // Unsynchronised, with a data length indicator.
-        body.extend(frame_v4(b"PRIV", 0x0003, &[0, 0, 0, 6, b'o', 0, 0xff, 0x00, 0x01, 0xff, 0x00]));
+        body.extend(frame_v4(
+            b"PRIV",
+            0x0003,
+            &[0, 0, 0, 6, b'o', 0, 0xff, 0x00, 0x01, 0xff, 0x00],
+        ));
         body.extend(frame_v4(b"SEEK", 0, &[0, 0, 0, 1]));
         body.extend(frame_v4(b"TLEN", 0, b"\x031000"));
         body.extend(frame_v4(b"GEOB", 0x0008, b"\0\0\0\x05zzzzz"));
@@ -1837,7 +1850,10 @@ mod tests {
         assert!(find_frame(&v3, b"SEEK").is_none());
         assert!(find_frame(&v3, b"GEOB").is_none());
         // UTF-8 text is converted to UTF-16.
-        assert_eq!(find_frame(&v3, b"TLEN"), Some((0, [&[1u8, 0xff, 0xfe][..], b"1\x000\x000\x000\x00"].concat())));
+        assert_eq!(
+            find_frame(&v3, b"TLEN"),
+            Some((0, [&[1u8, 0xff, 0xfe][..], b"1\x000\x000\x000\x00"].concat()))
+        );
 
         // The same version: copied as they are.
         let v4 = serialize(&tags, &[], &existing, &opts(Version::V4));
@@ -1897,7 +1913,9 @@ mod tests {
     fn verify_chapter_frames_are_converted() {
         // A CHAP frame with a TIT2 sub-frame, in ID3v2.3.
         let mut chap = b"ch1\0".to_vec();
-        chap.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0x03, 0xe8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+        chap.extend_from_slice(&[
+            0, 0, 0, 0, 0, 0, 0x03, 0xe8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        ]);
         chap.extend(frame_v3(b"TIT2", 0, b"\0Chapter"));
         let mut body = frame_v3(b"CHAP", 0, &chap);
         // A CTOC with a child.
@@ -1930,6 +1948,15 @@ mod tests {
     }
 
     #[test]
+    fn verify_trailing_terminator_is_not_a_string() {
+        assert_eq!(utf8_text_to_utf16(b"A\0"), utf8_text_to_utf16(b"A"));
+        assert_eq!(
+            utf8_text_to_utf16(b"A\0B\0"),
+            [&[1u8, 0xff, 0xfe][..], b"A\0", b"\0\0", &[0xff, 0xfe], b"B\0"].concat()
+        );
+    }
+
+    #[test]
     fn verify_tag_len() {
         let tag = tag_bytes(4, 0x10, &[0u8; 20]);
         assert_eq!(tag_len(&tag), Some(10 + 20 + 10));
@@ -1955,7 +1982,10 @@ mod tests {
         assert!(find_frame(&bytes, b"TDRC").is_none());
 
         let (read, _) = read_back(&bytes);
-        assert!(std_tags(&read).contains(&format!("{:?}", StandardTag::RecordingDate(s("2004-05-06T07:08")))));
+        assert!(
+            std_tags(&read)
+                .contains(&format!("{:?}", StandardTag::RecordingDate(s("2004-05-06T07:08"))))
+        );
 
         let bytes = serialize(&tags, &[], &Existing::new(), &opts(Version::V4));
         assert_eq!(find_frame(&bytes, b"TDRC").unwrap().1, b"\x032004-05-06T07:08");
@@ -1985,4 +2015,3 @@ mod tests {
         );
     }
 }
-
