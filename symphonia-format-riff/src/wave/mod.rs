@@ -1290,6 +1290,36 @@ mod tests {
         }
     }
 
+    /// Some writers omit the size of the data chunk header from the RIFF length (so the data chunk
+    /// appears to overrun its parent). The data chunk is authoritative, and the file must open.
+    #[test]
+    fn data_chunk_overrunning_riff_length_is_read() {
+        let data: Vec<u8> = (0..400).map(|i| i as u8).collect();
+        let fmt = chunk(b"fmt ", &pcm16_mono_fmt());
+
+        for short_by in [8u32, 20, 399] {
+            let data_chunk = chunk(b"data", &data);
+            let riff_len = (4 + fmt.len() + data_chunk.len()) as u32 - short_by;
+
+            let mut reader =
+                open_wav(riff_wave(Some(riff_len), &[fmt.clone(), data_chunk.clone()])).unwrap();
+
+            assert_eq!(reader.tracks[0].num_frames, Some(200));
+
+            let bytes: Vec<u8> =
+                read_all_packets(&mut reader).iter().flat_map(|p| p.data.iter().copied()).collect();
+            assert_eq!(bytes, data);
+        }
+    }
+
+    /// Only the data chunk may overrun the RIFF length. Any other chunk doing so is malformed.
+    #[test]
+    fn non_data_chunk_overrunning_riff_length_is_an_error() {
+        let fmt = chunk(b"fmt ", &pcm16_mono_fmt());
+        let riff_len = 4 + fmt.len() as u32 - 4;
+        assert!(open_wav(riff_wave(Some(riff_len), &[fmt, chunk(b"data", &[0u8; 8])])).is_err());
+    }
+
     #[test]
     fn truncated_data_chunk_ends_without_error() {
         // The data chunk claims 1000 frames, but there are only 300.

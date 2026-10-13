@@ -738,6 +738,10 @@ impl ParseChunkTag for RiffWaveChunks {
             _ => None,
         }
     }
+
+    fn overrides_parent_len(tag: [u8; 4]) -> bool {
+        &tag == b"data"
+    }
 }
 
 pub enum RiffInfoListChunks {

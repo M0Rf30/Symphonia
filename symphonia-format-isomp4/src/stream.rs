@@ -166,7 +166,10 @@ impl StreamSegment for MoofSegment {
             None => return Ok(None),
         };
 
-        let mut sample_num_rel = sample_num - self.seq[track_num].first_sample;
+        let Some(mut sample_num_rel) = sample_num.checked_sub(self.seq[track_num].first_sample)
+        else {
+            return decode_error("isomp4: sample precedes the first sample of the fragment");
+        };
         let mut trun_ts_offset = self.seq[track_num].first_ts;
 
         let mvex = match self.moov.mvex.as_ref() {
@@ -251,7 +254,10 @@ impl StreamSegment for MoofSegment {
             _ => self.moof.moof_base_pos,
         };
 
-        let mut sample_num_rel = sample_num - self.seq[track_num].first_sample;
+        let Some(mut sample_num_rel) = sample_num.checked_sub(self.seq[track_num].first_sample)
+        else {
+            return decode_error("isomp4: sample precedes the first sample of the fragment");
+        };
         let mut trun_offset = traf_base_pos;
 
         let mvex = match self.moov.mvex.as_ref() {
@@ -645,6 +651,19 @@ mod tests {
         let trafs = [traf(0, &[], 0, u32::MAX, &[])];
 
         assert!(moof_segment(&trafs, &PrevSegment { sample_end: 1, ts_end: 0 }).is_err());
+    }
+
+    #[test]
+    fn moof_segment_rejects_sample_before_fragment_start() {
+        // The fragment starts at sample 1 (e.g., the moov sample table is inconsistent with its
+        // time-to-sample table), but sample 0 is requested.
+        let trafs = [traf(0, &[], 0x1, 1, &0i32.to_be_bytes())];
+
+        let seg =
+            moof_segment(&trafs, &PrevSegment { sample_end: 1, ts_end: 0 }).expect("valid segment");
+
+        assert!(seg.sample_timing(0, 0).is_err());
+        assert!(seg.sample_data(0, 0, false).is_err());
     }
 
     #[test]

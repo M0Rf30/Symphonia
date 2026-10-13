@@ -76,7 +76,8 @@ fn flac_channels_to_channels(channels: u32) -> Channels {
 
 #[derive(Debug, Default)]
 pub struct StreamInfo {
-    /// The minimum and maximum number of decoded samples per block of audio.
+    /// The minimum and maximum number of decoded samples per block of audio. The minimum may be 0
+    /// if unknown.
     pub block_len_min: u16,
     pub block_len_max: u16,
     /// The minimum and maximum byte length of an encoded block (frame) of audio. Either value may
@@ -114,9 +115,11 @@ impl StreamInfo {
         info.block_len_min = reader.read_be_u16()?;
         info.block_len_max = reader.read_be_u16()?;
 
-        // Validate the block length bounds are in the range [16, 65535] samples.
-        if info.block_len_min < 16 || info.block_len_max < 16 {
-            return decode_error("flac: minimum block length is 16 samples");
+        // Validate the block length bounds are in the range [16, 65535] samples. Some encoders
+        // write 0 for an unknown minimum block length, which libFLAC and FFmpeg both accept, so
+        // allow it.
+        if (info.block_len_min != 0 && info.block_len_min < 16) || info.block_len_max < 16 {
+            return decode_error("flac: block length is less than 16 samples");
         }
 
         // Validate the maximum block size is greater than or equal to the minimum block size.

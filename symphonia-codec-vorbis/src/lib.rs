@@ -488,6 +488,11 @@ struct Setup {
     modes: Vec<Mode>,
 }
 
+/// Sub-byte padding after the framing flag is normal; only whole unparsed bytes are notable.
+fn has_unparsed_setup_bytes(bits_left: u64) -> bool {
+    bits_left >= 8
+}
+
 fn read_setup(reader: &mut BufReader<'_>, ident: &IdentHeader) -> Result<Setup> {
     // The packet type must be an setup header.
     let packet_type = reader.read_u8()?;
@@ -531,7 +536,7 @@ fn read_setup(reader: &mut BufReader<'_>, ident: &IdentHeader) -> Result<Setup> 
         return decode_error("vorbis: setup header framing flag unset");
     }
 
-    if bs.bits_left() > 0 {
+    if has_unparsed_setup_bytes(bs.bits_left()) {
         debug!("vorbis: leftover bits in setup head extra data");
     }
 
@@ -813,6 +818,14 @@ mod tests {
     /// Appends `num_bits` of `value` to `bits` in Vorbis (LSb-first) order.
     fn push_bits(bits: &mut Vec<bool>, value: u64, num_bits: u32) {
         bits.extend((0..num_bits).map(|i| (value >> i) & 1 == 1));
+    }
+
+    #[test]
+    fn verify_setup_padding_bits_not_reported() {
+        for bits in 0..8 {
+            assert!(!has_unparsed_setup_bytes(bits));
+        }
+        assert!(has_unparsed_setup_bytes(8));
     }
 
     #[test]

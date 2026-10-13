@@ -595,8 +595,6 @@ impl PacketParser {
     where
         B: ReadBytes + SeekBuffered,
     {
-        let init_pos = reader.pos();
-
         let mut frame_pos;
 
         let header = loop {
@@ -621,10 +619,9 @@ impl PacketParser {
         // Rewind reader back to the start of the frame.
         reader.seek_buffered(frame_pos);
 
-        // If the reader was moved, soft reset the parser.
-        if init_pos != reader.pos() {
-            self.soft_reset();
-        }
+        // A resync is a discontinuity, even if the reader did not move (e.g., seeking to the first
+        // frame after reading to the end of the stream). Always soft reset the parser.
+        self.soft_reset();
 
         Ok(ResyncInfo {
             ts: sync.ts.try_into().expect("flac timestamp is 36-bits maximum"),
@@ -643,15 +640,22 @@ impl PacketParser {
     }
 }
 
-fn calc_sync_info(stream_info: &StreamInfo, header: &FrameHeader) -> SyncInfo {
-    let is_fixed = stream_info.block_len_max == stream_info.block_len_min;
+/// Returns true if the stream information permits fixed-blocksize (frame number) frames. This is
+/// the case when the minimum and maximum block lengths are equal, or when the minimum is unknown
+/// (0), in which case either blocking strategy is possible.
+fn allows_fixed_blocking(stream_info: &StreamInfo) -> bool {
+    stream_info.block_len_min == stream_info.block_len_max || stream_info.block_len_min == 0
+}
 
+fn calc_sync_info(stream_info: &StreamInfo, header: &FrameHeader) -> SyncInfo {
     let dur = header.block_num_samples;
 
     let ts = match header.block_sequence {
         BlockSequence::BySample(sample) => sample,
-        BlockSequence::ByFrame(frame) if is_fixed => {
-            u64::from(frame) * u64::from(stream_info.block_len_min)
+        BlockSequence::ByFrame(frame) if allows_fixed_blocking(stream_info) => {
+            // The nominal block length of a fixed-blocksize stream is the maximum block length
+            // (equal to the minimum unless the minimum is unknown).
+            u64::from(frame) * u64::from(stream_info.block_len_max)
         }
         BlockSequence::ByFrame(frame) => {
             // This should not happen in practice.
@@ -682,7 +686,8 @@ fn strict_frame_header_check(
         }
     }
 
-    let is_fixed = stream_info.block_len_min == stream_info.block_len_max;
+    let allows_fixed = allows_fixed_blocking(stream_info);
+    let allows_variable = stream_info.block_len_min != stream_info.block_len_max;
 
     // All blocks should have a block length within the stated bounds. However, the last block may
     // be shorter than the minimum.
@@ -703,8 +708,10 @@ fn strict_frame_header_check(
     // information block, and the sequence number (frame number or sample number) is
     // monotonic given the current state.
     let is_monotonic = match header.block_sequence {
-        BlockSequence::BySample(sample) => !is_fixed && (sample > last_seq || sample == 0),
-        BlockSequence::ByFrame(frame) => is_fixed && (u64::from(frame) > last_seq || frame == 0),
+        BlockSequence::BySample(sample) => allows_variable && (sample > last_seq || sample == 0),
+        BlockSequence::ByFrame(frame) => {
+            allows_fixed && (u64::from(frame) > last_seq || frame == 0)
+        }
     };
 
     if !is_monotonic {

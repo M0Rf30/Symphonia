@@ -348,10 +348,15 @@ fn process_intensity_short_block(
     };
 
     // The intensity position for the final band (last three short windows) is not coded and is
-    // copied from the previous band.
+    // copied from the previous band. Therefore, the number of coded scale-factors is 3 less than
+    // the number of scale-factor indicies (e.g., 35 for a mixed block with 8 long bands and 9 short
+    // bands with 3 windows each, and 36 for a short block).
+    let n_coded = sfi - 3;
+
     let mut is_pos = [0; 39];
-    is_pos[..36].copy_from_slice(&granule.channels[1].scalefacs[..36]);
-    is_pos[36..].copy_from_slice(&granule.channels[1].scalefacs[33..36]);
+    is_pos[..n_coded].copy_from_slice(&granule.channels[1].scalefacs[..n_coded]);
+    is_pos[n_coded..n_coded + 3]
+        .copy_from_slice(&granule.channels[1].scalefacs[n_coded - 3..n_coded]);
 
     let mut window_is_zero = [true; 3];
 
@@ -548,4 +553,135 @@ pub(super) fn stereo(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::header;
+    use super::*;
+
+    fn joint_header(mid_side: bool, intensity: bool) -> FrameHeader {
+        let mut header = header();
+        header.channel_mode = ChannelMode::JointStereo(Mode::Layer3 { mid_side, intensity });
+        header
+    }
+
+    fn block_type(i: usize) -> BlockType {
+        match i {
+            0 => BlockType::Long,
+            1 => BlockType::Start,
+            2 => BlockType::Short { is_mixed: false },
+            3 => BlockType::Short { is_mixed: true },
+            _ => BlockType::End,
+        }
+    }
+
+    /// The channels of a joint stereo frame are not required to have the same block type in a
+    /// granule. A mismatch must not be an error, and the stereo processing must not depend on it.
+    #[test]
+    fn verify_mid_side_stereo_with_differing_block_types() {
+        for i in 0..5 {
+            for j in 0..5 {
+                let mut granule = Granule::default();
+
+                for (channel, block_type) in granule.channels.iter_mut().zip([i, j]) {
+                    channel.block_type = self::block_type(block_type);
+                    channel.rzero = 576;
+                }
+
+                let mut ch = [[0.0f32; 576]; 2];
+                let [mid, side] = &mut ch;
+
+                for (k, (m, s)) in mid.iter_mut().zip(side).enumerate() {
+                    *m = 1.0 + k as f32;
+                    *s = 0.5 - k as f32;
+                }
+
+                let expected = ch;
+
+                stereo(&joint_header(true, false), &mut granule, &mut ch)
+                    .unwrap_or_else(|e| panic!("block types ({i}, {j}): {e}"));
+
+                let [left, right] = &ch;
+
+                for (k, (l, r)) in left.iter().zip(right).enumerate() {
+                    let (m, s) = (expected[0][k], expected[1][k]);
+                    assert!((l - (m + s) * f32::consts::FRAC_1_SQRT_2).abs() < 1e-3);
+                    assert!((r - (m - s) * f32::consts::FRAC_1_SQRT_2).abs() < 1e-3);
+                }
+            }
+        }
+    }
+
+    /// Intensity stereo follows the block type of channel 1. The block type of channel 0 must not
+    /// matter.
+    #[test]
+    fn verify_intensity_stereo_with_differing_block_types() {
+        for i in 0..5 {
+            for j in 0..5 {
+                for mid_side in [false, true] {
+                    let mut granule = Granule::default();
+
+                    for (channel, block_type) in granule.channels.iter_mut().zip([i, j]) {
+                        channel.block_type = self::block_type(block_type);
+                        channel.rzero = 576;
+                    }
+
+                    let mut ch = [[0.0f32; 576]; 2];
+                    ch[0].fill(1.0);
+
+                    let r = stereo(&joint_header(mid_side, true), &mut granule, &mut ch);
+
+                    assert!(r.is_ok(), "block types ({i}, {j}), mid-side {mid_side}");
+                }
+            }
+        }
+    }
+
+    /// A mixed block has 35 coded scale-factors, the intensity position of its last short band is
+    /// not coded and is the position of the previous short band. For the first window of the last
+    /// band (samples 408..464 at 44.1 kHz) that is `scalefacs[32]`.
+    #[test]
+    fn verify_intensity_position_of_last_band_in_mixed_block() {
+        let mut granule = Granule::default();
+
+        granule.channels[0].rzero = 576;
+        granule.channels[1].rzero = 576;
+        granule.channels[1].block_type = BlockType::Short { is_mixed: true };
+        // Intensity position 3 is the same signal level in both channels.
+        granule.channels[1].scalefacs[32] = 3;
+
+        let mut ch = [[0.0f32; 576]; 2];
+        ch[0][408..464].fill(1.0);
+
+        stereo(&joint_header(false, true), &mut granule, &mut ch).unwrap();
+
+        for (k, (l, r)) in ch[0][408..464].iter().zip(&ch[1][408..464]).enumerate() {
+            assert!((l - 0.5).abs() < 1e-6, "left {}: {l}", 408 + k);
+            assert!((r - 0.5).abs() < 1e-6, "right {}: {r}", 408 + k);
+        }
+    }
+
+    /// The same as above for a short block, which has 36 coded scale-factors.
+    #[test]
+    fn verify_intensity_position_of_last_band_in_short_block() {
+        let mut granule = Granule::default();
+
+        granule.channels[0].rzero = 576;
+        granule.channels[1].rzero = 576;
+        granule.channels[1].block_type = BlockType::Short { is_mixed: false };
+        // The first window of short band 11 (at 44.1 kHz) is also the first window of band 12.
+        granule.channels[1].scalefacs[33] = 3;
+
+        let mut ch = [[0.0f32; 576]; 2];
+        // The first window of short band 12 (samples 408..464 at 44.1 kHz).
+        ch[0][408..464].fill(1.0);
+
+        stereo(&joint_header(false, true), &mut granule, &mut ch).unwrap();
+
+        for (k, (l, r)) in ch[0][408..464].iter().zip(&ch[1][408..464]).enumerate() {
+            assert!((l - 0.5).abs() < 1e-6, "left {}: {l}", 408 + k);
+            assert!((r - 0.5).abs() < 1e-6, "right {}: {r}", 408 + k);
+        }
+    }
 }

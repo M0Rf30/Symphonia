@@ -38,6 +38,14 @@ const MAX_FRAMES_PER_PACKET: NonZero<u64> = NonZero::new(1152).unwrap();
 /// enumeration
 pub trait ParseChunkTag: Sized {
     fn parse_tag(tag: [u8; 4], len: u32) -> Option<Self>;
+
+    /// Returns true if a chunk with the given tag is authoritative over the length of its parent
+    /// chunk. Writers commonly get the parent length wrong (e.g., by omitting the size of the
+    /// header of the audio data chunk). If such a chunk overruns the parent, the parent length is
+    /// ignored rather than rejecting the stream.
+    fn overrides_parent_len(_tag: [u8; 4]) -> bool {
+        false
+    }
 }
 
 pub enum NullChunks {}
@@ -104,11 +112,23 @@ impl<T: ParseChunkTag> ChunksReader<T> {
                 // Warning: The formulation of this conditional is critical because chunk_len is an
                 // untrusted input, it may overflow when if added to anything.
                 if len - self.consumed < u64::from(chunk_len) {
-                    debug!(
-                        "chunk length of {} exceeds parent (list) chunk length",
-                        String::from_utf8_lossy(&tag)
-                    );
-                    return decode_error("riff: chunk length exceeds parent (list) chunk length");
+                    if T::overrides_parent_len(tag) {
+                        debug!(
+                            "chunk length of {} exceeds parent chunk length, ignoring the parent \
+                             chunk length",
+                            String::from_utf8_lossy(&tag)
+                        );
+                        self.len = None;
+                    }
+                    else {
+                        debug!(
+                            "chunk length of {} exceeds parent (list) chunk length",
+                            String::from_utf8_lossy(&tag)
+                        );
+                        return decode_error(
+                            "riff: chunk length exceeds parent (list) chunk length",
+                        );
+                    }
                 }
             }
 

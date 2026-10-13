@@ -291,6 +291,8 @@ impl LogicalStream {
 
             for packet in self.packets.iter_mut().skip(num_prev_packets) {
                 packet.pts = next_pkt_pts;
+                // For audio, the decode timestamp is the same as the presentation timestamp.
+                packet.dts = next_pkt_pts;
 
                 // The packet's duration is populated with the packet's decoded duration (includes
                 // delay and padding). Calculate the next packet's PTS. This is also the end PTS of

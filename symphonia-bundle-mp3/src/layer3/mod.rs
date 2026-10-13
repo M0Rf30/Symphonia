@@ -23,7 +23,7 @@ use crate::{common::*, synthesis};
 
 use common::BlockType;
 
-use log::warn;
+use log::{debug, warn};
 
 /// `BitResevoir` implements the bit resevoir mechanism for main_data. Since frames have a
 /// deterministic length based on the bit-rate, low-complexity portions of the audio may not need
@@ -33,11 +33,15 @@ pub struct BitResevoir {
     buf: Box<[u8]>,
     len: usize,
     consumed: usize,
+    /// The number of bytes of main data buffered since the reservoir was created. Frames that
+    /// reuse more main data than that, reuse data of frames that were not decoded (e.g., the
+    /// decoding started in the middle of the stream after a seek).
+    buffered: usize,
 }
 
 impl BitResevoir {
     pub fn new() -> Self {
-        BitResevoir { buf: vec![0u8; 2048].into_boxed_slice(), len: 0, consumed: 0 }
+        BitResevoir { buf: vec![0u8; 2048].into_boxed_slice(), len: 0, consumed: 0, buffered: 0 }
     }
 
     pub fn fill(&mut self, pkt_main_data: &[u8], main_data_begin: usize) -> Result<u32> {
@@ -84,12 +88,25 @@ impl BitResevoir {
             // The number of bytes that will be missing.
             let underflow = (main_data_begin - unread) as u32;
 
-            warn!("mpa: invalid main_data_begin, underflow by {underflow} bytes");
+            // If the frame reuses more main data than has been buffered at all, the missing bytes
+            // belong to frames that precede the start of the decoding. That is expected when
+            // decoding starts in the middle of the stream, such as after a seek, and is not a fault
+            // in the stream. Otherwise, the missing bytes were lost to a fault, e.g. a dropped
+            // frame.
+            if main_data_begin <= self.buffered {
+                warn!("mpa: invalid main_data_begin, underflow by {underflow} bytes");
+            }
+            else {
+                debug!(
+                    "mpa: main_data_begin precedes the first frame, underflow by {underflow} bytes"
+                );
+            }
 
             underflow
         };
 
         self.consumed = 0;
+        self.buffered = self.buffered.saturating_add(main_data_len);
 
         Ok(underflow)
     }
@@ -517,8 +534,50 @@ impl Layer for Layer3 {
 
 #[cfg(test)]
 mod tests {
-    use super::Layer3;
+    use super::{BitResevoir, Layer3};
     use crate::common::{ChannelMode, Emphasis, FrameHeader, MpegLayer, MpegVersion};
+
+    use std::sync::{Mutex, Once};
+    use std::thread::{self, ThreadId};
+
+    /// The warnings and errors logged, and the thread that logged them.
+    static WARNINGS: Mutex<Vec<(ThreadId, String)>> = Mutex::new(Vec::new());
+
+    struct WarningLogger;
+
+    impl log::Log for WarningLogger {
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            metadata.level() <= log::Level::Warn
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            if self.enabled(record.metadata()) {
+                WARNINGS.lock().unwrap().push((thread::current().id(), record.args().to_string()));
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    /// Run `f`, and return the warnings and errors it logged. Tests run on parallel threads, so
+    /// only those logged by the current thread are returned.
+    fn logged_warnings(f: impl FnOnce()) -> Vec<String> {
+        static INIT: Once = Once::new();
+
+        INIT.call_once(|| {
+            log::set_logger(&WarningLogger).unwrap();
+            log::set_max_level(log::LevelFilter::Warn);
+        });
+
+        let id = thread::current().id();
+
+        WARNINGS.lock().unwrap().retain(|(thread, _)| *thread != id);
+
+        f();
+
+        let warnings = WARNINGS.lock().unwrap();
+        warnings.iter().filter(|(thread, _)| *thread == id).map(|(_, msg)| msg.clone()).collect()
+    }
 
     /// Bitwise MPEG audio CRC-16 (polynomial 0x8005, initial value 0xffff, MSB first).
     fn mpeg_crc(bytes: &[u8]) -> u16 {
@@ -536,7 +595,8 @@ mod tests {
         crc
     }
 
-    fn header() -> FrameHeader {
+    /// A 44.1 kHz MPEG1 layer 3 stereo frame header.
+    pub(super) fn header() -> FrameHeader {
         FrameHeader {
             version: MpegVersion::Mpeg1,
             layer: MpegLayer::Layer3,
@@ -578,5 +638,46 @@ mod tests {
         assert!(layer.verify_crc(&data, &header).is_err());
 
         assert!(layer.verify_crc(&data[..20], &header).is_err());
+    }
+
+    /// The frames at the start of the decoding (e.g., after a seek) may reuse main data of frames
+    /// that were not decoded. That is expected and must not be reported as a fault, but main data
+    /// that is missing in the middle of the decoding is.
+    #[test]
+    fn verify_underflow_before_the_first_frame_is_not_a_warning() {
+        let main_data = [0u8; 100];
+
+        // The first frame reuses 50 bytes the reservoir never had, then the second reuses 150
+        // bytes of which 50 are not in the first frame.
+        let warnings = logged_warnings(|| {
+            let mut resevoir = BitResevoir::new();
+            assert_eq!(resevoir.fill(&main_data, 50).unwrap(), 50);
+            assert_eq!(resevoir.fill(&main_data, 150).unwrap(), 50);
+        });
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        // The second frame reuses 60 bytes after the first frame was read in full. The bytes
+        // should be in the reservoir, but are not.
+        let warnings = logged_warnings(|| {
+            let mut resevoir = BitResevoir::new();
+            assert_eq!(resevoir.fill(&main_data, 0).unwrap(), 0);
+            resevoir.consume(100);
+            assert_eq!(resevoir.fill(&main_data, 60).unwrap(), 60);
+        });
+
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("underflow by 60 bytes"), "{warnings:?}");
+
+        // A new decoder state starts over.
+        let warnings = logged_warnings(|| {
+            let mut layer = Layer3::new();
+            assert_eq!(layer.resevoir.fill(&main_data, 0).unwrap(), 0);
+
+            let mut layer = Layer3::new();
+            assert_eq!(layer.resevoir.fill(&main_data, 30).unwrap(), 30);
+        });
+
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 }

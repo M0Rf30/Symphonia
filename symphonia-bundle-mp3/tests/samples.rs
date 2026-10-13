@@ -12,6 +12,8 @@
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, Once};
+use std::thread::{self, ThreadId};
 
 use symphonia_bundle_mp3::{MpaDecoder, MpaReader};
 use symphonia_core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
@@ -20,6 +22,47 @@ use symphonia_core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, Tra
 use symphonia_core::io::MediaSourceStream;
 use symphonia_core::units::Timestamp;
 use symphonia_testutil::sample_path;
+
+/// The warnings and errors logged, and the thread that logged them.
+static WARNINGS: Mutex<Vec<(ThreadId, String)>> = Mutex::new(Vec::new());
+
+struct WarningLogger;
+
+impl log::Log for WarningLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Warn
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            let msg = format!("{}: {}", record.target(), record.args());
+            WARNINGS.lock().unwrap().push((thread::current().id(), msg));
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+/// Start collecting the warnings and errors logged by the current thread. Tests run on parallel
+/// threads, so only those of the current thread are collected.
+fn start_collecting_warnings() {
+    static INIT: Once = Once::new();
+
+    INIT.call_once(|| {
+        log::set_logger(&WarningLogger).unwrap();
+        log::set_max_level(log::LevelFilter::Warn);
+    });
+
+    let id = thread::current().id();
+    WARNINGS.lock().unwrap().retain(|(thread, _)| *thread != id);
+}
+
+/// The warnings and errors logged by the current thread since `start_collecting_warnings`.
+fn collected_warnings() -> Vec<String> {
+    let id = thread::current().id();
+    let warnings = WARNINGS.lock().unwrap();
+    warnings.iter().filter(|(thread, _)| *thread == id).map(|(_, msg)| msg.clone()).collect()
+}
 
 fn open(path: &Path, opts: FormatOptions) -> (MpaReader<'static>, MpaDecoder) {
     let mss = symphonia_testutil::open_mss(path);
@@ -173,6 +216,8 @@ fn check_seeks(name: &str, modes: &[SeekMode]) {
 
     let mut n_checked = 0;
 
+    start_collecting_warnings();
+
     for mode in modes {
         for &pos in &order {
             let required_ts = reference.first_ts.max(0) + pos;
@@ -203,6 +248,11 @@ fn check_seeks(name: &str, modes: &[SeekMode]) {
     }
 
     assert!(n_checked > 20, "{name}: too few seeks checked");
+
+    // Seeking is not a fault. The first frames after a seek reuse main data of frames before them,
+    // which are not decoded, and that must not be reported.
+    let warnings = collected_warnings();
+    assert!(warnings.is_empty(), "{name}: warnings while seeking: {warnings:?}");
 }
 
 const BOTH: [SeekMode; 2] = [SeekMode::Accurate, SeekMode::Coarse];

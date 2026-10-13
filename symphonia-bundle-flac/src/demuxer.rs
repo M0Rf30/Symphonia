@@ -27,10 +27,19 @@ use symphonia_metadata::embedded::flac::*;
 
 use log::{debug, info};
 
+use super::frame::{BlockSequence, ChannelAssignment, read_frame_header};
 use super::parser::PacketParser;
 
 /// The FLAC start of stream marker: "fLaC" in ASCII.
 const FLAC_STREAM_MARKER: [u8; 4] = *b"fLaC";
+
+/// The FLAC frame synchronization codes for fixed-blocksize (0xfff8) and variable-blocksize
+/// (0xfff9) streams. A stream that starts with one of these has no stream header (e.g., it was cut
+/// out of the middle of another stream).
+const FLAC_FRAME_SYNC_MARKERS: &[&[u8]] = &[&[0xff, 0xf8], &[0xff, 0xf9]];
+
+/// The length of a FLAC STREAMINFO block.
+const STREAM_INFO_BLOCK_LEN: usize = 34;
 
 const FLAC_FORMAT_INFO: FormatInfo = FormatInfo {
     format: FORMAT_ID_FLAC,
@@ -56,7 +65,14 @@ impl<'s> FlacReader<'s> {
         // Read the first 4 bytes of the stream. Ideally this will be the FLAC stream marker.
         let marker = mss.read_quad_bytes()?;
 
+        // A stream that begins directly with a frame has no metadata. Reconstruct the stream
+        // information from the first frame header.
         if marker != FLAC_STREAM_MARKER {
+            if is_frame_sync(marker) {
+                mss.seek_buffered_rev(4);
+                return FlacReader::init_headerless(mss);
+            }
+
             return unsupported_error("flac: missing flac stream marker");
         }
 
@@ -72,6 +88,32 @@ impl<'s> FlacReader<'s> {
         }
 
         Ok(flac)
+    }
+
+    /// Initializes a reader for a stream that starts at a frame, without a stream marker or
+    /// metadata blocks.
+    fn init_headerless(mut reader: MediaSourceStream<'s>) -> Result<Self> {
+        let extra_data = headerless_stream_info(&mut reader)?;
+
+        let mut parser = PacketParser::default();
+        let track = read_stream_info_block_data(extra_data, &mut parser)?;
+
+        // Synchronize the packet parser to the first audio frame.
+        let _ = parser.resync(&mut reader)?;
+
+        let first_frame_offset = reader.pos();
+
+        Ok(FlacReader {
+            reader,
+            media_info: MediaInfo::from_track(&track),
+            tracks: vec![track],
+            attachments: Vec::new(),
+            chapters: None,
+            metadata: Default::default(),
+            index: None,
+            first_frame_offset,
+            parser,
+        })
     }
 
     /// Reads all the metadata blocks, returning a fully populated `FlacReader`.
@@ -199,8 +241,36 @@ impl<'s> FlacReader<'s> {
 }
 
 impl Scoreable for FlacReader<'_> {
-    fn score(_src: ScopedStream<&mut MediaSourceStream<'_>>) -> Result<Score> {
-        Ok(Score::Supported(255))
+    fn score(mut src: ScopedStream<&mut MediaSourceStream<'_>>) -> Result<Score> {
+        let marker = src.read_quad_bytes()?;
+
+        if marker == FLAC_STREAM_MARKER {
+            return Ok(Score::Supported(255));
+        }
+
+        // A bare frame synchronization code is a weak signal. Require the frame to have a valid
+        // header, and that the frame itself is valid if it fits within the scoring window.
+        if !is_frame_sync(marker) {
+            return Ok(Score::Unsupported);
+        }
+
+        src.seek_buffered_rev(4);
+
+        let extra_data = headerless_stream_info(&mut src)?;
+
+        let mut parser = PacketParser::default();
+        read_stream_info_block_data(extra_data, &mut parser)?;
+        parser.resync(&mut src)?;
+
+        match parser.parse(&mut src) {
+            Ok(Some(_)) => Ok(Score::Supported(64)),
+            // The frame may be larger than the scoring window, or the stream may be truncated. The
+            // frame header was valid, so accept the stream.
+            Err(Error::IoError(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                Ok(Score::Supported(64))
+            }
+            _ => Ok(Score::Unsupported),
+        }
     }
 }
 
@@ -213,7 +283,10 @@ impl ProbeableFormat<'_> for FlacReader<'_> {
     }
 
     fn probe_data() -> &'static [ProbeFormatData] {
-        &[support_format!(FLAC_FORMAT_INFO, &["flac"], &["audio/flac"], &[b"fLaC"])]
+        &[
+            support_format!(FLAC_FORMAT_INFO, &["flac"], &["audio/flac"], &[b"fLaC"]),
+            support_format!(FLAC_FORMAT_INFO, &["flac"], &["audio/flac"], FLAC_FRAME_SYNC_MARKERS),
+        ]
     }
 }
 
@@ -415,6 +488,70 @@ fn read_stream_info_block<B: ReadBytes + FiniteStream>(
     // data on the codec parameters.
     let extra_data = reader.read_boxed_slice_exact(reader.byte_len() as usize)?;
 
+    read_stream_info_block_data(extra_data, parser)
+}
+
+/// Returns true if the marker begins with a FLAC frame synchronization code.
+fn is_frame_sync(marker: [u8; 4]) -> bool {
+    marker[0] == 0xff && (marker[1] & 0xfe) == 0xf8
+}
+
+/// Reads the header of the frame at the current position, then rewinds to the start of the frame.
+/// Returns an equivalent STREAMINFO block (without a total length or MD5), inferred from the
+/// header, for a stream that has none.
+fn headerless_stream_info<B: ReadBytes + SeekBuffered>(reader: &mut B) -> Result<Box<[u8]>> {
+    let frame_pos = reader.pos();
+
+    let sync = reader.read_be_u16()?;
+    let header = read_frame_header(reader, sync);
+
+    reader.seek_buffered(frame_pos);
+
+    let header = header?;
+
+    // The sample rate and bits per sample are not optional in a STREAMINFO block, so the frame
+    // header must state them.
+    let (Some(sample_rate), Some(bits_per_sample)) = (header.sample_rate, header.bits_per_sample)
+    else {
+        return unsupported_error("flac: frame header relies on a missing stream info block");
+    };
+
+    let num_channels = match header.channel_assignment {
+        ChannelAssignment::Independant(num) => num,
+        _ => 2,
+    };
+
+    // The nominal block length is that of the first frame for a fixed-blocksize stream (every
+    // frame but the last is the same length). The block lengths of a variable-blocksize stream are
+    // unknown.
+    let (block_len_min, block_len_max) = match header.block_sequence {
+        BlockSequence::ByFrame(_) => {
+            let len = header.block_num_samples.max(16);
+            (len, len)
+        }
+        BlockSequence::BySample(_) => (16, u16::MAX),
+    };
+
+    let mut data = Vec::with_capacity(STREAM_INFO_BLOCK_LEN);
+
+    data.extend_from_slice(&block_len_min.to_be_bytes());
+    data.extend_from_slice(&block_len_max.to_be_bytes());
+    // Minimum and maximum frame byte lengths (unknown).
+    data.extend_from_slice(&[0; 6]);
+    // Sample rate (20 bits), channels - 1 (3 bits), bits per sample - 1 (5 bits), and total
+    // samples (36 bits, unknown).
+    let packed = (u64::from(sample_rate) << 44)
+        | (u64::from(num_channels - 1) << 41)
+        | (u64::from(bits_per_sample - 1) << 36);
+    data.extend_from_slice(&packed.to_be_bytes());
+    // MD5 (unknown).
+    data.extend_from_slice(&[0; 16]);
+
+    Ok(data.into_boxed_slice())
+}
+
+/// Parses a STREAMINFO block and populates the reader with stream information.
+fn read_stream_info_block_data(extra_data: Box<[u8]>, parser: &mut PacketParser) -> Result<Track> {
     // Parse the stream info block.
     let info = StreamInfo::read(&mut BufReader::new(&extra_data))?;
 
@@ -448,4 +585,134 @@ fn read_stream_info_block<B: ReadBytes + FiniteStream>(
     parser.reset(info);
 
     Ok(track)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::io::Cursor;
+
+    use symphonia_core::checksum::{Crc8Ccitt, Crc16Ansi};
+    use symphonia_core::formats::prelude::*;
+    use symphonia_core::io::{MediaSourceStream, Monitor};
+
+    use symphonia_core::codecs::CodecParameters;
+    use symphonia_core::formats::probe::Probe;
+
+    use super::FlacReader;
+
+    const BLOCK_LEN: u16 = 1000;
+
+    /// Build a minimal mono, 8 kHz, 16-bit stream of fixed-blocksize VERBATIM frames. Each entry
+    /// of `block_lens` is the length of a frame in samples. `min_block_len` is written verbatim to
+    /// the STREAMINFO block.
+    fn build_stream(min_block_len: u16, block_lens: &[u16]) -> Vec<u8> {
+        let mut out = b"fLaC".to_vec();
+
+        // STREAMINFO, last metadata block.
+        out.extend_from_slice(&[0x80, 0, 0, 34]);
+        out.extend_from_slice(&min_block_len.to_be_bytes());
+        out.extend_from_slice(&BLOCK_LEN.to_be_bytes());
+        out.extend_from_slice(&[0; 6]); // Frame byte length bounds (unknown).
+        // 8000 Hz (20 bits), 1 channel (3 bits), 16 bits per sample (5 bits), 0 total samples
+        // (36 bits).
+        let packed: u64 = (8000u64 << 44) | (15u64 << 36);
+        out.extend_from_slice(&packed.to_be_bytes());
+        out.extend_from_slice(&[0; 16]); // MD5.
+
+        for (n, &len) in block_lens.iter().enumerate() {
+            let mut frame = vec![0xff, 0xf8, 0x74, 0x08, n as u8];
+            frame.extend_from_slice(&(len - 1).to_be_bytes());
+            let mut crc8 = Crc8Ccitt::new(0);
+            crc8.process_buf_bytes(&frame);
+            frame.push(crc8.crc());
+
+            // VERBATIM subframe.
+            frame.push(0x02);
+            for i in 0..len {
+                frame.extend_from_slice(&(i as i16).wrapping_mul(7).to_be_bytes());
+            }
+
+            let mut crc16 = Crc16Ansi::new(0);
+            crc16.process_buf_bytes(&frame);
+            frame.extend_from_slice(&crc16.crc().to_be_bytes());
+            out.extend_from_slice(&frame);
+        }
+
+        out
+    }
+
+    fn open(data: Vec<u8>) -> FlacReader<'static> {
+        let mss = MediaSourceStream::new(Box::new(Cursor::new(data)), Default::default());
+        FlacReader::try_new(mss, Default::default()).unwrap()
+    }
+
+    fn read_all(reader: &mut FlacReader<'_>) -> Vec<(i64, u64)> {
+        let mut pkts = Vec::new();
+        while let Some(pkt) = reader.next_packet().unwrap() {
+            pkts.push((pkt.pts.get(), pkt.dur.get()));
+        }
+        pkts
+    }
+
+    // Upstream issue #564.
+    #[test]
+    fn verify_seek_to_start_after_eof_restarts_stream() {
+        let mut reader = open(build_stream(BLOCK_LEN, &[BLOCK_LEN; 4]));
+
+        let first = read_all(&mut reader);
+        assert_eq!(first.len(), 4);
+
+        let to = SeekTo::Timestamp { ts: Timestamp::new(0), track_id: 0 };
+        assert_eq!(reader.seek(SeekMode::Accurate, to).unwrap().actual_ts, Timestamp::new(0));
+
+        assert_eq!(read_all(&mut reader), first);
+    }
+
+    // Upstream issue #554.
+    #[test]
+    fn verify_unknown_min_block_length_is_accepted() {
+        let mut reader = open(build_stream(0, &[BLOCK_LEN, BLOCK_LEN, BLOCK_LEN, 500]));
+
+        let expected = vec![(0, 1000), (1000, 1000), (2000, 1000), (3000, 500)];
+        assert_eq!(read_all(&mut reader), expected);
+
+        let to = SeekTo::Timestamp { ts: Timestamp::new(2500), track_id: 0 };
+        assert_eq!(reader.seek(SeekMode::Accurate, to).unwrap().actual_ts, Timestamp::new(2000));
+        assert_eq!(read_all(&mut reader), expected[2..]);
+    }
+
+    // Upstream issue #372.
+    #[test]
+    fn verify_stream_without_header_is_readable() {
+        // Drop the stream marker and the STREAMINFO block, and the first frame.
+        let full = build_stream(BLOCK_LEN, &[BLOCK_LEN; 4]);
+        let frame_len = (full.len() - 42) / 4;
+        let data = full[42 + frame_len..].to_vec();
+
+        let mut reader = open(data.clone());
+
+        let tracks = reader.tracks();
+        assert_eq!(tracks.len(), 1);
+        let Some(CodecParameters::Audio(params)) = tracks[0].codec_params.as_ref()
+        else {
+            panic!("expected audio codec parameters");
+        };
+        assert_eq!(params.sample_rate, Some(8000));
+        assert_eq!(params.bits_per_sample, Some(16));
+
+        // The timestamps retain their position in the original stream.
+        assert_eq!(read_all(&mut reader), vec![(1000, 1000), (2000, 1000), (3000, 1000)]);
+
+        let to = SeekTo::Timestamp { ts: Timestamp::new(2500), track_id: 0 };
+        assert_eq!(reader.seek(SeekMode::Accurate, to).unwrap().actual_ts, Timestamp::new(2000));
+
+        // The stream is detected by the probe.
+        let mut probe = Probe::default();
+        probe.register_format::<FlacReader<'_>>();
+        let mss = MediaSourceStream::new(Box::new(Cursor::new(data)), Default::default());
+        let reader =
+            probe.probe(&Default::default(), mss, Default::default(), Default::default()).unwrap();
+        assert_eq!(reader.format_info().short_name, "flac");
+    }
 }

@@ -938,6 +938,7 @@ impl<'s> MkvReader<'s> {
     ) -> Result<SeekedTo> {
         // Save the iterator, cluster, and frame queue states to restore in-case of and error.
         let iter_state = self.iter.save_state();
+        let iter_pos = self.iter.pos();
         let cluster_state = self.current_cluster;
         let frames = std::mem::take(&mut self.frames);
         let cursors = self.cursors.clone();
@@ -969,8 +970,20 @@ impl<'s> MkvReader<'s> {
 
         match result {
             Err(err) => {
-                // Restore saved iterator, cluster, and frame queue states.
-                self.iter.restore_state(iter_state)?;
+                // If the source is not seekable, the elements read since the seek began cannot be
+                // read again, so nothing can be restored if the stream has moved. The error of
+                // the seek, and not that of the restoration, is the one to report.
+                if !self.is_seekable {
+                    if self.iter.pos() != iter_pos {
+                        return Err(err);
+                    }
+                }
+                else {
+                    // Restore saved iterator state.
+                    self.iter.restore_state(iter_state)?;
+                }
+
+                // Restore saved cluster and frame queue states.
                 self.current_cluster = cluster_state;
                 self.frames = frames;
                 self.cursors = cursors;
@@ -1031,7 +1044,12 @@ impl<'s> MkvReader<'s> {
         // a position can point past the first block of the track being seeked.
         let mut candidates = Vec::new();
 
-        if let Some(cues) = &self.cues {
+        // A cue point can only be reached by repositioning the stream, which is not possible if the
+        // source is not seekable. Then, the only option is to scan forward from the current
+        // position, which includes the rest of the current cluster.
+        let cues = self.cues.as_ref().filter(|_| self.is_seekable);
+
+        if let Some(cues) = cues {
             // If the track has no cue points at all, fallback to using all cue points.
             let track_has_cues =
                 cues.points.iter().any(|point| point.positions.track.get() == u64::from(id));

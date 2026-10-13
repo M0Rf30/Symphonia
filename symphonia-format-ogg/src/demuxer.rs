@@ -91,6 +91,9 @@ pub struct OggReader<'s> {
     links: Vec<Link>,
     /// The index of the current link in `links`.
     link_idx: usize,
+    /// Set when the stream ended inside the pages that start a new link. Such an end of stream is
+    /// never clean, even if all the logical streams of the current link read their last page.
+    truncated_in_new_link: bool,
 }
 
 impl<'s> OggReader<'s> {
@@ -119,6 +122,7 @@ impl<'s> OggReader<'s> {
             phys_byte_range_end: None,
             links: Vec::new(),
             link_idx: 0,
+            truncated_in_new_link: false,
         };
 
         ogg.start_new_physical_stream()?;
@@ -278,7 +282,14 @@ impl<'s> OggReader<'s> {
         loop {
             match self.pages.try_next_page(&mut self.reader) {
                 Ok(_) => break,
-                Err(Error::IoError(e)) => return Err(Error::from(e)),
+                Err(Error::IoError(e)) => {
+                    // The stream ended inside a page header, or inside a first page. The end of
+                    // the stream is not clean.
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof && self.pages.was_truncated() {
+                        self.truncated_in_new_link = true;
+                    }
+                    return Err(Error::from(e));
+                }
                 Err(e) => {
                     warn!("{e}");
                 }
@@ -289,7 +300,15 @@ impl<'s> OggReader<'s> {
 
         // If the page is marked as a first page, then try to start a new physical stream.
         if page.header.is_first_page {
-            self.start_new_physical_stream()?;
+            if let Err(err) = self.start_new_physical_stream() {
+                // The new link's streams were not installed, so the current streams cannot be
+                // used to judge whether the end of the stream was clean.
+                if matches!(&err, Error::IoError(e) if e.kind() == std::io::ErrorKind::UnexpectedEof)
+                {
+                    self.truncated_in_new_link = true;
+                }
+                return Err(err);
+            }
 
             // Keep track of the current link in a chained stream.
             if !self.links.is_empty() {
@@ -351,7 +370,7 @@ impl<'s> OggReader<'s> {
                 Ok(_) => (),
                 Err(Error::IoError(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
                     // Check that all logical streams have read their last page.
-                    if self.have_all_streams_read_last_page() {
+                    if !self.truncated_in_new_link && self.have_all_streams_read_last_page() {
                         // All streams read their last page. End of stream has been reached.
                         return Ok(None);
                     }

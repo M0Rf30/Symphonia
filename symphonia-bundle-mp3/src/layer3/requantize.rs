@@ -379,11 +379,103 @@ pub(super) fn requantize(header: &FrameHeader, channel: &GranuleChannel, buf: &m
             let bands = SFB_MIXED_BANDS[header.sample_rate_idx];
             let switch = SFB_MIXED_SWITCH_POINT[header.sample_rate_idx];
 
-            requantize_long(channel, &bands[..switch], buf);
+            // The switch point is the index of the first short band, thus the band edges of the
+            // long bands are `bands[..=switch]` (the last edge is the start of the short bands).
+            requantize_long(channel, &bands[..=switch], buf);
             requantize_short(channel, &bands[switch..], switch, buf);
         }
         _ => {
             requantize_long(channel, &SFB_LONG_BANDS[header.sample_rate_idx], buf);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::header;
+    use super::*;
+    use crate::common::MpegVersion;
+
+    /// The expected scale of a band: 2^(0.25 * (A - 8 * subblock_gain)) * 2^(-0.5 * scalefac).
+    fn scale(global_gain: u8, subblock_gain: u8, scalefac: u8) -> f32 {
+        let a = f64::from(global_gain) - 210.0 - 8.0 * f64::from(subblock_gain);
+        f64::powf(2.0, 0.25 * a - 0.5 * f64::from(scalefac)) as f32
+    }
+
+    fn mixed_channel(switch: usize) -> GranuleChannel {
+        let mut channel = GranuleChannel {
+            block_type: BlockType::Short { is_mixed: true },
+            global_gain: 200,
+            subblock_gain: [0, 1, 2],
+            rzero: 576,
+            ..Default::default()
+        };
+
+        // Every scale-factor is distinct to detect a band being scaled with the wrong one.
+        for (i, scalefac) in channel.scalefacs[..switch + 27].iter_mut().enumerate() {
+            *scalefac = 1 + (i % 11) as u8;
+        }
+
+        channel
+    }
+
+    /// The long bands of a mixed block, which cover the first 36 samples, must all be requantized.
+    /// The short bands that follow each use the window's subblock gain, and the scale-factors that
+    /// follow those of the long bands.
+    #[test]
+    fn verify_requantize_mixed_block_scales_all_bands() {
+        for (version, sample_rate_idx) in [
+            (MpegVersion::Mpeg1, 0),
+            (MpegVersion::Mpeg1, 1),
+            (MpegVersion::Mpeg1, 2),
+            (MpegVersion::Mpeg2, 3),
+            (MpegVersion::Mpeg2, 4),
+            (MpegVersion::Mpeg2, 5),
+            (MpegVersion::Mpeg2p5, 6),
+            (MpegVersion::Mpeg2p5, 7),
+        ] {
+            let mut header = header();
+            header.version = version;
+            header.sample_rate_idx = sample_rate_idx;
+
+            let bands = SFB_MIXED_BANDS[sample_rate_idx];
+            let switch = SFB_MIXED_SWITCH_POINT[sample_rate_idx];
+
+            // The long block spans two sub-bands.
+            assert_eq!(bands[switch], 36);
+
+            let channel = mixed_channel(switch);
+
+            let mut buf = [1.0f32; 576];
+            requantize(&header, &channel, &mut buf);
+
+            // The long bands.
+            for (band, edges) in bands[..=switch].windows(2).enumerate() {
+                let expected = scale(channel.global_gain, 0, channel.scalefacs[band]);
+
+                for (k, sample) in buf[edges[0]..edges[1]].iter().enumerate() {
+                    assert!(
+                        (sample - expected).abs() <= expected * 1e-6,
+                        "rate index {sample_rate_idx}, long band {band}, sample {k}: {sample} != {expected}"
+                    );
+                }
+            }
+
+            // The short bands.
+            for (i, edges) in bands[switch..].windows(2).enumerate() {
+                let expected = scale(
+                    channel.global_gain,
+                    channel.subblock_gain[i % 3],
+                    channel.scalefacs[switch + i],
+                );
+
+                for (k, sample) in buf[edges[0]..edges[1]].iter().enumerate() {
+                    assert!(
+                        (sample - expected).abs() <= expected * 1e-6,
+                        "rate index {sample_rate_idx}, short band {i}, sample {k}: {sample} != {expected}"
+                    );
+                }
+            }
         }
     }
 }

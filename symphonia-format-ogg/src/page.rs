@@ -148,6 +148,9 @@ pub struct PageReader {
     packet_lens: Vec<u16>,
     page_buf: Vec<u8>,
     page_buf_len: usize,
+    /// Set if the last attempt to read a page ended at the end of the stream inside the header of
+    /// a page, or inside a first page.
+    truncated: bool,
 }
 
 impl PageReader {
@@ -160,6 +163,7 @@ impl PageReader {
             packet_lens: Vec::new(),
             page_buf: Vec::new(),
             page_buf_len: 0,
+            truncated: false,
         };
 
         page_reader.try_next_page(reader)?;
@@ -167,8 +171,23 @@ impl PageReader {
         Ok(page_reader)
     }
 
+    /// Returns true if the last attempt to read a page hit the end of the stream inside the
+    /// header of a page, or inside the body of a page marked as the first page of a stream.
+    pub fn was_truncated(&self) -> bool {
+        self.truncated
+    }
+
     /// Attempts to read the next page. If the page is corrupted or invalid, returns an error.
     pub fn try_next_page<B>(&mut self, reader: &mut B) -> Result<()>
+    where
+        B: ReadBytes + SeekBuffered,
+    {
+        self.truncated = false;
+
+        self.try_next_page_inner(reader)
+    }
+
+    fn try_next_page_inner<B>(&mut self, reader: &mut B) -> Result<()>
     where
         B: ReadBytes + SeekBuffered,
     {
@@ -177,6 +196,9 @@ impl PageReader {
 
         // Synchronize to an OGG page capture pattern.
         sync_page(reader)?;
+
+        // From here on, reaching the end of the stream means a page was cut short.
+        self.truncated = true;
 
         // Record the position immediately after synchronization. If the page is found corrupt the
         // reader will need to seek back here to try to regain synchronization.
@@ -187,6 +209,10 @@ impl PageReader {
 
         // Parse the page header buffer.
         let header = read_page_header(&mut BufReader::new(&header_buf))?;
+
+        // A page that is cut short is only a certain sign of truncation for a first page, since a
+        // first page can begin a new link of a chained stream.
+        self.truncated = header.is_first_page;
 
         // debug!(
         //     "page {{ version={}, absgp={}, serial={}, sequence={}, crc={:#x}, n_segments={}, \
@@ -254,6 +280,7 @@ impl PageReader {
         }
 
         self.header = header;
+        self.truncated = false;
 
         Ok(())
     }

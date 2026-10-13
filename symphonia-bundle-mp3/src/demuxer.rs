@@ -2173,4 +2173,75 @@ mod tests {
             assert_eq!(i64::from(frame_idx(&packet)) * 1152, packet.pts.get());
         }
     }
+
+    /// A Xing/Info (`vbri == false`) or VBRI (`vbri == true`) frame, with the stated number of
+    /// MPEG frames, and no encoder delay or padding.
+    fn tag_frame(vbri: bool, num_mpeg_frames: u32) -> Vec<u8> {
+        let mut frame = vec![0xff, 0xfb, 9 << 4, 0x00];
+        frame.resize(FRAME_LEN, 0);
+
+        if vbri {
+            // The tag is 32 bytes after the header. Version 1, delay, quality, bytes, frames.
+            let tag = &mut frame[MPEG_HEADER_LEN + 32..];
+            tag[..4].copy_from_slice(b"VBRI");
+            tag[4..6].copy_from_slice(&1u16.to_be_bytes());
+            tag[14..18].copy_from_slice(&num_mpeg_frames.to_be_bytes());
+        }
+        else {
+            // The tag follows the 32 bytes of side information of an MPEG1 stereo frame. The
+            // flags only state that the number of frames is present.
+            let tag = &mut frame[MPEG_HEADER_LEN + 32..];
+            tag[..4].copy_from_slice(b"Info");
+            tag[4..8].copy_from_slice(&1u32.to_be_bytes());
+            tag[8..12].copy_from_slice(&num_mpeg_frames.to_be_bytes());
+        }
+
+        frame
+    }
+
+    #[test]
+    fn verify_seek_with_a_zero_frame_count_in_the_tag() {
+        for vbri in [false, true] {
+            // Streams with just the tag frame, and tag frames followed by 1 or more audio frames.
+            for n in [0usize, 1, 2, 10] {
+                let mut data = tag_frame(vbri, 0);
+                data.extend(build_stream(&plain_frames(n), 9, FRAME_LEN));
+                // A frame to follow the last one, so that the last frame can be validated.
+                data.extend(build_stream(&plain_frames(2), 9, FRAME_LEN));
+
+                for mode in [SeekMode::Coarse, SeekMode::Accurate] {
+                    let mss = MediaSourceStream::new(
+                        Box::new(Cursor::new(data.clone())),
+                        Default::default(),
+                    );
+
+                    let mut reader = MpaReader::try_new(mss, FormatOptions::default()).unwrap();
+
+                    assert_eq!(reader.tracks()[0].num_frames, Some(0));
+
+                    // The start of the stream can be seeked to.
+                    let seeked = seek_to(&mut reader, mode, 0);
+                    assert_eq!(seeked.actual_ts.get(), 0);
+
+                    // The result of any seek must be a valid position or an error, and not a panic
+                    // (a division by the number of frames).
+                    for required in [1, 1151, 1152, 5 * 1152] {
+                        let result = reader.seek(
+                            mode,
+                            SeekTo::Timestamp { ts: Timestamp::new(required), track_id: 0 },
+                        );
+
+                        match result {
+                            Ok(seeked) => {
+                                assert!(seeked.actual_ts.get() <= required);
+                                assert!(reader.next_packet().is_ok());
+                            }
+                            Err(Error::SeekError(_)) => (),
+                            Err(err) => panic!("unexpected error: {err}"),
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

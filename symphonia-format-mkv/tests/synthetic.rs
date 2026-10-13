@@ -1421,3 +1421,113 @@ fn opus_timeline_is_anchored_again_after_a_gap() {
         assert_eq!(packet.dur.get(), model.dur[i + 50]);
     }
 }
+
+fn open_unseekable(data: Vec<u8>) -> MkvReader<'static> {
+    let source = symphonia_core::io::ReadOnlySource::new(Cursor::new(data));
+    let mss = MediaSourceStream::new(Box::new(source), MediaSourceStreamOptions::default());
+    MkvReader::try_new(mss, FormatOptions::default()).expect("file should open")
+}
+
+// Cues refer to a block in the middle of the cluster (like the cues of ffmpeg, that write a
+// relative position), and the time of a cue is in milliseconds.
+fn cues_with_relative_positions(file: &mut File) {
+    file.cues = vec![
+        Cue { time: 0, cluster: 0, block: 0, track: 1 },
+        Cue { time: 250, cluster: 1, block: 0, track: 1 },
+        Cue { time: 500, cluster: 2, block: 0, track: 1 },
+        Cue { time: 750, cluster: 3, block: 0, track: 1 },
+    ];
+}
+
+// https://github.com/pdeljanov/Symphonia/issues/568
+#[test]
+fn seeks_with_cue_relative_positions_are_not_late_and_drop_queued_frames() {
+    let mut file = pcm_file();
+    cues_with_relative_positions(&mut file);
+    let mut reader = open(file.to_bytes(&Track::pcm()));
+
+    // Into the 2nd and later clusters: not at the start of the next cluster.
+    for (millis, block) in [(385, 38), (620, 62), (995, 99)] {
+        let seeked = seek_time(&mut reader, millis).unwrap();
+        assert_eq!(seeked.required_ts.get(), u64::from(millis) as i64 * 48);
+        assert_eq!(seeked.actual_ts.get(), i64::from(block) * 480);
+        assert_eq!(reader.next_packet().unwrap().unwrap().data[0], block as u8);
+    }
+
+    // A seek back must not yield the frame queued by the seek before.
+    for (millis, block) in [(385, 38), (260, 26), (130, 13), (10, 1)] {
+        let seeked = seek_time(&mut reader, millis).unwrap();
+        assert_eq!(seeked.actual_ts.get(), i64::from(block) * 480);
+        let packets = read_all(&mut reader);
+        assert_eq!(packets.len(), 100 - block as usize);
+        assert_eq!(packets[0].data[0], block as u8);
+    }
+}
+
+// https://github.com/pdeljanov/Symphonia/issues/278
+#[test]
+fn forward_seeks_of_an_unseekable_stream_within_the_current_cluster() {
+    for with_cues in [false, true] {
+        let mut file = pcm_file();
+        if with_cues {
+            cues_with_relative_positions(&mut file);
+        }
+        let mut reader = open_unseekable(file.to_bytes(&Track::pcm()));
+
+        // Read 5 blocks (50ms), then seek forward by 100ms, in the same cluster.
+        for _ in 0..5 {
+            reader.next_packet().unwrap().unwrap();
+        }
+        let seeked = seek_time(&mut reader, 150).unwrap();
+        assert_eq!(seeked.actual_ts.get(), 150 * 48, "cues: {with_cues}");
+        assert_eq!(reader.next_packet().unwrap().unwrap().data[0], 15);
+
+        // To the last block of the cluster.
+        let seeked = seek_time(&mut reader, 245).unwrap();
+        assert_eq!(seeked.actual_ts.get(), 240 * 48);
+        assert_eq!(reader.next_packet().unwrap().unwrap().data[0], 24);
+
+        // Every block of the cluster has been read: the next seek is in the next cluster.
+        let seeked = seek_time(&mut reader, 300).unwrap();
+        assert_eq!(seeked.actual_ts.get(), 300 * 48);
+        assert_eq!(reader.next_packet().unwrap().unwrap().data[0], 30);
+
+        // Backwards is impossible. The seek does not fail on the source, and the reader is usable
+        // afterwards.
+        if let Err(err) = seek_time(&mut reader, 100) {
+            assert!(matches!(err, symphonia_core::errors::Error::SeekError(_)), "{err:?}");
+        }
+        assert!(reader.next_packet().unwrap().is_some());
+
+        // To the end, and past it.
+        assert!(seek_time(&mut reader, 5000).is_err());
+    }
+}
+
+// https://github.com/pdeljanov/Symphonia/issues/576
+#[test]
+fn discard_padding_is_trimmed_from_the_start_and_end_of_a_block() {
+    let mut file = File::default();
+
+    // A negative padding is at the start of the block, a positive one at the end. It is a duration
+    // in nanoseconds independent of the timestamp scale: 2ms is 96 frames at 48kHz.
+    let padded = |ts: i64, padding: i64| Block {
+        track: 1,
+        ts,
+        len: 960,
+        duration: None,
+        padding: Some(padding),
+        fill: None,
+        data: None,
+    };
+
+    file.clusters
+        .push((0, vec![padded(0, -2_000_000), Block::new(10, 960), padded(20, 2_000_000)]));
+
+    let packets = read_all(&mut open(file.to_bytes(&Track::pcm())));
+    assert_eq!(packets.len(), 3);
+
+    let trims: Vec<_> =
+        packets.iter().map(|p| (p.trim_start.get(), p.trim_end.get(), p.dur.get())).collect();
+    assert_eq!(trims, [(96, 0, 384), (0, 0, 480), (0, 96, 384)]);
+}

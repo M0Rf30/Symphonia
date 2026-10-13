@@ -236,8 +236,12 @@ pub(super) fn antialias(channel: &mut GranuleChannel, samples: &mut [f32; 576]) 
 
     // The anti-aliasing filter must be applied up-to the last non-zero sub-band. After
     // anti-aliasing, the first zeroed sub-band may have non-zero values "smeared" into it.
-    // Therefore, the rzero must be updated.
-    channel.rzero = 18 * sb_limit.min(sb_rzero + 2).min(32);
+    // Therefore, the rzero must be updated. Note that the rzero of a mixed block must not be
+    // reduced to the end of the anti-aliased sub-bands since the short blocks that follow them
+    // are not anti-aliased, but are not zeroed either.
+    let aa_end = 18 * sb_limit.min(sb_rzero + 2).min(32);
+
+    channel.rzero = channel.rzero.max(aa_end);
 
     // Anti-aliasing is performed using 8 butterfly calculations at the boundaries of ADJACENT
     // sub-bands. For each calculation, there are two samples: lower and upper. For each iteration,
@@ -264,7 +268,7 @@ pub(super) fn antialias(channel: &mut GranuleChannel, samples: &mut [f32; 576]) 
     //
     // Note that all butterfly calculations only involve two samples, and all iterations are
     // independant of each other. This lends itself well for SIMD processing.
-    for sb in (18..channel.rzero).step_by(18) {
+    for sb in (18..aa_end).step_by(18) {
         for i in 0..8 {
             let li = sb - 1 - i;
             let ui = sb + i;
@@ -488,7 +492,48 @@ pub fn frequency_inversion(samples: &mut [f32; 576]) {
 mod tests {
     use super::IMDCT_WINDOWS;
     use super::imdct12_win;
+    use super::{BlockType, GranuleChannel, antialias};
     use std::f64;
+
+    /// Only the first two sub-bands (the long block) of a mixed block are anti-aliased. The short
+    /// blocks that follow must not be dropped from the non-zero samples (rzero), or they would not
+    /// be synthesized.
+    #[test]
+    fn verify_antialias_keeps_short_blocks_of_mixed_block() {
+        for rzero in [0, 10, 36, 37, 120, 575, 576] {
+            let mut channel = GranuleChannel {
+                block_type: BlockType::Short { is_mixed: true },
+                rzero,
+                ..Default::default()
+            };
+
+            let mut samples = [0.0f32; 576];
+            samples[..rzero].fill(1.0);
+
+            antialias(&mut channel, &mut samples);
+
+            // The samples at the boundary of the first two sub-bands may be smeared up-to 36.
+            assert_eq!(channel.rzero, rzero.max(36), "rzero {rzero}");
+
+            // Samples after the long block are not anti-aliased.
+            assert!(samples[36..rzero.max(36)].iter().all(|&s| s == 1.0), "rzero {rzero}");
+        }
+    }
+
+    /// The non-zero samples of long blocks are extended by one sub-band by anti-aliasing.
+    #[test]
+    fn verify_antialias_extends_rzero_of_long_block() {
+        for (rzero, expected) in [(0, 36), (10, 36), (100, 126), (558, 576), (576, 576)] {
+            let mut channel = GranuleChannel { rzero, ..Default::default() };
+
+            let mut samples = [0.0f32; 576];
+            samples[..rzero].fill(1.0);
+
+            antialias(&mut channel, &mut samples);
+
+            assert_eq!(channel.rzero, expected, "rzero {rzero}");
+        }
+    }
 
     fn imdct12_analytical(x: &[f32; 6]) -> [f32; 12] {
         const PI_24: f64 = f64::consts::PI / 24.0;

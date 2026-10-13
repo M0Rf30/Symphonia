@@ -138,6 +138,32 @@ mod tests {
     }
 
     #[test]
+    fn stts_lookup_with_sample_counts_near_u32_max() {
+        // A single entry covering every sample number, and a pair of entries whose counts sum to
+        // exactly u32::MAX, must be searchable without overflowing.
+        let Ok(stts) = read_stts(&[(u32::MAX, 1024)])
+        else {
+            panic!("valid stts");
+        };
+        assert_eq!(stts.find_timing_for_sample(1), Some((1024, 1024)));
+        assert_eq!(
+            stts.find_timing_for_sample(u32::MAX - 1),
+            Some((u64::from(u32::MAX - 1) * 1024, 1024))
+        );
+        assert_eq!(stts.find_timing_for_sample(u32::MAX), None);
+
+        let Ok(stts) = read_stts(&[(1, 1024), (u32::MAX - 1, 1024)])
+        else {
+            panic!("valid stts");
+        };
+        assert_eq!(stts.find_timing_for_sample(1), Some((1024, 1024)));
+        assert_eq!(stts.find_timing_for_sample(u32::MAX), None);
+
+        // Counts that sum to more than u32::MAX are rejected when the atom is read.
+        assert!(read_stts(&[(1, 1024), (u32::MAX, 1024)]).is_err());
+    }
+
+    #[test]
     fn stts_lookups_across_entries() {
         let Ok(stts) = read_stts(&[(2, 10), (0, 99), (3, 5)])
         else {
