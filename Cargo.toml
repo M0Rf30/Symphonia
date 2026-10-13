@@ -26,6 +26,7 @@ members = [
     "symphonia-format-ogg",
     "symphonia-format-riff",
     "symphonia-metadata",
+    "symphonia-tagging",
     "symphonia-play",
     "symphonia-check",
 ]

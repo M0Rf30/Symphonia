@@ -1,0 +1,26 @@
+[package]
+name = "symphonia-tagging"
+description = "Tag writing for files Project Symphonia reads (ID3v2/ID3v1, Vorbis comment, FLAC, Ogg, MP4 ilst, RIFF, AIFF, DSF, APEv2)."
+authors = ["Philip Deljanov <philip.deljanov@gmail.com>"]
+readme = "README.md"
+categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
+keywords = ["multimedia", "metadata", "tags", "id3v2", "vorbis"]
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+log = { workspace = true }
+symphonia-core = { version = "0.6.1", path = "../symphonia-core" }
+symphonia-metadata = { version = "0.6.1", path = "../symphonia-metadata", features = ["write", "id3v1", "id3v2", "ape", "flac", "vorbis", "riff"] }
+symphonia-format-ogg = { version = "0.6.1", path = "../symphonia-format-ogg", features = ["writer"] }
+symphonia-format-isomp4 = { version = "0.6.1", path = "../symphonia-format-isomp4", features = ["writer"] }
+
+[dev-dependencies]
+symphonia = { version = "0.6.1", path = "../symphonia", features = ["all"] }
+
+[lints]
+workspace = true

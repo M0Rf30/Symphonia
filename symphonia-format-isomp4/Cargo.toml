@@ -13,6 +13,11 @@ repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[features]
+default = []
+# ilst serializer + moov rewrite (used by `symphonia-tagging`).
+writer = ["symphonia-metadata/write"]
+
 [dependencies]
 log = { workspace = true }
 symphonia-core = { version = "0.6.1", path = "../symphonia-core" }

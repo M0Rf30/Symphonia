@@ -33,6 +33,9 @@ riff = [
     "riff-info",
 ]
 
+# Tag serializers (used by `symphonia-tagging`).
+write = []
+
 [dependencies]
 lazy_static = { workspace = true }
 log = { workspace = true }
