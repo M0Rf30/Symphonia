@@ -28,6 +28,9 @@ use crate::utils::base64;
 use crate::utils::images::try_get_image_info;
 use crate::utils::std_tag::*;
 
+#[cfg(feature = "write")]
+pub mod write;
+
 pub const VORBIS_COMMENT_METADATA_INFO: MetadataInfo = MetadataInfo {
     metadata: METADATA_ID_VORBIS_COMMENT,
     short_name: "vorbis",
@@ -57,6 +60,7 @@ lazy_static! {
         m.insert("arranger"                     , parse_arranger);
         m.insert("artist"                       , parse_artist);
         m.insert("artistsort"                   , parse_sort_artist);
+        m.insert("asin"                         , parse_ident_asin);
         // TODO: Is Author a synonym for Writer?
         m.insert("author"                       , parse_writer);
         m.insert("barcode"                      , parse_ident_barcode);
@@ -69,6 +73,7 @@ lazy_static! {
         m.insert("comment"                      , parse_comment);
         m.insert("compilation"                  , parse_compilation);
         m.insert("composer"                     , parse_composer);
+        m.insert("composersort"                 , parse_sort_composer);
         m.insert("conductor"                    , parse_conductor);
         m.insert("copyright"                    , parse_copyright);
         m.insert("ctdbdiscconfidence"           , parse_cuetoolsdb_disc_confidence);
@@ -88,6 +93,7 @@ lazy_static! {
         m.insert("encoded-by"                   , parse_encoded_by);
         m.insert("encodedby"                    , parse_encoded_by);
         m.insert("encoder settings"             , parse_encoder_settings);
+        m.insert("encodersettings"              , parse_encoder_settings);
         m.insert("encoder"                      , parse_encoder);
         m.insert("encoding"                     , parse_encoder_settings);
         m.insert("engineer"                     , parse_engineer);
@@ -95,6 +101,7 @@ lazy_static! {
         m.insert("genre"                        , parse_genre);
         m.insert("grouping"                     , parse_grouping);
         m.insert("isrc"                         , parse_ident_isrc);
+        m.insert("key"                          , parse_initial_key);
         m.insert("language"                     , parse_language);
         m.insert("label"                        , parse_label);
         m.insert("labelno"                      , parse_ident_catalog_number);
@@ -104,6 +111,9 @@ lazy_static! {
         m.insert("media"                        , parse_media_format);
         m.insert("mixer"                        , parse_mix_engineer);
         m.insert("mood"                         , parse_mood);
+        m.insert("movement"                     , parse_movement_number);
+        m.insert("movementname"                 , parse_movement_name);
+        m.insert("movementtotal"                , parse_movement_total);
         m.insert("musicbrainz_albumartistid"    , parse_musicbrainz_album_artist_id);
         m.insert("musicbrainz_albumid"          , parse_musicbrainz_album_id);
         m.insert("musicbrainz_artistid"         , parse_musicbrainz_artist_id);
