@@ -8,8 +8,9 @@
 //! FLAC metadata block writing.
 
 use symphonia_core::errors::{Error, Result};
-use symphonia_core::meta::{ColorMode, RawValue, StandardTag, StandardVisualKey, Visual};
+use symphonia_core::meta::{ColorMode, RawValue, StandardTag, Visual};
 
+use crate::utils::id3v2::get_picture_type_from_visual_key;
 use crate::utils::images::try_get_image_info;
 
 /// The `STREAMINFO` metadata block type.
@@ -39,34 +40,6 @@ pub fn block_header(is_last: bool, block_type: u8, len: usize) -> Result<[u8; 4]
     let len = (len as u32).to_be_bytes();
 
     Ok([(u8::from(is_last) << 7) | (block_type & 0x7f), len[1], len[2], len[3]])
-}
-
-/// Gets the picture type identifier (the same as an ID3v2 `APIC` picture type) of a visual
-/// usage. A visual without a usage is written as type 0 ("Other").
-pub fn picture_type(usage: Option<StandardVisualKey>) -> u32 {
-    match usage {
-        Some(StandardVisualKey::Other) | None => 0x00,
-        Some(StandardVisualKey::FileIcon) => 0x01,
-        Some(StandardVisualKey::OtherIcon) => 0x02,
-        Some(StandardVisualKey::FrontCover) => 0x03,
-        Some(StandardVisualKey::BackCover) => 0x04,
-        Some(StandardVisualKey::Leaflet) => 0x05,
-        Some(StandardVisualKey::Media) => 0x06,
-        Some(StandardVisualKey::LeadArtistPerformerSoloist) => 0x07,
-        Some(StandardVisualKey::ArtistPerformer) => 0x08,
-        Some(StandardVisualKey::Conductor) => 0x09,
-        Some(StandardVisualKey::BandOrchestra) => 0x0a,
-        Some(StandardVisualKey::Composer) => 0x0b,
-        Some(StandardVisualKey::Lyricist) => 0x0c,
-        Some(StandardVisualKey::RecordingLocation) => 0x0d,
-        Some(StandardVisualKey::RecordingSession) => 0x0e,
-        Some(StandardVisualKey::Performance) => 0x0f,
-        Some(StandardVisualKey::ScreenCapture) => 0x10,
-        Some(StandardVisualKey::Illustration) => 0x12,
-        Some(StandardVisualKey::BandArtistLogo) => 0x13,
-        Some(StandardVisualKey::PublisherStudioLogo) => 0x14,
-        Some(_) => 0x00,
-    }
 }
 
 /// Serializes the body of a `PICTURE` metadata block (which is also the content of a
@@ -112,7 +85,7 @@ pub fn picture_block(visual: &Visual) -> Result<Vec<u8>> {
 
     let mut out = Vec::with_capacity(32 + media_type.len() + description.len() + visual.data.len());
 
-    out.extend_from_slice(&picture_type(visual.usage).to_be_bytes());
+    out.extend_from_slice(&u32::from(get_picture_type_from_visual_key(visual.usage)).to_be_bytes());
     out.extend_from_slice(&len(media_type.len())?.to_be_bytes());
     out.extend_from_slice(media_type.as_bytes());
     out.extend_from_slice(&len(description.len())?.to_be_bytes());
@@ -132,7 +105,7 @@ mod tests {
     use std::sync::Arc;
 
     use symphonia_core::io::BufReader;
-    use symphonia_core::meta::{RawTag, Tag};
+    use symphonia_core::meta::{RawTag, StandardVisualKey, Tag};
 
     use super::*;
     use crate::embedded::flac::read_flac_picture_block;

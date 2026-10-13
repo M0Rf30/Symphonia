@@ -232,7 +232,7 @@ impl CldfbAnalysis {
             let sin = ANA_SIN[i % 4] * FRAC_1_SQRT_2;
             o.im = tim[i] * cos - tre[i] * sin;
             o.re = tim[i] * sin + tre[i] * cos;
-            *o = *o * ANALYSIS_GAIN;
+            *o *= ANALYSIS_GAIN;
         }
 
         Ok(out)
@@ -293,12 +293,10 @@ impl CldfbSynthesis {
         }
         else {
             let (mut c, mut s) = ([0.0f64; 32], [0.0f64; 32]);
-            self.transform.dct_dst::<32>(
-                re[..32].try_into().unwrap(),
-                im[..32].try_into().unwrap(),
-                &mut c,
-                &mut s,
-            );
+            let (mut re32, mut im32) = ([0.0f64; 32], [0.0f64; 32]);
+            re32.copy_from_slice(&re[..32]);
+            im32.copy_from_slice(&im[..32]);
+            self.transform.dct_dst::<32>(&re32, &im32, &mut c, &mut s);
             tre[..32].copy_from_slice(&c);
             tim[..32].copy_from_slice(&s);
         }

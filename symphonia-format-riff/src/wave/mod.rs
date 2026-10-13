@@ -791,7 +791,7 @@ mod tests {
         // data chunk
         file.extend_from_slice(b"data");
         file.extend_from_slice(&100u32.to_le_bytes());
-        file.extend_from_slice(&vec![0u8; 100]);
+        file.extend_from_slice(&[0u8; 100]);
 
         let source = ReadOnlySource::new(Cursor::new(file));
         let mss = MediaSourceStream::new(Box::new(source), Default::default());
@@ -832,7 +832,7 @@ mod tests {
         // data chunk
         file.extend_from_slice(b"data");
         file.extend_from_slice(&100u32.to_le_bytes());
-        file.extend_from_slice(&vec![0u8; 100]);
+        file.extend_from_slice(&[0u8; 100]);
 
         let source = ReadOnlySource::new(Cursor::new(file));
         let mss = MediaSourceStream::new(Box::new(source), Default::default());
@@ -1589,10 +1589,10 @@ mod tests {
             assert_eq!(seeked.actual_ts.get() as u64, start as u64 * SAMPLES_PER_FRAME);
 
             // The pre-roll frames follow, and then the target frame.
-            for i in start..=index {
+            for (i, frame) in frames.iter().enumerate().take(index + 1).skip(start) {
                 let packet = reader.next_packet().unwrap().expect("packet after seek");
                 assert_eq!(packet.pts.get() as u64, i as u64 * SAMPLES_PER_FRAME);
-                assert_eq!(&packet.data[..], &frames[i][..]);
+                assert_eq!(&packet.data[..], &frame[..]);
             }
 
             if index + 1 < NUM_FRAMES {

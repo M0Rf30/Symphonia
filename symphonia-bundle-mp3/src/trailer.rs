@@ -14,6 +14,7 @@
 
 use std::io::{Seek, SeekFrom};
 
+use symphonia_common::mpeg::audio::apev2::{APEV2_FOOTER_LEN, Apev2Footer};
 use symphonia_core::io::{MediaSourceStream, ReadBytes};
 
 /// The size of an ID3v1 tag.
@@ -23,7 +24,7 @@ const ID3V1_EXT_LEN: u64 = 227;
 /// The size of the ID3v2 header or footer.
 const ID3V2_HEADER_LEN: u64 = 10;
 /// The size of an APEv2 header or footer.
-const APEV2_HEADER_LEN: u64 = 32;
+const APEV2_HEADER_LEN: u64 = APEV2_FOOTER_LEN as u64;
 /// The size of the Lyrics3v2 trailer (6 digits of size, then "LYRICS200").
 const LYRICS3V2_TRAILER_LEN: u64 = 15;
 /// The maximum size of a Lyrics3v1 tag.
@@ -113,24 +114,14 @@ fn find_audio_end_inner(mss: &mut MediaSourceStream<'_>, start: u64, len: u64) -
         if avail >= APEV2_HEADER_LEN {
             let mut footer = [0; APEV2_HEADER_LEN as usize];
 
-            if read_at(mss, end - APEV2_HEADER_LEN, &mut footer) == Some(())
-                && &footer[..8] == b"APETAGEX"
-            {
-                // The size includes the footer and the items, but not the header.
-                let size =
-                    u64::from(u32::from_le_bytes([footer[12], footer[13], footer[14], footer[15]]));
-                let flags = u32::from_le_bytes([footer[20], footer[21], footer[22], footer[23]]);
+            if read_at(mss, end - APEV2_HEADER_LEN, &mut footer) == Some(()) {
+                if let Some(ape) = Apev2Footer::parse(&footer) {
+                    let total = ape.total_len();
 
-                // Bit 31 indicates the tag contains a header. Bit 29 would indicate this is the
-                // header itself, which is not valid for a footer.
-                let has_header = flags & (1 << 31) != 0;
-                let is_header = flags & (1 << 29) != 0;
-
-                let total = size + if has_header { APEV2_HEADER_LEN } else { 0 };
-
-                if !is_header && size >= APEV2_HEADER_LEN && total <= avail {
-                    end -= total;
-                    continue;
+                    if total <= avail {
+                        end -= total;
+                        continue;
+                    }
                 }
             }
         }

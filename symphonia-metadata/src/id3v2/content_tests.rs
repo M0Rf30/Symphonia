@@ -13,10 +13,7 @@ use symphonia_core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia_core::meta::{MetadataOptions, MetadataReader, StandardTag, Tag};
 
 use super::Id3v2Reader;
-
-fn syncsafe(n: usize) -> [u8; 4] {
-    [((n >> 21) & 0x7f) as u8, ((n >> 14) & 0x7f) as u8, ((n >> 7) & 0x7f) as u8, (n & 0x7f) as u8]
-}
+use super::unsync::encode_synchsafe;
 
 /// Builds an ID3v2.3 frame.
 fn frame_v3(id: &[u8; 4], body: &[u8]) -> Vec<u8> {
@@ -45,7 +42,7 @@ fn text_body(strings: &[&str]) -> Vec<u8> {
 fn tag(major: u8, frames: Vec<Vec<u8>>) -> Vec<u8> {
     let frames = frames.concat();
     let mut t = vec![b'I', b'D', b'3', major, 0, 0];
-    t.extend_from_slice(&syncsafe(frames.len()));
+    t.extend_from_slice(&encode_synchsafe(frames.len() as u32));
     t.extend_from_slice(&frames);
     t
 }

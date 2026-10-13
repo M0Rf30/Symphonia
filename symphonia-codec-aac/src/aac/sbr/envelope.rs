@@ -47,10 +47,10 @@
 //! the wire; the §4.6.18.3.5 DPCM accumulation across bands / time and
 //! the §4.6.18 dequantization to linear energies are downstream.
 
-use super::grid::{SbrDtdf, SbrGrid};
-use super::huffman::{env_tables, noise_tables, sbr_huff_dec, SbrHuffContext};
+use super::bits::{BitReader, bit_readers};
 use super::error::{SbrError as Error, SbrResult as Result};
-use super::bits::BitReader;
+use super::grid::{SbrDtdf, SbrGrid};
+use super::huffman::{SbrHuffContext, env_tables, noise_tables, sbr_huff_dec};
 
 /// Raw `bs_data_env` for one channel: one delta vector per envelope.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,11 +73,7 @@ pub struct SbrNoiseData {
 /// The number of envelope bands for a given freq-resolution flag:
 /// `NHigh` (high res) or `NLow` (low res).
 fn num_env_bands(bands: &super::freq_bands::HiLoTables, high_res: bool) -> usize {
-    if high_res {
-        bands.n_high()
-    } else {
-        bands.n_low()
-    }
+    if high_res { bands.n_high() } else { bands.n_low() }
 }
 
 impl SbrEnvelopeData {
@@ -100,23 +96,17 @@ impl SbrEnvelopeData {
         ch: bool,
         amp_res: bool,
     ) -> Result<Self> {
-        let ctx = SbrHuffContext {
-            coupling,
-            ch,
-            amp_res,
-        };
-        let ((t_huff, t_lav), (f_huff, f_lav)) = env_tables(ctx);
+        let ctx = SbrHuffContext { coupling, ch, amp_res };
+        let (t_huff, f_huff) = env_tables(ctx);
 
         // Start-value width per Table 4.72.
         let start_bits = if coupling && ch {
-            if amp_res {
-                5
-            } else {
-                6
-            }
-        } else if amp_res {
+            if amp_res { 5 } else { 6 }
+        }
+        else if amp_res {
             6
-        } else {
+        }
+        else {
             7
         };
 
@@ -130,12 +120,13 @@ impl SbrEnvelopeData {
                 let start = read(reader, start_bits)? as i32;
                 row.push(start);
                 for _ in 1..n {
-                    row.push(sbr_huff_dec(reader, f_huff, f_lav)?);
+                    row.push(sbr_huff_dec(reader, f_huff)?);
                 }
-            } else {
+            }
+            else {
                 // Delta in time: every band is a t_huff delta.
                 for _ in 0..n {
-                    row.push(sbr_huff_dec(reader, t_huff, t_lav)?);
+                    row.push(sbr_huff_dec(reader, t_huff)?);
                 }
             }
             data.push(row);
@@ -161,12 +152,8 @@ impl SbrNoiseData {
         ch: bool,
         amp_res: bool,
     ) -> Result<Self> {
-        let ctx = SbrHuffContext {
-            coupling,
-            ch,
-            amp_res,
-        };
-        let ((t_huff, t_lav), (f_huff, f_lav)) = noise_tables(ctx);
+        let ctx = SbrHuffContext { coupling, ch, amp_res };
+        let (t_huff, f_huff) = noise_tables(ctx);
 
         let mut data = Vec::with_capacity(grid.num_noise);
         for noise in 0..grid.num_noise {
@@ -177,11 +164,12 @@ impl SbrNoiseData {
                 let start = read(reader, 5)? as i32;
                 row.push(start);
                 for _ in 1..num_noise_bands {
-                    row.push(sbr_huff_dec(reader, f_huff, f_lav)?);
+                    row.push(sbr_huff_dec(reader, f_huff)?);
                 }
-            } else {
+            }
+            else {
                 for _ in 0..num_noise_bands {
-                    row.push(sbr_huff_dec(reader, t_huff, t_lav)?);
+                    row.push(sbr_huff_dec(reader, t_huff)?);
                 }
             }
             data.push(row);
@@ -190,17 +178,14 @@ impl SbrNoiseData {
     }
 }
 
-#[inline]
-fn read(reader: &mut BitReader<'_>, n: u32) -> Result<u32> {
-    reader.read_u32(n).map_err(|_| Error::SbrHuffInvalid)
-}
+bit_readers!(Error::SbrHuffInvalid, read);
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::super::freq_bands::{k0, k2, master_table, HiLoTables};
-    use super::super::grid::FrameClass;
     use super::super::bits::{BitReader, BitWriter};
+    use super::super::freq_bands::{HiLoTables, k0, k2, master_table};
+    use super::super::grid::FrameClass;
+    use super::*;
 
     fn bands_44100() -> HiLoTables {
         // The known-good 44.1 kHz linear geometry from sbr_freq_bands.
@@ -240,17 +225,13 @@ mod tests {
         };
         // amp_res = false → level start width 7 bits.
         let n = bands.n_high();
-        let ((_t, _tl), (f_huff, f_lav)) = env_tables(SbrHuffContext {
-            coupling: false,
-            ch: false,
-            amp_res: false,
-        });
+        let (_t, f_book) =
+            env_tables(SbrHuffContext { coupling: false, ch: false, amp_res: false });
+        let (f_huff, f_lav) = (f_book.table(), f_book.lav());
         let mut w = BitWriter::new();
         w.write_u32(40, 7); // start value
-                            // remaining n-1 bands: pick a few known indices.
-        let chosen: Vec<usize> = (1..n)
-            .map(|i| (i + f_lav as usize) % f_huff.len())
-            .collect();
+        // remaining n-1 bands: pick a few known indices.
+        let chosen: Vec<usize> = (1..n).map(|i| (i + f_lav as usize) % f_huff.len()).collect();
         for &idx in &chosen {
             push_code(&mut w, f_huff, idx);
         }
@@ -287,11 +268,9 @@ mod tests {
             df_noise: vec![false],
         };
         let n = bands.n_low();
-        let ((t_huff, t_lav), (_f, _fl)) = env_tables(SbrHuffContext {
-            coupling: false,
-            ch: false,
-            amp_res: false,
-        });
+        let (t_book, _f) =
+            env_tables(SbrHuffContext { coupling: false, ch: false, amp_res: false });
+        let (t_huff, t_lav) = (t_book.table(), t_book.lav());
         let mut w = BitWriter::new();
         let chosen: Vec<usize> = (0..n).map(|i| (i * 2 + 1) % t_huff.len()).collect();
         for &idx in &chosen {
@@ -328,24 +307,19 @@ mod tests {
             df_env: vec![false, false],
             df_noise: vec![false, true], // floor 0 freq, floor 1 time
         };
-        let ((t_huff, t_lav), (f_huff, f_lav)) = noise_tables(SbrHuffContext {
-            coupling: false,
-            ch: false,
-            amp_res: false,
-        });
+        let (t_book, f_book) =
+            noise_tables(SbrHuffContext { coupling: false, ch: false, amp_res: false });
+        let (t_huff, t_lav) = (t_book.table(), t_book.lav());
+        let (f_huff, f_lav) = (f_book.table(), f_book.lav());
         let mut w = BitWriter::new();
         // Floor 0: 5-bit start + (nq-1) f deltas.
         w.write_u32(12, 5);
-        let f_chosen: Vec<usize> = (1..nq)
-            .map(|i| (i + f_lav as usize) % f_huff.len())
-            .collect();
+        let f_chosen: Vec<usize> = (1..nq).map(|i| (i + f_lav as usize) % f_huff.len()).collect();
         for &idx in &f_chosen {
             push_code(&mut w, f_huff, idx);
         }
         // Floor 1: nq t deltas.
-        let t_chosen: Vec<usize> = (0..nq)
-            .map(|i| (i + t_lav as usize) % t_huff.len())
-            .collect();
+        let t_chosen: Vec<usize> = (0..nq).map(|i| (i + t_lav as usize) % t_huff.len()).collect();
         for &idx in &t_chosen {
             push_code(&mut w, t_huff, idx);
         }
@@ -381,16 +355,10 @@ mod tests {
             ld_borders: None,
             amp_res_frame: None,
         };
-        let dtdf = SbrDtdf {
-            df_env: vec![false],
-            df_noise: vec![false],
-        };
+        let dtdf = SbrDtdf { df_env: vec![false], df_noise: vec![false] };
         let n = bands.n_high();
-        let ((_t, _tl), (f_huff, f_lav)) = env_tables(SbrHuffContext {
-            coupling: true,
-            ch: true,
-            amp_res: true,
-        });
+        let (_t, f_book) = env_tables(SbrHuffContext { coupling: true, ch: true, amp_res: true });
+        let (f_huff, f_lav) = (f_book.table(), f_book.lav());
         let mut w = BitWriter::new();
         w.write_u32(7, 5); // 5-bit balance start
         for i in 1..n {
@@ -419,10 +387,7 @@ mod tests {
             ld_borders: None,
             amp_res_frame: None,
         };
-        let dtdf = SbrDtdf {
-            df_env: vec![false],
-            df_noise: vec![false],
-        };
+        let dtdf = SbrDtdf { df_env: vec![false], df_noise: vec![false] };
         let bytes = [0u8; 0];
         let mut r = BitReader::new(&bytes);
         assert!(matches!(

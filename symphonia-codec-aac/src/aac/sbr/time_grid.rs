@@ -34,8 +34,8 @@
 //! 4.176 of the staged spec. No part of this implementation is derived
 //! from any external decoder.
 
-use super::grid::{FrameClass, SbrGrid};
 use super::error::{SbrError as Error, SbrResult as Result};
+use super::grid::{FrameClass, SbrGrid};
 
 /// The derived §4.6.18.3.3 time grid for one channel's SBR frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,15 +111,18 @@ pub fn derive_time_grid(grid: &SbrGrid, num_time_slots: i32) -> Result<TimeGrid>
     for l in 0..=le {
         let border = if l == 0 {
             abs_bord_lead
-        } else if l == le {
+        }
+        else if l == le {
             abs_bord_trail
-        } else if l <= n_rel_lead {
+        }
+        else if l <= n_rel_lead {
             let mut b = abs_bord_lead;
             for i in 0..l {
                 b += rel_lead(i);
             }
             b
-        } else {
+        }
+        else {
             let mut b = abs_bord_trail;
             for i in 0..(le - l) {
                 b -= rel_trail(i);
@@ -145,7 +148,8 @@ pub fn derive_time_grid(grid: &SbrGrid, num_time_slots: i32) -> Result<TimeGrid>
     // tE(middleBorder) (Table 4.174).
     let t_q = if le == 1 {
         vec![t_e[0], t_e[1]]
-    } else {
+    }
+    else {
         let middle = middle_border(grid.frame_class, grid.pointer, le)?;
         if middle == 0 || middle >= le {
             return Err(Error::SbrGridInvalid);
@@ -162,14 +166,16 @@ pub fn derive_time_grid(grid: &SbrGrid, num_time_slots: i32) -> Result<TimeGrid>
         FrameClass::FixVar | FrameClass::VarVar => {
             if grid.pointer == 0 {
                 -1
-            } else {
+            }
+            else {
                 le as i32 + 1 - grid.pointer as i32
             }
         }
         FrameClass::VarFix => {
             if grid.pointer > 1 {
                 grid.pointer as i32 - 1
-            } else {
+            }
+            else {
                 -1
             }
         }
@@ -232,14 +238,8 @@ mod tests {
     #[test]
     fn fixfix_uniform_borders() {
         assert_eq!(derive_time_grid(&fixfix(1), 16).unwrap().t_e, vec![0, 16]);
-        assert_eq!(
-            derive_time_grid(&fixfix(2), 16).unwrap().t_e,
-            vec![0, 8, 16]
-        );
-        assert_eq!(
-            derive_time_grid(&fixfix(4), 16).unwrap().t_e,
-            vec![0, 4, 8, 12, 16]
-        );
+        assert_eq!(derive_time_grid(&fixfix(2), 16).unwrap().t_e, vec![0, 8, 16]);
+        assert_eq!(derive_time_grid(&fixfix(4), 16).unwrap().t_e, vec![0, 4, 8, 12, 16]);
     }
 
     /// FIXFIX noise floors: LE = 1 has one floor over the frame; LE > 1
@@ -360,9 +360,6 @@ mod tests {
             ..grid
         };
         // tE = [0, 16-24, …] — not increasing.
-        assert!(matches!(
-            derive_time_grid(&bad, 16),
-            Err(Error::SbrGridInvalid)
-        ));
+        assert!(matches!(derive_time_grid(&bad, 16), Err(Error::SbrGridInvalid)));
     }
 }

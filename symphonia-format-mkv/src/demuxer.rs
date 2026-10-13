@@ -1384,7 +1384,7 @@ impl<'s> MkvReader<'s> {
 
                         // Extract frames.
                         if !extract_frames(
-                            &data,
+                            data,
                             duration,
                             discard_padding,
                             cluster_ts,

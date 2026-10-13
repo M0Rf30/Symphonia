@@ -60,8 +60,8 @@
 //! All truth from ISO/IEC 14496-3:2009 §8.6.4.3 / Annex 8.A staged
 //! under `docs/audio/aac/`.
 
-use super::super::qmf::Complex;
 use super::super::error::{SbrError as Error, SbrResult as Result};
+use super::super::qmf::Complex;
 
 /// QMF slots per PS stereo frame in the SBR combination
 /// (`numQMFSlots = numTimeSlots · RATE`, Annex 8.A.3, 1024 framing).
@@ -225,10 +225,7 @@ impl PsHybrid {
     /// A fresh filterbank for `config` (zero history).
     #[must_use]
     pub fn new(config: HybridConfig) -> Self {
-        PsHybrid {
-            config,
-            history: vec![[Complex::default(); LOOKAHEAD]; config.split_bands()],
-        }
+        PsHybrid { config, history: vec![[Complex::default(); LOOKAHEAD]; config.split_bands()] }
     }
 
     /// The active configuration.
@@ -277,13 +274,15 @@ impl PsHybrid {
                         2.0 * core::f64::consts::PI / q_cnt as f64
                             * (q as f64 + 0.5)
                             * (m as f64 - 6.0)
-                    } else {
+                    }
+                    else {
                         2.0 * core::f64::consts::PI * q as f64 / q_cnt as f64 * (m as f64 - 6.0)
                     };
                     let (s, c) = arg.sin_cos();
                     *f = if type_a {
                         Complex::new(g[m] * c, g[m] * s)
-                    } else {
+                    }
+                    else {
                         Complex::new(g[m] * c, 0.0)
                     };
                 }
@@ -402,9 +401,7 @@ mod tests {
     /// Deterministic pseudo-random complex signal.
     fn noise(seed: u64) -> impl Fn(usize, usize) -> Complex {
         move |n, k| {
-            let mut h = seed
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add((n * 64 + k) as u64);
+            let mut h = seed.wrapping_mul(6364136223846793005).wrapping_add((n * 64 + k) as u64);
             h ^= h >> 33;
             h = h.wrapping_mul(0xff51afd7ed558ccd);
             h ^= h >> 33;
@@ -460,7 +457,8 @@ mod tests {
             if k == 0 {
                 let (s, c) = (omega * n as f64).sin_cos();
                 Complex::new(c, s)
-            } else {
+            }
+            else {
                 Complex::default()
             }
         });
@@ -468,9 +466,8 @@ mod tests {
         // Steady-state slot (history warm-up over).
         let row = &hyb[20];
         let energies: Vec<f64> = (0..10).map(|k| row[k].norm_sqr()).collect();
-        let max_k = (0..10)
-            .max_by(|&a, &b| energies[a].partial_cmp(&energies[b]).unwrap())
-            .unwrap();
+        let max_k =
+            (0..10).max_by(|&a, &b| energies[a].partial_cmp(&energies[b]).unwrap()).unwrap();
         assert_eq!(max_k, 2, "energies: {energies:?}");
     }
 
@@ -483,16 +480,16 @@ mod tests {
             if k == 0 {
                 let (s, c) = (omega * n as f64).sin_cos();
                 Complex::new(c, s)
-            } else {
+            }
+            else {
                 Complex::default()
             }
         });
         let hyb = fb.analyze(&x).unwrap();
         let row = &hyb[20];
         let energies: Vec<f64> = (0..10).map(|k| row[k].norm_sqr()).collect();
-        let max_k = (0..10)
-            .max_by(|&a, &b| energies[a].partial_cmp(&energies[b]).unwrap())
-            .unwrap();
+        let max_k =
+            (0..10).max_by(|&a, &b| energies[a].partial_cmp(&energies[b]).unwrap()).unwrap();
         assert_eq!(max_k, 1, "energies: {energies:?}");
     }
 

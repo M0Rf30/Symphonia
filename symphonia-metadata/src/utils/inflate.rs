@@ -107,9 +107,9 @@ impl Huffman {
         // Check for an over-subscribed set of lengths.
         let mut left = 1i32;
 
-        for len in 1..=MAX_BITS {
+        for &c in &count[1..=MAX_BITS] {
             left <<= 1;
-            left -= i32::from(count[len]);
+            left -= i32::from(c);
 
             if left < 0 {
                 return None;

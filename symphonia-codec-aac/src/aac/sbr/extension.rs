@@ -59,9 +59,8 @@
 //! up-sampled PCM) is **not** part of this walker — it keys off the
 //! band tables and scalefactors this produces. The `bs_sbr_crc_bits`
 //! value is captured along with its §4.4.2.8.1 coverage region (the
-//! `num_sbr_bits − 10` payload bits after the CRC field); callers that
-//! own the payload buffer verify it via
-//! [`SbrExtensionData::verify_crc`] (the decode drivers do).
+//! `num_sbr_bits − 10` payload bits after the CRC field); it is not
+//! verified.
 //!
 //! ## Clean-room provenance
 //!
@@ -72,13 +71,13 @@
 //! `sbr_layer` to `SBR_NOT_SCALABLE` (Table 4.62 Note 1), so the
 //! `bs_header_flag` is always present.
 
-use super::bits::BitReader;
+use super::bits::{BitReader, bit_readers};
 
 use super::IdSynEle;
 use super::element::SbrElement;
+use super::error::{SbrError as Error, SbrResult as Result};
 use super::grid::GridSyntax;
 use super::header::SbrHeader;
-use super::error::{SbrError as Error, SbrResult as Result};
 
 /// Field width of `bs_sbr_crc_bits` (Table 4.62).
 pub const SBR_CRC_BITS: u32 = 10;
@@ -88,7 +87,7 @@ pub const SBR_CRC_BITS: u32 = 10;
 pub struct SbrExtensionData {
     /// `bs_sbr_crc_bits` (10-bit) when `crc_flag` was set (the
     /// `EXT_SBR_DATA_CRC` extension type); `None` for the plain
-    /// `EXT_SBR_DATA` type. Verify with [`Self::verify_crc`].
+    /// `EXT_SBR_DATA` type. It is captured but not verified.
     pub crc: Option<u16>,
     /// The protected bit range `[start, end)` — absolute positions in
     /// the buffer the parsing [`BitReader`] was constructed over —
@@ -144,11 +143,7 @@ impl SbrExtensionData {
     ) -> Result<Self> {
         let start = reader.bit_position();
 
-        let crc = if crc_flag {
-            Some(read(reader, SBR_CRC_BITS)? as u16)
-        } else {
-            None
-        };
+        let crc = if crc_flag { Some(read(reader, SBR_CRC_BITS)? as u16) } else { None };
         let region_start = reader.bit_position();
 
         // Non-scalable core ⇒ sbr_layer == SBR_NOT_SCALABLE, so the
@@ -161,43 +156,6 @@ impl SbrExtensionData {
             start,
             region_start,
             header_present,
-            prev_header,
-            fs_sbr,
-            cnt,
-        )
-    }
-
-    /// [`SbrExtensionData::parse`] for a caller that has already
-    /// consumed the `extension_type` nibble, the optional 10-bit CRC
-    /// field, **and** a set `bs_header_flag` (the pre-header probe in
-    /// [`crate::extension_payload::ExtensionPayload::parse_with_sbr`]).
-    /// `nibble_start` is the bit position of the `extension_type`
-    /// nibble, from which the CRC coverage region and the Table 4.62
-    /// `num_sbr_bits` accounting are reconstructed.
-    #[allow(clippy::too_many_arguments)]
-    pub fn parse_after_prefix(
-        reader: &mut BitReader<'_>,
-        id_aac: IdSynEle,
-        crc: Option<u16>,
-        nibble_start: u64,
-        fs_sbr: u32,
-        cnt: Option<u32>,
-        prev_header: Option<SbrHeader>,
-    ) -> Result<Self> {
-        let start = nibble_start + 4;
-        let region_start = start
-            + if crc.is_some() {
-                u64::from(SBR_CRC_BITS)
-            } else {
-                0
-            };
-        Self::finish(
-            reader,
-            id_aac,
-            crc,
-            start,
-            region_start,
-            true,
             prev_header,
             fs_sbr,
             cnt,
@@ -226,7 +184,8 @@ impl SbrExtensionData {
         let header_present = read_flag(reader)?;
         let header = if header_present {
             SbrHeader::parse(reader)?
-        } else {
+        }
+        else {
             prev_header.ok_or(Error::SbrFreqBandInvalid)?
         };
 
@@ -265,7 +224,8 @@ impl SbrExtensionData {
     ) -> Result<Self> {
         let header = if header_present {
             SbrHeader::parse(reader)?
-        } else {
+        }
+        else {
             // Reuse the previous transmitted header. A stream that
             // opens with header-less SBR payloads is the §4.5.2.8.1
             // "upsampling and delay adjustment only" state — the
@@ -326,45 +286,17 @@ impl SbrExtensionData {
             num_sbr_bits,
         })
     }
-
-    /// Verify the `bs_sbr_crc_bits` checksum against the §4.5.2.8.1
-    /// coverage region (every payload bit after the CRC field to the
-    /// end of the fill payload — "the whole SBR data range including
-    /// possible bs_fill_bits").
-    ///
-    /// `data` must be the same byte buffer the parsing [`BitReader`]
-    /// was constructed over ([`Self::crc_region`] holds absolute bit
-    /// positions into it). A payload without a CRC field (plain
-    /// `EXT_SBR_DATA`) verifies vacuously. Returns
-    /// [`Error::SbrCrcMismatch`] when the recomputed 10-bit `G10`
-    /// (zero-init) CRC disagrees with the transmitted value.
-    pub fn verify_crc(&self, data: &[u8]) -> Result<()> {
-        if let (Some(crc), Some((start, end))) = (self.crc, self.crc_region) {
-            if super::crc::sbr_crc(data, start, end) != crc {
-                return Err(Error::SbrCrcMismatch);
-            }
-        }
-        Ok(())
-    }
 }
 
-#[inline]
-fn read(reader: &mut BitReader<'_>, n: u32) -> Result<u32> {
-    reader.read_u32(n).map_err(|_| Error::SbrFreqBandInvalid)
-}
-
-#[inline]
-fn read_flag(reader: &mut BitReader<'_>) -> Result<bool> {
-    reader.read_bit().map_err(|_| Error::SbrFreqBandInvalid)
-}
+bit_readers!(Error::SbrFreqBandInvalid, read, read_flag);
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::super::bits::BitWriter;
     use super::super::freq_bands::HiLoTables;
     use super::super::grid::FrameClass;
-    use super::super::huffman::{env_tables, noise_tables, SbrHuffContext};
-    use super::super::bits::BitWriter;
+    use super::super::huffman::{SbrHuffContext, env_tables, noise_tables};
+    use super::*;
 
     const FS_SBR: u32 = 88_200; // 44.1 kHz core, doubled.
 
@@ -415,20 +347,16 @@ mod tests {
         for _ in 0..n_q {
             w.write_u32(1, 2); // invf modes
         }
-        let (_, (f_huff, f_lav)) = env_tables(SbrHuffContext {
-            coupling: false,
-            ch: false,
-            amp_res: false,
-        });
+        let (_, f_huff_book) =
+            env_tables(SbrHuffContext { coupling: false, ch: false, amp_res: false });
+        let (f_huff, f_lav) = (f_huff_book.table(), f_huff_book.lav());
         w.write_u32(33, 7); // env start value (amp_res override → 7-bit)
         for i in 1..n_high {
             push_code(w, f_huff, (i + f_lav as usize) % f_huff.len());
         }
-        let (_, (nf, nfl)) = noise_tables(SbrHuffContext {
-            coupling: false,
-            ch: false,
-            amp_res: false,
-        });
+        let (_, nf_book) =
+            noise_tables(SbrHuffContext { coupling: false, ch: false, amp_res: false });
+        let (nf, nfl) = (nf_book.table(), nf_book.lav());
         w.write_u32(10, 5); // noise start
         for i in 1..n_q {
             push_code(w, nf, (i + nfl as usize) % nf.len());
@@ -474,14 +402,16 @@ mod tests {
         for _ in 0..n_q {
             w.write_u32(1, 2); // invf modes
         }
-        let (_, (f_huff, f_lav)) =
+        let (_, f_huff_book) =
             env_tables(SbrHuffContext { coupling: false, ch: false, amp_res: false });
+        let (f_huff, f_lav) = (f_huff_book.table(), f_huff_book.lav());
         w.write_u32(33, 7); // env start value
         for i in 1..n_high {
             push_code(w, f_huff, (i + f_lav as usize) % f_huff.len());
         }
-        let (_, (nf, nfl)) =
+        let (_, nf_book) =
             noise_tables(SbrHuffContext { coupling: false, ch: false, amp_res: false });
+        let (nf, nfl) = (nf_book.table(), nf_book.lav());
         w.write_u32(10, 5); // noise start
         for i in 1..n_q {
             push_code(w, nf, (i + nfl as usize) % nf.len());

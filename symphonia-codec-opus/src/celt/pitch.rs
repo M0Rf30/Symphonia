@@ -37,7 +37,13 @@ pub(crate) fn dual_inner_prod(x: &[f32], y01: &[f32], y02: &[f32], n: usize) -> 
 /// Like libopus' `xcorr_kernel`, four consecutive lags are accumulated together; every lag still
 /// sums its products in increasing sample order, so each result is identical to a plain
 /// [`celt_inner_prod`] over that lag.
-pub(crate) fn celt_pitch_xcorr(x: &[f32], y: &[f32], xcorr: &mut [f32], len: usize, max_pitch: usize) {
+pub(crate) fn celt_pitch_xcorr(
+    x: &[f32],
+    y: &[f32],
+    xcorr: &mut [f32],
+    len: usize,
+    max_pitch: usize,
+) {
     let x = &x[..len];
     let mut i = 0usize;
     while i + 4 <= max_pitch {
@@ -72,12 +78,12 @@ fn find_best_pitch(xcorr: &[f32], y: &[f32], len: usize, max_pitch: usize) -> [u
     let mut best_den = [0.0f32, 0.0f32];
     let mut best_pitch = [0usize, 1usize];
 
-    for j in 0..len {
-        syy += y[j] * y[j];
+    for &v in &y[..len] {
+        syy += v * v;
     }
-    for i in 0..max_pitch {
-        if xcorr[i] > 0.0 {
-            let xcorr16 = xcorr[i] * 1e-12f32;
+    for (i, &xc) in xcorr[..max_pitch].iter().enumerate() {
+        if xc > 0.0 {
+            let xcorr16 = xc * 1e-12f32;
             let num = xcorr16 * xcorr16;
             if num * best_den[1] > best_num[1] * syy {
                 if num * best_den[0] > best_num[0] * syy {
@@ -104,9 +110,10 @@ fn find_best_pitch(xcorr: &[f32], y: &[f32], len: usize, max_pitch: usize) -> [u
 /// C: `celt_fir5` (a specialized 5-tap FIR used only by `pitch_downsample`'s LPC whitening).
 fn celt_fir5(x: &mut [f32], num: &[f32; 5], n: usize) {
     let (num0, num1, num2, num3, num4) = (num[0], num[1], num[2], num[3], num[4]);
-    let (mut mem0, mut mem1, mut mem2, mut mem3, mut mem4) = (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
-    for i in 0..n {
-        let mut sum = x[i];
+    let (mut mem0, mut mem1, mut mem2, mut mem3, mut mem4) =
+        (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    for xi in x[..n].iter_mut() {
+        let mut sum = *xi;
         sum += num0 * mem0;
         sum += num1 * mem1;
         sum += num2 * mem2;
@@ -116,8 +123,8 @@ fn celt_fir5(x: &mut [f32], num: &[f32; 5], n: usize) {
         mem3 = mem2;
         mem2 = mem1;
         mem1 = mem0;
-        mem0 = x[i];
-        x[i] = sum;
+        mem0 = *xi;
+        *xi = sum;
     }
 }
 
@@ -143,8 +150,8 @@ pub fn pitch_downsample(x: &[&[f32]], x_lp: &mut [f32], len: i32, channels: i32)
     celt_autocorr(&x_lp[..len / 2], &mut ac, None, 0, 4, (len / 2) as i32);
 
     ac[0] *= 1.0001;
-    for i in 1..=4 {
-        ac[i] -= ac[i] * (0.008 * i as f32) * (0.008 * i as f32);
+    for (i, a) in ac.iter_mut().enumerate().skip(1) {
+        *a -= *a * (0.008 * i as f32) * (0.008 * i as f32);
     }
 
     let mut lpc = [0f32; 4];
@@ -164,16 +171,24 @@ pub fn pitch_downsample(x: &[&[f32]], x_lp: &mut [f32], len: i32, channels: i32)
     celt_fir5(&mut x_lp[..len / 2], &lpc2, len / 2);
 }
 
+/// Upper bound on `len + max_pitch` accepted by [`pitch_search`] (C: `DECODE_BUFFER_SIZE`).
+const MAX_PITCH_LAG: usize = 2048;
+
 /// C: `pitch_search`. Returns the estimated pitch lag.
 pub fn pitch_search(x_lp: &[f32], y: &[f32], len: i32, max_pitch: i32) -> i32 {
     let len = len as usize;
     let max_pitch = max_pitch as usize;
     assert!(len > 0 && max_pitch > 0);
     let lag = len + max_pitch;
+    // The only caller (CELT PLC) searches the 2048-sample decode buffer.
+    assert!(lag <= MAX_PITCH_LAG, "pitch search window exceeds the supported maximum");
 
-    let mut x_lp4 = vec![0f32; len / 4];
-    let mut y_lp4 = vec![0f32; lag / 4];
-    let mut xcorr = vec![0f32; max_pitch / 2];
+    let mut x_lp4_buf = [0f32; MAX_PITCH_LAG / 4];
+    let mut y_lp4_buf = [0f32; MAX_PITCH_LAG / 4];
+    let mut xcorr_buf = [0f32; MAX_PITCH_LAG / 2];
+    let x_lp4 = &mut x_lp4_buf[..len / 4];
+    let y_lp4 = &mut y_lp4_buf[..lag / 4];
+    let xcorr = &mut xcorr_buf[..max_pitch / 2];
 
     for j in 0..len / 4 {
         x_lp4[j] = x_lp[2 * j];
@@ -182,18 +197,20 @@ pub fn pitch_search(x_lp: &[f32], y: &[f32], len: i32, max_pitch: i32) -> i32 {
         y_lp4[j] = y[2 * j];
     }
 
-    celt_pitch_xcorr(&x_lp4, &y_lp4, &mut xcorr, len / 4, max_pitch / 4);
-    let best_pitch = find_best_pitch(&xcorr, &y_lp4, len / 4, max_pitch / 4);
+    celt_pitch_xcorr(x_lp4, y_lp4, xcorr, len / 4, max_pitch / 4);
+    let best_pitch = find_best_pitch(xcorr, y_lp4, len / 4, max_pitch / 4);
 
     for i in 0..max_pitch / 2 {
         xcorr[i] = 0.0;
-        if (i as i64 - 2 * best_pitch[0] as i64).abs() > 2 && (i as i64 - 2 * best_pitch[1] as i64).abs() > 2 {
+        if (i as i64 - 2 * best_pitch[0] as i64).abs() > 2
+            && (i as i64 - 2 * best_pitch[1] as i64).abs() > 2
+        {
             continue;
         }
         let sum = celt_inner_prod(x_lp, &y[i..], len / 2);
         xcorr[i] = sum.max(-1.0);
     }
-    let best_pitch = find_best_pitch(&xcorr, y, len / 2, max_pitch / 2);
+    let best_pitch = find_best_pitch(xcorr, y, len / 2, max_pitch / 2);
 
     let offset: i32 = if best_pitch[0] > 0 && best_pitch[0] < (max_pitch / 2) - 1 {
         let a = xcorr[best_pitch[0] - 1];
@@ -251,7 +268,8 @@ pub fn remove_doubling(
     let mut t = *t0 as usize;
     let t0_orig = t;
 
-    let mut yy_lookup = vec![0f32; maxperiod + 1];
+    assert!(maxperiod <= MAX_PITCH_LAG / 4, "maxperiod exceeds the supported maximum");
+    let mut yy_lookup = [0f32; MAX_PITCH_LAG / 4 + 1];
     let (xx, mut xy) = dual_inner_prod(&x[base..], &x[base..], &x[base - t0_orig..], n);
     yy_lookup[0] = xx;
     let mut yy = xx;
@@ -265,18 +283,14 @@ pub fn remove_doubling(
     let g0 = compute_pitch_gain(xy, xx, yy);
     let mut g = g0;
 
+    #[allow(clippy::needless_range_loop)] // `k` is the C loop variable, also used arithmetically
     for k in 2..=15usize {
         let t1 = (2 * t0_orig as i32 + k as i32) as usize / (2 * k);
         if t1 < minperiod {
             break;
         }
         let t1b = if k == 2 {
-            if t1 + t0_orig > maxperiod {
-                t0_orig
-            }
-            else {
-                t0_orig + t1
-            }
+            if t1 + t0_orig > maxperiod { t0_orig } else { t0_orig + t1 }
         }
         else {
             (2 * SECOND_CHECK[k] as usize * t0_orig + k) / (2 * k)
@@ -312,9 +326,9 @@ pub fn remove_doubling(
     let mut pg = if best_yy <= best_xy { 1.0 } else { best_xy / (best_yy + 1.0) };
 
     let mut xcorr = [0f32; 3];
-    for k in 0..3usize {
+    for (k, xc) in xcorr.iter_mut().enumerate() {
         let off = t + k - 1;
-        xcorr[k] = celt_inner_prod(&x[base..], &x[base - off..], n);
+        *xc = celt_inner_prod(&x[base..], &x[base - off..], n);
     }
     let offset: i32 = if (xcorr[2] - xcorr[0]) > 0.7 * (xcorr[1] - xcorr[0]) {
         1

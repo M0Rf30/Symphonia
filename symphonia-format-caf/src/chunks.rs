@@ -11,7 +11,7 @@ use symphonia_core::{
     audio::{AmbisonicBFormat, ChannelLabel, Channels, Position, layouts},
     codecs::audio::{AudioCodecId, well_known::*},
     errors::{Error, Result, decode_error, unsupported_error},
-    io::{MediaSourceStream, ReadBytes, ScopedStream},
+    io::{MediaSourceStream, ReadBytes, ScopedStream, read_base128_be_u64},
     meta::MetadataRevision,
     units::{Duration, Timestamp},
 };
@@ -718,21 +718,10 @@ fn read_c_string(data: &[u8], pos: &mut usize) -> Result<String> {
 }
 
 fn read_variable_length_integer(reader: &mut MediaSourceStream<'_>) -> Result<u64> {
-    let mut result = 0;
-
-    for _ in 0..9 {
-        let byte = reader.read_byte()?;
-
-        result |= (byte & 0x7f) as u64;
-
-        if byte & 0x80 == 0 {
-            return Ok(result);
-        }
-
-        result <<= 7;
+    match read_base128_be_u64(9, || reader.read_byte())? {
+        Some((value, _)) => Ok(value),
+        None => decode_error("caf: unterminated variable-length integer"),
     }
-
-    decode_error("caf: unterminated variable-length integer")
 }
 
 #[cfg(test)]

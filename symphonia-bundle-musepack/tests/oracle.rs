@@ -21,8 +21,8 @@ use std::process::Command;
 
 use symphonia_bundle_musepack::{MpcDecoder, MpcReader};
 use symphonia_core::audio::{Audio, GenericAudioBufferRef};
-use symphonia_core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia_core::codecs::CodecParameters;
+use symphonia_core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia_core::formats::{FormatOptions, FormatReader};
 use symphonia_core::io::MediaSourceStream;
 
@@ -48,11 +48,12 @@ fn decode_ours_s16(path: &Path) -> (Vec<i16>, usize) {
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut reader = MpcReader::try_new(mss, FormatOptions::default()).expect("probe");
     let track = reader.tracks()[0].clone();
-    let params = match track.codec_params.as_ref().unwrap() {
+    let params = match track.codec_params.as_ref().expect("unexpected failure") {
         CodecParameters::Audio(p) => p.clone(),
         _ => panic!("not audio"),
     };
-    let mut decoder = MpcDecoder::try_new(&params, &AudioDecoderOptions::default()).unwrap();
+    let mut decoder =
+        MpcDecoder::try_new(&params, &AudioDecoderOptions::default()).expect("unexpected failure");
     let mut out = Vec::new();
     let mut channels = 0usize;
     while let Some(packet) = reader.next_packet().expect("next_packet") {
@@ -64,7 +65,7 @@ fn decode_ours_s16(path: &Path) -> (Vec<i16>, usize) {
             channels = b.spec().channels().count();
             for i in 0..b.frames() {
                 for ch in 0..channels {
-                    let s = b.plane(ch).unwrap()[i];
+                    let s = b.plane(ch).expect("unexpected failure")[i];
                     out.push((s.clamp(-1.0, 1.0) * 32767.0).round() as i16);
                 }
             }
@@ -82,7 +83,8 @@ fn load_wav_s16(path: &Path) -> Vec<i16> {
     let mut data_len = 0usize;
     while pos + 8 <= data.len() {
         let id = &data[pos..pos + 4];
-        let len = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        let len = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().expect("unexpected failure"))
+            as usize;
         if id == b"data" {
             data_off = Some(pos + 8);
             data_len = len;
@@ -91,10 +93,7 @@ fn load_wav_s16(path: &Path) -> Vec<i16> {
         pos += 8 + len + (len & 1);
     }
     let off = data_off.expect("no data chunk");
-    data[off..off + data_len]
-        .chunks_exact(2)
-        .map(|b| i16::from_le_bytes([b[0], b[1]]))
-        .collect()
+    data[off..off + data_len].chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect()
 }
 
 /// Reports `(max_abs_err, first_diff_index, snr_db)` for two equal-or-different-length i16
@@ -116,7 +115,8 @@ fn compare_s16(ours: &[i16], reference: &[i16]) -> (i32, Option<usize>, f64, usi
         sum_sq_err += f64::from(d) * f64::from(d);
         sum_sq_ref += f64::from(reference[i]) * f64::from(reference[i]);
     }
-    let snr = if sum_sq_err > 0.0 { 10.0 * (sum_sq_ref / sum_sq_err).log10() } else { f64::INFINITY };
+    let snr =
+        if sum_sq_err > 0.0 { 10.0 * (sum_sq_ref / sum_sq_err).log10() } else { f64::INFINITY };
     (max_err, first_diff, snr, ours.len().abs_diff(reference.len()))
 }
 
@@ -131,11 +131,7 @@ fn matches_mpcdec_oracle_sv8() {
     let fixture = Path::new("tests/fixture_stereo_q5.mpc");
     let tmp_wav = std::env::temp_dir().join("musepack_oracle_test_stereo_q5.wav");
 
-    let status = Command::new(&mpcdec)
-        .arg(fixture)
-        .arg(&tmp_wav)
-        .status()
-        .expect("run mpcdec");
+    let status = Command::new(&mpcdec).arg(fixture).arg(&tmp_wav).status().expect("run mpcdec");
     assert!(status.success(), "mpcdec failed");
 
     let (ours, _channels) = decode_ours_s16(fixture);
@@ -173,16 +169,15 @@ fn matches_mpcdec_oracle_sv7_real_sample() {
         .unwrap_or_else(|_| "/tmp/sv7_samples/duran.mpc".to_string());
     let sample_path = Path::new(&sample_path);
     if !sample_path.is_file() {
-        eprintln!("skipping: no real SV7 sample at {} (set MUSEPACK_SV7_SAMPLE)", sample_path.display());
+        eprintln!(
+            "skipping: no real SV7 sample at {} (set MUSEPACK_SV7_SAMPLE)",
+            sample_path.display()
+        );
         return;
     }
 
     let tmp_wav = std::env::temp_dir().join("musepack_oracle_test_sv7.wav");
-    let status = Command::new(&mpcdec)
-        .arg(sample_path)
-        .arg(&tmp_wav)
-        .status()
-        .expect("run mpcdec");
+    let status = Command::new(&mpcdec).arg(sample_path).arg(&tmp_wav).status().expect("run mpcdec");
     assert!(status.success(), "mpcdec failed");
 
     let (ours, _channels) = decode_ours_s16(sample_path);
@@ -226,15 +221,16 @@ fn seek_then_decode_matches_mpcdec_at_landed_sample() {
     let reference = load_wav_s16(&tmp_wav);
     let _ = std::fs::remove_file(&tmp_wav);
 
-    let file = File::open(fixture).unwrap();
+    let file = File::open(fixture).expect("unexpected failure");
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut reader = MpcReader::try_new(mss, FormatOptions::default()).unwrap();
+    let mut reader = MpcReader::try_new(mss, FormatOptions::default()).expect("unexpected failure");
     let track = reader.tracks()[0].clone();
-    let params = match track.codec_params.as_ref().unwrap() {
+    let params = match track.codec_params.as_ref().expect("unexpected failure") {
         CodecParameters::Audio(p) => p.clone(),
         _ => panic!("not audio"),
     };
-    let mut decoder = MpcDecoder::try_new(&params, &AudioDecoderOptions::default()).unwrap();
+    let mut decoder =
+        MpcDecoder::try_new(&params, &AudioDecoderOptions::default()).expect("unexpected failure");
 
     let target: i64 = 80_000;
     let seeked = reader
@@ -246,14 +242,14 @@ fn seek_then_decode_matches_mpcdec_at_landed_sample() {
 
     let mut ours = Vec::new();
     while ours.len() < 20_000 {
-        let Some(packet) = reader.next_packet().unwrap()
+        let Some(packet) = reader.next_packet().expect("unexpected failure")
         else {
             break;
         };
         if let Ok(GenericAudioBufferRef::F32(b)) = decoder.decode(&packet) {
             for i in 0..b.frames() {
                 for ch in 0..b.spec().channels().count() {
-                    let s = b.plane(ch).unwrap()[i];
+                    let s = b.plane(ch).expect("unexpected failure")[i];
                     ours.push((s.clamp(-1.0, 1.0) * 32767.0).round() as i16);
                 }
             }

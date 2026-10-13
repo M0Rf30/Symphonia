@@ -105,7 +105,7 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | MP1                          | Great     | No      | `mp1`, `mpa` | No      | [`symphonia-bundle-mp3`]   |
 | MP2                          | Great     | No      | `mp2`, `mpa` | No      | [`symphonia-bundle-mp3`]   |
 | MP3                          | Excellent | Yes     | `mp3`, `mpa` | No      | [`symphonia-bundle-mp3`]   |
-| Opus                         | Good      | Yes     | `opus`       | No      | [`symphonia-codec-opus`]   |
+| Opus                         | Good      | Yes     | `opus`       | Yes     | [`symphonia-codec-opus`]   |
 | PCM                          | Excellent | Yes     | `pcm`        | Yes     | [`symphonia-codec-pcm`]    |
 | Vorbis                       | Excellent | Yes     | `vorbis`     | Yes     | [`symphonia-codec-vorbis`] |
 
@@ -137,8 +137,8 @@ For metadata formats that are standalone and not part of the media container, a 
 | ID3v2                 | Great     | `id3v2`      | Yes     |
 | ISO/MP4               | Great     | N/A          | N/A     |
 | RIFF                  | Great     | N/A          | N/A     |
-| Vorbis comment (FLAC) | Perfect   | N/A          | N/A     |
-| Vorbis comment (OGG)  | Perfect   | N/A          | N/A     |
+| Vorbis comment (FLAC) | Excellent | N/A          | N/A     |
+| Vorbis comment (OGG)  | Excellent | N/A          | N/A     |
 
 > [!TIP]
 > All metadata formats can be enabled with the `all-meta` feature flag.

@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 //! ADIF: header parsing, block splitting by parsing the block syntax, duration estimate,
 //! decoding, and seeking.
 

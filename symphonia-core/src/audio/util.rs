@@ -136,6 +136,20 @@ pub fn copy_to_slice_interleaved<Sin, Sout, Src, Dst>(
         "destination slice does not match number of samples"
     );
 
+    interleave_planes(src, bound, dst, |s| s.into_sample());
+}
+
+/// Writes `f(sample)` for every sample of the `bound` range of each plane in `src` into `dst` in
+/// interleaved order. `dst.len()` must equal `src.len() * bound.len()`.
+#[inline(always)]
+fn interleave_planes<Sin, Src, D, F>(src: &[Src], bound: Range<usize>, dst: &mut [D], f: F)
+where
+    Sin: Sample,
+    Src: AsRef<[Sin]>,
+    F: Fn(Sin) -> D,
+{
+    let num_planes = src.len();
+
     let mut i = 0;
 
     // The pattern below may be extended to copy planes in triplets to further improve performance.
@@ -147,8 +161,8 @@ pub fn copy_to_slice_interleaved<Sin, Sout, Src, Dst>(
         let src1 = &src[i + 1].as_ref()[bound.clone()];
 
         for ((&s0, &s1), d) in src0.iter().zip(src1).zip(dst.chunks_exact_mut(num_planes)) {
-            d[i + 0] = s0.into_sample();
-            d[i + 1] = s1.into_sample();
+            d[i + 0] = f(s0);
+            d[i + 1] = f(s1);
         }
 
         i += 2
@@ -159,7 +173,7 @@ pub fn copy_to_slice_interleaved<Sin, Sout, Src, Dst>(
         let src0 = &src[i].as_ref()[bound.clone()];
 
         for (&s0, d) in src0.iter().zip(dst.chunks_exact_mut(num_planes)) {
-            d[i] = s0.into_sample();
+            d[i] = f(s0);
         }
 
         i += 1;
@@ -270,34 +284,7 @@ pub fn copy_bytes_interleaved<Sout, Sin, Src, F, Dst>(
         "destination slice does not match number of samples"
     );
 
-    let mut i = 0;
-
-    // The pattern below may be extended to copy planes in triplets to further improve performance.
-    // However, the binary will become bloated because this function is heavily parameterized.
-
-    // Copy planes in pairs when possible, it is substantially faster.
-    while num_planes - i > 1 {
-        let src0 = &src[i + 0].as_ref()[bound.clone()];
-        let src1 = &src[i + 1].as_ref()[bound.clone()];
-
-        for ((&s0, &s1), d) in src0.iter().zip(src1).zip(dst.chunks_exact_mut(num_planes)) {
-            d[i + 0] = f(s0).to_ne_sample_bytes();
-            d[i + 1] = f(s1).to_ne_sample_bytes();
-        }
-
-        i += 2
-    }
-
-    // Copy the final plane.
-    while i < num_planes {
-        let src0 = &src[i].as_ref()[bound.clone()];
-
-        for (&s0, d) in src0.iter().zip(dst.chunks_exact_mut(num_planes)) {
-            d[i] = f(s0).to_ne_sample_bytes();
-        }
-
-        i += 1;
-    }
+    interleave_planes(src, bound, dst, |s| f(s).to_ne_sample_bytes());
 }
 
 #[inline(never)]

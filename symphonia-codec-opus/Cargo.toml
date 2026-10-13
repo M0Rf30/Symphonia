@@ -24,17 +24,16 @@ ogg = ["encoder", "dep:symphonia-format-ogg"]
 
 [dependencies]
 log = { workspace = true }
-symphonia-core = { version = "0.6.1", path = "../symphonia-core" }
+symphonia-core = { workspace = true }
 
 [dependencies.symphonia-format-ogg]
-version = "0.6.1"
-path = "../symphonia-format-ogg"
-optional = true
-default-features = false
+workspace = true
 features = ["writer"]
+optional = true
 
 [dev-dependencies]
-rand = "0.9"
+symphonia-testutil = { workspace = true }
+rand = "0.10.0"
 
 [lints]
 workspace = true

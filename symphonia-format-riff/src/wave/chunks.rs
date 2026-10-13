@@ -18,15 +18,15 @@ use symphonia_core::codecs::audio::well_known::{
 };
 use symphonia_core::errors::{Error, Result, decode_error, unsupported_error};
 use symphonia_core::formats::Track;
-use symphonia_core::io::{MediaSource, MediaSourceStream, ReadBytes, ScopedStream};
+use symphonia_core::io::{MediaSource, MediaSourceStream, ReadBytes};
 use symphonia_core::meta::{MetadataBuilder, MetadataLog, MetadataRevision};
 
 use symphonia_metadata::embedded::riff;
 
 use crate::common::{
     ByteOrder, ChunkParser, ChunksReader, FormatALaw, FormatAdpcm, FormatData, FormatExtensible,
-    FormatIeeeFloat, FormatMpeg, FormatMuLaw, FormatPcm, NullChunks, PacketInfo, ParseChunk,
-    ParseChunkTag,
+    FormatIeeeFloat, FormatMpeg, FormatMuLaw, FormatPcm, Id3Chunk, NullChunks, PacketInfo,
+    ParseChunk, ParseChunkTag,
 };
 
 use log::info;
@@ -99,9 +99,9 @@ impl WaveFormatChunk {
 
         // Block align is redundant for this format, but ideally it should be set correctly. Log if
         // it's incorrect.
-        let expected_block_align = num_channels * (bits_per_sample / 8);
+        let expected_block_align = u32::from(num_channels) * u32::from(bits_per_sample / 8);
 
-        if block_align != expected_block_align {
+        if u32::from(block_align) != expected_block_align {
             info!("fmt_pcm expected block align of {}, got {}", expected_block_align, block_align);
         }
 
@@ -341,7 +341,7 @@ impl WaveFormatChunk {
                 // channels.
 
                 // Fix the channel mask if it is invalid for the stated number of channels.
-                let channel_mask = fix_wave_channel_mask(channel_mask, num_channels);
+                let channel_mask = fix_wave_channel_mask(channel_mask, num_channels)?;
 
                 // Try to map the channel mask to positioned channels.
                 match Position::from_wave_channel_mask(channel_mask) {
@@ -867,25 +867,6 @@ pub fn read_trailing_metadata(
     Ok(())
 }
 
-pub struct Id3Chunk {
-    pub metadata: MetadataRevision,
-}
-
-impl ParseChunk for Id3Chunk {
-    fn parse<B: ReadBytes>(reader: &mut B, _tag: [u8; 4], len: u32) -> Result<Self> {
-        // The tag must not be read past the end of the chunk.
-        let mut reader = ScopedStream::new(reader, u64::from(len));
-
-        let mut side_data = Vec::new();
-        let metadata = riff::read_riff_id3_chunk(&mut reader, &mut side_data)?;
-
-        // Skip any unread data in the chunk (e.g., padding).
-        reader.ignore()?;
-
-        Ok(Id3Chunk { metadata })
-    }
-}
-
 /// The last 12 bytes of the GUID of the Wave64 "riff" chunk.
 pub const W64_RIFF_GUID_TAIL: [u8; 12] =
     [0x2e, 0x91, 0xcf, 0x11, 0xa5, 0xd6, 0x28, 0xdb, 0x04, 0xc1, 0x00, 0x00];
@@ -987,8 +968,8 @@ impl W64ChunksReader {
 }
 
 /// Corrects a WAVE channel mask that doesn't is not valid for the stated number of channels.
-fn fix_wave_channel_mask(mut channel_mask: u32, num_channels: u16) -> u32 {
-    let channel_diff = num_channels as i32 - channel_mask.count_ones() as i32;
+fn fix_wave_channel_mask(mut channel_mask: u32, num_channels: u16) -> Result<u32> {
+    let channel_diff = i32::from(num_channels) - channel_mask.count_ones() as i32;
 
     if channel_diff != 0 {
         info!("channel mask not set correctly, channel positions may be incorrect!");
@@ -997,30 +978,52 @@ fn fix_wave_channel_mask(mut channel_mask: u32, num_channels: u16) -> u32 {
     // Check that the number of ones in the channel mask match the number of channels.
     if channel_diff > 0 {
         // Too few ones in mask so add extra ones above the most significant one
-        let shift = 32 - (!channel_mask).leading_ones();
-        channel_mask |= ((1 << channel_diff) - 1) << shift;
+        let shift = 32 - channel_mask.leading_zeros();
+
+        // There must be enough room above the most significant one for the missing channels.
+        if shift as i32 + channel_diff > 32 {
+            return unsupported_error("wav: too many channels in mask for fmt_ext");
+        }
+
+        channel_mask |= (((1u64 << channel_diff) - 1) << shift) as u32;
     }
     else {
         // Too many ones in mask so remove the most significant extra ones
-        while channel_mask.count_ones() != num_channels as u32 {
+        while channel_mask.count_ones() != u32::from(num_channels) {
             let highest_one = 31 - (!channel_mask).leading_ones();
             channel_mask &= !(1 << highest_one);
         }
     }
 
-    channel_mask
+    Ok(channel_mask)
 }
 
 #[test]
 fn test_fix_channel_mask() {
     // Too few
-    assert_eq!(fix_wave_channel_mask(0, 9), 0b111111111);
-    assert_eq!(fix_wave_channel_mask(0b101000, 5), 0b111101000);
+    assert_eq!(fix_wave_channel_mask(0, 9).unwrap(), 0b111111111);
+    assert_eq!(fix_wave_channel_mask(0b101000, 5).unwrap(), 0b111101000);
 
     // Too many
-    assert_eq!(fix_wave_channel_mask(0b1111111, 0), 0);
-    assert_eq!(fix_wave_channel_mask(0b101110111010, 5), 0b10111010);
-    assert_eq!(fix_wave_channel_mask(0xFFFFFFFF, 8), 0b11111111);
+    assert_eq!(fix_wave_channel_mask(0b1111111, 0).unwrap(), 0);
+    assert_eq!(fix_wave_channel_mask(0b101110111010, 5).unwrap(), 0b10111010);
+    assert_eq!(fix_wave_channel_mask(0xFFFFFFFF, 8).unwrap(), 0b11111111);
+
+    // Not enough free bits above the mask to add the missing channels.
+    assert!(fix_wave_channel_mask(0, 40).is_err());
+    assert!(fix_wave_channel_mask(0x8000_0000, 2).is_err());
+    assert!(fix_wave_channel_mask(0x4000_0000, 3).is_err());
+    assert_eq!(fix_wave_channel_mask(0x4000_0000, 2).unwrap(), 0xC000_0000);
+}
+
+#[test]
+fn test_fmt_pcm_block_align_does_not_overflow() {
+    use symphonia_core::io::BufReader;
+
+    // 32-bit samples with a channel count whose block align exceeds u16::MAX must yield an
+    // error (too many channels), not an arithmetic overflow.
+    let mut reader = BufReader::new(&[]);
+    assert!(WaveFormatChunk::read_pcm_fmt(&mut reader, 0, 32, 20000, 16).is_err());
 }
 
 /// Map a WAVE channel count to a set of channels.

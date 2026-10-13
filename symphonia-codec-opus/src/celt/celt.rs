@@ -18,6 +18,9 @@
 //! [`comb_filter_copy`] (pre-filter/fold: distinct buffers, no crossfade — for which C's `T0`/
 //! `g0`/`tapset0` become dead parameters once `overlap == 0`, so they're dropped here).
 
+// Tables and constants transcribed from libopus keep the reference decimal text.
+#![allow(clippy::excessive_precision)]
+
 use crate::celt::modes::CeltMode;
 
 /// C: `COMBFILTER_MINPERIOD`.
@@ -44,10 +47,10 @@ pub fn resampling_factor(rate: i32) -> i32 {
 
 /// C: `init_caps` (per-band bit-allocation caps for the current channel count/LM).
 pub fn init_caps(mode: &CeltMode, caps: &mut [i32], lm: i32, channels: i32) {
-    for i in 0..mode.nb_ebands as usize {
+    for (i, cap) in caps.iter_mut().enumerate().take(mode.nb_ebands as usize) {
         let n = (mode.e_bands[i + 1] - mode.e_bands[i]) as i32 * (1 << lm);
         let idx = mode.nb_ebands * (2 * lm + channels - 1) + i as i32;
-        caps[i] = (mode.cache.caps[idx as usize] as i32 + 64) * channels * n >> 2;
+        *cap = ((mode.cache.caps[idx as usize] as i32 + 64) * channels * n) >> 2;
     }
 }
 
@@ -135,7 +138,15 @@ pub fn comb_filter_inplace(
 /// `overlap == 0`), used only by `prefilter_and_fold`. With the crossfade region empty, `T0`/
 /// `g0`/`tapset0` are never read by the reference implementation either (they only matter
 /// inside the crossfade loop), so they're omitted here.
-pub fn comb_filter_copy(y: &mut [f32], x: &[f32], x_pos: usize, t1: i32, n: i32, g1: f32, tapset1: i32) {
+pub fn comb_filter_copy(
+    y: &mut [f32],
+    x: &[f32],
+    x_pos: usize,
+    t1: i32,
+    n: i32,
+    g1: f32,
+    tapset1: i32,
+) {
     let n = n as usize;
     if g1 == 0.0 {
         y[..n].copy_from_slice(&x[x_pos..x_pos + n]);
@@ -180,6 +191,7 @@ mod tests {
     /// code under test), operating on an owned `Vec` rather than the in-place-friendly
     /// `buf`/`pos` convention used by [`comb_filter_inplace`]/[`comb_filter_copy`]. Used as an
     /// independent oracle: same algorithm, different (more direct, C-shaped) code path.
+    #[allow(clippy::too_many_arguments)]
     fn comb_filter_direct(
         x_full: &[f32],
         x_pos: usize,
@@ -279,15 +291,18 @@ mod tests {
         let n = 200i32;
         let overlap = 40i32;
         let window: Vec<f32> = (0..overlap)
-            .map(|i| ((i as f64 + 0.5) * std::f64::consts::PI / (2.0 * overlap as f64)).sin() as f32)
+            .map(|i| {
+                ((i as f64 + 0.5) * std::f64::consts::PI / (2.0 * overlap as f64)).sin() as f32
+            })
             .collect();
         for (t0, t1, g0, g1, ts0, ts1) in
             [(30, 35, 0.5f32, 0.7f32, 0, 1), (50, 50, 0.3, 0.3, 2, 2), (20, 60, 0.9, 0.2, 1, 0)]
         {
             let full = make_signal(history + n as usize, 7);
 
-            let expected =
-                comb_filter_direct(&full, history, t0, t1, n, g0, g1, ts0, ts1, &window, overlap, true);
+            let expected = comb_filter_direct(
+                &full, history, t0, t1, n, g0, g1, ts0, ts1, &window, overlap, true,
+            );
 
             let mut buf = full.clone();
             comb_filter_inplace(&mut buf, history, t0, t1, n, g0, g1, ts0, ts1, &window, overlap);
@@ -308,7 +323,8 @@ mod tests {
         let n = 100i32;
         let full = make_signal(history + n as usize, 11);
         for (t1, g1, ts1) in [(25, 0.6f32, 0), (40, 0.0, 1), (10, 0.9, 2)] {
-            let expected = comb_filter_direct(&full, history, t1, t1, n, 0.0, g1, 0, ts1, &[], 0, false);
+            let expected =
+                comb_filter_direct(&full, history, t1, t1, n, 0.0, g1, 0, ts1, &[], 0, false);
             let mut y = vec![0f32; n as usize];
             comb_filter_copy(&mut y, &full, history, t1, n, g1, ts1);
             for i in 0..n as usize {

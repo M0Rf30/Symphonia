@@ -9,6 +9,7 @@
 // Set `OPUS_FAMILY3_REF=<dir>` to additionally compare the whole stream against full
 // `<name>.ref.f32` decodes (`family3_<name>.ref.f32`) produced by libopus.
 
+#![allow(clippy::unwrap_used)] // test/example code: a panic is the failure signal
 use symphonia_codec_opus::decoder::SampleRate;
 use symphonia_codec_opus::mapping::{ChannelMapping, MappingError, OpusHead};
 use symphonia_codec_opus::multistream::MultistreamDecoder;

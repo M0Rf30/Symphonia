@@ -13,7 +13,9 @@
 
 use crate::silk::macros::{silk_limit, silk_smulbb};
 use crate::silk::structs::MAX_NB_SUBFR;
-use crate::silk::tables::{CB_LAGS_STAGE2, CB_LAGS_STAGE2_10_MS, CB_LAGS_STAGE3, CB_LAGS_STAGE3_10_MS};
+use crate::silk::tables::{
+    CB_LAGS_STAGE2, CB_LAGS_STAGE2_10_MS, CB_LAGS_STAGE3, CB_LAGS_STAGE3_10_MS,
+};
 
 /// C: `PE_MIN_LAG_MS`/`PE_MAX_LAG_MS` (`silk/pitch_est_defines.h`).
 const PE_MIN_LAG_MS: i32 = 2;
@@ -36,12 +38,15 @@ pub(crate) fn silk_decode_pitch(
         let delta = if fs_khz == 8 {
             if nb_subfr == MAX_NB_SUBFR {
                 CB_LAGS_STAGE2[k][ci] as i32
-            } else {
+            }
+            else {
                 CB_LAGS_STAGE2_10_MS[k][ci] as i32
             }
-        } else if nb_subfr == MAX_NB_SUBFR {
+        }
+        else if nb_subfr == MAX_NB_SUBFR {
             CB_LAGS_STAGE3[k][ci] as i32
-        } else {
+        }
+        else {
             CB_LAGS_STAGE3_10_MS[k][ci] as i32
         };
         pitch_lags[k] = silk_limit(lag + delta, min_lag, max_lag);
@@ -57,7 +62,7 @@ mod tests {
         let mut lags = [0i32; MAX_NB_SUBFR];
         silk_decode_pitch(50, 5, &mut lags, 16, 4);
         for &l in lags.iter() {
-            assert!(l >= 2 * 16 && l <= 18 * 16);
+            assert!((2 * 16..=18 * 16).contains(&l));
         }
     }
 
@@ -66,7 +71,7 @@ mod tests {
         let mut lags = [0i32; MAX_NB_SUBFR];
         silk_decode_pitch(20, 1, &mut lags, 8, 2);
         for &l in lags[..2].iter() {
-            assert!(l >= 2 * 8 && l <= 18 * 8);
+            assert!((2 * 8..=18 * 8).contains(&l));
         }
     }
 }

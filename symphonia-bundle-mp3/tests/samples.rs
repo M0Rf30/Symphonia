@@ -6,13 +6,12 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! Tests that use real MPEG audio files. The files are located in the directory given by the
-//! `RMPD_SAMPLES` environment variable (default: `/home/gianluca/rmpd-samples/samples`). Tests are
-//! skipped if the files they need are not present.
+//! `RMPD_SAMPLES` environment variable. Tests are skipped if the files they need are not present.
 
 #![allow(clippy::unwrap_used)]
 
 use std::fs::File;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use symphonia_bundle_mp3::{MpaDecoder, MpaReader};
 use symphonia_core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
@@ -20,20 +19,10 @@ use symphonia_core::errors::Error;
 use symphonia_core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, Track};
 use symphonia_core::io::MediaSourceStream;
 use symphonia_core::units::Timestamp;
+use symphonia_testutil::sample_path;
 
-fn sample_path(name: &str) -> Option<PathBuf> {
-    let dir = std::env::var_os("RMPD_SAMPLES")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/home/gianluca/rmpd-samples/samples"));
-
-    let path = dir.join(name);
-
-    if path.exists() { Some(path) } else { None }
-}
-
-fn open(path: &PathBuf, opts: FormatOptions) -> (MpaReader<'static>, MpaDecoder) {
-    let file = File::open(path).unwrap();
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+fn open(path: &Path, opts: FormatOptions) -> (MpaReader<'static>, MpaDecoder) {
+    let mss = symphonia_testutil::open_mss(path);
     let reader = MpaReader::try_new(mss, opts).unwrap();
     let decoder = new_decoder(&reader.tracks()[0]);
     (reader, decoder)
@@ -65,7 +54,7 @@ impl Decoded {
     }
 }
 
-fn decode_all(path: &PathBuf) -> Decoded {
+fn decode_all(path: &Path) -> Decoded {
     let (mut reader, mut decoder) = open(path, FormatOptions::default());
 
     let mut first_ts = None;

@@ -22,6 +22,8 @@ use symphonia_core::meta::{RawValue, StandardTag, StandardVisualKey, Tag, Visual
 
 use crate::utils::images::try_get_image_info;
 
+use super::COVER_ART_KEYS;
+
 /// The size of an APE tag header or footer.
 pub const APE_HEADER_SIZE: usize = 32;
 
@@ -30,10 +32,7 @@ pub const APE_PREAMBLE: &[u8; 8] = b"APETAGEX";
 
 const APE_VERSION_2: u32 = 2000;
 
-/// Flag: the tag has a header (set in both the header and the footer).
-const FLAG_HAS_HEADER: u32 = 1 << 31;
-/// Flag: this block is the header, not the footer.
-const FLAG_IS_HEADER: u32 = 1 << 29;
+pub use crate::utils::ape::{FLAG_HAS_HEADER, FLAG_IS_HEADER};
 
 /// Item type (bits 1..=2 of the item flags): UTF-8 text.
 const ITEM_TEXT: u32 = 0 << 1;
@@ -116,34 +115,31 @@ pub fn serialize(tags: &[Tag], visuals: &[Visual], locator_keys: &[String]) -> V
 /// malformed or is an APEv1 tag (which only has text items).
 pub fn locator_keys(tag: &[u8]) -> Vec<String> {
     let mut keys = Vec::new();
+    let _ = collect_locator_keys(tag, &mut keys);
+    keys
+}
 
-    if tag.len() < APE_HEADER_SIZE {
-        return keys;
+/// Collects the keys of the locator items of `tag` into `keys`. Returns `None` when the tag ends
+/// or is malformed before all items were read; the keys collected up to then are kept.
+fn collect_locator_keys(tag: &[u8], keys: &mut Vec<String>) -> Option<()> {
+    let footer = &tag[tag.len().checked_sub(APE_HEADER_SIZE)?..];
+
+    if &footer[..8] != APE_PREAMBLE || read_u32(&footer[8..])? != APE_VERSION_2 {
+        return None;
     }
 
-    let footer = &tag[tag.len() - APE_HEADER_SIZE..];
-
-    if &footer[..8] != APE_PREAMBLE || read_u32(&footer[8..]) != APE_VERSION_2 {
-        return keys;
-    }
-
-    let count = read_u32(&footer[16..]);
-    let has_header = read_u32(&footer[20..]) & FLAG_HAS_HEADER != 0;
+    let count = read_u32(&footer[16..])?;
+    let has_header = read_u32(&footer[20..])? & FLAG_HAS_HEADER != 0;
 
     let start = if has_header { APE_HEADER_SIZE } else { 0 };
     let mut items = &tag[start.min(tag.len() - APE_HEADER_SIZE)..tag.len() - APE_HEADER_SIZE];
 
     for _ in 0..count {
-        if items.len() < 8 {
-            break;
-        }
+        let len = read_u32(items)? as usize;
+        let flags = read_u32(items.get(4..)?)?;
 
-        let len = read_u32(items) as usize;
-        let flags = read_u32(&items[4..]);
-
-        let Some(key_len) = items[8..].iter().position(|&b| b == 0) else { break };
-        let Some(rest) = items.get(8 + key_len + 1..) else { break };
-        let Some(next) = rest.get(len..) else { break };
+        let key_len = items.get(8..)?.iter().position(|&b| b == 0)?;
+        let next = items.get(8 + key_len + 1..)?.get(len..)?;
 
         if flags & (3 << 1) == ITEM_LOCATOR {
             if let Ok(key) = std::str::from_utf8(&items[8..8 + key_len]) {
@@ -154,11 +150,11 @@ pub fn locator_keys(tag: &[u8]) -> Vec<String> {
         items = next;
     }
 
-    keys
+    Some(())
 }
 
-fn read_u32(buf: &[u8]) -> u32 {
-    u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])
+fn read_u32(buf: &[u8]) -> Option<u32> {
+    Some(u32::from_le_bytes(buf.get(..4)?.try_into().ok()?))
 }
 
 fn write_header(out: &mut Vec<u8>, size: u32, count: u32, flags: u32) {
@@ -290,7 +286,8 @@ fn collect_items(tags: &[Tag], visuals: &[Visual], locator_keys: &[String]) -> V
     for field in fields.fields {
         let kind = if locator_keys.iter().any(|k| k.eq_ignore_ascii_case(&field.key)) {
             ItemKind::Locator
-        } else {
+        }
+        else {
             ItemKind::Text
         };
 
@@ -343,28 +340,12 @@ fn add_raw(tag: &Tag, fields: &mut Fields, binaries: &mut Vec<Item>) {
 
 /// The item key for a visual.
 fn cover_key(usage: Option<StandardVisualKey>) -> &'static str {
-    match usage {
-        Some(StandardVisualKey::FileIcon) => "Cover Art (PNG Icon)",
-        Some(StandardVisualKey::OtherIcon) => "Cover Art (Icon)",
-        Some(StandardVisualKey::FrontCover) => "Cover Art (Front)",
-        Some(StandardVisualKey::BackCover) => "Cover Art (Back)",
-        Some(StandardVisualKey::Leaflet) => "Cover Art (Leaflet)",
-        Some(StandardVisualKey::Media) => "Cover Art (Media)",
-        Some(StandardVisualKey::LeadArtistPerformerSoloist) => "Cover Art (Lead Artist)",
-        Some(StandardVisualKey::ArtistPerformer) => "Cover Art (Artist)",
-        Some(StandardVisualKey::Conductor) => "Cover Art (Conductor)",
-        Some(StandardVisualKey::BandOrchestra) => "Cover Art (Band)",
-        Some(StandardVisualKey::Composer) => "Cover Art (Composer)",
-        Some(StandardVisualKey::Lyricist) => "Cover Art (Lyricist)",
-        Some(StandardVisualKey::RecordingLocation) => "Cover Art (Recording Location)",
-        Some(StandardVisualKey::RecordingSession) => "Cover Art (During Recording)",
-        Some(StandardVisualKey::Performance) => "Cover Art (During Performance)",
-        Some(StandardVisualKey::ScreenCapture) => "Cover Art (Video Capture)",
-        Some(StandardVisualKey::Illustration) => "Cover Art (Illustration)",
-        Some(StandardVisualKey::BandArtistLogo) => "Cover Art (Band Logotype)",
-        Some(StandardVisualKey::PublisherStudioLogo) => "Cover Art (Publisher Logotype)",
-        _ => "Cover Art (Other)",
-    }
+    let usage = usage.unwrap_or(StandardVisualKey::Other);
+
+    COVER_ART_KEYS
+        .iter()
+        .find(|(_, key_usage)| *key_usage == usage)
+        .map_or(COVER_ART_KEYS[0].0, |(key, _)| key)
 }
 
 fn extension_for(media_type: &str) -> &'static str {
@@ -543,15 +524,15 @@ mod tests {
         let item = 8 + "Title".len() + 1 + "Song".len();
         assert_eq!(tag.len(), 64 + item);
         assert_eq!(&tag[..8], APE_PREAMBLE);
-        assert_eq!(read_u32(&tag[8..]), 2000);
-        assert_eq!(read_u32(&tag[12..]) as usize, item + 32);
-        assert_eq!(read_u32(&tag[16..]), 1);
-        assert_eq!(read_u32(&tag[20..]), 0xa000_0000);
+        assert_eq!(read_u32(&tag[8..]).unwrap(), 2000);
+        assert_eq!(read_u32(&tag[12..]).unwrap() as usize, item + 32);
+        assert_eq!(read_u32(&tag[16..]).unwrap(), 1);
+        assert_eq!(read_u32(&tag[20..]).unwrap(), 0xa000_0000);
 
         let footer = &tag[tag.len() - 32..];
         assert_eq!(&footer[..8], APE_PREAMBLE);
         assert_eq!(&footer[8..20], &tag[8..20]);
-        assert_eq!(read_u32(&footer[20..]), 0x8000_0000);
+        assert_eq!(read_u32(&footer[20..]).unwrap(), 0x8000_0000);
     }
 
     #[test]
@@ -603,6 +584,21 @@ mod tests {
 
         assert_eq!(locator_keys(&tag), vec!["Link".to_string()]);
         assert!(locator_keys(&serialize(&tags, &[], &[])).is_empty());
+    }
+
+    #[test]
+    fn verify_locator_keys_of_malformed_tags_do_not_panic() {
+        let tags = vec![Tag::new(RawTag::new("Link", "https://example.org"))];
+        let tag = serialize(&tags, &[], &["link".to_string()]);
+
+        for len in 0..tag.len() {
+            let _ = locator_keys(&tag[..len]);
+            let _ = locator_keys(&tag[tag.len() - len..]);
+        }
+
+        assert!(locator_keys(&[]).is_empty());
+        assert!(locator_keys(&[0; 3]).is_empty());
+        assert!(locator_keys(&[0; 32]).is_empty());
     }
 
     #[test]

@@ -35,3 +35,31 @@ pub fn get_visual_key_from_picture_type(apic: u32) -> Option<StandardVisualKey> 
         _ => None,
     }
 }
+
+/// Get the APIC picture type identifier of a visual usage. This is the inverse of
+/// [`get_visual_key_from_picture_type`]. A visual without a usage, or with a usage that has no
+/// picture type, is "Other" (0x00).
+pub fn get_picture_type_from_visual_key(usage: Option<StandardVisualKey>) -> u8 {
+    match usage {
+        Some(StandardVisualKey::FileIcon) => 0x01,
+        Some(StandardVisualKey::OtherIcon) => 0x02,
+        Some(StandardVisualKey::FrontCover) => 0x03,
+        Some(StandardVisualKey::BackCover) => 0x04,
+        Some(StandardVisualKey::Leaflet) => 0x05,
+        Some(StandardVisualKey::Media) => 0x06,
+        Some(StandardVisualKey::LeadArtistPerformerSoloist) => 0x07,
+        Some(StandardVisualKey::ArtistPerformer) => 0x08,
+        Some(StandardVisualKey::Conductor) => 0x09,
+        Some(StandardVisualKey::BandOrchestra) => 0x0a,
+        Some(StandardVisualKey::Composer) => 0x0b,
+        Some(StandardVisualKey::Lyricist) => 0x0c,
+        Some(StandardVisualKey::RecordingLocation) => 0x0d,
+        Some(StandardVisualKey::RecordingSession) => 0x0e,
+        Some(StandardVisualKey::Performance) => 0x0f,
+        Some(StandardVisualKey::ScreenCapture) => 0x10,
+        Some(StandardVisualKey::Illustration) => 0x12,
+        Some(StandardVisualKey::BandArtistLogo) => 0x13,
+        Some(StandardVisualKey::PublisherStudioLogo) => 0x14,
+        _ => 0x00,
+    }
+}

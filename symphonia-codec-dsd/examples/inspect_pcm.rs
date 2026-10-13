@@ -4,8 +4,8 @@ use std::fs::File;
 
 use symphonia_codec_dsd::DsdDecoder;
 use symphonia_core::audio::{Audio, GenericAudioBufferRef};
-use symphonia_core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia_core::codecs::CodecParameters;
+use symphonia_core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia_core::formats::{FormatOptions, FormatReader};
 use symphonia_core::io::MediaSourceStream;
 
@@ -22,7 +22,8 @@ fn main() {
 
     // Create format reader directly (DSF).
     let reader_result = symphonia_format_dsd::DsfReader::try_new(mss, FormatOptions::default());
-    let mut reader: Box<dyn FormatReader> = Box::new(reader_result.expect("Failed to open DSF file"));
+    let mut reader: Box<dyn FormatReader> =
+        Box::new(reader_result.expect("Failed to open DSF file"));
 
     // Find the first audio track and clone its parameters.
     let (track_id, audio_params) = reader

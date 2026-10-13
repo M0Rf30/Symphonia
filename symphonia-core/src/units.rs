@@ -376,15 +376,6 @@ impl Duration {
         Some(Self((self.0 / align_to.0) * align_to.0))
     }
 
-    /// Align `self` to the nearest multiple of the provided duration that is closest to negative
-    /// infinity.
-    ///
-    /// Since a duration is unsigned, this function is the same as calling `align_towards_zero`.
-    #[inline]
-    pub const fn align_down(self, align_to: Self) -> Option<Self> {
-        self.align_towards_zero(align_to)
-    }
-
     /// Compute a `Timestamp` from the duration by adding `self` to `from`.
     #[inline]
     pub const fn timestamp_from(self, from: Timestamp) -> Option<Timestamp> {
@@ -786,12 +777,13 @@ impl Time {
     }
 
     fn checked_add(self, delta_secs: i64, delta_nanos: i64) -> Option<Self> {
-        let seconds = self.seconds.checked_add(delta_secs)?;
-
         // Never exceeds +/-2_000_000_000.
-        let nanos = i64::from(self.nanos) + delta_nanos;
+        Self::normalize(self.seconds.checked_add(delta_secs)?, i64::from(self.nanos) + delta_nanos)
+    }
 
-        // Normalize.
+    /// Build a time from `seconds` and a `nanos` value in `(-NS_PER_SEC, 2 * NS_PER_SEC)`, carrying
+    /// into `seconds` as needed.
+    fn normalize(seconds: i64, nanos: i64) -> Option<Self> {
         let time = if nanos >= Self::NS_PER_SEC {
             Self { seconds: seconds.checked_add(1)?, nanos: (nanos - Self::NS_PER_SEC) as u32 }
         }
@@ -844,23 +836,8 @@ impl Time {
     }
 
     fn checked_sub(self, delta_secs: i64, delta_nanos: i64) -> Option<Self> {
-        let seconds = self.seconds.checked_sub(delta_secs)?;
-
         // Never exceeds +/-2_000_000_000.
-        let nanos = i64::from(self.nanos) - delta_nanos;
-
-        // Normalize.
-        let time = if nanos >= Self::NS_PER_SEC {
-            Self { seconds: seconds.checked_add(1)?, nanos: (nanos - Self::NS_PER_SEC) as u32 }
-        }
-        else if nanos < 0 {
-            Self { seconds: seconds.checked_sub(1)?, nanos: (nanos + Self::NS_PER_SEC) as u32 }
-        }
-        else {
-            Self { seconds, nanos: nanos as u32 }
-        };
-
-        Some(time)
+        Self::normalize(self.seconds.checked_sub(delta_secs)?, i64::from(self.nanos) - delta_nanos)
     }
 
     /// Subtract the provided number of nanoseconds to `self`, returning `None` if an overflow
@@ -1118,8 +1095,6 @@ impl fmt::Display for TimeBase {
 
 #[cfg(test)]
 mod tests {
-    use std::i64;
-
     use super::{Duration, Time, TimeBase, Timestamp};
 
     #[test]

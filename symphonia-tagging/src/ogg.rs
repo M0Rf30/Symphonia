@@ -17,8 +17,13 @@ use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+use symphonia_core::checksum::Crc32;
+use symphonia_core::io::Monitor;
 use symphonia_core::meta::{Tag, Visual};
-use symphonia_format_ogg::writer::{build_page, page_crc};
+use symphonia_format_ogg::writer::{
+    FLAG_BOS, FLAG_EOS, NO_GRANULE, OGG_PAGE_HEADER_SIZE, OGG_PAGE_MARKER, build_page,
+    packet_lacing,
+};
 use symphonia_metadata::embedded::flac::write::{
     BLOCK_TYPE_PADDING, BLOCK_TYPE_PICTURE, BLOCK_TYPE_VORBIS_COMMENT, block_header, picture_block,
 };
@@ -26,14 +31,8 @@ use symphonia_metadata::embedded::vorbis::write::{
     CommentOptions, ExistingComments, comment_body_with, parse_existing,
 };
 
-use crate::flac::{comment_options, default_vendor, meta_error};
+use crate::flac::{comment_options, existing_or_default};
 use crate::{Error, Result, WriteOptions, read_up_to, replace_file};
-
-const PAGE_HEADER_LEN: usize = 27;
-const FLAG_BOS: u8 = 0x02;
-const FLAG_EOS: u8 = 0x04;
-/// The granule position of a page on which no packet ends.
-const NO_GRANULE: i64 = -1;
 
 const VORBIS_COMMENT_PREFIX: &[u8] = b"\x03vorbis";
 const OPUS_COMMENT_PREFIX: &[u8] = b"OpusTags";
@@ -106,7 +105,7 @@ impl Codec {
 
 /// An Ogg page, as read from the file.
 struct Page {
-    head: [u8; PAGE_HEADER_LEN],
+    head: [u8; OGG_PAGE_HEADER_SIZE],
     lacing: Vec<u8>,
     body: Vec<u8>,
 }
@@ -138,26 +137,22 @@ impl Page {
         out.write_all(&self.body)
     }
 
-    /// Writes the page with a different sequence number, and a recomputed CRC. `buf` is scratch
-    /// space.
-    fn write_with_sequence(
-        &self,
-        sequence: u32,
-        buf: &mut Vec<u8>,
-        out: &mut impl Write,
-    ) -> io::Result<()> {
-        buf.clear();
-        buf.extend_from_slice(&self.head);
-        buf.extend_from_slice(&self.lacing);
-        buf.extend_from_slice(&self.body);
+    /// Writes the page with a different sequence number, and a recomputed CRC.
+    fn write_with_sequence(&self, sequence: u32, out: &mut impl Write) -> io::Result<()> {
+        let mut head = self.head;
+        head[18..22].copy_from_slice(&sequence.to_le_bytes());
+        head[22..26].copy_from_slice(&[0; 4]);
 
-        buf[18..22].copy_from_slice(&sequence.to_le_bytes());
-        buf[22..26].copy_from_slice(&[0; 4]);
+        let mut crc = Crc32::new(0);
+        crc.process_buf_bytes(&head);
+        crc.process_buf_bytes(&self.lacing);
+        crc.process_buf_bytes(&self.body);
 
-        let crc = page_crc(buf);
-        buf[22..26].copy_from_slice(&crc.to_le_bytes());
+        head[22..26].copy_from_slice(&crc.crc().to_le_bytes());
 
-        out.write_all(buf)
+        out.write_all(&head)?;
+        out.write_all(&self.lacing)?;
+        out.write_all(&self.body)
     }
 }
 
@@ -169,7 +164,7 @@ enum PageRead {
 }
 
 fn read_page(input: &mut impl Read) -> Result<PageRead> {
-    let mut head = [0u8; PAGE_HEADER_LEN];
+    let mut head = [0u8; OGG_PAGE_HEADER_SIZE];
 
     let n = read_up_to(input, &mut head)?;
 
@@ -177,7 +172,7 @@ fn read_page(input: &mut impl Read) -> Result<PageRead> {
         return Ok(PageRead::Eof);
     }
 
-    if n < PAGE_HEADER_LEN || &head[..4] != b"OggS" {
+    if n < OGG_PAGE_HEADER_SIZE || head[..4] != OGG_PAGE_MARKER {
         return Ok(PageRead::Junk(head[..n].to_vec()));
     }
 
@@ -331,8 +326,7 @@ fn build_headers(
             .ok_or_else(|| malformed("the comment header has an unexpected signature"))?;
 
         // A comment header that cannot be parsed is replaced.
-        Ok(parse_existing(body)
-            .unwrap_or(ExistingComments { vendor: default_vendor(), ..Default::default() }))
+        Ok(existing_or_default(parse_existing(body)))
     };
 
     match headers.codec {
@@ -340,10 +334,7 @@ fn build_headers(
             let ExistingComments { vendor, preserved, .. } = existing(VORBIS_COMMENT_PREFIX)?;
 
             let mut comment = VORBIS_COMMENT_PREFIX.to_vec();
-            comment.extend(
-                comment_body_with(&vendor, tags, visuals, &preserved, comment_opts)
-                    .map_err(meta_error)?,
-            );
+            comment.extend(comment_body_with(&vendor, tags, visuals, &preserved, comment_opts)?);
             // The framing bit.
             comment.push(1);
 
@@ -354,10 +345,7 @@ fn build_headers(
             let ExistingComments { vendor, preserved, trailing } = existing(OPUS_COMMENT_PREFIX)?;
 
             let mut comment = OPUS_COMMENT_PREFIX.to_vec();
-            comment.extend(
-                comment_body_with(&vendor, tags, visuals, &preserved, comment_opts)
-                    .map_err(meta_error)?,
-            );
+            comment.extend(comment_body_with(&vendor, tags, visuals, &preserved, comment_opts)?);
             // Opus tools may append binary padding to the comment header, keep it.
             comment.extend(trailing);
 
@@ -366,8 +354,7 @@ fn build_headers(
         Codec::Speex => {
             let ExistingComments { vendor, preserved, .. } = existing(&[])?;
 
-            let comment = comment_body_with(&vendor, tags, visuals, &preserved, comment_opts)
-                .map_err(meta_error)?;
+            let comment = comment_body_with(&vendor, tags, visuals, &preserved, comment_opts)?;
 
             let mut packets = vec![comment];
             // The extra headers.
@@ -396,20 +383,16 @@ fn build_headers(
                 }
             }
 
-            let ExistingComments { vendor, preserved, .. } = match vorbis_comment {
-                Some(body) => parse_existing(body)
-                    .unwrap_or(ExistingComments { vendor: default_vendor(), ..Default::default() }),
-                None => ExistingComments { vendor: default_vendor(), ..Default::default() },
-            };
+            let ExistingComments { vendor, preserved, .. } =
+                existing_or_default(vorbis_comment.and_then(parse_existing));
 
             blocks.push((
                 BLOCK_TYPE_VORBIS_COMMENT,
-                comment_body_with(&vendor, tags, &[], &preserved, comment_opts)
-                    .map_err(meta_error)?,
+                comment_body_with(&vendor, tags, &[], &preserved, comment_opts)?,
             ));
 
             for visual in visuals {
-                blocks.push((BLOCK_TYPE_PICTURE, picture_block(visual).map_err(meta_error)?));
+                blocks.push((BLOCK_TYPE_PICTURE, picture_block(visual)?));
             }
 
             let count = u16::try_from(blocks.len())
@@ -420,8 +403,7 @@ fn build_headers(
             let mut packets = Vec::with_capacity(blocks.len());
 
             for (i, (kind, body)) in blocks.into_iter().enumerate() {
-                let mut packet =
-                    block_header(i == last, kind, body.len()).map_err(meta_error)?.to_vec();
+                let mut packet = block_header(i == last, kind, body.len())?.to_vec();
                 packet.extend(body);
                 packets.push(packet);
             }
@@ -531,7 +513,6 @@ fn rewrite(
     src.seek(SeekFrom::Start(0))?;
 
     let mut input = BufReader::with_capacity(1 << 16, &mut *src);
-    let mut buf = Vec::new();
 
     let mut stream_page = 0;
     let mut sequence = 0u32;
@@ -562,7 +543,7 @@ fn rewrite(
             }
             else {
                 // The identification packet changed (the header count of a FLAC stream).
-                let lacing = lacing_for(id.len());
+                let lacing = packet_lacing(id.len());
                 out.write_all(&build_page(
                     page.flags(),
                     page.granule(),
@@ -616,7 +597,7 @@ fn rewrite(
             }
         }
         else {
-            page.write_with_sequence(sequence, &mut buf, out)?;
+            page.write_with_sequence(sequence, out)?;
             sequence = sequence.wrapping_add(1);
 
             if page.flags() & FLAG_EOS != 0 {
@@ -630,15 +611,10 @@ fn rewrite(
     Ok(())
 }
 
-/// Builds the segment table of a single packet.
-fn lacing_for(len: usize) -> Vec<u8> {
-    let mut lacing = vec![255; len / 255];
-    lacing.push((len % 255) as u8);
-    lacing
-}
-
 #[cfg(test)]
 mod tests {
+    use symphonia_format_ogg::writer::page_crc;
+
     use super::*;
 
     /// Splits pages back into packets, checking the page structure.
@@ -701,10 +677,10 @@ mod tests {
     }
 
     #[test]
-    fn verify_lacing_for() {
-        assert_eq!(lacing_for(0), vec![0]);
-        assert_eq!(lacing_for(51), vec![51]);
-        assert_eq!(lacing_for(255), vec![255, 0]);
-        assert_eq!(lacing_for(256), vec![255, 1]);
+    fn verify_packet_lacing() {
+        assert_eq!(packet_lacing(0), vec![0]);
+        assert_eq!(packet_lacing(51), vec![51]);
+        assert_eq!(packet_lacing(255), vec![255, 0]);
+        assert_eq!(packet_lacing(256), vec![255, 1]);
     }
 }

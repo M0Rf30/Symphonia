@@ -123,9 +123,7 @@ mod tests {
 
         assert_eq!(bitset.count(), 0);
 
-        if let Some(_) = bitset.iter().next() {
-            panic!("Should be empty!");
-        }
+        assert!(bitset.iter().next().is_none(), "Should be empty!");
 
         bitset.set(1);
         bitset.set(2);

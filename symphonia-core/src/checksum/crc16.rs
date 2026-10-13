@@ -404,7 +404,7 @@ impl Monitor for Crc16AnsiLe {
     }
 
     fn process_buf_bytes(&mut self, buf: &[u8]) {
-        // TODO: Implement by-8 method.
+        // Used for short headers only, so a per-byte loop is sufficient.
         for byte in buf.iter() {
             self.process_byte(*byte);
         }

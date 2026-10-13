@@ -1,6 +1,8 @@
 // Faithful Rust port of libopus `src/opus_compare.c`, restricted to 48 kHz (mono or stereo),
 // which is all the RFC 8251 conformance harness needs.
 // Ported from libopus (BSD-3-Clause), see ../../NOTICE.
+#![allow(clippy::unwrap_used)] // test/example code: a panic is the failure signal
+#![allow(dead_code)] // shared by several test crates, each using a subset
 #![allow(clippy::needless_range_loop)]
 
 const NBANDS: usize = 21;
@@ -32,7 +34,8 @@ fn band_energy(
     let ps_sz = window_sz / 2;
 
     for xj in 0..window_sz {
-        window[xj] = 0.5 - 0.5 * (2.0 * std::f32::consts::PI / (window_sz as f32 - 1.0) * xj as f32).cos();
+        window[xj] =
+            0.5 - 0.5 * (2.0 * std::f32::consts::PI / (window_sz as f32 - 1.0) * xj as f32).cos();
     }
     for xj in 0..window_sz {
         c[xj] = (2.0 * std::f32::consts::PI / window_sz as f32 * xj as f32).cos();
@@ -76,7 +79,8 @@ fn band_energy(
             if let Some(out) = out.as_deref_mut() {
                 out[(xi * nbands + bi) * channels] = p[0] / (bands[bi + 1] - bands[bi]) as f32;
                 if channels == 2 {
-                    out[(xi * nbands + bi) * channels + 1] = p[1] / (bands[bi + 1] - bands[bi]) as f32;
+                    out[(xi * nbands + bi) * channels + 1] =
+                        p[1] / (bands[bi + 1] - bands[bi]) as f32;
                 }
             }
         }
@@ -110,8 +114,30 @@ pub fn compare(x: &[f32], y: &[f32], channels: usize) -> CompareResult {
     let mut xfreq = vec![0f32; nframes * NFREQS * channels];
     let mut yfreq = vec![0f32; nframes * yfreqs * channels];
 
-    band_energy(Some(&mut xb), &mut xfreq, &BANDS, NBANDS, x, channels, nframes, TEST_WIN_SIZE, TEST_WIN_STEP, 1);
-    band_energy(None, &mut yfreq, &BANDS, ybands, y, channels, nframes, TEST_WIN_SIZE, TEST_WIN_STEP, 1);
+    band_energy(
+        Some(&mut xb),
+        &mut xfreq,
+        &BANDS,
+        NBANDS,
+        x,
+        channels,
+        nframes,
+        TEST_WIN_SIZE,
+        TEST_WIN_STEP,
+        1,
+    );
+    band_energy(
+        None,
+        &mut yfreq,
+        &BANDS,
+        ybands,
+        y,
+        channels,
+        nframes,
+        TEST_WIN_SIZE,
+        TEST_WIN_STEP,
+        1,
+    );
 
     for xi in 0..nframes {
         for bi in 1..NBANDS {
@@ -181,7 +207,8 @@ pub fn compare(x: &[f32], y: &[f32], channels: usize) -> CompareResult {
             let mut eb = 0f64;
             for xj in BANDS[bi]..BANDS[bi + 1].min(max_compare) {
                 for ci in 0..channels {
-                    let re = yfreq[(xi * yfreqs + xj) * channels + ci] / xfreq[(xi * NFREQS + xj) * channels + ci];
+                    let re = yfreq[(xi * yfreqs + xj) * channels + ci]
+                        / xfreq[(xi * NFREQS + xj) * channels + ci];
                     let mut im = (re - re.ln() - 1.0) as f64;
                     if (79..=81).contains(&xj) {
                         im *= 0.1;

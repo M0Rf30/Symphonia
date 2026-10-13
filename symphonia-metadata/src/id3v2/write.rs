@@ -50,13 +50,17 @@
 //!
 //! Unsynchronisation is never applied to a tag that is written.
 
-use symphonia_core::meta::{RawTag, RawValue, StandardTag, StandardVisualKey, Tag, Visual};
+use symphonia_core::meta::{RawTag, RawValue, StandardTag, Tag, Visual};
 
+use crate::utils::id3v2::get_picture_type_from_visual_key;
 use crate::utils::images::try_get_image_info;
 
 use super::frames::{LEGACY_FRAME_MAP, id3v2p4_frame_size, validate_frame_id};
 use super::sub_fields::*;
 use super::unsync::decode_unsynchronisation;
+use super::{HeaderBytes, parse_header_bytes};
+
+pub use super::unsync::{decode_synchsafe, encode_synchsafe};
 
 /// The owner identifier of the `UFID` frame containing the MusicBrainz recording ID.
 const UFID_OWNER_MUSICBRAINZ: &str = "http://musicbrainz.org";
@@ -215,7 +219,7 @@ impl Existing {
                 3 => {
                     body.get(..4).map(|b| 4 + u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize)
                 }
-                _ => body.get(..4).map(|b| synchsafe(b) as usize),
+                _ => body.get(..4).map(|b| decode_synchsafe(b) as usize),
             };
 
             match skip {
@@ -241,30 +245,14 @@ struct Header {
     size: usize,
 }
 
-fn synchsafe(b: &[u8]) -> u32 {
-    b.iter().take(4).fold(0, |acc, &x| (acc << 7) | u32::from(x & 0x7f))
-}
-
 fn parse_header(tag: &[u8]) -> Option<Header> {
-    let [b'I', b'D', b'3', major, minor, flags, size @ ..] = tag.get(..10)?
-    else {
-        return None;
-    };
-
-    if !(2..=4).contains(major) || *minor == 0xff || size.iter().any(|b| b & 0x80 != 0) {
-        return None;
-    }
-
-    // ID3v2.2 compression is undefined.
-    if *major == 2 && flags & 0x40 != 0 {
-        return None;
-    }
+    let hdr = parse_header_bytes(tag).filter(HeaderBytes::is_supported)?;
 
     Some(Header {
-        major: *major,
-        unsync: flags & 0x80 != 0,
-        ext_header: *major >= 3 && flags & 0x40 != 0,
-        size: synchsafe(size) as usize,
+        major: hdr.major,
+        unsync: hdr.flags & 0x80 != 0,
+        ext_header: hdr.major >= 3 && hdr.flags & 0x40 != 0,
+        size: hdr.size as usize,
     })
 }
 
@@ -419,10 +407,6 @@ impl OutFrame {
         out.extend_from_slice(&self.data);
         true
     }
-}
-
-fn encode_synchsafe(v: u32) -> [u8; 4] {
-    [(v >> 21) as u8 & 0x7f, (v >> 14) as u8 & 0x7f, (v >> 7) as u8 & 0x7f, v as u8 & 0x7f]
 }
 
 // Text encoding.
@@ -918,7 +902,8 @@ impl Builder {
             match &entry.key {
                 Key::Text([a, b, c, d]) => {
                     let id = [*a, *b, *c, *d];
-                    let body = text_body(v, self.encoding, &self.join_v23, &[], &entry.values, false);
+                    let body =
+                        text_body(v, self.encoding, &self.join_v23, &[], &entry.values, false);
                     frames.push(OutFrame { id, flags: 0, data: body });
                 }
                 Key::Txxx(desc) => {
@@ -1271,31 +1256,6 @@ fn screaming_snake_case(ident: &str) -> String {
 
 // Pictures.
 
-fn picture_type(usage: Option<StandardVisualKey>) -> u8 {
-    match usage {
-        Some(StandardVisualKey::FileIcon) => 0x01,
-        Some(StandardVisualKey::OtherIcon) => 0x02,
-        Some(StandardVisualKey::FrontCover) => 0x03,
-        Some(StandardVisualKey::BackCover) => 0x04,
-        Some(StandardVisualKey::Leaflet) => 0x05,
-        Some(StandardVisualKey::Media) => 0x06,
-        Some(StandardVisualKey::LeadArtistPerformerSoloist) => 0x07,
-        Some(StandardVisualKey::ArtistPerformer) => 0x08,
-        Some(StandardVisualKey::Conductor) => 0x09,
-        Some(StandardVisualKey::BandOrchestra) => 0x0a,
-        Some(StandardVisualKey::Composer) => 0x0b,
-        Some(StandardVisualKey::Lyricist) => 0x0c,
-        Some(StandardVisualKey::RecordingLocation) => 0x0d,
-        Some(StandardVisualKey::RecordingSession) => 0x0e,
-        Some(StandardVisualKey::Performance) => 0x0f,
-        Some(StandardVisualKey::ScreenCapture) => 0x10,
-        Some(StandardVisualKey::Illustration) => 0x12,
-        Some(StandardVisualKey::BandArtistLogo) => 0x13,
-        Some(StandardVisualKey::PublisherStudioLogo) => 0x14,
-        _ => 0x00,
-    }
-}
-
 fn apic_frame(version: Version, encoding: TextEncoding, visual: &Visual) -> OutFrame {
     let media_type = visual
         .media_type
@@ -1318,7 +1278,7 @@ fn apic_frame(version: Version, encoding: TextEncoding, visual: &Visual) -> OutF
     let mut body = vec![encoding];
     push_latin1(&mut body, &media_type);
     body.push(0);
-    body.push(picture_type(visual.usage));
+    body.push(get_picture_type_from_visual_key(visual.usage));
     push_text(&mut body, &desc, encoding);
     push_terminator(&mut body, encoding);
     body.extend_from_slice(&visual.data);
@@ -1537,8 +1497,7 @@ pub fn serialize(
             }
 
             // The play counter of the frame that is replaced is carried over.
-            let counter =
-                existing.frames.iter().filter_map(parse_popm).find(|(e, _)| *e == email);
+            let counter = existing.frames.iter().filter_map(parse_popm).find(|(e, _)| *e == email);
 
             let rating = ((u64::from(ppm) * 255 + 500_000) / 1_000_000).min(255) as u8;
 
@@ -1606,7 +1565,9 @@ mod tests {
     use std::sync::Arc;
 
     use symphonia_core::io::BufReader;
-    use symphonia_core::meta::{MetadataBuilder, RawTag, RawTagSubField, StandardTag, Tag, Visual};
+    use symphonia_core::meta::{
+        MetadataBuilder, RawTag, RawTagSubField, StandardTag, StandardVisualKey, Tag, Visual,
+    };
 
     use super::*;
     use crate::id3v2::{ID3V2_METADATA_INFO, read_id3v2};
@@ -2278,7 +2239,8 @@ mod tests {
     #[test]
     fn verify_utf16_v4_multiple_values_have_wide_separators() {
         let tags = [std(StandardTag::Artist(s("A"))), std(StandardTag::Artist(s("B")))];
-        let bytes = serialize(&tags, &[], &Existing::new(), &encoded(Version::V4, TextEncoding::Utf16));
+        let bytes =
+            serialize(&tags, &[], &Existing::new(), &encoded(Version::V4, TextEncoding::Utf16));
         let data = find_frame(&bytes, b"TPE1").unwrap().1;
         assert_eq!(data, b"\x01\xff\xfeA\0\0\0\xff\xfeB\0");
         let (read, _) = read_back(&bytes);
@@ -2307,10 +2269,7 @@ mod tests {
 
     #[test]
     fn verify_itunes_grouping() {
-        let tags = [
-            std(StandardTag::Grouping(s("Group"))),
-            std(StandardTag::Work(s("Work"))),
-        ];
+        let tags = [std(StandardTag::Grouping(s("Group"))), std(StandardTag::Work(s("Work")))];
 
         for version in [Version::V3, Version::V4] {
             let o = WriteOptions { version, itunes_grouping: true, ..Default::default() };
@@ -2320,7 +2279,8 @@ mod tests {
             assert!(find_frame(&bytes, b"TXXX").is_none());
 
             let (read, _) = read_back(&bytes);
-            let raw: Vec<_> = read.iter().map(|t| (t.raw.key.clone(), t.raw.value.to_string())).collect();
+            let raw: Vec<_> =
+                read.iter().map(|t| (t.raw.key.clone(), t.raw.value.to_string())).collect();
             assert!(raw.contains(&("GRP1".to_string(), "Group".to_string())));
             assert!(raw.contains(&("TIT1".to_string(), "Work".to_string())));
 
@@ -2442,11 +2402,7 @@ mod tests {
             ),
             StandardTag::Rating(1_000_000),
         );
-        let tags = [
-            std(StandardTag::Rating(200_000)),
-            std(StandardTag::Rating(900_000)),
-            other,
-        ];
+        let tags = [std(StandardTag::Rating(200_000)), std(StandardTag::Rating(900_000)), other];
 
         let bytes = serialize(&tags, &[], &existing, &rating_opts(Version::V4, Some("me@x.org")));
         assert_eq!(

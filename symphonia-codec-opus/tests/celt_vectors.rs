@@ -7,9 +7,10 @@
 // frames): 01, 07, 11 per the wave-1 assignment.
 //
 // Run with:
-//   OPUS_TESTVECTORS=/home/gianluca/M0Rf30/wt/ref/opus_newvectors \
+//   OPUS_TESTVECTORS=/path/to/opus_newvectors \
 //     cargo test -p symphonia-codec-opus --release --test celt_vectors -- --ignored --nocapture
 
+#![allow(clippy::unwrap_used)] // test/example code: a panic is the failure signal
 mod common;
 
 use common::opus_demo::BitFile;
@@ -112,7 +113,9 @@ fn decode_celt_vector(bit_path: &std::path::Path, channels: u8) -> DecodeStats {
         for frame in &parsed.frames {
             let frame_data = &pkt.payload[frame.offset..frame.offset + frame.len];
             let mut out = vec![0f32; frame_size as usize * channels as usize];
-            let n = decoder.decode_with_ec(Some(frame_data), &mut out, frame_size, None, false).unwrap();
+            let n = decoder
+                .decode_with_ec(Some(frame_data), &mut out, frame_size, None, false)
+                .unwrap();
             pcm.extend(out[..n * channels as usize].iter().map(|&s| float2int16(s)));
         }
 
@@ -163,7 +166,11 @@ macro_rules! celt_conformance_test {
                 reference.iter().zip(stats.pcm.iter()).position(|(a, b)| (a - b).abs() > 50.0)
             {
                 let s = idx.saturating_sub(5);
-                eprintln!("first diff at sample {idx}: ref={:?} got={:?}", &reference[s..s + 15], &stats.pcm[s..s + 15]);
+                eprintln!(
+                    "first diff at sample {idx}: ref={:?} got={:?}",
+                    &reference[s..s + 15],
+                    &stats.pcm[s..s + 15]
+                );
             }
             let result = common::opus_compare::compare(&reference, &stats.pcm, 2);
             assert!(result.pass, "opus_compare FAILS (stereo): {result:?}");
@@ -176,7 +183,8 @@ macro_rules! celt_conformance_test {
                 "final range mismatches (mono): {}/{} packets",
                 stats_m.range_mismatches, stats_m.frames_checked
             );
-            let reference_m = read_dec_as_f32(&dir.join(format!("testvector{:02}m.dec", $index)), 1);
+            let reference_m =
+                read_dec_as_f32(&dir.join(format!("testvector{:02}m.dec", $index)), 1);
             let result_m = common::opus_compare::compare(&reference_m, &stats_m.pcm, 1);
             assert!(result_m.pass, "opus_compare FAILS (mono): {result_m:?}");
         }

@@ -54,10 +54,14 @@ fn read_block_header(mss: &mut MediaSourceStream<'_>) -> Result<([u8; 2], u64)> 
     Ok((key, payload_size))
 }
 
+/// The fields of an `SH` block: `(stream_version, samples, beg_silence, sample_rate, max_band,
+/// channels, ms, block_pwr)`.
+type ShFields = (u32, u64, u64, u32, i32, u32, bool, u8);
+
 /// Ported from libmpcdec `streaminfo.c` (`streaminfo_read_header_sv8`), skipping the CRC check
 /// (malformed streams are handled defensively rather than rejected outright, matching this
 /// crate's "never panic, degrade gracefully" policy for network sources).
-fn parse_sh(payload: &[u8]) -> Result<(u32, u64, u64, u32, i32, u32, bool, u8)> {
+fn parse_sh(payload: &[u8]) -> Result<ShFields> {
     let mut r = BitReader::new(payload);
     let _crc = r.read_bits(32);
     let stream_version = r.read_bits(8);
@@ -419,11 +423,7 @@ fn build_noise_index(
         return states;
     }
     let mut parser = Core::new(8, cfg.max_band, cfg.ms, cfg.channels);
-    loop {
-        let Ok((key, size)) = read_block_header(mss)
-        else {
-            break;
-        };
+    while let Ok((key, size)) = read_block_header(mss) {
         if &key == b"SE" {
             break;
         }

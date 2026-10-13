@@ -11,6 +11,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+use symphonia_core::dsp::quant::{POW43_LEN, pow43_table};
 use symphonia_core::errors::{Result, decode_error};
 use symphonia_core::io::ReadBitsLtr;
 use symphonia_core::io::vlc::{Codebook, Entry8x16};
@@ -38,15 +39,21 @@ const INTENSITY_HCB: u8 = 15;
 const INTENSITY_SCALE_MIN: i16 = -155;
 const NORMAL_SCALE_MIN: i16 = -100;
 
-/// The length of the `POW43` table.
+/// The range of integral magnitudes (exclusive) looked up in the shared `POW43` table.
 const POW43_TABLE_LEN: usize = 8192;
 
-lazy_static! {
-    /// Pre-computed table of y = x^(4/3).
-    static ref POW43_TABLE: Box<[f32; POW43_TABLE_LEN]> = {
-        let table: Vec<f32> = (0..POW43_TABLE_LEN).map(|i| (i as f32).powf(4.0 / 3.0)).collect();
-        table.into_boxed_slice().try_into().expect("vec initialized to correct table length")
+/// Computes y = sign(x) * |x|^(4/3), using the pre-computed table for integral magnitudes in its
+/// range.
+#[inline(always)]
+pub(super) fn pow43(x: f32) -> f32 {
+    let mag = x.abs();
+    let y = if mag < POW43_TABLE_LEN as f32 && mag.fract() == 0.0 {
+        pow43_table()[mag as usize]
+    }
+    else {
+        mag.powf(4.0 / 3.0)
     };
+    if x < 0.0 { -y } else { y }
 }
 
 /// The length of the `NORMAL_SCF_TABLE` table.
@@ -556,6 +563,20 @@ fn decode_sign(val: u32) -> f32 {
     1.0 - 2.0 * val as f32
 }
 
+/// Reads `n` (0..=4) sign bits at once. Consume them with [`next_sign`].
+#[inline(always)]
+fn read_signs<B: ReadBitsLtr>(bs: &mut B, n: u32) -> Result<(u32, u32)> {
+    let bits = if n > 0 { bs.read_bits_leq32(n)? } else { 0 };
+    Ok((bits, n))
+}
+
+/// Pops the first (most significant) of the remaining sign bits read by [`read_signs`].
+#[inline(always)]
+fn next_sign(signs: &mut (u32, u32)) -> f32 {
+    signs.1 -= 1;
+    decode_sign((signs.0 >> signs.1) & 1)
+}
+
 fn decode_quads_unsigned<B: ReadBitsLtr>(
     bs: &mut B,
     cb: &codebooks::QuadsCodebook,
@@ -568,17 +589,15 @@ fn decode_quads_unsigned<B: ReadBitsLtr>(
     for out in dst.chunks_exact_mut(4) {
         let (a, b, c, d) = cb.read_quant(bs)?;
 
-        if a != 0 {
-            out[0] = decode_sign(bs.read_bit()?) * iquant[a as usize];
-        }
-        if b != 0 {
-            out[1] = decode_sign(bs.read_bit()?) * iquant[b as usize];
-        }
-        if c != 0 {
-            out[2] = decode_sign(bs.read_bit()?) * iquant[c as usize];
-        }
-        if d != 0 {
-            out[3] = decode_sign(bs.read_bit()?) * iquant[d as usize];
+        // The sign bits of the non-zero values follow the codeword in order, MSB first.
+        let num_signs =
+            u32::from(a != 0) + u32::from(b != 0) + u32::from(c != 0) + u32::from(d != 0);
+        let mut signs = read_signs(bs, num_signs)?;
+
+        for (o, q) in out.iter_mut().zip([a, b, c, d]) {
+            if q != 0 {
+                *o = next_sign(&mut signs) * iquant[q as usize];
+            }
         }
     }
 
@@ -629,8 +648,9 @@ fn decode_pairs_unsigned<B: ReadBitsLtr>(
     for out in dst.chunks_exact_mut(2) {
         let (x, y) = cb.read_dequant(bs)?;
 
-        let sign_x = if x != 0.0 { decode_sign(bs.read_bit()?) } else { 1.0 };
-        let sign_y = if y != 0.0 { decode_sign(bs.read_bit()?) } else { 1.0 };
+        let mut signs = read_signs(bs, u32::from(x != 0.0) + u32::from(y != 0.0))?;
+        let sign_x = if x != 0.0 { next_sign(&mut signs) } else { 1.0 };
+        let sign_y = if y != 0.0 { next_sign(&mut signs) } else { 1.0 };
 
         out[0] = sign_x * x * scale;
         out[1] = sign_y * y * scale;
@@ -645,14 +665,15 @@ fn decode_pairs_unsigned_escape<B: ReadBitsLtr>(
     scale: f32,
     dst: &mut [f32],
 ) -> Result<()> {
-    let iquant: &[f32; POW43_TABLE_LEN] = &POW43_TABLE;
+    let iquant: &[f32; POW43_LEN] = pow43_table();
 
     for out in dst.chunks_exact_mut(2) {
         let (a, b) = cb.read_quant(bs)?;
 
         // Read the signs of the dequantized samples.
-        let sign_x = if a != 0 { decode_sign(bs.read_bit()?) } else { 1.0 };
-        let sign_y = if b != 0 { decode_sign(bs.read_bit()?) } else { 1.0 };
+        let mut signs = read_signs(bs, u32::from(a != 0) + u32::from(b != 0))?;
+        let sign_x = if a != 0 { next_sign(&mut signs) } else { 1.0 };
+        let sign_y = if b != 0 { next_sign(&mut signs) } else { 1.0 };
 
         let x = iquant[if a == 16 { read_escape(bs)? } else { a } as usize];
         let y = iquant[if b == 16 { read_escape(bs)? } else { b } as usize];

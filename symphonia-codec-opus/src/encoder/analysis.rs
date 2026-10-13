@@ -183,7 +183,7 @@ pub(crate) fn tf_analysis(
     let mut path1 = vec![0i32; len];
     let it = is_transient as usize;
 
-    for i in 0..len {
+    for (i, met) in metric.iter_mut().enumerate().take(len) {
         let band_w = (m.e_bands[i + 1] - m.e_bands[i]) as usize;
         let n = band_w << lm;
         // Band is too narrow to be split down to LM=-1.
@@ -214,11 +214,11 @@ pub(crate) fn tf_analysis(
             }
         }
         // metric is in Q1 to be able to select the mid-point (-0.5) for narrower bands.
-        metric[i] = if is_transient { 2 * best_level } else { -2 * best_level };
+        *met = if is_transient { 2 * best_level } else { -2 * best_level };
         // For bands that can't be split to -1, set the metric to the half-way point to avoid
         // biasing the decision.
-        if narrow && (metric[i] == 0 || metric[i] == -2 * lm) {
-            metric[i] -= 1;
+        if narrow && (*met == 0 || *met == -2 * lm) {
+            *met -= 1;
         }
     }
 
@@ -300,15 +300,15 @@ pub(crate) fn tf_encode(
     budget -= tf_select_rsv as u32;
     let mut curr = 0i32;
     let mut tf_changed = 0i32;
-    for i in start..end {
+    for r in tf_res.iter_mut().take(end).skip(start) {
         if tell + logp <= budget {
-            enc.enc_bit_logp((tf_res[i] ^ curr) != 0, logp);
+            enc.enc_bit_logp((*r ^ curr) != 0, logp);
             tell = enc.tell() as u32;
-            curr = tf_res[i];
+            curr = *r;
             tf_changed |= curr;
         }
         else {
-            tf_res[i] = curr;
+            *r = curr;
         }
         logp = if is_transient { 4 } else { 5 };
     }
@@ -602,12 +602,12 @@ pub(crate) fn dynalloc_analysis(
                 *f *= 0.5;
             }
         }
-        for i in start..end {
+        for (i, f) in follower.iter_mut().enumerate().take(end).skip(start) {
             if i < 8 {
-                follower[i] *= 2.0;
+                *f *= 2.0;
             }
             if i >= 12 {
-                follower[i] *= 0.5;
+                *f *= 0.5;
             }
         }
         for i in start..end {

@@ -4,6 +4,7 @@
 //
 // The hash (and the optional raw little-endian f32 dump) makes it easy to compare the decoder
 // output of two builds.
+#![allow(clippy::unwrap_used)]
 use std::env;
 use std::fs::File;
 use std::io::Write;

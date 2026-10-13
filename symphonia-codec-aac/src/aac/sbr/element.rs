@@ -49,11 +49,11 @@
 //! All of this is fixed-/variable-width syntax driven by the grid and
 //! the band tables; the Huffman content lives in [`crate::sbr_huffman`].
 
+use super::bits::{BitReader, bit_readers};
 use super::envelope::{SbrEnvelopeData, SbrNoiseData};
+use super::error::{SbrError as Error, SbrResult as Result};
 use super::freq_bands::HiLoTables;
 use super::grid::{GridSyntax, SbrDtdf, SbrGrid, SbrInvf};
-use super::error::{SbrError as Error, SbrResult as Result};
-use super::bits::BitReader;
 
 /// `bs_extension_id` value that signals a Parametric Stereo payload
 /// inside `sbr_extension()` (§4.4.2.8 / Table 4.A.x). PS itself is not
@@ -158,24 +158,14 @@ impl SbrElement {
         let envelope = SbrEnvelopeData::parse(reader, &grid, &dtdf, bands, false, false, eff_amp)?;
         let noise = SbrNoiseData::parse(reader, &grid, &dtdf, n_q, false, false, eff_amp)?;
 
-        let add_harmonic = if read_flag(reader)? {
-            parse_sinusoidal(reader, bands.n_high())?
-        } else {
-            Vec::new()
-        };
+        let add_harmonic =
+            if read_flag(reader)? { parse_sinusoidal(reader, bands.n_high())? } else { Vec::new() };
 
         let extension = parse_extended_data(reader)?;
 
         Ok(SbrElement {
             coupling: false,
-            channels: vec![SbrChannel {
-                grid,
-                dtdf,
-                invf,
-                envelope,
-                noise,
-                add_harmonic,
-            }],
+            channels: vec![SbrChannel { grid, dtdf, invf, envelope, noise, add_harmonic }],
             extension,
         })
     }
@@ -235,15 +225,14 @@ impl SbrElement {
                 SbrChannel {
                     grid,
                     dtdf: dtdf1,
-                    invf: SbrInvf {
-                        invf_mode: Vec::new(),
-                    },
+                    invf: SbrInvf { invf_mode: Vec::new() },
                     envelope: env1,
                     noise: noise1,
                     add_harmonic: h1,
                 },
             ]
-        } else {
+        }
+        else {
             // Independent grids per channel.
             let grid0 = SbrGrid::parse_with(reader, syntax)?;
             let grid1 = SbrGrid::parse_with(reader, syntax)?;
@@ -284,11 +273,7 @@ impl SbrElement {
 
         let extension = parse_extended_data(reader)?;
 
-        Ok(SbrElement {
-            coupling,
-            channels,
-            extension,
-        })
+        Ok(SbrElement { coupling, channels, extension })
     }
 }
 
@@ -299,16 +284,10 @@ fn parse_pair_harmonics(
     reader: &mut BitReader<'_>,
     bands: &HiLoTables,
 ) -> Result<(Vec<bool>, Vec<bool>)> {
-    let h0 = if read_flag(reader)? {
-        parse_sinusoidal(reader, bands.n_high())?
-    } else {
-        Vec::new()
-    };
-    let h1 = if read_flag(reader)? {
-        parse_sinusoidal(reader, bands.n_high())?
-    } else {
-        Vec::new()
-    };
+    let h0 =
+        if read_flag(reader)? { parse_sinusoidal(reader, bands.n_high())? } else { Vec::new() };
+    let h1 =
+        if read_flag(reader)? { parse_sinusoidal(reader, bands.n_high())? } else { Vec::new() };
     Ok((h0, h1))
 }
 
@@ -362,23 +341,15 @@ fn parse_extended_data(reader: &mut BitReader<'_>) -> Result<Option<SbrExtension
     Ok(Some(SbrExtension { id, data }))
 }
 
-#[inline]
-fn read(reader: &mut BitReader<'_>, n: u32) -> Result<u32> {
-    reader.read_u32(n).map_err(|_| Error::SbrGridInvalid)
-}
-
-#[inline]
-fn read_flag(reader: &mut BitReader<'_>) -> Result<bool> {
-    reader.read_bit().map_err(|_| Error::SbrGridInvalid)
-}
+bit_readers!(Error::SbrGridInvalid, read, read_flag);
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::super::freq_bands::{k0, k2, master_table, HiLoTables};
-    use super::super::grid::FrameClass;
-    use super::super::huffman::{env_tables, noise_tables, SbrHuffContext};
     use super::super::bits::{BitReader, BitWriter};
+    use super::super::freq_bands::{HiLoTables, k0, k2, master_table};
+    use super::super::grid::FrameClass;
+    use super::super::huffman::{SbrHuffContext, env_tables, noise_tables};
+    use super::*;
 
     fn bands_44100() -> HiLoTables {
         let k0v = k0(88_200, 5).unwrap();
@@ -400,33 +371,29 @@ mod tests {
         let n_q = bands.n_q();
         let mut w = BitWriter::new();
         w.write_bit(false); // bs_data_extra
-                            // sbr_grid: FIXFIX, 2^0 = 1 env, freq_res high.
+        // sbr_grid: FIXFIX, 2^0 = 1 env, freq_res high.
         w.write_u32(FrameClass::FixFix.to_bits(), 2);
         w.write_u32(0, 2); // 1 env
         w.write_bit(true); // freq_res[0] = high
-                           // sbr_dtdf: 1 env flag + 1 noise flag, both freq (0).
+        // sbr_dtdf: 1 env flag + 1 noise flag, both freq (0).
         w.write_bit(false); // df_env[0]
         w.write_bit(false); // df_noise[0]
-                            // sbr_invf: n_q 2-bit modes.
+        // sbr_invf: n_q 2-bit modes.
         for _ in 0..n_q {
             w.write_u32(1, 2);
         }
         // sbr_envelope: amp_res override → false; level start = 7 bits.
-        let ((_t, _tl), (f_huff, f_lav)) = env_tables(SbrHuffContext {
-            coupling: false,
-            ch: false,
-            amp_res: false,
-        });
+        let (_, f_huff_book) =
+            env_tables(SbrHuffContext { coupling: false, ch: false, amp_res: false });
+        let (f_huff, f_lav) = (f_huff_book.table(), f_huff_book.lav());
         w.write_u32(33, 7); // start value
         for i in 1..n_high {
             push_code(&mut w, f_huff, (i + f_lav as usize) % f_huff.len());
         }
         // sbr_noise: 5-bit start + (n_q-1) f deltas.
-        let ((_nt, _ntl), (nf, nfl)) = noise_tables(SbrHuffContext {
-            coupling: false,
-            ch: false,
-            amp_res: false,
-        });
+        let (_, nf_book) =
+            noise_tables(SbrHuffContext { coupling: false, ch: false, amp_res: false });
+        let (nf, nfl) = (nf_book.table(), nf_book.lav());
         w.write_u32(10, 5);
         for i in 1..n_q {
             push_code(&mut w, nf, (i + nfl as usize) % nf.len());
@@ -473,20 +440,16 @@ mod tests {
         for _ in 0..n_q {
             w.write_u32(0, 2);
         }
-        let ((_t, _tl), (f_huff, f_lav)) = env_tables(SbrHuffContext {
-            coupling: false,
-            ch: false,
-            amp_res: false,
-        });
+        let (_, f_huff_book) =
+            env_tables(SbrHuffContext { coupling: false, ch: false, amp_res: false });
+        let (f_huff, f_lav) = (f_huff_book.table(), f_huff_book.lav());
         w.write_u32(20, 7);
         for i in 1..n_high {
             push_code(&mut w, f_huff, (i + f_lav as usize) % f_huff.len());
         }
-        let ((_nt, _ntl), (nf, nfl)) = noise_tables(SbrHuffContext {
-            coupling: false,
-            ch: false,
-            amp_res: false,
-        });
+        let (_, nf_book) =
+            noise_tables(SbrHuffContext { coupling: false, ch: false, amp_res: false });
+        let (nf, nfl) = (nf_book.table(), nf_book.lav());
         w.write_u32(5, 5);
         for i in 1..n_q {
             push_code(&mut w, nf, (i + nfl as usize) % nf.len());
@@ -499,7 +462,7 @@ mod tests {
         // Extended data: id = PS, one body byte 0xA5, then byte-align.
         w.write_bit(true); // bs_extended_data
         w.write_u32(1, 4); // bs_extension_size = 1 byte (8 bits)
-                           // 8 bits = id(2) + 6 fill bits; body has no full byte.
+        // 8 bits = id(2) + 6 fill bits; body has no full byte.
         w.write_u32(EXTENSION_ID_PS as u32, 2);
         w.write_u32(0, 6); // fill
         let bytes = w.finish();
@@ -522,7 +485,7 @@ mod tests {
         let mut w = BitWriter::new();
         w.write_bit(false); // data_extra
         w.write_bit(false); // bs_coupling = 0 (independent)
-                            // grid0: FIXFIX 1 env high.
+        // grid0: FIXFIX 1 env high.
         w.write_u32(FrameClass::FixFix.to_bits(), 2);
         w.write_u32(0, 2);
         w.write_bit(true);
@@ -542,16 +505,12 @@ mod tests {
         for _ in 0..n_q {
             w.write_u32(3, 2);
         }
-        let ((_t, _tl), (f_huff, f_lav)) = env_tables(SbrHuffContext {
-            coupling: false,
-            ch: false,
-            amp_res: false,
-        });
-        let ((_nt, _ntl), (nf, nfl)) = noise_tables(SbrHuffContext {
-            coupling: false,
-            ch: false,
-            amp_res: false,
-        });
+        let (_, f_huff_book) =
+            env_tables(SbrHuffContext { coupling: false, ch: false, amp_res: false });
+        let (f_huff, f_lav) = (f_huff_book.table(), f_huff_book.lav());
+        let (_, nf_book) =
+            noise_tables(SbrHuffContext { coupling: false, ch: false, amp_res: false });
+        let (nf, nfl) = (nf_book.table(), nf_book.lav());
         // env0, env1.
         for &start in &[30u32, 40] {
             w.write_u32(start, 7);

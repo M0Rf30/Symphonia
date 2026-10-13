@@ -244,7 +244,7 @@ impl FormatReader for CafReader<'_> {
                 // the requested seek time, so align down to a packet boundary.
                 let dur_from_start = required_ts
                     .duration_from(*start_pts)
-                    .and_then(|d| d.align_down(Duration::from(frames_per_packet)))
+                    .and_then(|d| d.align_towards_zero(Duration::from(frames_per_packet)))
                     .ok_or(Error::SeekError(SeekErrorKind::OutOfRange))?;
 
                 // Calculate the actual PTS that will be seeked to after aligning down.
@@ -756,6 +756,7 @@ mod tests {
     };
 
     /// Builds a CAF file with an Audio Description chunk, and an Audio Data chunk.
+    #[allow(clippy::too_many_arguments)]
     fn make_caf(
         format_id: &[u8; 4],
         format_flags: u32,

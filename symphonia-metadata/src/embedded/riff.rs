@@ -19,6 +19,9 @@ mod info {
     use symphonia_core::errors::{Result, decode_error};
     use symphonia_core::meta::{MetadataBuilder, RawTag};
 
+    use crate::utils::id3v1::decode_windows_1252_byte;
+    #[cfg(feature = "write")]
+    use crate::utils::id3v1::encode_windows_1252_char;
     use crate::utils::std_tag::*;
     #[cfg(feature = "write")]
     use symphonia_core::meta::{StandardTag, Tag};
@@ -94,50 +97,9 @@ mod info {
         Ok(())
     }
 
-    /// The characters of the Windows-1252 bytes 0x80 - 0x9F. `None` where the byte is unassigned.
-    const WINDOWS_1252_C1: [Option<char>; 32] = [
-        Some('€'),
-        None,
-        Some('‚'),
-        Some('ƒ'),
-        Some('„'),
-        Some('…'),
-        Some('†'),
-        Some('‡'),
-        Some('ˆ'),
-        Some('‰'),
-        Some('Š'),
-        Some('‹'),
-        Some('Œ'),
-        None,
-        Some('Ž'),
-        None,
-        None,
-        Some('‘'),
-        Some('’'),
-        Some('“'),
-        Some('”'),
-        Some('•'),
-        Some('–'),
-        Some('—'),
-        Some('˜'),
-        Some('™'),
-        Some('š'),
-        Some('›'),
-        Some('œ'),
-        None,
-        Some('ž'),
-        Some('Ÿ'),
-    ];
-
     /// Decodes Windows-1252 text. Unassigned bytes become U+FFFD.
     fn decode_windows_1252(buf: &[u8]) -> String {
-        buf.iter()
-            .map(|&b| match b {
-                0x80..=0x9f => WINDOWS_1252_C1[usize::from(b - 0x80)].unwrap_or('\u{fffd}'),
-                _ => char::from(b),
-            })
-            .collect()
+        buf.iter().map(|&b| decode_windows_1252_byte(b)).collect()
     }
 
     /// Decodes the text of an INFO sub-chunk: UTF-8, or Windows-1252 if the bytes are not valid
@@ -163,15 +125,7 @@ mod info {
     /// Encodes `text` as Windows-1252. Characters that cannot be represented become `?`.
     #[cfg(feature = "write")]
     pub fn encode_windows_1252(text: &str) -> Vec<u8> {
-        text.chars()
-            .map(|c| match u32::from(c) {
-                0x00..=0x7f | 0xa0..=0xff => c as u8,
-                _ => WINDOWS_1252_C1
-                    .iter()
-                    .position(|&x| x == Some(c))
-                    .map_or(b'?', |i| 0x80 + i as u8),
-            })
-            .collect()
+        text.chars().map(|c| encode_windows_1252_char(c).unwrap_or(b'?')).collect()
     }
 
     /// Returns `true` if `chunk_id` is an INFO sub-chunk that the reader maps to a standard tag
@@ -379,10 +333,7 @@ mod info {
         fn verify_odd_and_even_values_are_word_aligned() {
             // "ab" + NUL = 3 bytes (odd, padded), "abc" + NUL = 4 bytes (even).
             let out = serialize_info(
-                &[
-                    tag(StandardTag::TrackTitle(s("ab"))),
-                    tag(StandardTag::Artist(s("abc"))),
-                ],
+                &[tag(StandardTag::TrackTitle(s("ab"))), tag(StandardTag::Artist(s("abc")))],
                 InfoEncoding::Utf8,
             );
 

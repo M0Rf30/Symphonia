@@ -336,7 +336,9 @@ impl SilkDecoderState {
     /// already be set by the caller.
     pub fn decoder_set_fs(&mut self, fs_khz: i32, fs_api_hz: i32) {
         debug_assert!(fs_khz == 8 || fs_khz == 12 || fs_khz == 16);
-        debug_assert!(self.nb_subfr as usize == MAX_NB_SUBFR || self.nb_subfr as usize == MAX_NB_SUBFR / 2);
+        debug_assert!(
+            self.nb_subfr as usize == MAX_NB_SUBFR || self.nb_subfr as usize == MAX_NB_SUBFR / 2
+        );
 
         // New (sub)frame length.
         self.subfr_length = SUB_FRAME_LENGTH_MS * fs_khz;
@@ -344,7 +346,12 @@ impl SilkDecoderState {
 
         // Initialize resampler when switching internal or external sampling frequency.
         if self.fs_khz != fs_khz || self.fs_api_hz != fs_api_hz {
-            crate::silk::resampler::silk_resampler_init(&mut self.resampler_state, fs_khz * 1000, fs_api_hz, false);
+            crate::silk::resampler::silk_resampler_init(
+                &mut self.resampler_state,
+                fs_khz * 1000,
+                fs_api_hz,
+                false,
+            );
             self.fs_api_hz = fs_api_hz;
         }
 
@@ -352,13 +359,16 @@ impl SilkDecoderState {
             if fs_khz == 8 {
                 self.pitch_contour_icdf = if self.nb_subfr as usize == MAX_NB_SUBFR {
                     &tables::PITCH_CONTOUR_NB_ICDF
-                } else {
+                }
+                else {
                     &tables::PITCH_CONTOUR_10_MS_NB_ICDF
                 };
-            } else {
+            }
+            else {
                 self.pitch_contour_icdf = if self.nb_subfr as usize == MAX_NB_SUBFR {
                     &tables::PITCH_CONTOUR_ICDF
-                } else {
+                }
+                else {
                     &tables::PITCH_CONTOUR_10_MS_ICDF
                 };
             }
@@ -367,7 +377,8 @@ impl SilkDecoderState {
                 if fs_khz == 8 || fs_khz == 12 {
                     self.lpc_order = MIN_LPC_ORDER as i32;
                     self.ps_nlsf_cb = &tables::SILK_NLSF_CB_NB_MB;
-                } else {
+                }
+                else {
                     self.lpc_order = MAX_LPC_ORDER as i32;
                     self.ps_nlsf_cb = &tables::SILK_NLSF_CB_WB;
                 }

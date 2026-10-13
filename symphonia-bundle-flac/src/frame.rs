@@ -5,9 +5,10 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+use symphonia_common::xiph::audio::flac::read_utf8_be_u64;
 use symphonia_core::checksum::Crc8Ccitt;
 use symphonia_core::errors::{Result, decode_error};
-use symphonia_core::io::{Monitor, MonitorStream, ReadBytes};
+use symphonia_core::io::{Monitor, MonitorStream, ReadBytes, read_until_sync};
 
 /// The minimum FLAC frame header size including the sync bytes.
 pub const FLAC_MIN_FRAME_HEADER_SIZE: usize = 6;
@@ -62,16 +63,12 @@ pub struct FrameHeader {
 }
 
 pub fn sync_frame<B: ReadBytes>(reader: &mut B) -> Result<u16> {
-    let mut sync = 0u16;
-
     // Synchronize stream to Frame Header. FLAC specifies a byte-aligned 14 bit sync code of
     // `0b11_1111_1111_1110`. This would be difficult to find on its own. Expand the search to
     // a 16-bit field of `0b1111_1111_1111_10xx` and search a word at a time.
-    while (sync & 0xfffc) != 0xfff8 {
-        sync = sync.wrapping_shl(8) | u16::from(reader.read_u8()?);
-    }
+    let sync = read_until_sync(reader, 0, |w| (w & 0xfffc) == 0xfff8)?;
 
-    Ok(sync)
+    Ok((sync & 0xffff) as u16)
 }
 
 pub fn read_frame_header<B: ReadBytes>(reader: &mut B, sync: u16) -> Result<FrameHeader> {
@@ -103,7 +100,7 @@ pub fn read_frame_header<B: ReadBytes>(reader: &mut B, sync: u16) -> Result<Fram
     let block_sequence = match blocking_strategy {
         // Fixed-blocksize stream sequence blocks by a frame number.
         BlockingStrategy::Fixed => {
-            let frame = match utf8_decode_be_u64(&mut reader_crc8)? {
+            let frame = match read_utf8_be_u64(&mut reader_crc8)? {
                 Some(frame) => frame,
                 None => return decode_error("flac: frame sequence number is not valid"),
             };
@@ -119,7 +116,7 @@ pub fn read_frame_header<B: ReadBytes>(reader: &mut B, sync: u16) -> Result<Fram
         }
         // Variable-blocksize streams sequence blocks by a sample number.
         BlockingStrategy::Variable => {
-            let sample = match utf8_decode_be_u64(&mut reader_crc8)? {
+            let sample = match read_utf8_be_u64(&mut reader_crc8)? {
                 Some(sample) => sample,
                 None => return decode_error("flac: sample sequence number is not valid"),
             };
@@ -264,70 +261,4 @@ pub fn is_likely_frame_header(buf: &[u8]) -> bool {
     }
 
     true
-}
-
-/// Decodes a big-endian unsigned integer encoded via extended UTF8. In this context, extended UTF8
-/// simply means the encoded UTF8 value may be up to 7 bytes for a maximum integer bit width of
-/// 36-bits.
-fn utf8_decode_be_u64<B: ReadBytes>(src: &mut B) -> Result<Option<u64>> {
-    // Read the first byte of the UTF8 encoded integer.
-    let mut state = u64::from(src.read_u8()?);
-
-    // UTF8 prefixes 1s followed by a 0 to indicate the total number of bytes within the multi-byte
-    // sequence. Using ranges, determine the mask that will overlap the data bits within the first
-    // byte of the sequence. For values 0-128, return the value immediately. If the value falls out
-    // of range return None as this is either not the start of a UTF8 sequence or the prefix is
-    // incorrect.
-    let mask: u8 = match state {
-        0x00..=0x7f => return Ok(Some(state)),
-        0xc0..=0xdf => 0x1f,
-        0xe0..=0xef => 0x0f,
-        0xf0..=0xf7 => 0x07,
-        0xf8..=0xfb => 0x03,
-        0xfc..=0xfd => 0x01,
-        0xfe => 0x00,
-        _ => return Ok(None),
-    };
-
-    // Obtain the data bits from the first byte by using the data mask.
-    state &= u64::from(mask);
-
-    // Read the remaining bytes within the UTF8 sequence. Since the mask 0s out the UTF8 prefix
-    // of 1s which indicate the length of the multi-byte sequence in bytes, plus an additional 0
-    // bit, the number of remaining bytes to read is the number of zeros in the mask minus 2.
-    // To avoid extra computation, simply loop from 2 to the number of zeros.
-    for _i in 2..mask.leading_zeros() {
-        // Each subsequent byte after the first in UTF8 is prefixed with 0b10xx_xxxx, therefore
-        // only 6 bits are useful. Append these six bits to the result by shifting the result left
-        // by 6 bit positions, and appending the next subsequent byte with the first two high-order
-        // bits masked out.
-        state = (state << 6) | u64::from(src.read_u8()? & 0x3f);
-
-        // TODO: Validation? Invalid if the byte is greater than 0x3f.
-    }
-
-    Ok(Some(state))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::utf8_decode_be_u64;
-    use symphonia_core::io::BufReader;
-
-    #[test]
-    fn verify_utf8_decode_be_u64() {
-        let mut stream = BufReader::new(&[
-            0x24, 0xc2, 0xa2, 0xe0, 0xa4, 0xb9, 0xe2, 0x82, //
-            0xac, 0xf0, 0x90, 0x8d, 0x88, 0xff, 0x80, 0xbf, //
-        ]);
-
-        assert_eq!(utf8_decode_be_u64(&mut stream).unwrap(), Some(36));
-        assert_eq!(utf8_decode_be_u64(&mut stream).unwrap(), Some(162));
-        assert_eq!(utf8_decode_be_u64(&mut stream).unwrap(), Some(2361));
-        assert_eq!(utf8_decode_be_u64(&mut stream).unwrap(), Some(8364));
-        assert_eq!(utf8_decode_be_u64(&mut stream).unwrap(), Some(66376));
-        assert_eq!(utf8_decode_be_u64(&mut stream).unwrap(), None);
-        assert_eq!(utf8_decode_be_u64(&mut stream).unwrap(), None);
-        assert_eq!(utf8_decode_be_u64(&mut stream).unwrap(), None);
-    }
 }

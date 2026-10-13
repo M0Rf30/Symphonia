@@ -409,6 +409,11 @@ impl VorbisCodebook {
         }
     }
 
+    /// The number of elements in the VQ lookup table, or 0 for a scalar codebook.
+    pub fn vq_len(&self) -> usize {
+        self.vq_vec.as_ref().map_or(0, Vec::len)
+    }
+
     #[inline(always)]
     pub fn dimensions(&self) -> u16 {
         self.dimensions
@@ -434,14 +439,9 @@ mod tests {
 
         // If dimensions is 0, then the only acceptable value for entries is 0 because 0 ^ 0 = 1.
         if dimensions > 0 {
-            loop {
-                // Since entries is 24-bit, an overflow of u32 will by definition exceed the number
-                // of entries.
-                let Some(x_pow) = x.checked_pow(u32::from(dimensions))
-                else {
-                    break;
-                };
-
+            // Since entries is 24-bit, an overflow of u32 will by definition exceed the number of
+            // entries.
+            while let Some(x_pow) = x.checked_pow(u32::from(dimensions)) {
                 if x_pow > entries {
                     break;
                 }

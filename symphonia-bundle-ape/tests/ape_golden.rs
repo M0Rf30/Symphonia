@@ -6,32 +6,34 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! Golden hashes of the full decode of every APE file of the sample corpus (including the
-//! corrupt and tag-fuzzed ones, whose errors are part of the hash), so that decoder
+//! corrupt and tag-fuzzed ones, whose error kinds are part of the hash), so that decoder
 //! optimisations are provably bit-identical. The test is a no-op unless `RMPD_SAMPLES` is set.
 //!
 //! Run with `GOLDEN_PRINT=1 RMPD_SAMPLES=... cargo test -p symphonia-bundle-ape --test ape_golden -- --nocapture`
 //! to print the table for the checked-in `GOLDEN` constant.
 
-use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use symphonia_bundle_ape::{ApeDecoder, ApeReader};
 use symphonia_core::audio::{Audio, GenericAudioBufferRef};
 use symphonia_core::codecs::CodecParameters;
 use symphonia_core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
+use symphonia_core::errors::Error;
 use symphonia_core::formats::{FormatOptions, FormatReader};
-use symphonia_core::io::MediaSourceStream;
+use symphonia_testutil::{Fnv, open_mss, sample_dir};
 
-struct Fnv(u64);
-
-impl Fnv {
-    fn new() -> Self {
-        Fnv(0xcbf2_9ce4_8422_2325)
-    }
-    fn write(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.0 = (self.0 ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3);
-        }
+/// A stable tag of an error (its variant, and the kind of an I/O error), so that the golden
+/// hashes depend neither on the wording of the error messages nor on the platform's I/O error
+/// strings.
+fn error_tag(e: &Error) -> String {
+    match e {
+        Error::IoError(e) => format!("IoError({:?})", e.kind()),
+        Error::DecodeError(_) => "DecodeError".into(),
+        Error::SeekError(_) => "SeekError".into(),
+        Error::Unsupported(_) => "Unsupported".into(),
+        Error::LimitError(_) => "LimitError".into(),
+        Error::ResetRequired => "ResetRequired".into(),
+        _ => "Other".into(),
     }
 }
 
@@ -54,13 +56,12 @@ fn feed(h: &mut Fnv, buf: &GenericAudioBufferRef<'_>) {
 fn hash_file(path: &Path) -> (u64, u64) {
     let mut h = Fnv::new();
     let mut frames = 0u64;
-    let file = File::open(path).expect("open");
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mss = open_mss(path);
     let mut reader = match ApeReader::try_new(mss, FormatOptions::default()) {
         Ok(r) => r,
         Err(e) => {
-            h.write(format!("OPEN:{e}").as_bytes());
-            return (h.0, 0);
+            h.write(format!("OPEN:{}", error_tag(&e)).as_bytes());
+            return (h.finish(), 0);
         }
     };
     let Some(CodecParameters::Audio(params)) = reader.tracks()[0].codec_params.clone()
@@ -70,8 +71,8 @@ fn hash_file(path: &Path) -> (u64, u64) {
     let mut decoder = match ApeDecoder::try_new(&params, &AudioDecoderOptions::default()) {
         Ok(d) => d,
         Err(e) => {
-            h.write(format!("DEC:{e}").as_bytes());
-            return (h.0, 0);
+            h.write(format!("DEC:{}", error_tag(&e)).as_bytes());
+            return (h.finish(), 0);
         }
     };
     loop {
@@ -81,16 +82,16 @@ fn hash_file(path: &Path) -> (u64, u64) {
                     frames += buf.frames() as u64;
                     feed(&mut h, &buf);
                 }
-                Err(e) => h.write(format!("ERR:{e}").as_bytes()),
+                Err(e) => h.write(format!("ERR:{}", error_tag(&e)).as_bytes()),
             },
             Ok(None) => break,
             Err(e) => {
-                h.write(format!("READ:{e}").as_bytes());
+                h.write(format!("READ:{}", error_tag(&e)).as_bytes());
                 break;
             }
         }
     }
-    (h.0, frames)
+    (h.finish(), frames)
 }
 
 fn ape_files(dir: &Path) -> Vec<PathBuf> {
@@ -121,11 +122,11 @@ fn all_hashes(samples: &Path) -> Vec<(String, u64, u64)> {
 
 #[test]
 fn golden_decode_hashes() {
-    let Some(samples) = std::env::var_os("RMPD_SAMPLES")
+    let Some(samples) = sample_dir()
     else {
         return;
     };
-    let hashes = all_hashes(Path::new(&samples));
+    let hashes = all_hashes(&samples);
     if std::env::var_os("GOLDEN_PRINT").is_some() {
         for (name, h, n) in &hashes {
             println!("    (\"{name}\", 0x{h:016x}, {n}),");
@@ -166,48 +167,48 @@ const GOLDEN: &[(&str, u64, u64)] = &[
     ("tags/ape_id3v2_3_prepended.ape", 0xb1f6465d52276a0c, 264600),
     ("tags/ape_id3v2_4_prepended.ape", 0xb1f6465d52276a0c, 264600),
     ("tags/ape_mac_native_tags.ape", 0xb1f6465d52276a0c, 264600),
-    ("corrupt/corrupt_ape_corrupt_hdr.ape", 0x491baa515dc25e47, 0),
-    ("corrupt/corrupt_ape_corrupt_mid.ape", 0xb3d42fa0eb0ed41c, 1175544),
-    ("corrupt/corrupt_ape_ff_fill_mid.ape", 0xa81e3fa91d77c9d1, 1249272),
-    ("corrupt/corrupt_ape_flip_bits.ape", 0x52953f7cdcbd04bb, 0),
-    ("corrupt/corrupt_ape_head200.ape", 0xd6f95e4a52903d25, 0),
-    ("corrupt/corrupt_ape_head8.ape", 0xd6f95e4a52903d25, 0),
-    ("corrupt/corrupt_ape_trunc10.ape", 0x8af491444e3ef373, 73728),
-    ("corrupt/corrupt_ape_trunc50.ape", 0xac09375daf9571b7, 663552),
-    ("corrupt/corrupt_ape_trunc99.ape", 0xb9a531cdef97cf22, 1253376),
-    ("corrupt/corrupt_ape_zero_hdr.ape", 0x491baa515dc25e47, 0),
-    ("corrupt/random_1048576_ape.ape", 0x491baa515dc25e47, 0),
-    ("corrupt/random_4096_ape.ape", 0x491baa515dc25e47, 0),
-    ("corrupt/random_64_ape.ape", 0x491baa515dc25e47, 0),
-    ("corrupt/text_ape.ape", 0x491baa515dc25e47, 0),
-    ("corrupt/zero_byte_ape.ape", 0xd6f95e4a52903d25, 0),
+    ("corrupt/corrupt_ape_corrupt_hdr.ape", 0x4323610ac8f34033, 0),
+    ("corrupt/corrupt_ape_corrupt_mid.ape", 0xf6ad589832819e86, 1175544),
+    ("corrupt/corrupt_ape_ff_fill_mid.ape", 0x5935b36af128e7f5, 1249272),
+    ("corrupt/corrupt_ape_flip_bits.ape", 0xbd0dcdf4147a9417, 0),
+    ("corrupt/corrupt_ape_head200.ape", 0x8c73ff1ae440b485, 0),
+    ("corrupt/corrupt_ape_head8.ape", 0x8c73ff1ae440b485, 0),
+    ("corrupt/corrupt_ape_trunc10.ape", 0x7cb082535e0c26af, 73728),
+    ("corrupt/corrupt_ape_trunc50.ape", 0x0e6f1c1b7285666b, 663552),
+    ("corrupt/corrupt_ape_trunc99.ape", 0x76da0c7f2399808e, 1253376),
+    ("corrupt/corrupt_ape_zero_hdr.ape", 0x4323610ac8f34033, 0),
+    ("corrupt/random_1048576_ape.ape", 0x4323610ac8f34033, 0),
+    ("corrupt/random_4096_ape.ape", 0x4323610ac8f34033, 0),
+    ("corrupt/random_64_ape.ape", 0x4323610ac8f34033, 0),
+    ("corrupt/text_ape.ape", 0x4323610ac8f34033, 0),
+    ("corrupt/zero_byte_ape.ape", 0x8c73ff1ae440b485, 0),
     ("tagfuzz/apebad_binary_cover_bad_ape.ape", 0xb1f6465d52276a0c, 264600),
     ("tagfuzz/apebad_count_huge_ape.ape", 0xb1f6465d52276a0c, 264600),
     ("tagfuzz/apebad_item_len_huge_ape.ape", 0xb1f6465d52276a0c, 264600),
     ("tagfuzz/apebad_many_items_ape.ape", 0xb1f6465d52276a0c, 264600),
     ("tagfuzz/apebad_size_huge_ape.ape", 0xb1f6465d52276a0c, 264600),
-    ("tagfuzz/fuzz_ape_apev2_full_00_u32.ape", 0x8e0c117ab577a421, 190872),
-    ("tagfuzz/fuzz_ape_apev2_full_01_u32.ape", 0x8e0c117ab577a421, 190872),
-    ("tagfuzz/fuzz_ape_apev2_full_02_u32.ape", 0x8e0c117ab577a421, 190872),
-    ("tagfuzz/fuzz_ape_apev2_full_03_u64.ape", 0x2601a9484f034b6c, 190872),
-    ("tagfuzz/fuzz_ape_apev2_full_04_flip.ape", 0x2601a9484f034b6c, 190872),
+    ("tagfuzz/fuzz_ape_apev2_full_00_u32.ape", 0x52d6a3a36d2412b5, 190872),
+    ("tagfuzz/fuzz_ape_apev2_full_01_u32.ape", 0x52d6a3a36d2412b5, 190872),
+    ("tagfuzz/fuzz_ape_apev2_full_02_u32.ape", 0x52d6a3a36d2412b5, 190872),
+    ("tagfuzz/fuzz_ape_apev2_full_03_u64.ape", 0x52d6a3a36d2412b5, 190872),
+    ("tagfuzz/fuzz_ape_apev2_full_04_flip.ape", 0x52d6a3a36d2412b5, 190872),
     ("tagfuzz/fuzz_ape_apev2_full_05_rand.ape", 0xb1f6465d52276a0c, 264600),
-    ("tagfuzz/fuzz_ape_apev2_full_06_trunc.ape", 0x260526e61d658ca9, 0),
+    ("tagfuzz/fuzz_ape_apev2_full_06_trunc.ape", 0x56437c98121a7f11, 0),
     ("tagfuzz/fuzz_ape_apev2_full_07_dup.ape", 0xb1f6465d52276a0c, 264600),
     ("tagfuzz/fuzz_ape_apev2_full_08_cut.ape", 0xb1f6465d52276a0c, 264600),
-    ("tagfuzz/fuzz_ape_apev2_full_09_u32.ape", 0x8e0c117ab577a421, 190872),
-    ("tagfuzz/fuzz_ape_apev2_full_10_u32.ape", 0x8e0c117ab577a421, 190872),
-    ("tagfuzz/fuzz_ape_apev2_full_11_u32.ape", 0x8e0c117ab577a421, 190872),
-    ("tagfuzz/fuzz_ape_apev2_full_12_u64.ape", 0x8e0c117ab577a421, 190872),
-    ("tagfuzz/fuzz_ape_apev2_full_13_flip.ape", 0x8e0c117ab577a421, 190872),
-    ("tagfuzz/fuzz_ape_apev2_full_14_rand.ape", 0x8e0c117ab577a421, 190872),
-    ("tagfuzz/fuzz_ape_apev2_full_15_trunc.ape", 0x260526e61d658ca9, 0),
+    ("tagfuzz/fuzz_ape_apev2_full_09_u32.ape", 0x52d6a3a36d2412b5, 190872),
+    ("tagfuzz/fuzz_ape_apev2_full_10_u32.ape", 0x52d6a3a36d2412b5, 190872),
+    ("tagfuzz/fuzz_ape_apev2_full_11_u32.ape", 0x52d6a3a36d2412b5, 190872),
+    ("tagfuzz/fuzz_ape_apev2_full_12_u64.ape", 0x52d6a3a36d2412b5, 190872),
+    ("tagfuzz/fuzz_ape_apev2_full_13_flip.ape", 0x52d6a3a36d2412b5, 190872),
+    ("tagfuzz/fuzz_ape_apev2_full_14_rand.ape", 0x52d6a3a36d2412b5, 190872),
+    ("tagfuzz/fuzz_ape_apev2_full_15_trunc.ape", 0x56437c98121a7f11, 0),
     ("tagfuzz/fuzz_ape_apev2_full_16_dup.ape", 0xb1f6465d52276a0c, 264600),
-    ("tagfuzz/fuzz_ape_apev2_full_17_cut.ape", 0xfdb18fe1a886c695, 0),
-    ("tagfuzz/fuzz_ape_apev2_full_18_u32.ape", 0x8e0c117ab577a421, 190872),
-    ("tagfuzz/fuzz_ape_apev2_full_19_u32.ape", 0x8e0c117ab577a421, 190872),
-    ("tagfuzz/fuzz_ape_apev2_full_20_u32.ape", 0x8e0c117ab577a421, 190872),
-    ("tagfuzz/fuzz_ape_apev2_full_21_u64.ape", 0x8e0c117ab577a421, 190872),
-    ("tagfuzz/fuzz_ape_apev2_full_22_flip.ape", 0x519f2c0919f7eeb2, 73728),
-    ("tagfuzz/fuzz_ape_apev2_full_23_rand.ape", 0x2601a9484f034b6c, 190872),
+    ("tagfuzz/fuzz_ape_apev2_full_17_cut.ape", 0x53067fe85e759019, 0),
+    ("tagfuzz/fuzz_ape_apev2_full_18_u32.ape", 0x52d6a3a36d2412b5, 190872),
+    ("tagfuzz/fuzz_ape_apev2_full_19_u32.ape", 0x52d6a3a36d2412b5, 190872),
+    ("tagfuzz/fuzz_ape_apev2_full_20_u32.ape", 0x52d6a3a36d2412b5, 190872),
+    ("tagfuzz/fuzz_ape_apev2_full_21_u64.ape", 0x52d6a3a36d2412b5, 190872),
+    ("tagfuzz/fuzz_ape_apev2_full_22_flip.ape", 0x9df9f65bd41f08f0, 73728),
+    ("tagfuzz/fuzz_ape_apev2_full_23_rand.ape", 0x52d6a3a36d2412b5, 190872),
 ];

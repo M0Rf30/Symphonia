@@ -49,12 +49,13 @@ fn open(bytes: &[u8]) -> Stream {
     let reader = MpcReader::try_new(mss, FormatOptions::default()).expect("probe");
     let track = &reader.tracks()[0];
     let len = track.num_frames.expect("track length");
-    let params = match track.codec_params.as_ref().unwrap() {
+    let params = match track.codec_params.as_ref().expect("unexpected failure") {
         CodecParameters::Audio(p) => p.clone(),
         _ => panic!("not audio"),
     };
-    let channels = params.channels.as_ref().unwrap().count();
-    let decoder = MpcDecoder::try_new(&params, &AudioDecoderOptions::default()).unwrap();
+    let channels = params.channels.as_ref().expect("unexpected failure").count();
+    let decoder =
+        MpcDecoder::try_new(&params, &AudioDecoderOptions::default()).expect("unexpected failure");
     Stream { reader, decoder, len, channels }
 }
 
@@ -63,17 +64,18 @@ impl Stream {
     fn read(&mut self, max_frames: usize) -> Vec<f32> {
         let mut out = Vec::new();
         while out.len() < max_frames * self.channels {
-            let Some(packet) = self.reader.next_packet().unwrap()
+            let Some(packet) = self.reader.next_packet().expect("unexpected failure")
             else {
                 break;
             };
-            let GenericAudioBufferRef::F32(buf) = self.decoder.decode(&packet).unwrap()
+            let GenericAudioBufferRef::F32(buf) =
+                self.decoder.decode(&packet).expect("unexpected failure")
             else {
                 panic!("not f32");
             };
             for i in 0..buf.frames() {
                 for ch in 0..self.channels {
-                    out.push(buf.plane(ch).unwrap()[i]);
+                    out.push(buf.plane(ch).expect("unexpected failure")[i]);
                 }
             }
         }
@@ -191,7 +193,7 @@ impl BitWriter {
                 self.bytes.push(0);
             }
             if (value >> i) & 1 != 0 {
-                *self.bytes.last_mut().unwrap() |= 0x80 >> (self.bits % 8);
+                *self.bytes.last_mut().expect("unexpected failure") |= 0x80 >> (self.bits % 8);
             }
             self.bits += 1;
         }
@@ -261,10 +263,10 @@ fn sv7_synthetic_packets_describe_the_stream() {
 
         let mut total = 0;
         let mut n = 0u64;
-        while let Some(p) = s.reader.next_packet().unwrap() {
+        while let Some(p) = s.reader.next_packet().expect("unexpected failure") {
             assert_eq!(p.pts.get(), (n * FRAME) as i64 - SYNTH_DELAY as i64, "pts of packet {n}");
             assert_eq!(p.block_dur().get(), FRAME);
-            let GenericAudioBufferRef::F32(buf) = s.decoder.decode(&p).unwrap()
+            let GenericAudioBufferRef::F32(buf) = s.decoder.decode(&p).expect("unexpected failure")
             else {
                 panic!()
             };
@@ -305,18 +307,18 @@ fn seek_past_the_end_is_out_of_range_and_recoverable() {
         }
     }
     // The reader is still usable afterwards.
-    assert_eq!(s.seek(SeekMode::Accurate, 10_000).unwrap(), 10_000);
+    assert_eq!(s.seek(SeekMode::Accurate, 10_000).expect("unexpected failure"), 10_000);
     assert!(!s.read(100).is_empty());
 
     // Seeking to exactly the end is allowed and yields nothing.
-    assert_eq!(s.seek(SeekMode::Accurate, len).unwrap(), len);
+    assert_eq!(s.seek(SeekMode::Accurate, len).expect("unexpected failure"), len);
     assert!(s.read(100).is_empty());
 
     // Negative timestamps clamp to the start.
     let seeked = s
         .reader
         .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(-5), track_id: 0 })
-        .unwrap();
+        .expect("unexpected failure");
     assert_eq!(seeked.actual_ts.get(), 0);
 }
 
@@ -412,9 +414,9 @@ fn sv8_synthetic_packets_describe_the_stream() {
         let skip = SYNTH_DELAY + beg;
         let mut total = 0;
         let mut n = 0u64;
-        while let Some(p) = s.reader.next_packet().unwrap() {
+        while let Some(p) = s.reader.next_packet().expect("unexpected failure") {
             assert_eq!(p.pts.get(), (n * (FRAME << pwr)) as i64 - skip as i64, "pts of packet {n}");
-            let GenericAudioBufferRef::F32(buf) = s.decoder.decode(&p).unwrap()
+            let GenericAudioBufferRef::F32(buf) = s.decoder.decode(&p).expect("unexpected failure")
             else {
                 panic!()
             };
@@ -461,10 +463,10 @@ fn sv8_fixtures_seek_matches_linear_decode() {
             .codec_params
             .as_ref()
             .map(|p| match p {
-                CodecParameters::Audio(a) => a.max_frames_per_packet.unwrap(),
+                CodecParameters::Audio(a) => a.max_frames_per_packet.expect("unexpected failure"),
                 _ => unreachable!(),
             })
-            .unwrap();
+            .expect("unexpected failure");
         check_seeks(&bytes, &targets_for(probe.len, block), block);
     }
 }
@@ -473,16 +475,16 @@ fn sv8_fixtures_seek_matches_linear_decode() {
 fn sv8_packets_describe_the_stream() {
     let bytes =
         std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixture_mono_q2.mpc"))
-            .unwrap();
+            .expect("unexpected failure");
     let mut s = open(&bytes);
     let mut total = 0;
     let mut expected_pts = None;
-    while let Some(p) = s.reader.next_packet().unwrap() {
+    while let Some(p) = s.reader.next_packet().expect("unexpected failure") {
         if let Some(e) = expected_pts {
             assert_eq!(p.pts.get(), e, "packets are contiguous");
         }
         expected_pts = Some(p.pts.get() + p.block_dur().get() as i64);
-        let GenericAudioBufferRef::F32(buf) = s.decoder.decode(&p).unwrap()
+        let GenericAudioBufferRef::F32(buf) = s.decoder.decode(&p).expect("unexpected failure")
         else {
             panic!()
         };
@@ -516,10 +518,10 @@ fn real_file_seek_matches_linear_decode() {
         .codec_params
         .as_ref()
         .map(|p| match p {
-            CodecParameters::Audio(a) => a.max_frames_per_packet.unwrap(),
+            CodecParameters::Audio(a) => a.max_frames_per_packet.expect("unexpected failure"),
             _ => unreachable!(),
         })
-        .unwrap();
+        .expect("unexpected failure");
     let len = probe.len;
     let sr = 44_100;
     let mut targets = vec![0, 5_000, sr * 10, sr * 60 + 123, len / 2, len - 2 * block, len - 1];

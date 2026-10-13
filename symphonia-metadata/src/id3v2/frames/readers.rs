@@ -17,7 +17,7 @@ use symphonia_core::errors::{Result, decode_error, unsupported_error};
 use symphonia_core::io::{BufReader, FiniteStream, ReadBytes};
 use symphonia_core::meta::RawTag;
 use symphonia_core::meta::RawTagSubField;
-use symphonia_core::meta::{Chapter, RawValue, StandardTag, Tag, Visual};
+use symphonia_core::meta::{Chapter, RawValue, StandardTag, Tag};
 use symphonia_core::units::Time;
 use symphonia_core::util::text;
 
@@ -31,7 +31,7 @@ use crate::utils::id3v1::decode_windows_1252_byte;
 use crate::utils::id3v2::get_visual_key_from_picture_type;
 use crate::utils::std_tag::*;
 
-use crate::utils::images::try_get_image_info;
+use crate::utils::images::{try_get_image_info, visual_from_image_data};
 
 /// The owner identifier of a `UFID` frame containing a MusicBrainz recording ID.
 const UFID_OWNER_MUSICBRAINZ: &str = "http://musicbrainz.org";
@@ -334,21 +334,14 @@ pub fn read_apic_frame(mut reader: BufReader<'_>, frame: &FrameInfo<'_>) -> Resu
         tags.push(Tag::new_from_parts("", "", Some(StandardTag::Description(Arc::from(desc)))));
     }
 
-    // The remainder of the APIC frame is the image data.
-    // TODO: Apply a limit.
+    // The remainder of the APIC frame is the image data. The frame has already been read into
+    // memory in full, so this is bounded by the size of the tag.
     let data = Box::from(reader.read_buf_bytes_available_ref());
 
     // Try to get information about the image.
     let image_info = try_get_image_info(&data);
 
-    let visual = Visual {
-        media_type: image_info.as_ref().map(|info| info.media_type.clone()).or(media_type),
-        dimensions: image_info.as_ref().map(|info| info.dimensions),
-        color_mode: image_info.as_ref().map(|info| info.color_mode),
-        usage,
-        tags,
-        data,
-    };
+    let visual = visual_from_image_data(data, image_info, media_type, None, usage, tags);
 
     Ok(FrameResult::Visual(visual))
 }

@@ -8,37 +8,26 @@
 // WavPack v3 entropy word decoders, ported from unpack3.c by Conifer Software
 // (BSD licence).  get_word1, get_old_word1, get_word2, get_word3.
 
-use super::bits::Bits;
+use super::bits::{Bits, count_bits};
 
 pub const WORD_EOF: i32 = i32::MIN;
 
 const NUM_SAMPLES: u32 = 128;
 
 #[inline(always)]
-pub fn count_bits(x: u32) -> u32 {
-    if x == 0 {
-        0
-    } else {
-        32 - x.leading_zeros()
-    }
-}
-
-#[inline(always)]
 pub fn bitset(n: u32) -> u32 {
-    if n < 32 {
-        1u32 << n
-    } else {
-        0
-    }
+    if n < 32 { 1u32 << n } else { 0 }
 }
 
 #[inline(always)]
 pub fn bitmask(n: u32) -> u32 {
     if n == 0 {
         0
-    } else if n >= 32 {
+    }
+    else if n >= 32 {
         u32::MAX
-    } else {
+    }
+    else {
         (1u32 << n) - 1
     }
 }
@@ -102,7 +91,8 @@ pub fn get_word1(ws: &mut WordState, bits: &mut Bits<'_>, chan: usize, flags: i1
             if ws.w1.zeros_acc > 0 {
                 return 0;
             }
-        } else if ws.w1.ave_level[0][0] < 0x20 && ws.w1.ave_level[0][1] < 0x20 {
+        }
+        else if ws.w1.ave_level[0][0] < 0x20 && ws.w1.ave_level[0][1] < 0x20 {
             let mut cbits = 0i32;
             while cbits < 33 && bits.getbit() != 0 {
                 cbits += 1;
@@ -112,7 +102,8 @@ pub fn get_word1(ws: &mut WordState, bits: &mut Bits<'_>, chan: usize, flags: i1
             }
             if cbits < 2 {
                 ws.w1.zeros_acc = cbits as u32;
-            } else {
+            }
+            else {
                 let mut mask = 1u32;
                 ws.w1.zeros_acc = 0;
                 let mut c = cbits - 1;
@@ -152,7 +143,8 @@ pub fn get_word1(ws: &mut WordState, bits: &mut Bits<'_>, chan: usize, flags: i1
     if ones_count == 0 {
         let raw = bits.getbits(k0);
         avalue = raw & bitmask(k0);
-    } else {
+    }
+    else {
         let tmp1 = bitset(k0);
         let k1 = {
             let v = ws.w1.ave_level[1][chan];
@@ -172,12 +164,19 @@ pub fn get_word1(ws: &mut WordState, bits: &mut Bits<'_>, chan: usize, flags: i1
             ws.w1.ave_level[0][chan] = ws.w1.ave_level[0][chan]
                 .wrapping_sub((ws.w1.ave_level[0][chan].wrapping_add(0x20)) >> 6)
                 .wrapping_add(avalue);
-            return if avalue != 0 && bits.getbit() != 0 { -(avalue as i32) } else { avalue as i32 };
-        } else {
+            return if avalue != 0 && bits.getbit() != 0 {
+                -(avalue as i32)
+            }
+            else {
+                avalue as i32
+            };
+        }
+        else {
             let tmp2 = bitset(k1);
             let raw_av: u32 = if ones_count == 24 {
                 bits.getbits(24) & 0xffffff
-            } else {
+            }
+            else {
                 let k2 = {
                     let v = ws.w1.ave_level[2][chan];
                     let k = count_bits(v.wrapping_add(0x10) >> 5);
@@ -223,7 +222,8 @@ pub fn get_old_word1(ws: &mut WordState, bits: &mut Bits<'_>, chan: usize) -> i3
         }
         ws.w1.k_value[chan] = if ones % 3 == 1 {
             (guess_k - (ones / 3) - 1).max(0) as u32
-        } else {
+        }
+        else {
             (guess_k + ones - (ones + 1) / 3).max(0) as u32
         };
         ws.w1.ave_k[chan] = ws.w1.ave_k[chan]
@@ -237,13 +237,16 @@ pub fn get_old_word1(ws: &mut WordState, bits: &mut Bits<'_>, chan: usize) -> i3
     }
 
     let k = ws.w1.k_value[chan];
+    if k & !31 != 0 {
+        return WORD_EOF;
+    }
     let raw = bits.getbits(k);
 
     let mut bc = 0u32;
     while bc < 32 && bits.getbit() != 0 {
         bc += 1;
     }
-    if bc == 32 || (k & !31 != 0) {
+    if bc == 32 {
         return WORD_EOF;
     }
 
@@ -269,10 +272,12 @@ pub fn get_word2(ws: &mut WordState, bits: &mut Bits<'_>, chan: usize, wphdr_bit
 
     let delta_dbits = if cbits == 0 {
         0
-    } else if cbits & 1 != 0 {
+    }
+    else if cbits & 1 != 0 {
         let d = (cbits + 1) / 2;
         if ws.w2.last_delta_sign[chan] > 0 { -d } else { d }
-    } else {
+    }
+    else {
         let d = cbits / 2;
         if ws.w2.last_delta_sign[chan] <= 0 { -d } else { d }
     };
@@ -301,7 +306,8 @@ pub fn get_word2(ws: &mut WordState, bits: &mut Bits<'_>, chan: usize, wphdr_bit
             mask <<= 1;
             d -= 1;
         }
-    } else {
+    }
+    else {
         while d > 0 {
             if bits.getbit() != 0 {
                 value |= mask;
@@ -331,13 +337,13 @@ pub fn get_word3(ws: &mut WordState, bits: &mut Bits<'_>, chan: usize, wphdr_bit
         cbits += 1;
     }
 
-    let delta_dbits =
-        if (cbits + 1) % 3 == 0 { (cbits + 1) / 3 } else { -(cbits - cbits / 3) };
+    let delta_dbits = if (cbits + 1) % 3 == 0 { (cbits + 1) / 3 } else { -(cbits - cbits / 3) };
 
     let dbits = {
         let ave = ws.w3.ave_dbits[chan];
         let d = (ave >> 8) + 1 + delta_dbits;
-        ws.w3.ave_dbits[chan] = ave.wrapping_sub((ave.wrapping_add(0x10)) >> 5).wrapping_add(d << 3);
+        ws.w3.ave_dbits[chan] =
+            ave.wrapping_sub((ave.wrapping_add(0x10)) >> 5).wrapping_add(d << 3);
         d
     };
 
@@ -355,15 +361,35 @@ pub fn get_word3(ws: &mut WordState, bits: &mut Bits<'_>, chan: usize, wphdr_bit
         let hbit = wphdr_bits as u32 - 1;
         if value & bitset(hbit) != 0 {
             -(((value & bitmask(wphdr_bits as u32)) as i32) << (dbits - wphdr_bits as u32))
-        } else {
+        }
+        else {
             (((value & bitmask(hbit)) | bitset(hbit)) as i32) << (dbits - wphdr_bits as u32)
         }
-    } else {
+    }
+    else {
         let value = bits.getbits(dbits);
         if value & bitset(dbits - 1) != 0 {
             -((value & bitmask(dbits)) as i32)
-        } else {
+        }
+        else {
             ((value & bitmask(dbits - 1)) | bitset(dbits - 1)) as i32
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_word1_with_oversized_k_is_eof() {
+        let data = [0u8; 16];
+        for k in [32u32, 64, 70, 200] {
+            let mut ws = WordState::default();
+            ws.w1.index[0] = 1;
+            ws.w1.k_value[0] = k;
+            let mut bits = Bits::new(&data);
+            assert_eq!(get_old_word1(&mut ws, &mut bits, 0), WORD_EOF, "k = {k}");
         }
     }
 }

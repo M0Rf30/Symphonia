@@ -8,6 +8,23 @@
 use symphonia_core::errors::Result;
 use symphonia_core::io::ReadBytes;
 
+/// Decode a syncsafe integer from the first 4 bytes of `buf`. The most significant bit of every
+/// byte is ignored.
+pub fn decode_synchsafe(buf: &[u8]) -> u32 {
+    buf.iter().take(4).fold(0, |acc, &x| (acc << 7) | u32::from(x & 0x7f))
+}
+
+/// Encode the 28 least significant bits of `value` as a 4 byte syncsafe integer.
+#[cfg(any(test, feature = "write"))]
+pub fn encode_synchsafe(value: u32) -> [u8; 4] {
+    [
+        (value >> 21) as u8 & 0x7f,
+        (value >> 14) as u8 & 0x7f,
+        (value >> 7) as u8 & 0x7f,
+        value as u8 & 0x7f,
+    ]
+}
+
 pub fn read_syncsafe_leq32<B: ReadBytes>(reader: &mut B, bit_width: u8) -> Result<u32> {
     debug_assert!(bit_width <= 32);
 

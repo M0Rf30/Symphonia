@@ -37,7 +37,7 @@ fn mpa_frames(n: usize) -> Vec<Vec<u8>> {
 }
 
 fn pts_of(frame: usize, samples: u64, rate: u64, base: u64) -> u64 {
-    (base + frame as u64 * samples * 90_000 / rate) % (1 << 33)
+    (base + frame as u64 * samples * 90_000 / rate) % symphonia_common::mpeg::pes::PTS_MODULUS
 }
 
 fn mux_mpa(mux: &mut PsMux, stream_id: u8, frames: &[Vec<u8>], per_pes: usize, base: u64) {

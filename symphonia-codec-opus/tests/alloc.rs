@@ -14,9 +14,10 @@
 //! enabled and asserts the count stayed at zero.
 //!
 //! Run with:
-//!   OPUS_TESTVECTORS=/home/gianluca/M0Rf30/wt/ref/opus_newvectors \
+//!   OPUS_TESTVECTORS=/path/to/opus_newvectors \
 //!     cargo test -p symphonia-codec-opus --release --test alloc -- --include-ignored
 
+#![allow(clippy::unwrap_used)] // test/example code: a panic is the failure signal
 mod common;
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -159,5 +160,8 @@ fn zero_alloc_hot_path() {
     // Vector 12: SILK-only with frequent CELT/SILK redundancy frames -- exercises the
     // `redundant_audio`/`pcm_silk` scratch and the redundancy bookkeeping in `opus_decode_frame`.
     let allocs = count_allocs_for_vector(&dir.join("testvector12.bit"), 2, 5);
-    assert_eq!(allocs, 0, "vector12 (SILK + redundancy) should perform zero heap allocations per decode");
+    assert_eq!(
+        allocs, 0,
+        "vector12 (SILK + redundancy) should perform zero heap allocations per decode"
+    );
 }

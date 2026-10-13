@@ -11,8 +11,10 @@ use symphonia_core::io::{BufReader, Monitor, MonitorStream, ReadBytes, SeekBuffe
 
 use log::{debug, warn};
 
-const OGG_PAGE_MARKER: [u8; 4] = *b"OggS";
-const OGG_PAGE_HEADER_SIZE: usize = 27;
+/// The capture pattern that starts every Ogg page.
+pub const OGG_PAGE_MARKER: [u8; 4] = *b"OggS";
+/// The size of the fixed part of an Ogg page header, excluding the segment table.
+pub const OGG_PAGE_HEADER_SIZE: usize = 27;
 
 pub const OGG_PAGE_MAX_SIZE: usize = OGG_PAGE_HEADER_SIZE + 255 + 255 * 255;
 

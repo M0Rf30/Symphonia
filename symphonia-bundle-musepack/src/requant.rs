@@ -15,6 +15,7 @@
 /// `__Cc`: requantization coefficients, indexable as `Cc[-1..=17]` in the C source (`Cc` is
 /// `__Cc + 1`). [`cc`] below reproduces that offset.
 #[rustfmt::skip]
+#[allow(clippy::excessive_precision)]
 const CC_RAW: [f32; 19] = [
     111.285962475327, 65536.000000000000, 21845.333333333332, 13107.200000000001, 9362.285714285713,
     7281.777777777777, 4369.066666666666, 2114.064516129032, 1040.253968253968, 516.031496062992,
@@ -35,27 +36,18 @@ pub const RES_BIT: [u8; 18] = [0, 0, 0, 0, 0, 0, 0, 0, 7, 8, 9, 10, 11, 12, 13, 
 #[inline]
 pub fn cc(res: i32) -> f32 {
     let idx = res + 1;
-    if idx < 0 {
-        0.0
-    }
-    else {
-        CC_RAW.get(idx as usize).copied().unwrap_or(0.0)
-    }
+    if idx < 0 { 0.0 } else { CC_RAW.get(idx as usize).copied().unwrap_or(0.0) }
 }
 
 /// `Dc[res]` for `res` in `-1..=17`.
 #[inline]
 pub fn dc(res: i32) -> i32 {
     let idx = res + 1;
-    if idx < 0 {
-        0
-    }
-    else {
-        DC_RAW.get(idx as usize).copied().unwrap_or(0)
-    }
+    if idx < 0 { 0 } else { DC_RAW.get(idx as usize).copied().unwrap_or(0) }
 }
 
 /// Ratio between successive entries of the scale-factor ladder (`0.83298066476582673961`).
+#[allow(clippy::excessive_precision)]
 const SCF_RATIO: f64 = 0.83298066476582673961;
 
 /// Ported from libmpcdec `requant.c` (`mpc_decoder_scale_output` / `mpc_decoder_init_quant`).

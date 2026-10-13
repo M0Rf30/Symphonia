@@ -5,10 +5,14 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use symphonia_core::audio::{AsGenericAudioBufferRef, AudioBuffer, AudioMut, AudioSpec, GenericAudioBufferRef};
+use symphonia_core::audio::{
+    AsGenericAudioBufferRef, AudioBuffer, AudioMut, AudioSpec, GenericAudioBufferRef,
+};
 use symphonia_core::codecs::CodecInfo;
 use symphonia_core::codecs::audio::well_known::CODEC_ID_MONKEYS_AUDIO;
-use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions, FinalizeResult};
+use symphonia_core::codecs::audio::{
+    AudioCodecParameters, AudioDecoder, AudioDecoderOptions, FinalizeResult,
+};
 use symphonia_core::codecs::registry::{RegisterableAudioDecoder, SupportedAudioCodec};
 use symphonia_core::errors::{Error, Result, decode_error, unsupported_error};
 use symphonia_core::packet::PacketRef;
@@ -32,6 +36,8 @@ pub struct ApeDecoder {
     frame_decoder: crate::mac::frame::FrameDecoder,
     channels: u16,
     bits_per_sample: u16,
+    /// Reused interleaved PCM output of the frame decoder.
+    pcm: Vec<u8>,
 }
 
 /// Convert interleaved PCM bytes of `BYTES` bytes per sample to the planes of `buf`.
@@ -62,15 +68,18 @@ impl ApeDecoder {
 
         let sample_rate =
             params.sample_rate.ok_or(Error::DecodeError("ape: missing sample rate"))?;
-        let channels = params.channels.clone().ok_or(Error::DecodeError("ape: missing channels"))?;
+        let channels =
+            params.channels.clone().ok_or(Error::DecodeError("ape: missing channels"))?;
         let bits_per_sample =
-            params.bits_per_sample.ok_or(Error::DecodeError("ape: missing bits per sample"))? as u16;
+            params.bits_per_sample.ok_or(Error::DecodeError("ape: missing bits per sample"))?
+                as u16;
         let max_frames =
             params.max_frames_per_packet.unwrap_or(DEFAULT_MAX_FRAMES_PER_PACKET) as usize;
 
         // Extra data layout (6 bytes, little-endian): version(u16), compression_level(u16),
         // channels(u16). See `demuxer::build_extra_data`.
-        let extra = params.extra_data.as_ref().ok_or(Error::DecodeError("ape: missing extra data"))?;
+        let extra =
+            params.extra_data.as_ref().ok_or(Error::DecodeError("ape: missing extra data"))?;
         if extra.len() < 6 {
             return decode_error("ape: extra data too short");
         }
@@ -79,14 +88,25 @@ impl ApeDecoder {
         let compression_level = u16::from_le_bytes([extra[2], extra[3]]);
         let channels_count = u16::from_le_bytes([extra[4], extra[5]]);
 
-        let frame_decoder =
-            crate::mac::frame::FrameDecoder::new(version, channels_count, bits_per_sample, compression_level)
-                .map_err(map_ape_error)?;
+        let frame_decoder = crate::mac::frame::FrameDecoder::new(
+            version,
+            channels_count,
+            bits_per_sample,
+            compression_level,
+        )
+        .map_err(map_ape_error)?;
 
         let spec = AudioSpec::new(sample_rate, channels);
         let buf = AudioBuffer::new(spec, max_frames);
 
-        Ok(ApeDecoder { params: params.clone(), buf, frame_decoder, channels: channels_count, bits_per_sample })
+        Ok(ApeDecoder {
+            params: params.clone(),
+            buf,
+            frame_decoder,
+            pcm: Vec::new(),
+            channels: channels_count,
+            bits_per_sample,
+        })
     }
 
     fn decode_inner(&mut self, packet: &PacketRef<'_>) -> Result<()> {
@@ -102,10 +122,10 @@ impl ApeDecoder {
         let frame_blocks = packet.dur.get() as usize;
         let ch_count = self.channels as usize;
 
-        let pcm_bytes = self
-            .frame_decoder
-            .decode_frame(frame_data, seek_remainder, frame_blocks)
+        self.frame_decoder
+            .decode_frame(frame_data, seek_remainder, frame_blocks, &mut self.pcm)
             .map_err(map_ape_error)?;
+        let pcm_bytes = self.pcm.as_slice();
 
         self.buf.clear();
         self.buf.render_uninit(Some(frame_blocks));
@@ -119,7 +139,7 @@ impl ApeDecoder {
                 }
                 // APE "unprepare" biases 8-bit samples by +128 (silence = 128), which is exactly
                 // Symphonia's unsigned 8-bit PCM convention; the samples are re-centered here.
-                deinterleave::<1>(&mut self.buf, &pcm_bytes, ch_count, |b| {
+                deinterleave::<1>(&mut self.buf, pcm_bytes, ch_count, |b| {
                     (u32::from(b[0]) << 24).wrapping_sub(0x8000_0000) as i32
                 });
             }
@@ -127,7 +147,7 @@ impl ApeDecoder {
                 if pcm_bytes.len() < frame_blocks * ch_count * 2 {
                     return decode_error("ape: pcm data too short for 16-bit");
                 }
-                deinterleave::<2>(&mut self.buf, &pcm_bytes, ch_count, |b| {
+                deinterleave::<2>(&mut self.buf, pcm_bytes, ch_count, |b| {
                     i32::from(i16::from_le_bytes(b)) << 16
                 });
             }
@@ -135,7 +155,7 @@ impl ApeDecoder {
                 if pcm_bytes.len() < frame_blocks * ch_count * 3 {
                     return decode_error("ape: pcm data too short for 24-bit");
                 }
-                deinterleave::<3>(&mut self.buf, &pcm_bytes, ch_count, |b| {
+                deinterleave::<3>(&mut self.buf, pcm_bytes, ch_count, |b| {
                     // The 24-bit sample, sign-extended to 32 bits and shifted up by 8 bits.
                     ((u32::from(b[0]) << 8) | (u32::from(b[1]) << 16) | (u32::from(b[2]) << 24))
                         as i32
@@ -145,7 +165,7 @@ impl ApeDecoder {
                 if pcm_bytes.len() < frame_blocks * ch_count * 4 {
                     return decode_error("ape: pcm data too short for 32-bit");
                 }
-                deinterleave::<4>(&mut self.buf, &pcm_bytes, ch_count, i32::from_le_bytes);
+                deinterleave::<4>(&mut self.buf, pcm_bytes, ch_count, i32::from_le_bytes);
             }
             _ => return unsupported_error("ape: unsupported bit depth"),
         }

@@ -9,5 +9,7 @@
 
 pub mod fft;
 pub mod mdct;
+pub mod quant;
+pub mod window;
 
 pub use num_complex as complex;

@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 //! Decodes an AAC file and writes the decoded audio as interleaved little-endian f32 samples.
 //!
 //! Usage: `decode_dump <input> <output.f32> [adts|loas|adif|mp4]`

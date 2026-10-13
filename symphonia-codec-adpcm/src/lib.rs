@@ -135,9 +135,14 @@ impl AdpcmDecoder {
         };
 
         let block_count = packet.block_dur().get() as usize / frames_per_block;
+        let num_frames = block_count * frames_per_block;
+
+        if num_frames > self.buf.capacity() {
+            return decode_error("adpcm: packet duration exceeds maximum frames per packet");
+        }
 
         self.buf.clear();
-        self.buf.render_uninit(Some(block_count * frames_per_block));
+        self.buf.render_uninit(Some(num_frames));
 
         let channel_count = self.buf.spec().channels().count();
         match channel_count {
@@ -276,5 +281,16 @@ mod tests {
         assert!(AdpcmDecoder::try_new(&params, &opts).is_ok());
         let params = adpcm_params(CODEC_ID_ADPCM_MS, 500);
         assert!(AdpcmDecoder::try_new(&params, &opts).is_ok());
+    }
+
+    #[test]
+    fn rejects_packet_duration_above_capacity() {
+        use symphonia_core::units::{Duration, Timestamp};
+
+        let params = adpcm_params(CODEC_ID_ADPCM_IMA_WAV, 505);
+        let mut decoder = AdpcmDecoder::try_new(&params, &AudioDecoderOptions::default()).unwrap();
+        let data = [0u8; 4096];
+        let packet = PacketRef::new(0, Timestamp::new(0), Duration::new(505 * 4), &data);
+        assert!(decoder.decode_ref(&packet).is_err());
     }
 }

@@ -16,10 +16,7 @@ use symphonia_core::io::ReadBitsLtr;
 
 use crate::aac::common::{MAX_SFBS, MAX_WINDOWS};
 
-#[inline(always)]
-fn iquant(val: f32) -> f32 {
-    if val < 0.0 { -((-val).powf(4.0 / 3.0)) } else { val.powf(4.0 / 3.0) }
-}
+use super::pow43;
 
 #[inline(always)]
 fn requant(val: f32, scale: f32) -> f32 {
@@ -100,7 +97,7 @@ impl Pulse {
             else {
                 base -= f32::from(self.pulse_amp[pno]);
             }
-            coeffs[k] = iquant(base) * scale;
+            coeffs[k] = pow43(base) * scale;
         }
     }
 }

@@ -17,6 +17,8 @@
 //! parse failure, or a table that fails [`SeekTable::sanity_check`], causes the demuxer to fall
 //! back to the (verified) linear block-size scan instead of trusting unverified table data.
 
+use symphonia_core::io::read_base128_be_u64;
+
 use crate::decoder_core::FRAME_LENGTH;
 
 const MAX_SEEK_TABLE_SIZE: u64 = 65536;
@@ -42,7 +44,9 @@ impl<'a> StReader<'a> {
 
     /// Ported from `mpc_st_read`.
     fn read(&mut self, bits: u32) -> Option<u32> {
-        if bits > 32 || self.bit_pos > self.bit_size || u64::from(bits) > self.bit_size - self.bit_pos
+        if bits > 32
+            || self.bit_pos > self.bit_size
+            || u64::from(bits) > self.bit_size - self.bit_pos
         {
             return None;
         }
@@ -59,18 +63,7 @@ impl<'a> StReader<'a> {
 
     /// Ported from `mpc_st_read_size`.
     fn read_size(&mut self) -> Option<u64> {
-        let mut result: u64 = 0;
-        for _ in 0..10 {
-            let byte = self.read(8)? as u8;
-            if result > (u64::MAX >> 7) {
-                return None;
-            }
-            result = (result << 7) | u64::from(byte & 0x7F);
-            if byte & 0x80 == 0 {
-                return Some(result);
-            }
-        }
-        None
+        read_base128_be_u64(10, || self.read(8).map(|b| b as u8).ok_or(())).ok()?.map(|(v, _)| v)
     }
 
     /// Ported from `mpc_st_read_golomb`.
@@ -106,7 +99,12 @@ impl SeekTable {
     /// bit-reader with a `+1` byte offset that only matters for that in-place reading style).
     /// `header_position` is `si.header_position` (added to each decoded entry). `block_pwr` is
     /// `si.block_pwr`. `samples` is `si.samples` (raw, pre-`beg_silence`).
-    pub fn parse(payload: &[u8], header_position: u64, block_pwr: u8, samples: u64) -> Option<Self> {
+    pub fn parse(
+        payload: &[u8],
+        header_position: u64,
+        block_pwr: u8,
+        samples: u64,
+    ) -> Option<Self> {
         let mut r = StReader::new(payload);
 
         let file_table_size_full = r.read_size()?;
@@ -134,7 +132,9 @@ impl SeekTable {
         }
         let capacity = entries;
         let seek_table_size = (file_table_size + ((1u64 << diff_pwr) - 1)) >> diff_pwr;
-        if seek_table_size == 0 || seek_table_size > capacity || seek_table_size > MAX_SEEK_TABLE_SIZE
+        if seek_table_size == 0
+            || seek_table_size > capacity
+            || seek_table_size > MAX_SEEK_TABLE_SIZE
         {
             return None;
         }

@@ -18,30 +18,19 @@ use std::io::Read;
 use std::panic::{self, AssertUnwindSafe};
 
 use symphonia_codec_wavpack::{WavPackDecoder, WavPackReader};
-use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
 use symphonia_core::codecs::CodecParameters;
+use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
 use symphonia_core::formats::{FormatOptions, FormatReader};
 use symphonia_core::io::MediaSourceStream;
-
-/// A small xorshift PRNG so the mutation sequence is reproducible without pulling in a
-/// `rand` dev-dependency.
-struct Xorshift(u64);
-
-impl Xorshift {
-    fn next(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.0 = x;
-        x
-    }
-}
+use symphonia_testutil::XorShift64;
 
 fn fixture(name: &str) -> Vec<u8> {
     let path = format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name);
     let mut buf = Vec::new();
-    File::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}")).read_to_end(&mut buf).unwrap();
+    File::open(&path)
+        .unwrap_or_else(|e| panic!("open {path}: {e}"))
+        .read_to_end(&mut buf)
+        .expect("unexpected failure");
     buf
 }
 
@@ -54,11 +43,13 @@ fn try_decode_all(data: Vec<u8>) {
         Err(_) => return,
     };
 
-    let codec_params: AudioCodecParameters = match reader.tracks().first().and_then(|t| t.codec_params.clone()) {
-        Some(CodecParameters::Audio(a)) => a,
-        _ => return,
-    };
-    let mut decoder = match WavPackDecoder::try_new(&codec_params, &AudioDecoderOptions::default()) {
+    let codec_params: AudioCodecParameters =
+        match reader.tracks().first().and_then(|t| t.codec_params.clone()) {
+            Some(CodecParameters::Audio(a)) => a,
+            _ => return,
+        };
+    let mut decoder = match WavPackDecoder::try_new(&codec_params, &AudioDecoderOptions::default())
+    {
         Ok(d) => d,
         Err(_) => return,
     };
@@ -77,7 +68,7 @@ fn try_decode_all(data: Vec<u8>) {
 
 fn fuzz_fixture(name: &str, iterations: u64, seed: u64) {
     let original = fixture(name);
-    let mut rng = Xorshift(seed | 1);
+    let mut rng = XorShift64(seed | 1);
 
     for i in 0..iterations {
         let mut data = original.clone();
@@ -87,20 +78,20 @@ fn fuzz_fixture(name: &str, iterations: u64, seed: u64) {
         match i % 3 {
             0 => {
                 // Flip a handful of random bits.
-                let flips = 1 + (rng.next() % 4);
+                let flips = 1 + (rng.next_u64() % 4);
                 for _ in 0..flips {
                     if data.is_empty() {
                         break;
                     }
-                    let pos = (rng.next() as usize) % data.len();
-                    let bit = (rng.next() % 8) as u32;
+                    let pos = (rng.next_u64() as usize) % data.len();
+                    let bit = (rng.next_u64() % 8) as u32;
                     data[pos] ^= 1 << bit;
                 }
             }
             1 => {
                 // Truncate to a random prefix length.
                 if !data.is_empty() {
-                    let len = 1 + (rng.next() as usize) % data.len();
+                    let len = 1 + (rng.next_u64() as usize) % data.len();
                     data.truncate(len);
                 }
             }
@@ -108,13 +99,13 @@ fn fuzz_fixture(name: &str, iterations: u64, seed: u64) {
                 // Overwrite a random contiguous run with random bytes (simulates a
                 // corrupted sub-block length/flags word).
                 if !data.is_empty() {
-                    let start = (rng.next() as usize) % data.len();
-                    let run = 1 + (rng.next() as usize) % 8;
+                    let start = (rng.next_u64() as usize) % data.len();
+                    let run = 1 + (rng.next_u64() as usize) % 8;
                     for j in 0..run {
                         if start + j >= data.len() {
                             break;
                         }
-                        data[start + j] = (rng.next() & 0xff) as u8;
+                        data[start + j] = (rng.next_u64() & 0xff) as u8;
                     }
                 }
             }
@@ -163,12 +154,12 @@ fn fuzz_multichannel_mixed_3ch_no_panics() {
 fn fuzz_random_garbage_no_panics() {
     // Not derived from a real file at all: pure random bytes with the "wvpk" magic
     // stamped in occasionally, to probe the header/sub-block parsers directly.
-    let mut rng = Xorshift(0x5EED_F10E);
+    let mut rng = XorShift64(0x5EED_F10E);
     for i in 0..200u64 {
-        let len = 32 + (rng.next() as usize) % 4096;
+        let len = 32 + (rng.next_u64() as usize) % 4096;
         let mut data = vec![0u8; len];
         for b in data.iter_mut() {
-            *b = (rng.next() & 0xff) as u8;
+            *b = (rng.next_u64() & 0xff) as u8;
         }
         if len >= 4 {
             data[0..4].copy_from_slice(b"wvpk");

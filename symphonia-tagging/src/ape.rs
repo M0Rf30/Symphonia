@@ -14,19 +14,16 @@
 //! untouched. A leading ID3v2 tag is not touched either. The audio is copied verbatim.
 
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
 use symphonia_core::meta::{Tag, Visual};
-use symphonia_metadata::ape::write::{self, APE_HEADER_SIZE, APE_PREAMBLE};
+use symphonia_metadata::ape::write::{
+    self, APE_HEADER_SIZE, APE_PREAMBLE, FLAG_HAS_HEADER, FLAG_IS_HEADER,
+};
+use symphonia_metadata::id3v1::write::ID3V1_TAG_LEN;
 
-use crate::{ApePolicy, Result, WriteOptions, copy_range, read_up_to, replace_file};
-
-/// The size of an ID3v1 tag.
-const ID3V1_SIZE: u64 = 128;
-
-const FLAG_HAS_HEADER: u32 = 1 << 31;
-const FLAG_IS_HEADER: u32 = 1 << 29;
+use crate::{ApePolicy, Result, WriteOptions, copy_range, read_at, read_up_to, replace_file};
 
 /// The location of an APE tag in a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,7 +51,7 @@ impl TailLayout {
     pub fn audio_end(&self) -> u64 {
         match self.tag {
             Some(tag) => tag.start,
-            None if self.id3v1 => self.len - ID3V1_SIZE,
+            None if self.id3v1 => self.len - ID3V1_TAG_LEN as u64,
             None => self.len,
         }
     }
@@ -89,15 +86,15 @@ pub(crate) fn find_tag(file: &mut File) -> Result<TailLayout> {
 
     let mut marker = [0u8; 3];
 
-    let id3v1 = len >= ID3V1_SIZE && {
-        file.seek(SeekFrom::Start(len - ID3V1_SIZE))?;
+    let id3v1 = len >= ID3V1_TAG_LEN as u64 && {
+        file.seek(SeekFrom::Start(len - ID3V1_TAG_LEN as u64))?;
         read_up_to(file, &mut marker)? == 3 && &marker == b"TAG"
     };
 
-    let end = if id3v1 { len - ID3V1_SIZE } else { len };
+    let end = if id3v1 { len - ID3V1_TAG_LEN as u64 } else { len };
     let tag = find_tag_before(file, end)?;
 
-    debug_assert!(tag.map_or(true, |t| t.end == end));
+    debug_assert!(tag.is_none_or(|t| t.end == end));
 
     Ok(TailLayout { tag, id3v1, len })
 }
@@ -117,9 +114,13 @@ fn tag_ending_at(file: &mut File, end: u64) -> Result<Option<TagRange>> {
         return Ok(None);
     }
 
-    let version = u32::from_le_bytes(footer[8..12].try_into().unwrap());
-    let size = u64::from(u32::from_le_bytes(footer[12..16].try_into().unwrap()));
-    let flags = u32::from_le_bytes(footer[20..24].try_into().unwrap());
+    let word = |b: &[u8; APE_HEADER_SIZE], i: usize| {
+        u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]])
+    };
+
+    let version = word(&footer, 8);
+    let size = u64::from(word(&footer, 12));
+    let flags = word(&footer, 20);
 
     // In an APEv1 tag the size covers the items and the footer, and there is no header. APEv2
     // adds the header (which is not part of the size) if the flag says so.
@@ -145,9 +146,7 @@ fn tag_ending_at(file: &mut File, end: u64) -> Result<Option<TagRange>> {
             return Ok(None);
         }
 
-        let flags = u32::from_le_bytes(header[20..24].try_into().unwrap());
-
-        if flags & FLAG_IS_HEADER == 0 {
+        if word(&header, 20) & FLAG_IS_HEADER == 0 {
             return Ok(None);
         }
     }
@@ -167,10 +166,7 @@ pub(crate) fn write(
         // Keep the type of the items that were external links.
         let locators = match layout.tag {
             Some(range) => {
-                // A tag is parsed from memory, which is bounded by what the tag may hold.
-                let mut old = vec![0u8; (range.end - range.start) as usize];
-                src.seek(SeekFrom::Start(range.start))?;
-                src.read_exact(&mut old)?;
+                let old = read_at(src, range.start, range.end - range.start)?;
                 write::locator_keys(&old)
             }
             None => Vec::new(),

@@ -14,10 +14,11 @@ version.workspace = true
 
 [dependencies]
 log = { workspace = true }
-symphonia-core = { version = "0.6.1", path = "../symphonia-core" }
-symphonia-metadata = { version = "0.6.1", path = "../symphonia-metadata", features = ["write", "id3v1", "id3v2", "ape", "flac", "vorbis", "riff"] }
-symphonia-format-ogg = { version = "0.6.1", path = "../symphonia-format-ogg", features = ["writer"] }
-symphonia-format-isomp4 = { version = "0.6.1", path = "../symphonia-format-isomp4", features = ["writer"] }
+symphonia-core = { workspace = true }
+symphonia-common = { workspace = true }
+symphonia-metadata = { workspace = true, features = ["ape", "id3v1", "id3v2", "write", "flac", "vorbis", "riff"] }
+symphonia-format-ogg = { workspace = true, features = ["writer"] }
+symphonia-format-isomp4 = { workspace = true, features = ["writer"] }
 
 [dev-dependencies]
 symphonia = { version = "0.6.1", path = "../symphonia", features = ["all"] }

@@ -58,12 +58,12 @@
 //! PDF's typeset equations. No part of this implementation is derived
 //! from any external decoder.
 
+use super::error::{SbrError as Error, SbrResult as Result};
 use super::freq_bands::HiLoTables;
 use super::hf_gen::T_HF_ADJ;
 use super::lp::{aliasing_reduction, gain_groups};
 use super::noise_table::NOISE_TABLE;
 use super::qmf::Complex;
-use super::error::{SbrError as Error, SbrResult as Result};
 
 /// `limGain = [0.70795, 1.0, 1.41254, 1e10]` (§4.6.18.7.5).
 pub const LIM_GAIN: [f64; 4] = [0.70795, 1.0, 1.41254, 1e10];
@@ -81,13 +81,8 @@ pub const MAX_BOOST: f64 = 1.584893192;
 pub const G_MAX_CAP: f64 = 1e5;
 
 /// `hSmooth` — the §4.6.18.7.6 smoothing filter.
-pub const H_SMOOTH: [f64; 5] = [
-    0.33333333333333,
-    0.30150283239582,
-    0.21816949906249,
-    0.11516383427084,
-    0.03183050093751,
-];
+pub const H_SMOOTH: [f64; 5] =
+    [0.33333333333333, 0.30150283239582, 0.21816949906249, 0.11516383427084, 0.03183050093751];
 
 /// `φRe,sin = [1, 0, −1, 0]`, `φIm,sin = [0, 1, 0, −1]` (§4.6.18.7.6).
 pub const PHI_SIN: [(f64, f64); 4] = [(1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0)];
@@ -146,8 +141,8 @@ pub struct EnvAdjustState {
     l_a_prev_frame: i32,
     l_e_prev: i32,
     /// Previous frame's trailing `hSL` columns of `GTemp` / `QTemp`.
-    g_temp_tail: Vec<Vec<f64>>,
-    q_temp_tail: Vec<Vec<f64>>,
+    g_temp_tail: Vec<f64>,
+    q_temp_tail: Vec<f64>,
     /// Running noise / sine phase indices.
     index_noise: usize,
     index_sine: usize,
@@ -175,11 +170,7 @@ pub fn adjust(
 ) -> Result<Vec<[Complex; 64]>> {
     let m_cnt = usize::try_from(p.bands.m).map_err(|_| Error::SbrFreqBandInvalid)?;
     let k_x = p.bands.k_x;
-    let l_e = p
-        .t_e
-        .len()
-        .checked_sub(1)
-        .ok_or(Error::SbrFreqBandInvalid)?;
+    let l_e = p.t_e.len().checked_sub(1).ok_or(Error::SbrFreqBandInvalid)?;
     if l_e == 0
         || p.freq_res.len() != l_e
         || p.e_orig.len() != l_e
@@ -209,7 +200,8 @@ pub fn adjust(
         let (noise, sine) = if p.resumed && !st.started {
             let lead = usize::try_from(i0).unwrap_or(0);
             ((m_cnt * lead) % 512, lead % 4)
-        } else {
+        }
+        else {
             (0, 0)
         };
         st.index_noise = noise;
@@ -224,20 +216,12 @@ pub fn adjust(
 
     // lAPrev: 0 if the previous frame's transient sat on its trailing
     // border, else -1.
-    let l_a_prev = if st.l_a_prev_frame == st.l_e_prev {
-        0i32
-    } else {
-        -1
-    };
+    let l_a_prev = if st.l_a_prev_frame == st.l_e_prev { 0i32 } else { -1 };
 
     // ---- §4.6.18.7.2 mapping -------------------------------------
     // Envelope band table per resolution.
     let f_of = |high: bool| -> &Vec<i32> {
-        if high {
-            &p.bands.f_table_high
-        } else {
-            &p.bands.f_table_low
-        }
+        if high { &p.bands.f_table_high } else { &p.bands.f_table_low }
     };
     // Band index of QMF subband `k` in border table `f`.
     let band_of = |f: &[i32], k: i32| -> Result<usize> {
@@ -249,10 +233,11 @@ pub fn adjust(
         Err(Error::SbrFreqBandInvalid)
     };
 
-    let mut e_map = vec![vec![0.0f64; m_cnt]; l_e]; // EOrigMapped[l][m]
-    let mut q_map = vec![vec![0.0f64; m_cnt]; l_e]; // QMapped[l][m]
-    let mut s_index = vec![vec![false; m_cnt]; l_e]; // SIndexMapped[l][m]
-    let mut s_map = vec![vec![false; m_cnt]; l_e]; // SMapped[l][m]
+    // The per-envelope matrices are flat, row `l` at `l * m_cnt..(l + 1) * m_cnt`.
+    let mut e_map = vec![0.0f64; l_e * m_cnt]; // EOrigMapped[l][m]
+    let mut q_map = vec![0.0f64; l_e * m_cnt]; // QMapped[l][m]
+    let mut s_index = vec![false; l_e * m_cnt]; // SIndexMapped[l][m]
+    let mut s_map = vec![false; l_e * m_cnt]; // SMapped[l][m]
 
     let n_high = p.bands.n_high();
     for l in 0..l_e {
@@ -274,8 +259,8 @@ pub fn adjust(
         }
         for m in 0..m_cnt {
             let k = k_x + i32::try_from(m).map_err(|_| Error::SbrFreqBandInvalid)?;
-            e_map[l][m] = p.e_orig[l][band_of(f, k)?];
-            q_map[l][m] = p.q_orig[kq][band_of(&p.bands.f_table_noise, k)?];
+            e_map[l * m_cnt + m] = p.e_orig[l][band_of(f, k)?];
+            q_map[l * m_cnt + m] = p.q_orig[kq][band_of(&p.bands.f_table_noise, k)?];
         }
 
         // SIndexMapped: sinusoid in the middle subband of each
@@ -298,25 +283,21 @@ pub fn adjust(
                 let prev_on = {
                     let prev_rel = mid - st.k_x_prev;
                     prev_rel >= 0
-                        && st
-                            .s_index_prev
-                            .get(prev_rel as usize)
-                            .copied()
-                            .unwrap_or(false)
+                        && st.s_index_prev.get(prev_rel as usize).copied().unwrap_or(false)
                 };
                 if (l as i32) >= p.l_a || prev_on {
-                    s_index[l][m_rel as usize] = true;
+                    s_index[l * m_cnt + m_rel as usize] = true;
                 }
             }
         }
         // SMapped: any sinusoid within the envelope band.
         for i in 0..f.len() - 1 {
             let any = ((f[i] - k_x).max(0)..(f[i + 1] - k_x).max(0))
-                .any(|j| (j as usize) < m_cnt && s_index[l][j as usize]);
+                .any(|j| (j as usize) < m_cnt && s_index[l * m_cnt + j as usize]);
             if any {
                 for j in (f[i] - k_x).max(0)..(f[i + 1] - k_x).max(0) {
                     if (j as usize) < m_cnt {
-                        s_map[l][j as usize] = true;
+                        s_map[l * m_cnt + j as usize] = true;
                     }
                 }
             }
@@ -327,8 +308,9 @@ pub fn adjust(
     // §4.6.18.8.4: the real-valued low-power signals carry half the
     // energy of the complex representation — the estimation doubles.
     let e_scale = if p.low_power { 2.0 } else { 1.0 };
-    let mut e_curr = vec![vec![0.0f64; m_cnt]; l_e];
-    for (l, e_curr_l) in e_curr.iter_mut().enumerate() {
+    let mut e_curr = vec![0.0f64; l_e * m_cnt];
+    for l in 0..l_e {
+        let e_curr_l = &mut e_curr[l * m_cnt..(l + 1) * m_cnt];
         let lo = (rate * p.t_e[l] + T_HF_ADJ as i32) as usize;
         let hi = (rate * p.t_e[l + 1] + T_HF_ADJ as i32) as usize;
         let width = (hi - lo) as f64;
@@ -338,17 +320,15 @@ pub fn adjust(
                 let sum: f64 = x_high[lo..hi].iter().map(|col| col[k].norm_sqr()).sum();
                 *e = e_scale * sum / width;
             }
-        } else {
+        }
+        else {
             let f = f_of(p.freq_res[l]);
             for pband in 0..f.len() - 1 {
                 let kl = f[pband];
                 let kh = f[pband + 1] - 1;
                 let mut sum = 0.0;
                 for j in kl..=kh {
-                    sum += x_high[lo..hi]
-                        .iter()
-                        .map(|col| col[j as usize].norm_sqr())
-                        .sum::<f64>();
+                    sum += x_high[lo..hi].iter().map(|col| col[j as usize].norm_sqr()).sum::<f64>();
                 }
                 let avg = e_scale * sum / (width * f64::from(kh - kl + 1));
                 for j in kl..=kh {
@@ -365,45 +345,48 @@ pub fn adjust(
     let lim_gain = LIM_GAIN[usize::from(p.limiter_gains)];
     let n_l = p.f_table_lim.len() - 1;
 
-    let mut g_lim_boost = vec![vec![0.0f64; m_cnt]; l_e];
-    let mut q_m_lim_boost = vec![vec![0.0f64; m_cnt]; l_e];
-    let mut s_m_boost = vec![vec![0.0f64; m_cnt]; l_e];
+    let mut g_lim_boost = vec![0.0f64; l_e * m_cnt];
+    let mut q_m_lim_boost = vec![0.0f64; l_e * m_cnt];
+    let mut s_m_boost = vec![0.0f64; l_e * m_cnt];
+
+    let mut q_m = vec![0.0f64; m_cnt];
+    let mut s_m = vec![0.0f64; m_cnt];
+    let mut g = vec![0.0f64; m_cnt];
+    let mut g_max = vec![0.0f64; m_cnt];
+    let mut q_m_lim = vec![0.0f64; m_cnt];
+    let mut g_lim = vec![0.0f64; m_cnt];
 
     for l in 0..l_e {
         let li = l as i32;
-        let delta_l = if li == p.l_a || li == l_a_prev {
-            0.0
-        } else {
-            1.0
-        };
+        let row = l * m_cnt..(l + 1) * m_cnt;
+        let e_map_l = &e_map[row.clone()];
+        let q_map_l = &q_map[row.clone()];
+        let s_index_l = &s_index[row.clone()];
+        let s_map_l = &s_map[row.clone()];
+        let e_curr_l = &e_curr[row.clone()];
+        let delta_l = if li == p.l_a || li == l_a_prev { 0.0 } else { 1.0 };
 
         // QM / SM (amplitude domain).
-        let mut q_m = vec![0.0f64; m_cnt];
-        let mut s_m = vec![0.0f64; m_cnt];
-        let mut g = vec![0.0f64; m_cnt];
         for m in 0..m_cnt {
-            let e_o = e_map[l][m];
-            let q = q_map[l][m];
+            let e_o = e_map_l[m];
+            let q = q_map_l[m];
             q_m[m] = (e_o * q / (1.0 + q)).sqrt();
-            s_m[m] = if s_index[l][m] {
-                (e_o / (1.0 + q)).sqrt()
-            } else {
-                0.0
-            };
-            g[m] = if s_map[l][m] {
-                ((e_o / (EPS + e_curr[l][m])) * (q / (1.0 + q))).sqrt()
-            } else {
-                (e_o / ((EPS + e_curr[l][m]) * (1.0 + delta_l * q))).sqrt()
+            s_m[m] = if s_index_l[m] { (e_o / (1.0 + q)).sqrt() } else { 0.0 };
+            g[m] = if s_map_l[m] {
+                ((e_o / (EPS + e_curr_l[m])) * (q / (1.0 + q))).sqrt()
+            }
+            else {
+                (e_o / ((EPS + e_curr_l[m]) * (1.0 + delta_l * q))).sqrt()
             };
         }
 
         // Limiter-band maxima.
-        let mut g_max = vec![0.0f64; m_cnt];
+        g_max.fill(0.0);
         for k in 0..n_l {
             let lo = (p.f_table_lim[k] - k_x).max(0) as usize;
             let hi = ((p.f_table_lim[k + 1] - k_x).max(0) as usize).min(m_cnt);
-            let num: f64 = EPS0 + e_map[l][lo..hi].iter().sum::<f64>();
-            let den: f64 = EPS0 + e_curr[l][lo..hi].iter().sum::<f64>();
+            let num: f64 = EPS0 + e_map_l[lo..hi].iter().sum::<f64>();
+            let den: f64 = EPS0 + e_curr_l[lo..hi].iter().sum::<f64>();
             let gmax = ((num / den).sqrt() * lim_gain).min(G_MAX_CAP);
             for gm in &mut g_max[lo..hi] {
                 *gm = gmax;
@@ -411,14 +394,8 @@ pub fn adjust(
         }
 
         // QM_Lim / GLim.
-        let mut q_m_lim = vec![0.0f64; m_cnt];
-        let mut g_lim = vec![0.0f64; m_cnt];
         for m in 0..m_cnt {
-            q_m_lim[m] = if g[m] > 0.0 {
-                q_m[m].min(q_m[m] * g_max[m] / g[m])
-            } else {
-                q_m[m]
-            };
+            q_m_lim[m] = if g[m] > 0.0 { q_m[m].min(q_m[m] * g_max[m] / g[m]) } else { q_m[m] };
             g_lim[m] = g[m].min(g_max[m]);
         }
 
@@ -429,21 +406,18 @@ pub fn adjust(
             let mut num = EPS0;
             let mut den = EPS0;
             for i in lo..hi {
-                num += e_map[l][i];
-                let delta_s = if s_m[i] != 0.0 || li == p.l_a || li == l_a_prev {
-                    0.0
-                } else {
-                    1.0
-                };
-                den += e_curr[l][i] * g_lim[i] * g_lim[i]
+                num += e_map_l[i];
+                let delta_s =
+                    if s_m[i] != 0.0 || li == p.l_a || li == l_a_prev { 0.0 } else { 1.0 };
+                den += e_curr_l[i] * g_lim[i] * g_lim[i]
                     + s_m[i] * s_m[i]
                     + delta_s * q_m_lim[i] * q_m_lim[i];
             }
             let boost = (num / den).sqrt().min(MAX_BOOST);
             for i in lo..hi {
-                g_lim_boost[l][i] = g_lim[i] * boost;
-                q_m_lim_boost[l][i] = q_m_lim[i] * boost;
-                s_m_boost[l][i] = s_m[i] * boost;
+                g_lim_boost[l * m_cnt + i] = g_lim[i] * boost;
+                q_m_lim_boost[l * m_cnt + i] = q_m_lim[i] * boost;
+                s_m_boost[l * m_cnt + i] = s_m[i] * boost;
             }
         }
     }
@@ -456,31 +430,29 @@ pub fn adjust(
             return Err(Error::SbrFreqBandInvalid);
         }
         for l in 0..l_e {
-            let groups = gain_groups(dp, &s_map[l], k_x);
-            aliasing_reduction(&mut g_lim_boost[l], &e_curr[l], dp, &groups, k_x)?;
+            let row = l * m_cnt..(l + 1) * m_cnt;
+            let groups = gain_groups(dp, &s_map[row.clone()], k_x);
+            aliasing_reduction(&mut g_lim_boost[row.clone()], &e_curr[row], dp, &groups, k_x)?;
         }
     }
 
     // ---- §4.6.18.7.6 assembly ------------------------------------
     // §4.6.18.8.5: the low-power tool never smooths, regardless of
     // bs_smoothing_mode.
-    let h_sl: usize = if p.smoothing_mode || p.low_power {
-        0
-    } else {
-        4
-    };
+    let h_sl: usize = if p.smoothing_mode || p.low_power { 0 } else { 4 };
 
-    // GTemp / QTemp with the hSL-column prefix.
-    let mut g_temp = vec![vec![0.0f64; m_cnt]; n_cols + h_sl];
-    let mut q_temp = vec![vec![0.0f64; m_cnt]; n_cols + h_sl];
-    for j in 0..h_sl {
-        if st.g_temp_tail.len() == h_sl && st.g_temp_tail[j].len() == m_cnt {
-            g_temp[j].clone_from(&st.g_temp_tail[j]);
-            q_temp[j].clone_from(&st.q_temp_tail[j]);
-        } else {
-            // Reset (or first frame): prefix = first column values.
-            g_temp[j].clone_from(&g_lim_boost[0]);
-            q_temp[j].clone_from(&q_m_lim_boost[0]);
+    // GTemp / QTemp with the hSL-column prefix; column `j` at `j * m_cnt..(j + 1) * m_cnt`.
+    let mut g_temp = vec![0.0f64; (n_cols + h_sl) * m_cnt];
+    let mut q_temp = vec![0.0f64; (n_cols + h_sl) * m_cnt];
+    if st.g_temp_tail.len() == h_sl * m_cnt && st.q_temp_tail.len() == h_sl * m_cnt {
+        g_temp[..h_sl * m_cnt].copy_from_slice(&st.g_temp_tail);
+        q_temp[..h_sl * m_cnt].copy_from_slice(&st.q_temp_tail);
+    }
+    else {
+        // Reset (or first frame): prefix = first column values.
+        for j in 0..h_sl {
+            g_temp[j * m_cnt..(j + 1) * m_cnt].copy_from_slice(&g_lim_boost[..m_cnt]);
+            q_temp[j * m_cnt..(j + 1) * m_cnt].copy_from_slice(&q_m_lim_boost[..m_cnt]);
         }
     }
     // Envelope of column i (spec index space i0..i_end).
@@ -496,31 +468,32 @@ pub fn adjust(
     };
     for c in 0..n_cols {
         let l = env_of(i0 + c as i32);
-        g_temp[c + h_sl].clone_from(&g_lim_boost[l]);
-        q_temp[c + h_sl].clone_from(&q_m_lim_boost[l]);
+        let (dst, src) = ((c + h_sl) * m_cnt..(c + h_sl + 1) * m_cnt, l * m_cnt..(l + 1) * m_cnt);
+        g_temp[dst.clone()].copy_from_slice(&g_lim_boost[src.clone()]);
+        q_temp[dst].copy_from_slice(&q_m_lim_boost[src]);
     }
 
     // §4.6.18.8.5: the modified sinusoid equations apply to the first
     // 16 sinusoids (in increasing frequency order) of every time
     // segment; later sinusoids keep the original (real-part) term.
-    let lp_first16: Vec<Vec<bool>> = if p.low_power {
+    let lp_first16: Vec<bool> = if p.low_power {
         s_index
-            .iter()
-            .map(|row| {
+            .chunks_exact(m_cnt.max(1))
+            .flat_map(|row| {
                 let mut count = 0usize;
-                row.iter()
-                    .map(|&on| {
-                        if on {
-                            count += 1;
-                            count <= 16
-                        } else {
-                            false
-                        }
-                    })
-                    .collect()
+                row.iter().map(move |&on| {
+                    if on {
+                        count += 1;
+                        count <= 16
+                    }
+                    else {
+                        false
+                    }
+                })
             })
             .collect()
-    } else {
+    }
+    else {
         Vec::new()
     };
 
@@ -539,21 +512,20 @@ pub fn adjust(
             let k = (k_x as usize) + m;
             // GFilt.
             let g_filt = if smooth_gain {
-                (0..=h_sl)
-                    .map(|j| g_temp[c + h_sl - j][m] * H_SMOOTH[j])
-                    .sum::<f64>()
-            } else {
-                g_temp[c + h_sl][m]
+                (0..=h_sl).map(|j| g_temp[(c + h_sl - j) * m_cnt + m] * H_SMOOTH[j]).sum::<f64>()
+            }
+            else {
+                g_temp[(c + h_sl) * m_cnt + m]
             };
             // QFilt: zero on transient envelopes and sinusoid bands.
-            let q_filt = if li == p.l_a || li == l_a_prev || s_m_boost[l][m] != 0.0 {
+            let q_filt = if li == p.l_a || li == l_a_prev || s_m_boost[l * m_cnt + m] != 0.0 {
                 0.0
-            } else if h_sl != 0 {
-                (0..=h_sl)
-                    .map(|j| q_temp[c + h_sl - j][m] * H_SMOOTH[j])
-                    .sum::<f64>()
-            } else {
-                q_temp[c + h_sl][m]
+            }
+            else if h_sl != 0 {
+                (0..=h_sl).map(|j| q_temp[(c + h_sl - j) * m_cnt + m] * H_SMOOTH[j]).sum::<f64>()
+            }
+            else {
+                q_temp[(c + h_sl) * m_cnt + m]
             };
 
             // W1 = GFilt · XHigh.
@@ -565,19 +537,16 @@ pub fn adjust(
             let (v_re, v_im) = NOISE_TABLE[f_index_noise];
             let mut out = if p.low_power {
                 Complex::new(w1.re + q_filt * v_re, 0.0)
-            } else {
+            }
+            else {
                 Complex::new(w1.re + q_filt * v_re, w1.im + q_filt * v_im)
             };
 
             // Y = W2 + ψ (sinusoids; the low-power injection runs as
             // a separate per-column pass below).
-            if !p.low_power && s_index[l][m] {
-                let s = s_m_boost[l][m];
-                let alt = if (m + k_x as usize) % 2 == 1 {
-                    -1.0
-                } else {
-                    1.0
-                };
+            if !p.low_power && s_index[l * m_cnt + m] {
+                let s = s_m_boost[l * m_cnt + m];
+                let alt = if (m + k_x as usize) % 2 == 1 { -1.0 } else { 1.0 };
                 out.re += s * sin_re;
                 out.im += s * alt * sin_im;
             }
@@ -596,12 +565,13 @@ pub fn adjust(
             let f0 = phi_re_at(0);
             let fm1 = phi_re_at(-1);
             let fp1 = phi_re_at(1);
-            let first16 = &lp_first16[l];
+            let first16 = &lp_first16[l * m_cnt..(l + 1) * m_cnt];
             // ψRe of the (first-16) sinusoid in band m, else 0.
             let s16 = |m: i64| -> f64 {
                 if m >= 0 && (m as usize) < m_cnt && first16[m as usize] {
-                    s_m_boost[l][m as usize]
-                } else {
+                    s_m_boost[l * m_cnt + m as usize]
+                }
+                else {
                     0.0
                 }
             };
@@ -618,28 +588,23 @@ pub fn adjust(
             }
             // Sinusoids beyond the sixteenth keep the original term
             // (real part only).
-            for (m, &on) in s_index[l].iter().enumerate() {
+            for (m, &on) in s_index[l * m_cnt..(l + 1) * m_cnt].iter().enumerate() {
                 if on && !first16[m] {
-                    y[col][(k_x as usize) + m].re += s_m_boost[l][m] * f0;
+                    y[col][(k_x as usize) + m].re += s_m_boost[l * m_cnt + m] * f0;
                 }
             }
         }
     }
 
     // ---- thread cross-frame state --------------------------------
-    st.index_noise = if n_cols > 0 {
-        f_index_noise
-    } else {
-        st.index_noise
-    };
-    st.index_sine = if n_cols > 0 {
-        (f_index_sine + 1) % 4
-    } else {
-        st.index_sine
-    };
-    st.g_temp_tail = g_temp[n_cols..].to_vec();
-    st.q_temp_tail = q_temp[n_cols..].to_vec();
-    st.s_index_prev = s_index[l_e - 1].clone();
+    st.index_noise = if n_cols > 0 { f_index_noise } else { st.index_noise };
+    st.index_sine = if n_cols > 0 { (f_index_sine + 1) % 4 } else { st.index_sine };
+    st.g_temp_tail.clear();
+    st.g_temp_tail.extend_from_slice(&g_temp[n_cols * m_cnt..]);
+    st.q_temp_tail.clear();
+    st.q_temp_tail.extend_from_slice(&q_temp[n_cols * m_cnt..]);
+    st.s_index_prev.clear();
+    st.s_index_prev.extend_from_slice(&s_index[(l_e - 1) * m_cnt..]);
     st.k_x_prev = k_x;
     st.l_a_prev_frame = p.l_a;
     st.l_e_prev = l_e as i32;
@@ -730,10 +695,7 @@ mod tests {
             let col = c + T_HF_ADJ;
             for k in 8..16 {
                 let g = (y[col][k].norm_sqr() / x[col][k].norm_sqr()).sqrt();
-                assert!(
-                    (g - target_gain).abs() < 1e-3 * target_gain,
-                    "col {col} k {k}: gain {g}"
-                );
+                assert!((g - target_gain).abs() < 1e-3 * target_gain, "col {col} k {k}: gain {g}");
             }
         }
     }
@@ -782,7 +744,7 @@ mod tests {
         let mut x = flat_x_high(amp, 40);
         for col in x.iter_mut() {
             for cell in &mut col[8..10] {
-                *cell = *cell * 1e-6;
+                *cell *= 1e-6;
             }
         }
         let e_orig = vec![vec![
@@ -882,8 +844,7 @@ mod tests {
 
         // A header reset after the start of the stream restarts the phases at 0 again.
         p.reset = true;
-        let mut st = EnvAdjustState::default();
-        st.started = true;
+        let mut st = EnvAdjustState { started: true, ..Default::default() };
         adjust(&x, &p, &mut st).unwrap();
         assert_eq!(st.index_noise, fresh.index_noise);
     }
@@ -907,8 +868,8 @@ mod tests {
         let mut st = EnvAdjustState::new();
         let y = adjust(&x, &p, &mut st).unwrap();
         let s = 64.0f64.sqrt() * MAX_BOOST; // SM boosted (ECurr = 0)
-                                            // m + kx = 11 (odd) → imaginary part sign-flipped.
-                                            // c = 0: φ = (1, 0); c = 1: φ = (0, 1) → im = −s.
+        // m + kx = 11 (odd) → imaginary part sign-flipped.
+        // c = 0: φ = (1, 0); c = 1: φ = (0, 1) → im = −s.
         let y0 = y[T_HF_ADJ][11];
         let y1 = y[T_HF_ADJ + 1][11];
         assert!((y0.re - s).abs() < 1e-9 && y0.im.abs() < 1e-12, "{y0:?}");
@@ -941,7 +902,7 @@ mod tests {
         p1.smoothing_mode = false;
         let mut st = EnvAdjustState::new();
         let _ = adjust(&x, &p1, &mut st).unwrap();
-        assert_eq!(st.g_temp_tail.len(), 4);
+        assert_eq!(st.g_temp_tail.len(), 4 * usize::try_from(b.m).unwrap());
         // Second frame jumps to gain 10; the first output columns are
         // still pulled down by the smoothing history (gain < 10).
         let mut p2 = params(&b, &lim, &t_e, &t_q, &fr, &e_hi, &q_orig, &[]);
@@ -988,10 +949,7 @@ mod tests {
         // part; ECurr = 2·|X|², so G = √(EOrig/(ε + 2·amp²)) = 3.
         let g = (y[T_HF_ADJ][12].re / x[T_HF_ADJ][12].re).abs();
         let expect = (e_target / (EPS + 2.0 * amp * amp)).sqrt();
-        assert!(
-            (g - expect).abs() < 1e-3 * expect,
-            "LP gain {g} vs expected {expect}"
-        );
+        assert!((g - expect).abs() < 1e-3 * expect, "LP gain {g} vs expected {expect}");
     }
 
     /// The §4.6.18.8.5 sinusoid injection: real-valued main term on
@@ -1030,16 +988,8 @@ mod tests {
         // ψ = −0.00815·(+1)·(s).
         let col1 = T_HF_ADJ + 1;
         assert!(y[col1][11].re.abs() < 1e-12);
-        assert!(
-            (y[col1][10].re - 0.00815 * s).abs() < 1e-9,
-            "{}",
-            y[col1][10].re
-        );
-        assert!(
-            (y[col1][12].re + 0.00815 * s).abs() < 1e-9,
-            "{}",
-            y[col1][12].re
-        );
+        assert!((y[col1][10].re - 0.00815 * s).abs() < 1e-9, "{}", y[col1][10].re);
+        assert!((y[col1][12].re + 0.00815 * s).abs() < 1e-9, "{}", y[col1][12].re);
         // Everything stays real.
         for col in y.iter() {
             for cell in col.iter() {

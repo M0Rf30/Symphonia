@@ -124,6 +124,7 @@ impl MpaDecoder {
             }
             #[cfg(feature = "mp3")]
             State::Layer3(layer) if header.layer == MpegLayer::Layer3 => {
+                layer.verify_crc(packet.data, &header)?;
                 layer.decode(&mut reader, &header, &mut self.buf)?;
             }
             _ => return decode_error("mpa: invalid mpeg audio layer"),

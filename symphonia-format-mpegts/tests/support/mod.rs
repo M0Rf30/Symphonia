@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+// Test code: a panic is a test failure.
 // Symphonia
 // Copyright (c) 2019-2026 The Project Symphonia Developers.
 //
@@ -23,7 +25,21 @@ use symphonia_core::units::Timestamp;
 use symphonia_format_mpegts::MpegTsReader;
 
 use symphonia_common::mpeg::pes::write_timestamp;
-use symphonia_format_mpegts::psi::build_section;
+use symphonia_core::checksum::Crc32;
+use symphonia_core::io::Monitor;
+
+/// Build a PSI section (long form) with the CRC.
+pub fn build_section(table_id: u8, table_id_ext: u16, body: &[u8]) -> Vec<u8> {
+    let len = 5 + body.len() + 4;
+    let mut s = vec![table_id, 0xb0 | (len >> 8) as u8, len as u8];
+    s.extend_from_slice(&table_id_ext.to_be_bytes());
+    s.extend_from_slice(&[0xc1, 0, 0]);
+    s.extend_from_slice(body);
+    let mut crc = Crc32::new(0xffff_ffff);
+    crc.process_buf_bytes(&s);
+    s.extend_from_slice(&crc.crc().to_be_bytes());
+    s
+}
 
 pub struct TsMux {
     pub out: Vec<u8>,
@@ -70,7 +86,7 @@ impl TsMux {
 
             if af_len > 0 {
                 p.push(0x00);
-                p.extend(std::iter::repeat(0xff).take(af_len - 1));
+                p.extend(std::iter::repeat_n(0xff, af_len - 1));
             }
         }
 
@@ -290,21 +306,7 @@ pub fn check_seeks(
     }
 }
 
-/// A xorshift generator.
-pub struct Rng(pub u64);
-
-impl Rng {
-    pub fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-
-    pub fn below(&mut self, n: usize) -> usize {
-        (self.next() % n as u64) as usize
-    }
-}
+pub use symphonia_testutil::XorShift64 as Rng;
 
 /// Corrupt the stream randomly: flip bytes, overwrite ranges, delete ranges, insert junk, truncate.
 pub fn corrupt(data: &[u8], rng: &mut Rng) -> Vec<u8> {
@@ -323,7 +325,7 @@ pub fn corrupt(data: &[u8], rng: &mut Rng) -> Vec<u8> {
                 let n = 1 + rng.below(300);
                 let end = (pos + n).min(d.len());
                 for b in d[pos..end].iter_mut() {
-                    *b = rng.next() as u8;
+                    *b = rng.next_u64() as u8;
                 }
             }
             2 => {
@@ -332,7 +334,7 @@ pub fn corrupt(data: &[u8], rng: &mut Rng) -> Vec<u8> {
             }
             3 => {
                 let n = 1 + rng.below(500);
-                let junk: Vec<u8> = (0..n).map(|_| rng.next() as u8).collect();
+                let junk: Vec<u8> = (0..n).map(|_| rng.next_u64() as u8).collect();
                 d.splice(pos..pos, junk);
             }
             _ => d.truncate(pos + 8),

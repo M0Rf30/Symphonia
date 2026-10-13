@@ -948,7 +948,7 @@ impl<'s> IsoMp4Reader<'s> {
                             self.segs.last().expect("always at least one segment from moov atom");
 
                         // Create a new segment for the moof atom.
-                        let seg = MoofSegment::new(moof, self.moov.clone(), last_seg.as_ref());
+                        let seg = MoofSegment::new(moof, self.moov.clone(), last_seg.as_ref())?;
 
                         // Segments should have a monotonic sequence number.
                         if seg.sequence_num() <= last_seg.sequence_num() {

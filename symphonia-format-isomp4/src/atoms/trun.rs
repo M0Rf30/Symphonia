@@ -31,6 +31,9 @@ pub struct TrunAtom {
     total_sample_size: u64,
     /// The total duration of all samples in this run. 0 if the sample duration flag is not set.
     total_sample_duration: u64,
+    /// The timestamp of each sample relative to the start of this run. Empty if the sample
+    /// duration flag is not set.
+    sample_timestamp: Vec<u64>,
 }
 
 impl TrunAtom {
@@ -117,16 +120,9 @@ impl TrunAtom {
         debug_assert!(sample_num_rel < self.sample_count);
 
         if self.is_sample_duration_present() {
-            // All sample durations are unique.
-            let ts = if sample_num_rel > 0 {
-                self.sample_duration[..sample_num_rel as usize]
-                    .iter()
-                    .map(|&s| u64::from(s))
-                    .sum::<u64>()
-            }
-            else {
-                0
-            };
+            // All sample durations are unique. The timestamp of each sample relative to the start
+            // of the run was accumulated when the atom was read.
+            let ts = self.sample_timestamp[sample_num_rel as usize];
 
             let dur = self.sample_duration[sample_num_rel as usize];
 
@@ -265,13 +261,22 @@ impl Atom for TrunAtom {
         let mut sample_duration = Vec::new();
         let mut sample_size = Vec::new();
         let mut sample_flags = Vec::new();
+        let mut sample_timestamp = Vec::new();
 
         let mut total_sample_size = 0;
         let mut total_sample_duration = 0;
 
-        for _ in 0..sample_count {
+        // Without any per-sample fields, there is nothing to read for any of the samples.
+        let per_sample_mask = TrunAtom::SAMPLE_DURATION_PRESENT
+            | TrunAtom::SAMPLE_SIZE_PRESENT
+            | TrunAtom::SAMPLE_FLAGS_PRESENT
+            | TrunAtom::SAMPLE_COMPOSITION_TIME_OFFSETS_PRESENT;
+        let sample_read_count = if flags & per_sample_mask != 0 { sample_count } else { 0 };
+
+        for _ in 0..sample_read_count {
             if (flags & TrunAtom::SAMPLE_DURATION_PRESENT) != 0 {
                 let duration = it.read_u32()?;
+                sample_timestamp.push(total_sample_duration);
                 total_sample_duration += u64::from(duration);
                 sample_duration.push(duration);
             }
@@ -304,6 +309,7 @@ impl Atom for TrunAtom {
             sample_flags,
             total_sample_size,
             total_sample_duration,
+            sample_timestamp,
         })
     }
 }

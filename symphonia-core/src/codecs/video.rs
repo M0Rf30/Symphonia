@@ -7,12 +7,9 @@
 
 //! Video decoder specific support.
 
-use std::fmt;
-
 #[cfg(feature = "exp-video-codecs")]
 use crate::codecs::CodecInfo;
 use crate::codecs::CodecProfile;
-use crate::common::FourCc;
 
 /// An `VideoCodecId` is a unique identifier used to identify a specific video codec.
 ///
@@ -20,7 +17,8 @@ use crate::common::FourCc;
 ///
 /// Using a [well-known](well_known) codec ID is *highly* recommended to maximize compatibility
 /// between components, libraries, and applications. However, if a codec requires custom codec ID,
-/// or there is no well-known ID, then the [`FourCc`] for the codec may be converted into a codec
+/// or there is no well-known ID, then the [`FourCc`](crate::common::FourCc) for the codec may be
+/// converted into a codec
 /// ID.
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -35,25 +33,7 @@ impl Default for VideoCodecId {
     }
 }
 
-impl VideoCodecId {
-    /// Create a new video codec ID from a FourCC.
-    pub const fn new(cc: FourCc) -> VideoCodecId {
-        // A FourCc always only contains ASCII characters. Therefore, the upper bits are always 0.
-        Self(0x8000_0000 | u32::from_be_bytes(cc.get()))
-    }
-}
-
-impl From<FourCc> for VideoCodecId {
-    fn from(value: FourCc) -> Self {
-        VideoCodecId::new(value)
-    }
-}
-
-impl fmt::Display for VideoCodecId {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:#x}", self.0)
-    }
-}
+crate::common::impl_fourcc_id!(VideoCodecId);
 
 /// An `VideoExtraDataId` is a unique identifier used to identify a specific video extra data.
 #[repr(transparent)]

@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+// Example code: errors abort the example.
 use std::env;
 use std::fs::File;
 use std::path::Path;

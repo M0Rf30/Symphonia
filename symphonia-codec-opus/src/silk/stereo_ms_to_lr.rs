@@ -11,9 +11,10 @@
 #![allow(dead_code)]
 
 use crate::silk::macros::{
-    silk_add_lshift32, silk_div32_16, silk_lshift, silk_rshift_round, silk_sat16, silk_smlawb, silk_smulbb,
+    silk_add_lshift32, silk_div32_16, silk_lshift, silk_rshift_round, silk_sat16, silk_smlawb,
+    silk_smulbb,
 };
-use crate::silk::structs::{StereoDecState, STEREO_INTERP_LEN_MS};
+use crate::silk::structs::{STEREO_INTERP_LEN_MS, StereoDecState};
 
 /// C: `silk_stereo_MS_to_LR`. Convert adaptive Mid/Side representation to Left/Right stereo
 /// signal, in place.
@@ -50,15 +51,15 @@ pub fn silk_stereo_ms_to_lr(
     let mut pred1_q13 = state.pred_prev_q13[1];
     let interp_len = (STEREO_INTERP_LEN_MS * fs_khz) as usize;
     let denom_q16 = silk_div32_16(1i32 << 16, STEREO_INTERP_LEN_MS * fs_khz);
-    let delta0_q13 = silk_rshift_round(silk_smulbb(pred_q13[0] - state.pred_prev_q13[0], denom_q16), 16);
-    let delta1_q13 = silk_rshift_round(silk_smulbb(pred_q13[1] - state.pred_prev_q13[1], denom_q16), 16);
+    let delta0_q13 =
+        silk_rshift_round(silk_smulbb(pred_q13[0] - state.pred_prev_q13[0], denom_q16), 16);
+    let delta1_q13 =
+        silk_rshift_round(silk_smulbb(pred_q13[1] - state.pred_prev_q13[1], denom_q16), 16);
     for n in 0..interp_len {
         pred0_q13 += delta0_q13;
         pred1_q13 += delta1_q13;
-        let mut sum = silk_lshift(
-            silk_add_lshift32(x1[n] as i32 + x1[n + 2] as i32, x1[n + 1] as i32, 1),
-            9,
-        ); // Q11
+        let mut sum =
+            silk_lshift(silk_add_lshift32(x1[n] as i32 + x1[n + 2] as i32, x1[n + 1] as i32, 1), 9); // Q11
         sum = silk_smlawb(silk_lshift(x2[n + 1] as i32, 8), sum, pred0_q13); // Q8
         sum = silk_smlawb(sum, silk_lshift(x1[n + 1] as i32, 11), pred1_q13); // Q8
         x2[n + 1] = silk_sat16(silk_rshift_round(sum, 8)) as i16;
@@ -66,10 +67,8 @@ pub fn silk_stereo_ms_to_lr(
     pred0_q13 = pred_q13[0];
     pred1_q13 = pred_q13[1];
     for n in interp_len..frame_length {
-        let mut sum = silk_lshift(
-            silk_add_lshift32(x1[n] as i32 + x1[n + 2] as i32, x1[n + 1] as i32, 1),
-            9,
-        ); // Q11
+        let mut sum =
+            silk_lshift(silk_add_lshift32(x1[n] as i32 + x1[n + 2] as i32, x1[n + 1] as i32, 1), 9); // Q11
         sum = silk_smlawb(silk_lshift(x2[n + 1] as i32, 8), sum, pred0_q13); // Q8
         sum = silk_smlawb(sum, silk_lshift(x1[n + 1] as i32, 11), pred1_q13); // Q8
         x2[n + 1] = silk_sat16(silk_rshift_round(sum, 8)) as i16;

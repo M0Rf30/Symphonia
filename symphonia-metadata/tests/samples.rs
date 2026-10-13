@@ -45,8 +45,8 @@ fn open(name: &str) -> Option<(MediaSourceStream<'static>, u64)> {
 
 fn read_leading(name: &str) -> Option<Vec<Tag>> {
     let (mss, _) = open(name)?;
-    let mut reader = Id3v2Reader::try_new(mss, MetadataOptions::default()).unwrap();
-    Some(reader.read_all().unwrap().revision.media.tags)
+    let mut reader = Id3v2Reader::try_new(mss, MetadataOptions::default()).expect("id3v2 reader");
+    Some(reader.read_all().expect("read id3v2").revision.media.tags)
 }
 
 fn values(tags: &[Tag], f: impl Fn(&StandardTag) -> Option<&str>) -> Vec<String> {

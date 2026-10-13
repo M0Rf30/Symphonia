@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 //! Implicitly signalled SBR and parametric stereo: HE-AAC in transports that do not signal it
 //! (ADTS, and LOAS/LATM with a plain AAC-LC config).
 
@@ -378,9 +380,7 @@ fn adts_seek_with_implicit_sbr_uses_decoded_frames() {
 
 /// The generated format-coverage samples are used if `RMPD_SAMPLES` points at them.
 fn sample(name: &str) -> Option<MediaSourceStream<'static>> {
-    let dir = std::env::var_os("RMPD_SAMPLES")?;
-    let file = std::fs::File::open(std::path::Path::new(&dir).join("aac").join(name)).ok()?;
-    Some(MediaSourceStream::new(Box::new(file), Default::default()))
+    symphonia_testutil::open_sample(std::path::Path::new("aac").join(name))
 }
 
 #[test]

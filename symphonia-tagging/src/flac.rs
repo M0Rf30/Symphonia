@@ -16,10 +16,9 @@
 //! block without seek points is dropped if `remove_empty_flac_seektable` is set.
 
 use std::fs::File;
-use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use symphonia_core::errors::Error as MetaError;
 use symphonia_core::meta::{Tag, Visual};
 use symphonia_metadata::embedded::flac::write::{
     BLOCK_TYPE_PADDING, BLOCK_TYPE_PICTURE, BLOCK_TYPE_STREAMINFO, BLOCK_TYPE_VORBIS_COMMENT,
@@ -30,8 +29,8 @@ use symphonia_metadata::embedded::vorbis::write::{
 };
 
 use crate::{
-    Error, FlacId3, Result, VorbisRatingScale, WriteOptions, copy_range, read_up_to, replace_file,
-    synchsafe,
+    Error, FlacId3, Result, VorbisRatingScale, WriteOptions, copy_range, leading_id3v2_end,
+    read_at, read_up_to, replace_file,
 };
 
 /// The `SEEKTABLE` block type.
@@ -50,17 +49,13 @@ pub(crate) fn default_vendor() -> Vec<u8> {
     concat!("symphonia-tagging ", env!("CARGO_PKG_VERSION")).as_bytes().to_vec()
 }
 
+/// The existing comments, or an empty set with the default vendor if there are none.
+pub(crate) fn existing_or_default(existing: Option<ExistingComments>) -> ExistingComments {
+    existing.unwrap_or_else(|| ExistingComments { vendor: default_vendor(), ..Default::default() })
+}
+
 /// The most padding, in bytes, that is kept to leave the audio where it is.
 const MAX_REUSED_PADDING: u64 = 64 * 1024;
-
-/// Converts a serializer error.
-pub(crate) fn meta_error(err: MetaError) -> Error {
-    match err {
-        MetaError::IoError(err) => Error::Io(err),
-        MetaError::DecodeError(msg) => Error::Malformed(msg.to_string()),
-        other => Error::Unsupported(other.to_string()),
-    }
-}
 
 /// An existing metadata block, located in the source file.
 struct Block {
@@ -117,21 +112,7 @@ fn rewrite(
     let file_len = src.metadata()?.len();
 
     // Skip the leading ID3v2 tags, if any. They are dropped or kept as is, see `FlacId3`.
-    let mut start = 0u64;
-
-    loop {
-        src.seek(SeekFrom::Start(start))?;
-
-        let mut head = [0u8; 10];
-
-        if read_up_to(src, &mut head)? == 10 && &head[..3] == b"ID3" {
-            let footer = if head[5] & 0x10 != 0 { 10 } else { 0 };
-            start += 10 + u64::from(synchsafe(&head[6..10])) + footer;
-        }
-        else {
-            break;
-        }
-    }
+    let start = leading_id3v2_end(src)?;
 
     let had_id3v2 = start > 0;
 
@@ -188,19 +169,11 @@ fn rewrite(
 
     // The vendor string and the non-tag comments come from the first comment block.
     let existing = match blocks.iter().find(|block| block.kind == BLOCK_TYPE_VORBIS_COMMENT) {
-        Some(block) => {
-            let mut body = vec![0u8; block.len];
-            src.seek(SeekFrom::Start(block.offset))?;
-            src.read_exact(&mut body)?;
-            parse_existing(&body)
-        }
+        Some(block) => parse_existing(&read_at(src, block.offset, block.len as u64)?),
         None => None,
     };
 
-    let ExistingComments { vendor, preserved, .. } = match existing {
-        Some(existing) => existing,
-        None => ExistingComments { vendor: default_vendor(), ..Default::default() },
-    };
+    let ExistingComments { vendor, preserved, .. } = existing_or_default(existing);
 
     // Assemble the new chain: every unmanaged block, then the comment, the pictures and padding.
     let old_len = audio_offset - (start + 4);
@@ -220,15 +193,11 @@ fn rewrite(
 
     items.push(Item::Mem {
         kind: BLOCK_TYPE_VORBIS_COMMENT,
-        data: comment_body_with(&vendor, tags, &[], &preserved, &comment_options(opts))
-            .map_err(meta_error)?,
+        data: comment_body_with(&vendor, tags, &[], &preserved, &comment_options(opts))?,
     });
 
     for visual in visuals {
-        items.push(Item::Mem {
-            kind: BLOCK_TYPE_PICTURE,
-            data: picture_block(visual).map_err(meta_error)?,
-        });
+        items.push(Item::Mem { kind: BLOCK_TYPE_PICTURE, data: picture_block(visual)? });
     }
 
     // Reuse the space the old chain occupied so the audio stays where it is, if it can: the new
@@ -267,8 +236,7 @@ fn rewrite(
     let num_items = items.len();
 
     for (i, item) in items.iter().enumerate() {
-        let header =
-            block_header(i + 1 == num_items, item.kind(), item.len()).map_err(meta_error)?;
+        let header = block_header(i + 1 == num_items, item.kind(), item.len())?;
         out.write_all(&header)?;
 
         match item {

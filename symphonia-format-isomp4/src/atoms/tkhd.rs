@@ -49,23 +49,15 @@ impl Atom for TkhdAtom {
         };
 
         // Version 0 uses 32-bit time values, verion 1 used 64-bit values.
-        match version {
-            0 => {
-                tkhd.ctime = u64::from(it.read_u32()?);
-                tkhd.mtime = u64::from(it.read_u32()?);
-                tkhd.id = it.read_u32()?;
-                let _ = it.read_u32()?; // Reserved
-                tkhd.duration = u64::from(it.read_u32()?);
-            }
-            1 => {
-                tkhd.ctime = it.read_u64()?;
-                tkhd.mtime = it.read_u64()?;
-                tkhd.id = it.read_u32()?;
-                let _ = it.read_u32()?; // Reserved
-                tkhd.duration = it.read_u64()?;
-            }
-            _ => return decode_error("isomp4 (tkhd): invalid version"),
+        if version > 1 {
+            return decode_error("isomp4 (tkhd): invalid version");
         }
+
+        tkhd.ctime = it.read_versioned_u64(version)?;
+        tkhd.mtime = it.read_versioned_u64(version)?;
+        tkhd.id = it.read_u32()?;
+        let _ = it.read_u32()?; // Reserved
+        tkhd.duration = it.read_versioned_u64(version)?;
 
         // Reserved
         let _ = it.read_u64()?;

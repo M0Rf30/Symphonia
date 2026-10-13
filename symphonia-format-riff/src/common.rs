@@ -19,7 +19,9 @@ use symphonia_core::codecs::audio::well_known::{
 use symphonia_core::codecs::audio::{AudioCodecId, AudioCodecParameters};
 use symphonia_core::errors::{Error, Result, decode_error};
 use symphonia_core::formats::prelude::*;
-use symphonia_core::io::{MediaSourceStream, ReadBytes};
+use symphonia_core::io::{MediaSourceStream, ReadBytes, ScopedStream};
+use symphonia_core::meta::MetadataRevision;
+use symphonia_metadata::embedded::riff;
 
 use log::{debug, info};
 
@@ -213,9 +215,9 @@ pub struct FormatPcm {
 
 impl FormatPcm {
     pub fn make_packet_info(&self) -> Result<PacketInfo> {
-        let num_channels = self.channels.count() as u16;
-        let frame_len = (self.bits_per_sample / 8) * num_channels;
-        PacketInfo::without_blocks(u32::from(frame_len))
+        let num_channels = self.channels.count() as u32;
+        let frame_len = u32::from(self.bits_per_sample / 8) * num_channels;
+        PacketInfo::without_blocks(frame_len)
     }
 }
 
@@ -295,9 +297,9 @@ pub struct FormatExtensible {
 impl FormatExtensible {
     pub fn make_packet_info(&self) -> Result<PacketInfo> {
         // NOTE: This is only valid for compressed sub-types.
-        let num_channels = self.channels.count() as u16;
-        let frame_len = (self.bits_per_sample / 8) * num_channels;
-        PacketInfo::without_blocks(u32::from(frame_len))
+        let num_channels = self.channels.count() as u32;
+        let frame_len = u32::from(self.bits_per_sample / 8) * num_channels;
+        PacketInfo::without_blocks(frame_len)
     }
 }
 
@@ -448,7 +450,6 @@ pub fn next_packet(
         Err(_) => return Ok(None),
     };
 
-    let dur = Duration::from(blocks_per_packet * packet_info.frames_per_block.get());
     let pkt_len = blocks_per_packet * packet_info.block_size.get();
 
     // Copy the frames. The data chunk length may be unknown (e.g., a stream with a length of
@@ -460,20 +461,13 @@ pub fn next_packet(
     packet_buf
         .try_reserve_exact(pkt_len as usize)
         .map_err(|_| Error::IoError(io::Error::from(io::ErrorKind::OutOfMemory)))?;
-    packet_buf.resize(pkt_len as usize, 0);
 
-    let mut filled = 0;
-
-    while filled < packet_buf.len() {
-        match reader.read_buf(&mut packet_buf[filled..]) {
-            Ok(0) => break,
-            Ok(count) => filled += count,
-            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => break,
-            Err(err) => return Err(err.into()),
-        }
+    // Read directly into the spare capacity to avoid zero-filling the packet first.
+    match io::Read::read_to_end(&mut io::Read::take(&mut *reader, pkt_len), &mut packet_buf) {
+        Ok(_) => (),
+        Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => (),
+        Err(err) => return Err(err.into()),
     }
-
-    packet_buf.truncate(filled);
 
     let blocks_read = packet_buf.len() as u64 / packet_info.block_size.get();
 
@@ -481,13 +475,11 @@ pub fn next_packet(
         return Ok(None);
     }
 
-    let dur = if blocks_read < blocks_per_packet {
+    if blocks_read < blocks_per_packet {
         packet_buf.truncate((blocks_read * packet_info.block_size.get()) as usize);
-        Duration::from(blocks_read * packet_info.frames_per_block.get())
     }
-    else {
-        dur
-    };
+
+    let dur = Duration::from(blocks_read * packet_info.frames_per_block.get());
 
     Ok(Some(Packet::new(0, pts, dur, packet_buf.into_boxed_slice())))
 }
@@ -542,4 +534,43 @@ pub fn append_data_params(track: &mut Track, data_len: u64, packet_info: &Packet
     track.with_num_frames(num_frames);
     // Duration equals the number of frames because the timebase is always 1 / sample rate.
     track.with_duration(Duration::from(num_frames));
+}
+
+pub struct Id3Chunk {
+    pub metadata: MetadataRevision,
+}
+
+impl ParseChunk for Id3Chunk {
+    fn parse<B: ReadBytes>(reader: &mut B, _tag: [u8; 4], len: u32) -> Result<Self> {
+        // The tag must not be read past the end of the chunk.
+        let mut reader = ScopedStream::new(reader, u64::from(len));
+
+        let mut side_data = Vec::new();
+        let metadata = riff::read_riff_id3_chunk(&mut reader, &mut side_data)?;
+
+        // Skip any unread data in the chunk (e.g., padding).
+        reader.ignore()?;
+
+        Ok(Id3Chunk { metadata })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use symphonia_core::audio::Position;
+
+    use super::*;
+
+    #[test]
+    fn verify_extensible_packet_info_does_not_overflow() {
+        // 8191 bytes per sample * 26 channels exceeds u16::MAX.
+        let ext = FormatExtensible {
+            bits_per_sample: 0xfff8,
+            valid_bits_per_sample: 0,
+            channels: Channels::Positioned(Position::from_count(26).unwrap()),
+            sub_format_guid: [0; 16],
+            codec: CODEC_ID_PCM_F32LE,
+        };
+        assert!(ext.make_packet_info().is_ok());
+    }
 }

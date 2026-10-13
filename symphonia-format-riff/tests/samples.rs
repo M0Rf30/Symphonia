@@ -6,40 +6,20 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! Tests against real files. The files are not part of the repository: the tests look for them in
-//! the directory in the `RMPD_SAMPLES_DIR` environment variable (by default
-//! `/home/gianluca/rmpd-samples/samples`), and are skipped when a file is absent.
+//! the directory in the `RMPD_SAMPLES` environment variable, and are skipped when a file is absent.
 
 #![cfg(feature = "wav")]
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::path::PathBuf;
 
 use symphonia_core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
-use symphonia_core::io::MediaSourceStream;
 use symphonia_core::units::Time;
 use symphonia_format_riff::WavReader;
-
-fn sample_path(name: &str) -> Option<PathBuf> {
-    let dir = std::env::var_os("RMPD_SAMPLES_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/home/gianluca/rmpd-samples/samples"));
-
-    let path = dir.join(name);
-
-    if path.exists() {
-        Some(path)
-    }
-    else {
-        eprintln!("skipping: {} not found", path.display());
-        None
-    }
-}
+use symphonia_testutil::open_sample;
 
 fn open(name: &str) -> Option<WavReader<'static>> {
-    let path = sample_path(name)?;
-    let mss = MediaSourceStream::new(Box::new(File::open(path).unwrap()), Default::default());
-    Some(WavReader::try_new(mss, FormatOptions::default()).unwrap())
+    let mss = open_sample(name)?;
+    Some(WavReader::try_new(mss, FormatOptions::default()).expect("sample file is valid"))
 }
 
 /// Reads all the packets from the current position. Returns a map from the timestamp of a packet,
@@ -66,9 +46,10 @@ fn check_seeks(name: &str, max_distance_secs: f64) {
     };
 
     let track = &reader.tracks()[0];
-    let rate =
-        f64::from(track.codec_params.as_ref().unwrap().audio().unwrap().sample_rate.unwrap());
-    let num_frames = track.num_frames.unwrap();
+    let params =
+        track.codec_params.as_ref().and_then(|p| p.audio()).expect("audio codec parameters");
+    let rate = f64::from(params.sample_rate.expect("sample rate"));
+    let num_frames = track.num_frames.expect("number of frames");
     let duration = num_frames as f64 / rate;
 
     let (order, packets) = read_all(&mut reader);
@@ -76,7 +57,7 @@ fn check_seeks(name: &str, max_distance_secs: f64) {
 
     for fraction in [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99] {
         let secs = duration * fraction;
-        let time = Time::try_from_secs_f64(secs).unwrap();
+        let time = Time::try_from_secs_f64(secs).expect("valid time");
 
         let seeked = reader
             .seek(SeekMode::Accurate, SeekTo::Time { time, track_id: None })
@@ -90,7 +71,7 @@ fn check_seeks(name: &str, max_distance_secs: f64) {
 
         let packet = reader
             .next_packet()
-            .unwrap()
+            .expect("packet read after seek")
             .unwrap_or_else(|| panic!("{name}: no packet after seek to {secs:.3}s"));
 
         assert_eq!(packet.pts, seeked.actual_ts, "{name}: first packet after seek to {secs:.3}s");

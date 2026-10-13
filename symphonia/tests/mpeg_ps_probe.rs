@@ -9,24 +9,16 @@
 //! the samples in `$RMPD_SAMPLES`; skipped if absent.
 
 use std::fs::File;
-use std::path::PathBuf;
 
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::io::MediaSourceStream;
 
-fn samples_dir() -> PathBuf {
-    std::env::var_os("RMPD_SAMPLES")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/home/gianluca/rmpd-samples/samples"))
-}
-
 #[test]
 fn mpeg_program_stream_is_not_probed_as_mpeg_audio() {
-    let path = samples_dir().join("unsupported/mp2_in_mpegps.mpg");
-
-    if !path.exists() {
+    let Some(path) = symphonia_testutil::sample_path("unsupported/mp2_in_mpegps.mpg")
+    else {
         return;
-    }
+    };
 
     let mss = MediaSourceStream::new(Box::new(File::open(path).unwrap()), Default::default());
     let result = symphonia::default::get_probe().probe(
@@ -46,7 +38,10 @@ fn mpeg_program_stream_is_not_probed_as_mpeg_audio() {
 /// (`cargo test -- --nocapture`) to compare before/after a change to the MPEG-PS detection.
 #[test]
 fn tagged_mp3s_are_probed_as_mp3() {
-    let dir = samples_dir().join("tags");
+    let Some(dir) = symphonia_testutil::sample_dir().map(|d| d.join("tags"))
+    else {
+        return;
+    };
 
     let Ok(entries) = std::fs::read_dir(&dir)
     else {

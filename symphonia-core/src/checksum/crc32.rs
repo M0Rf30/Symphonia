@@ -595,9 +595,93 @@ impl Monitor for Crc32 {
     }
 }
 
+/// Slice-by-8 lookup tables for the reflected CRC-32 (IEEE 802.3, as used by zlib).
+const fn make_ieee_tables() -> [[u32; 256]; 8] {
+    let mut t = [[0u32; 256]; 8];
+    let mut i = 0;
+    while i < 256 {
+        let mut c = i as u32;
+        let mut k = 0;
+        while k < 8 {
+            c = if c & 1 != 0 { (c >> 1) ^ 0xedb8_8320 } else { c >> 1 };
+            k += 1;
+        }
+        t[0][i] = c;
+        i += 1;
+    }
+    let mut i = 0;
+    while i < 256 {
+        let mut c = t[0][i];
+        let mut k = 1;
+        while k < 8 {
+            c = t[0][(c & 0xff) as usize] ^ (c >> 8);
+            t[k][i] = c;
+            k += 1;
+        }
+        i += 1;
+    }
+    t
+}
+
+static CRC32_IEEE: [[u32; 256]; 8] = make_ieee_tables();
+
+/// `Crc32Ieee` implements the reflected CRC-32 checksum algorithm (as used by zlib, PNG, etc.).
+///
+/// The state is the raw register: for the standard CRC-32 initialize with `0xffff_ffff` and
+/// invert the value returned by [`Crc32Ieee::crc`].
+///
+/// * Polynomial = 0x04c11db7 (reflected: 0xedb88320)
+/// * RefIn = true
+/// * RefOut = true
+pub struct Crc32Ieee {
+    state: u32,
+}
+
+impl Crc32Ieee {
+    /// Instantiates a `Crc32Ieee` instance with an initial state.
+    pub fn new(state: u32) -> Self {
+        Crc32Ieee { state }
+    }
+
+    /// Returns the raw CRC register.
+    pub fn crc(&self) -> u32 {
+        self.state
+    }
+}
+
+impl Monitor for Crc32Ieee {
+    #[inline(always)]
+    fn process_byte(&mut self, byte: u8) {
+        self.state = CRC32_IEEE[0][usize::from((self.state as u8) ^ byte)] ^ (self.state >> 8);
+    }
+
+    fn process_buf_bytes(&mut self, buf: &[u8]) {
+        let t = &CRC32_IEEE;
+        let mut iter = buf.chunks_exact(8);
+
+        for c in &mut iter {
+            let lo = u32::from_le_bytes([c[0], c[1], c[2], c[3]]) ^ self.state;
+            let hi = u32::from_le_bytes([c[4], c[5], c[6], c[7]]);
+
+            self.state = t[7][(lo & 0xff) as usize]
+                ^ t[6][((lo >> 8) & 0xff) as usize]
+                ^ t[5][((lo >> 16) & 0xff) as usize]
+                ^ t[4][(lo >> 24) as usize]
+                ^ t[3][(hi & 0xff) as usize]
+                ^ t[2][((hi >> 8) & 0xff) as usize]
+                ^ t[1][((hi >> 16) & 0xff) as usize]
+                ^ t[0][(hi >> 24) as usize];
+        }
+
+        for byte in iter.remainder() {
+            self.process_byte(*byte);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Crc32, Monitor};
+    use super::{Crc32, Crc32Ieee, Monitor};
 
     #[test]
     fn verify_crc32() {
@@ -635,5 +719,26 @@ mod tests {
             crc.process_byte(b'9');
             assert_eq!(crc.crc(), 0x0376e6e7);
         }
+    }
+
+    #[test]
+    fn verify_crc32_ieee() {
+        let crc = |data: &[u8]| {
+            let mut c = Crc32Ieee::new(0xffff_ffff);
+            c.process_buf_bytes(data);
+            !c.crc()
+        };
+
+        assert_eq!(crc(b""), 0);
+        assert_eq!(crc(b"123456789"), 0xcbf4_3926);
+
+        // Slice-by-8 must match the bytewise path.
+        let data: Vec<u8> =
+            (0..1000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        let mut c = Crc32Ieee::new(0xffff_ffff);
+        for &b in &data {
+            c.process_byte(b);
+        }
+        assert_eq!(crc(&data), !c.crc());
     }
 }

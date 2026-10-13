@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+// Test code: a panic is a test failure.
 // Symphonia
 // Copyright (c) 2019-2026 The Project Symphonia Developers.
 //
@@ -23,8 +25,8 @@ use std::fs::File;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
+use symphonia::core::formats::FormatOptions;
 use symphonia::core::formats::probe::{Hint, Probe};
-use symphonia::core::formats::{FormatOptions, FormatReader};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::default::formats::*;
@@ -33,7 +35,7 @@ use symphonia::default::formats::*;
 const NEW_FORMATS: [&str; 3] = ["flv", "mpegps", "mpegts"];
 
 /// The samples that are in the new formats, and the format they must be read by.
-const EXPECTED: [(&str, &str); 9] = [
+static EXPECTED: [(&str, &str); 9] = [
     ("unsupported/aac_in_flv.flv", "flv"),
     ("unsupported/mp3_in_flv.flv", "flv"),
     ("unsupported/mp2_in_mpegps.mpg", "mpegps"),

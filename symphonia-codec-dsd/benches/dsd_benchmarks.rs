@@ -1,4 +1,5 @@
 // DSD Codec Benchmarks
+#![allow(clippy::unwrap_used)]
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use symphonia_codec_dsd::{CODEC_ID_DSD, DsdDecoder};
@@ -134,7 +135,8 @@ fn bench_bitstream_unpacking(c: &mut Criterion) {
                 let mut output = vec![0.0f32; size * 8];
 
                 b.iter(|| {
-                    black_box(unpack_dsd_bytes_to_f32(&input, BitOrder::LsbFirst, &mut output))
+                    unpack_dsd_bytes_to_f32(&input, BitOrder::LsbFirst, &mut output);
+                    black_box(&output);
                 });
             },
         );

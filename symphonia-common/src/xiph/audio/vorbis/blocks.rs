@@ -199,7 +199,7 @@ fn read_setup_modes(buf: &[u8], n_channels: u8) -> Result<(u8, u64)> {
     Ok((num_modes as u8, flags))
 }
 
-fn skip_codebooks(bs: &mut BitReaderRtl<'_>) -> Result<()> {
+pub fn skip_codebooks(bs: &mut BitReaderRtl<'_>) -> Result<()> {
     let count = bs.read_bits_leq32(8)? + 1;
 
     for _ in 0..count {

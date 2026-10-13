@@ -20,6 +20,7 @@
 
 use crate::decoder::{DecodeError, OpusDecoder, Result, SampleRate};
 use crate::mapping::ChannelMapping;
+use symphonia_core::audio::conv::I16_SCALE_INV;
 
 /// C: `get_left_channel`. Returns the next output channel index (after `prev`) whose mapping
 /// table entry addresses the left channel of coupled stream `stream_id` (`stream_id*2`).
@@ -77,7 +78,7 @@ fn demix(
         for (row, d) in dst.iter_mut().enumerate() {
             let mut acc = 0.0f32;
             for (col, &x) in src.iter().enumerate().take(used_cols) {
-                acc += ((1.0 / 32768.0) * f32::from(matrix[rows * col + row])) * x;
+                acc += (I16_SCALE_INV * f32::from(matrix[rows * col + row])) * x;
             }
             *d = acc;
         }
@@ -96,6 +97,10 @@ pub struct MultistreamDecoder {
     /// explicit table (`RFC 7845` implicit mapping) and this field holds the equivalent
     /// identity table (`[0]` or `[0, 1]`) so [`Self::decode`] never needs to special-case it.
     effective_table: Vec<u8>,
+    /// Per-stream decode scratch (`2 * frame_size` samples), reused across packets.
+    buf: Vec<f32>,
+    /// Projection (family 3) intermediate mix buffer, reused across packets.
+    mix: Vec<f32>,
 }
 
 impl MultistreamDecoder {
@@ -151,7 +156,15 @@ impl MultistreamDecoder {
             let ch = if i < mapping.coupled_count { 2 } else { 1 };
             decoders.push(OpusDecoder::try_new(sample_rate, ch)?);
         }
-        Ok(MultistreamDecoder { mapping, layout_channels, sample_rate, decoders, effective_table })
+        Ok(MultistreamDecoder {
+            mapping,
+            layout_channels,
+            sample_rate,
+            decoders,
+            effective_table,
+            buf: Vec::new(),
+            mix: Vec::new(),
+        })
     }
 
     pub fn stream_count(&self) -> usize {
@@ -220,17 +233,20 @@ impl MultistreamDecoder {
             Some(need) if out.len() >= need => {}
             _ => return Err(DecodeError::BufferTooSmall),
         }
-        let mut buf = vec![0f32; 2 * frame_size];
+        self.buf.clear();
+        self.buf.resize(2 * frame_size, 0.0);
 
         // Mapping family 3 (projection): decode into a `stream_count + coupled_count` channel
         // intermediate buffer, demixed into `out` at the end.
         let projection = self.mapping.family == 3;
         let n_in = self.mapping.stream_count as usize + self.mapping.coupled_count as usize;
-        let mut mix = if projection { vec![0f32; frame_size * n_in] } else { Vec::new() };
+        self.mix.clear();
+        if projection {
+            self.mix.resize(frame_size * n_in, 0.0);
+        }
 
         let do_plc = data.is_none();
-        if !do_plc {
-            let d = data.unwrap();
+        if let Some(d) = data {
             if d.len() < 2 * self.decoders.len() - 1 {
                 return Err(DecodeError::Packet(crate::packet::PacketError::InvalidPacket));
             }
@@ -246,19 +262,19 @@ impl MultistreamDecoder {
             let is_coupled = s < self.mapping.coupled_count as usize;
             let self_delimited = s != nb_streams - 1;
 
-            if !do_plc && data_ptr.map_or(true, |d| d.is_empty()) {
+            if !do_plc && data_ptr.is_none_or(|d| d.is_empty()) {
                 return Err(DecodeError::Internal);
             }
 
             let (n, packet_offset) = self.decoders[s].decode_native(
                 if do_plc { None } else { data_ptr },
-                &mut buf,
+                &mut self.buf,
                 frame_size,
                 decode_fec,
                 self_delimited,
             )?;
-            if !do_plc {
-                data_ptr = Some(&data_ptr.unwrap()[packet_offset..]);
+            if let Some(d) = data_ptr.filter(|_| !do_plc) {
+                data_ptr = Some(&d[packet_offset..]);
             }
             if n == 0 {
                 return Err(DecodeError::Internal);
@@ -270,10 +286,10 @@ impl MultistreamDecoder {
                 let mut prev = -1i32;
                 while let Some(chan) = get_left_channel(&self.effective_table, s as u8, prev) {
                     scatter(
-                        if projection { &mut mix[..] } else { &mut out[..] },
+                        if projection { &mut self.mix[..] } else { &mut out[..] },
                         total_ch,
                         chan,
-                        &buf,
+                        &self.buf,
                         2,
                         0,
                         frame_size,
@@ -283,10 +299,10 @@ impl MultistreamDecoder {
                 prev = -1;
                 while let Some(chan) = get_right_channel(&self.effective_table, s as u8, prev) {
                     scatter(
-                        if projection { &mut mix[..] } else { &mut out[..] },
+                        if projection { &mut self.mix[..] } else { &mut out[..] },
                         total_ch,
                         chan,
-                        &buf,
+                        &self.buf,
                         2,
                         1,
                         frame_size,
@@ -303,10 +319,10 @@ impl MultistreamDecoder {
                     prev,
                 ) {
                     scatter(
-                        if projection { &mut mix[..] } else { &mut out[..] },
+                        if projection { &mut self.mix[..] } else { &mut out[..] },
                         total_ch,
                         chan,
-                        &buf,
+                        &self.buf,
                         1,
                         0,
                         frame_size,
@@ -318,7 +334,15 @@ impl MultistreamDecoder {
 
         if projection {
             let rows = self.layout_channels as usize;
-            demix(&self.mapping.demixing_matrix, rows, n_in, rows.min(n_in), &mix, out, frame_size);
+            demix(
+                &self.mapping.demixing_matrix,
+                rows,
+                n_in,
+                rows.min(n_in),
+                &self.mix,
+                out,
+                frame_size,
+            );
             return Ok(frame_size);
         }
 

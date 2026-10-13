@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+// Test code: a panic is a test failure.
 // End-to-end integration test: decodes ffmpeg/libopus-encoded Ogg Opus files through
 // Symphonia's *default* probe + codec registry (i.e. exactly how a real consumer of this crate
 // would use it, not `symphonia-codec-opus` directly), and cross-checks against `ffmpeg`'s own
@@ -8,8 +10,12 @@
 // Run with:
 //   cargo test -p symphonia --release --features opus --test opus_integration -- --nocapture
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use common::run_ffmpeg;
 
 use symphonia::core::errors::Error;
 use symphonia::core::formats::probe::Hint;
@@ -21,15 +27,8 @@ fn ffmpeg_available() -> bool {
     Command::new("ffmpeg").arg("-version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
-fn run_ffmpeg(args: &[&str]) {
-    let status = Command::new("ffmpeg").args(args).status().expect("failed to spawn ffmpeg");
-    assert!(status.success(), "ffmpeg {args:?} failed");
-}
-
 fn fixtures_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join("symphonia-opus-fixtures");
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    common::fixtures_dir("symphonia-opus-fixtures")
 }
 
 /// Encodes a small sine-wave (or multi-tone) fixture with `ffmpeg -c:a libopus`.
@@ -183,7 +182,12 @@ fn rms(x: &[f32]) -> f64 {
 /// RFC 7845 "Vorbis order" 1:1, making a raw interleaved SNR comparison channel-order-fragile --
 /// frame count (gapless-exactness) and overall RMS energy are checked instead, still exercising
 /// the full 5.1 decode path end-to-end as required).
-fn check_fixture(name: &str, encode_args: &[&str], expected_channels: usize, min_snr_db: Option<f64>) {
+fn check_fixture(
+    name: &str,
+    encode_args: &[&str],
+    expected_channels: usize,
+    min_snr_db: Option<f64>,
+) {
     if !ffmpeg_available() {
         eprintln!("ffmpeg not available; skipping {name}");
         return;
@@ -369,7 +373,8 @@ fn perf_celt_60s_160k() {
             "audio",
         ],
     );
-    let iters: u32 = std::env::var("OPUS_PERF_ITERS").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
+    let iters: u32 =
+        std::env::var("OPUS_PERF_ITERS").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
     let start = std::time::Instant::now();
     let mut last = (Vec::new(), 0usize);
     for _ in 0..iters {
@@ -440,8 +445,14 @@ fn probe_opus(path: &Path, ext: &str) -> Box<dyn FormatReader> {
 ///  - `cold`: an artificial pre-fix baseline. A *freshly* `reset()` decoder is fed *only* the
 ///    packet(s) starting at `required_ts`, i.e. zero lead-in -- this is what every format
 ///    reader did before this patch (`actual_ts == required_ts` unconditionally).
+///
 /// Returns `(warm_pcm, cold_pcm)`, both interleaved PCM windows of (up to) `200`ms.
-fn seek_preroll_window(path: &Path, ext: &str, time_s: u32, channels: usize) -> (Vec<f32>, Vec<f32>) {
+fn seek_preroll_window(
+    path: &Path,
+    ext: &str,
+    time_s: u32,
+    channels: usize,
+) -> (Vec<f32>, Vec<f32>) {
     const WINDOW_MS: f64 = 200.0;
     const SAMPLE_RATE: f64 = 48_000.0;
 
@@ -451,7 +462,10 @@ fn seek_preroll_window(path: &Path, ext: &str, time_s: u32, channels: usize) -> 
     let time_base = track.time_base.expect("symphonia: track has no time base");
 
     let seeked = format
-        .seek(SeekMode::Accurate, SeekTo::Time { time: Time::from(time_s), track_id: Some(track_id) })
+        .seek(
+            SeekMode::Accurate,
+            SeekTo::Time { time: Time::from(time_s), track_id: Some(track_id) },
+        )
         .expect("symphonia: seek failed");
 
     assert!(
@@ -530,14 +544,16 @@ fn seek_preroll_window(path: &Path, ext: &str, time_s: u32, channels: usize) -> 
     let split = packets
         .iter()
         .position(|p| {
-            let end_ticks = (p.pts.get() + p.dur.get() as i64 - seeked.actual_ts.get()).max(0) as u64;
+            let end_ticks =
+                (p.pts.get() + p.dur.get() as i64 - seeked.actual_ts.get()).max(0) as u64;
             let end_secs = time_base.calc_duration(Duration::new(end_ticks)).unwrap().as_secs_f64();
             end_secs >= lead_in_secs
         })
         .unwrap_or(0);
     let cold_full = decode_from(&packets[split..]);
     let cold_lead_ticks = (seeked.required_ts.get() - packets[split].pts.get()).max(0) as u64;
-    let cold_skip_secs = time_base.calc_duration(Duration::new(cold_lead_ticks)).unwrap().as_secs_f64();
+    let cold_skip_secs =
+        time_base.calc_duration(Duration::new(cold_lead_ticks)).unwrap().as_secs_f64();
     let cold_skip = (cold_skip_secs * SAMPLE_RATE).round() as usize;
     let cold = slice(&cold_full, cold_skip);
 

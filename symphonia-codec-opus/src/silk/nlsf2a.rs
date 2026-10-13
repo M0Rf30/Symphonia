@@ -14,7 +14,9 @@
 use crate::silk::bwexpander::silk_bwexpander_32;
 use crate::silk::lpc_fit::silk_lpc_fit;
 use crate::silk::lpc_inv_pred_gain::silk_lpc_inverse_pred_gain;
-use crate::silk::macros::{silk_lshift, silk_mul, silk_rshift, silk_rshift_round, silk_smull};
+use crate::silk::macros::{
+    silk_lshift, silk_mul, silk_rshift, silk_rshift_round, silk_rshift_round64, silk_smull,
+};
 use crate::silk::structs::MAX_LPC_ORDER;
 use crate::silk::tables::LSF_COS_TAB_FIX_Q12;
 
@@ -32,19 +34,15 @@ fn nlsf2a_find_poly(out: &mut [i32], c_lsf: &[i32], dd: usize) {
     out[1] = -c_lsf[0];
     for k in 1..dd {
         let ftmp = c_lsf[2 * k];
-        out[k + 1] = silk_lshift(out[k - 1], 1) - (silk_rshift_round64_i32(silk_smull(ftmp, out[k]), QA));
+        out[k + 1] =
+            silk_lshift(out[k - 1], 1) - (silk_rshift_round64(silk_smull(ftmp, out[k]), QA) as i32);
         let mut n = k;
         while n > 1 {
-            out[n] += out[n - 2] - silk_rshift_round64_i32(silk_smull(ftmp, out[n - 1]), QA);
+            out[n] += out[n - 2] - silk_rshift_round64(silk_smull(ftmp, out[n - 1]), QA) as i32;
             n -= 1;
         }
         out[1] -= ftmp;
     }
-}
-
-#[inline]
-fn silk_rshift_round64_i32(a: i64, shift: i32) -> i32 {
-    crate::silk::macros::silk_rshift_round64(a, shift) as i32
 }
 
 /// C: `silk_NLSF2A`. Compute whitening filter coefficients (Q12) from normalized line spectral

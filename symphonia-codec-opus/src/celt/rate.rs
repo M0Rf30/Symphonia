@@ -18,11 +18,9 @@
 //! `ec_dec_bit_logp`/`ec_dec_uint` calls); `encode`/`prev`/`signalBandwidth` are dropped since
 //! they only affect the (unported) encode direction.
 
-use crate::celt::modes::{celt_sudiv, CeltMode};
-use crate::range::{RangeDecoder, BITRES};
+use crate::celt::modes::{CeltMode, celt_sudiv};
+use crate::range::{BITRES, RangeDecoder};
 
-/// C: `MAX_PSEUDO` (`celt/rate.h`).
-const MAX_PSEUDO: i32 = 40;
 /// C: `LOG_MAX_PSEUDO` (`celt/rate.h`).
 const LOG_MAX_PSEUDO: i32 = 6;
 /// C: `MAX_FINE_BITS` (`celt/rate.h`).
@@ -46,12 +44,7 @@ fn eb(m: &CeltMode, i: usize) -> i32 {
 
 /// C: `get_pulses` (`celt/rate.h`).
 pub(crate) fn get_pulses(i: i32) -> i32 {
-    if i < 8 {
-        i
-    }
-    else {
-        (8 + (i & 7)) << ((i >> 3) - 1)
-    }
+    if i < 8 { i } else { (8 + (i & 7)) << ((i >> 3) - 1) }
 }
 
 /// C: `bits2pulses` (`celt/rate.h`).
@@ -71,24 +64,14 @@ pub(crate) fn bits2pulses(m: &CeltMode, band: i32, lm: i32, bits: i32) -> i32 {
         }
     }
     let lo_bits = if lo == 0 { -1 } else { cache[lo as usize] as i32 };
-    if bits - lo_bits <= cache[hi as usize] as i32 - bits {
-        lo
-    }
-    else {
-        hi
-    }
+    if bits - lo_bits <= cache[hi as usize] as i32 - bits { lo } else { hi }
 }
 
 /// C: `pulses2bits` (`celt/rate.h`).
 pub(crate) fn pulses2bits(m: &CeltMode, band: i32, lm: i32, pulses: i32) -> i32 {
     let lm = lm + 1;
     let cache = &m.cache.bits[m.cache.index[(lm * m.nb_ebands + band) as usize] as usize..];
-    if pulses == 0 {
-        0
-    }
-    else {
-        cache[pulses as usize] as i32 + 1
-    }
+    if pulses == 0 { 0 } else { cache[pulses as usize] as i32 + 1 }
 }
 
 /// The single built-in 48 kHz mode's `nb_ebands` (see crate docs: only this one mode is
@@ -210,12 +193,7 @@ fn interp_bits2pulses<R: AllocCoder>(
         let ji = j as usize;
         let tmp0 = bits1[ji] + ((lo * bits2[ji]) >> ALLOC_STEPS);
         let tmp = if tmp0 < thresh[ji] && !done {
-            if tmp0 >= alloc_floor {
-                alloc_floor
-            }
-            else {
-                0
-            }
+            if tmp0 >= alloc_floor { alloc_floor } else { 0 }
         }
         else {
             done = true;
@@ -230,7 +208,6 @@ fn interp_bits2pulses<R: AllocCoder>(
     let mut coded_bands = end;
     let mut total = total;
     let mut intensity_rsv = intensity_rsv_in;
-    let skip_start = skip_start;
     loop {
         let j = coded_bands - 1;
         if j <= skip_start {
@@ -303,7 +280,8 @@ fn interp_bits2pulses<R: AllocCoder>(
             excess = (bit - cap[ji]).max(0);
             bits[ji] = bit - excess;
 
-            let den = channels * n + if channels == 2 && n > 2 && !dual_stereo && j < intensity { 1 } else { 0 };
+            let den = channels * n
+                + if channels == 2 && n > 2 && !dual_stereo && j < intensity { 1 } else { 0 };
             let nc_log_n = den * (m.log_n[ji] as i32 + log_m);
             let mut offset = (nc_log_n >> 1) - den * FINE_OFFSET;
             if n == 2 {
@@ -416,8 +394,13 @@ pub fn clt_compute_allocation(
     for j in start..end {
         let ji = j as usize;
         let width = eb(mode, ji + 1) - eb(mode, ji);
-        thresh[ji] = (channels << BITRES).max((3 * width << lm << BITRES) >> 4);
-        trim_offset[ji] = channels * width * (alloc_trim - 5 - lm) * (end - j - 1) * (1 << (lm + BITRES as i32)) >> 6;
+        thresh[ji] = (channels << BITRES).max((((3 * width) << lm) << BITRES) >> 4);
+        trim_offset[ji] = (channels
+            * width
+            * (alloc_trim - 5 - lm)
+            * (end - j - 1)
+            * (1 << (lm + BITRES as i32)))
+            >> 6;
         if width << lm == 1 {
             trim_offset[ji] -= channels << BITRES;
         }
@@ -433,7 +416,8 @@ pub fn clt_compute_allocation(
         for j in (start..end).rev() {
             let ji = j as usize;
             let n = eb(mode, ji + 1) - eb(mode, ji);
-            let mut bitsj = (channels * n * mode.alloc_vectors[(mid * len + j) as usize] as i32) << lm >> 2;
+            let mut bitsj =
+                (channels * n * mode.alloc_vectors[(mid * len + j) as usize] as i32) << lm >> 2;
             if bitsj > 0 {
                 bitsj = 0.max(bitsj + trim_offset[ji]);
             }
@@ -462,7 +446,8 @@ pub fn clt_compute_allocation(
     for j in start..end {
         let ji = j as usize;
         let n = eb(mode, ji + 1) - eb(mode, ji);
-        let mut bits1j = (channels * n * mode.alloc_vectors[(lo * len + j) as usize] as i32) << lm >> 2;
+        let mut bits1j =
+            (channels * n * mode.alloc_vectors[(lo * len + j) as usize] as i32) << lm >> 2;
         let mut bits2j = if hi >= nb_alloc_vectors {
             caps[ji]
         }
@@ -547,7 +532,10 @@ mod tests {
                         q -= 1;
                         cost = pulses2bits(m, band, lm, q);
                     }
-                    assert!(cost <= bits.max(0), "band={band} lm={lm} bits={bits}: q={q} cost={cost}");
+                    assert!(
+                        cost <= bits.max(0),
+                        "band={band} lm={lm} bits={bits}: q={q} cost={cost}"
+                    );
                     assert!(q >= 0);
                 }
             }
@@ -607,7 +595,11 @@ mod tests {
                             &mut fine_priority,
                         );
 
-                        assert!(alloc.coded_bands > start && alloc.coded_bands <= end, "coded_bands={}", alloc.coded_bands);
+                        assert!(
+                            alloc.coded_bands > start && alloc.coded_bands <= end,
+                            "coded_bands={}",
+                            alloc.coded_bands
+                        );
                         assert!(
                             alloc.intensity >= start && alloc.intensity <= alloc.coded_bands,
                             "intensity={} coded_bands={}",

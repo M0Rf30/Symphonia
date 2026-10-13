@@ -59,9 +59,9 @@
 //! resolution remap is ever needed.
 
 use super::envelope::{SbrEnvelopeData, SbrNoiseData};
+use super::error::{SbrError as Error, SbrResult as Result};
 use super::freq_bands::HiLoTables;
 use super::grid::{SbrDtdf, SbrGrid};
-use super::error::{SbrError as Error, SbrResult as Result};
 
 /// Reconstructed quantized envelope scalefactors `E_Q(k,l)` for one
 /// channel: one band vector per envelope.
@@ -88,11 +88,7 @@ pub struct NoiseScalefactors {
 /// `1` otherwise.
 #[inline]
 fn inv_delta(coupling: bool, ch: bool) -> i32 {
-    if coupling && ch {
-        2
-    } else {
-        1
-    }
+    if coupling && ch { 2 } else { 1 }
 }
 
 /// `i(k)` for `r(l) = 1, g(l) = 0` (current high-res band `k` → ref
@@ -110,11 +106,7 @@ fn high_to_low(bands: &HiLoTables, k: usize) -> usize {
 /// high-res band): the `i` with `fTableHigh(i) = fTableLow(k)`.
 fn low_to_high(bands: &HiLoTables, k: usize) -> usize {
     let target = bands.f_table_low[k];
-    bands
-        .f_table_high
-        .iter()
-        .position(|&v| v == target)
-        .unwrap_or(0)
+    bands.f_table_high.iter().position(|&v| v == target).unwrap_or(0)
 }
 
 /// Map a reference-envelope band array `prev` (at resolution
@@ -129,10 +121,12 @@ pub(crate) fn ref_band(
 ) -> i32 {
     let idx = if cur_high == prev_high {
         k
-    } else if cur_high {
+    }
+    else if cur_high {
         // r=1, g=0
         high_to_low(bands, k)
-    } else {
+    }
+    else {
         // r=0, g=1
         low_to_high(bands, k)
     };
@@ -161,11 +155,7 @@ impl EnvelopeScalefactors {
 
         for l in 0..grid.num_env {
             let cur_high = grid.freq_res[l];
-            let n = if cur_high {
-                bands.n_high()
-            } else {
-                bands.n_low()
-            };
+            let n = if cur_high { bands.n_high() } else { bands.n_low() };
             let raw = &env.data[l];
             if raw.len() != n {
                 return Err(Error::SbrGridInvalid);
@@ -178,19 +168,22 @@ impl EnvelopeScalefactors {
                 for k in 1..n {
                     row[k] = row[k - 1] + raw[k] * inv;
                 }
-            } else {
+            }
+            else {
                 // Time direction: reference is the previous envelope of
                 // this frame (l-1), or the last envelope of the previous
                 // frame for l == 0.
                 let (prev_row, prev_high): (Vec<i32>, bool) = if l >= 1 {
                     (eq[l - 1].clone(), grid.freq_res[l - 1])
-                } else if let Some(p) = prev {
+                }
+                else if let Some(p) = prev {
                     let last = p.eq.len().saturating_sub(1);
                     (
                         p.eq.get(last).cloned().unwrap_or_default(),
                         *p.freq_res.get(last).unwrap_or(&cur_high),
                     )
-                } else {
+                }
+                else {
                     (vec![0i32; n], cur_high)
                 };
                 for k in 0..n {
@@ -201,10 +194,7 @@ impl EnvelopeScalefactors {
             eq.push(row);
         }
 
-        Ok(EnvelopeScalefactors {
-            eq,
-            freq_res: grid.freq_res.clone(),
-        })
+        Ok(EnvelopeScalefactors { eq, freq_res: grid.freq_res.clone() })
     }
 }
 
@@ -235,14 +225,15 @@ impl NoiseScalefactors {
                 for k in 1..num_noise_bands {
                     row[k] = row[k - 1] + raw[k] * inv;
                 }
-            } else {
+            }
+            else {
                 let prev_row: Vec<i32> = if l >= 1 {
                     q[l - 1].clone()
-                } else if let Some(p) = prev {
-                    p.q.last()
-                        .cloned()
-                        .unwrap_or_else(|| vec![0i32; num_noise_bands])
-                } else {
+                }
+                else if let Some(p) = prev {
+                    p.q.last().cloned().unwrap_or_else(|| vec![0i32; num_noise_bands])
+                }
+                else {
                     vec![0i32; num_noise_bands]
                 };
                 for k in 0..num_noise_bands {
@@ -259,9 +250,9 @@ impl NoiseScalefactors {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::super::freq_bands::{k0, k2, master_table, HiLoTables};
+    use super::super::freq_bands::{HiLoTables, k0, k2, master_table};
     use super::super::grid::FrameClass;
+    use super::*;
 
     fn bands_44100() -> HiLoTables {
         let k0v = k0(88_200, 5).unwrap();
@@ -286,10 +277,7 @@ mod tests {
                 ld_borders: None,
                 amp_res_frame: None,
             },
-            SbrDtdf {
-                df_env: vec![false],
-                df_noise: vec![false],
-            },
+            SbrDtdf { df_env: vec![false], df_noise: vec![false] },
         )
     }
 
@@ -303,9 +291,7 @@ mod tests {
         for k in 1..n {
             raw.push(if k % 2 == 0 { 2 } else { -1 });
         }
-        let env = SbrEnvelopeData {
-            data: vec![raw.clone()],
-        };
+        let env = SbrEnvelopeData { data: vec![raw.clone()] };
         let rec = EnvelopeScalefactors::reconstruct(&env, &grid, &dtdf, &bands, false, false, None)
             .unwrap();
         // Expected: cumulative sum.
@@ -358,9 +344,7 @@ mod tests {
         let mut raw0 = vec![20i32]; // env0 start = 20, flat thereafter
         raw0.extend(std::iter::repeat_n(0, n - 1));
         let raw1 = vec![1i32; n]; // env1 = env0 + 1 per band
-        let env = SbrEnvelopeData {
-            data: vec![raw0, raw1],
-        };
+        let env = SbrEnvelopeData { data: vec![raw0, raw1] };
         let rec = EnvelopeScalefactors::reconstruct(&env, &grid, &dtdf, &bands, false, false, None)
             .unwrap();
         for k in 0..n {
@@ -375,18 +359,10 @@ mod tests {
         let n = bands.n_high();
         let (grid, _) = single_env_grid(true);
         // Previous frame: a single high-res envelope all = 30.
-        let prev = EnvelopeScalefactors {
-            eq: vec![vec![30i32; n]],
-            freq_res: vec![true],
-        };
+        let prev = EnvelopeScalefactors { eq: vec![vec![30i32; n]], freq_res: vec![true] };
         // Current frame: single time-coded envelope, deltas all +2.
-        let dtdf = SbrDtdf {
-            df_env: vec![true],
-            df_noise: vec![false],
-        };
-        let env = SbrEnvelopeData {
-            data: vec![vec![2i32; n]],
-        };
+        let dtdf = SbrDtdf { df_env: vec![true], df_noise: vec![false] };
+        let env = SbrEnvelopeData { data: vec![vec![2i32; n]] };
         let rec = EnvelopeScalefactors::reconstruct(
             &env,
             &grid,
@@ -421,9 +397,7 @@ mod tests {
         let bands = bands_44100();
         let nq = bands.n_q();
         let (grid, dtdf) = single_env_grid(true);
-        let raw = (0..nq)
-            .map(|k| if k == 0 { 5 } else { 1 })
-            .collect::<Vec<_>>();
+        let raw = (0..nq).map(|k| if k == 0 { 5 } else { 1 }).collect::<Vec<_>>();
         let noise = SbrNoiseData { data: vec![raw] };
         let rec =
             NoiseScalefactors::reconstruct(&noise, &grid, &dtdf, nq, false, false, None).unwrap();

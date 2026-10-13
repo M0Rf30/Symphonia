@@ -40,14 +40,13 @@ pub(crate) fn silk_decode_signs(
     let n_blocks = (length + SHELL_CODEC_FRAME_LENGTH / 2) >> 4; // LOG2_SHELL_CODEC_FRAME_LENGTH == 4
 
     let mut q_off = 0usize;
-    for blk in 0..n_blocks {
-        let p = sum_pulses[blk];
+    for &p in sum_pulses[..n_blocks].iter() {
         if p > 0 {
             icdf[0] = icdf_ptr[silk_min(p & 0x1F, 6) as usize];
-            for j in 0..SHELL_CODEC_FRAME_LENGTH {
-                if pulses[q_off + j] > 0 {
+            for pj in pulses[q_off..q_off + SHELL_CODEC_FRAME_LENGTH].iter_mut() {
+                if *pj > 0 {
                     let bit = rd.dec_icdf(&icdf, 8);
-                    pulses[q_off + j] = (pulses[q_off + j] as i32 * silk_dec_map(bit)) as i16;
+                    *pj = (*pj as i32 * silk_dec_map(bit)) as i16;
                 }
             }
         }

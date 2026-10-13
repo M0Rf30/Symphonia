@@ -5,7 +5,6 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use crate::atoms::limits::*;
 use crate::atoms::{Atom, AtomHeader, AtomIterator, ReadAtom, Result};
 
 #[derive(Debug)]
@@ -29,22 +28,14 @@ impl Atom for StszAtom {
         let (_, _) = it.read_extended_header()?;
 
         let sample_size = it.read_u32()?;
-        let sample_count = it.read_u32()?;
 
-        let sample_sizes = if sample_size == 0 {
-            // Limit the maximum initial capacity to prevent malicious files from using all the
-            // available memory.
-            let mut entries =
-                Vec::with_capacity(MAX_TABLE_INITIAL_CAPACITY.min(sample_count as usize));
-
-            for _ in 0..sample_count {
-                entries.push(it.read_u32()?);
-            }
-
-            SampleSize::Variable(entries)
+        let (sample_count, sample_sizes) = if sample_size == 0 {
+            // The sample count is the entry count of the variable size table.
+            let sizes = it.read_table(|it| it.read_u32())?;
+            (sizes.len() as u32, SampleSize::Variable(sizes))
         }
         else {
-            SampleSize::Constant(sample_size)
+            (it.read_u32()?, SampleSize::Constant(sample_size))
         };
 
         Ok(StszAtom { sample_count, sample_sizes })

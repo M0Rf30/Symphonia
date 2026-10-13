@@ -55,7 +55,7 @@ fn adts_frames(n: usize, payload_len: usize) -> Vec<Vec<u8>> {
 }
 
 fn pts_of(frame: usize, samples: u64, rate: u64, base: u64) -> u64 {
-    (base + frame as u64 * samples * 90_000 / rate) % (1 << 33)
+    (base + frame as u64 * samples * 90_000 / rate) % symphonia_common::mpeg::pes::PTS_MODULUS
 }
 
 /// Multiplex whole frames, `per_pes` at a time.

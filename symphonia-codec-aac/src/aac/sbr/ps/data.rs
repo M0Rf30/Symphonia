@@ -49,13 +49,11 @@
 //! All truth from ISO/IEC 14496-3:2009 subpart 8 staged under
 //! `docs/audio/aac/`.
 
-use super::super::bits::BitReader;
+use super::super::bits::{BitReader, bit_readers};
 
-use super::huffman::{
-    ps_huff_dec, HUFF_ICC_DF, HUFF_ICC_DT, HUFF_IID_DF, HUFF_IID_DT, HUFF_IID_FINE_DF,
-    HUFF_IID_FINE_DT, HUFF_IPD_DF, HUFF_IPD_DT, HUFF_OPD_DF, HUFF_OPD_DT,
-};
+use super::super::codebook::Codebook;
 use super::super::error::{SbrError as Error, SbrResult as Result};
+use super::huffman::{books, ps_huff_dec};
 
 /// `nr_iid_par_tab[iid_mode]` / `nr_icc_par_tab[icc_mode]` — Tables
 /// 8.24 / 8.27 (modes 6 and 7 are reserved).
@@ -89,32 +87,20 @@ impl PsConfig {
     /// Number of IID parameters per envelope (Table 8.24).
     #[must_use]
     pub fn nr_iid_par(&self) -> usize {
-        if self.enable_iid {
-            NR_PAR_TAB[usize::from(self.iid_mode)]
-        } else {
-            0
-        }
+        if self.enable_iid { NR_PAR_TAB[usize::from(self.iid_mode)] } else { 0 }
     }
 
     /// Number of ICC parameters per envelope (Table 8.27).
     #[must_use]
     pub fn nr_icc_par(&self) -> usize {
-        if self.enable_icc {
-            NR_PAR_TAB[usize::from(self.icc_mode)]
-        } else {
-            0
-        }
+        if self.enable_icc { NR_PAR_TAB[usize::from(self.icc_mode)] } else { 0 }
     }
 
     /// Number of IPD/OPD parameters per envelope (Table 8.24 — coupled
     /// to the IID configuration).
     #[must_use]
     pub fn nr_ipdopd_par(&self) -> usize {
-        if self.enable_iid {
-            NR_IPDOPD_PAR_TAB[usize::from(self.iid_mode)]
-        } else {
-            0
-        }
+        if self.enable_iid { NR_IPDOPD_PAR_TAB[usize::from(self.iid_mode)] } else { 0 }
     }
 
     /// `iid_quant` — Table 8.24: modes 3..=5 use the fine (±15,
@@ -127,11 +113,7 @@ impl PsConfig {
     /// The Table 8.24 IID index bound: 7 (default grid) or 15 (fine).
     #[must_use]
     pub fn iid_bound(&self) -> i32 {
-        if self.iid_quant_fine() {
-            15
-        } else {
-            7
-        }
+        if self.iid_quant_fine() { 15 } else { 7 }
     }
 }
 
@@ -202,14 +184,9 @@ impl PsData {
                 }
             }
             let enable_ext = read_flag(reader)?;
-            PsConfig {
-                enable_iid,
-                iid_mode,
-                enable_icc,
-                icc_mode,
-                enable_ext,
-            }
-        } else {
+            PsConfig { enable_iid, iid_mode, enable_icc, icc_mode, enable_ext }
+        }
+        else {
             match prev_config {
                 Some(c) => *c,
                 // §8.6.5.1: not yet decodable — a conformant stream
@@ -238,16 +215,15 @@ impl PsData {
             for _ in 0..num_env {
                 let dt = read_flag(reader)?;
                 iid_dt.push(dt);
-                let table: &[(u8, u32)] = match (fine, dt) {
-                    (false, false) => &HUFF_IID_DF,
-                    (false, true) => &HUFF_IID_DT,
-                    (true, false) => &HUFF_IID_FINE_DF,
-                    (true, true) => &HUFF_IID_FINE_DT,
+                let table: &Codebook = match (fine, dt) {
+                    (false, false) => &books::IID_DF,
+                    (false, true) => &books::IID_DT,
+                    (true, false) => &books::IID_FINE_DF,
+                    (true, true) => &books::IID_FINE_DT,
                 };
-                let lav = if fine { 30 } else { 14 };
                 let mut row = Vec::with_capacity(nr_iid);
                 for _ in 0..nr_iid {
-                    row.push(ps_huff_dec(reader, table, lav)?);
+                    row.push(ps_huff_dec(reader, table)?);
                 }
                 iid_deltas.push(row);
             }
@@ -260,10 +236,10 @@ impl PsData {
             for _ in 0..num_env {
                 let dt = read_flag(reader)?;
                 icc_dt.push(dt);
-                let table: &[(u8, u32)] = if dt { &HUFF_ICC_DT } else { &HUFF_ICC_DF };
+                let table: &Codebook = if dt { &books::ICC_DT } else { &books::ICC_DF };
                 let mut row = Vec::with_capacity(nr_icc);
                 for _ in 0..nr_icc {
-                    row.push(ps_huff_dec(reader, table, 7)?);
+                    row.push(ps_huff_dec(reader, table)?);
                 }
                 icc_deltas.push(row);
             }
@@ -293,25 +269,26 @@ impl PsData {
                         for _ in 0..num_env {
                             let dt_i = read_flag(reader)?;
                             ipd_dt.push(dt_i);
-                            let t: &[(u8, u32)] = if dt_i { &HUFF_IPD_DT } else { &HUFF_IPD_DF };
+                            let t: &Codebook = if dt_i { &books::IPD_DT } else { &books::IPD_DF };
                             let mut row = Vec::with_capacity(nr_ipdopd);
                             for _ in 0..nr_ipdopd {
-                                row.push(ps_huff_dec(reader, t, 0)?);
+                                row.push(ps_huff_dec(reader, t)?);
                             }
                             ipd_deltas.push(row);
                             let dt_o = read_flag(reader)?;
                             opd_dt.push(dt_o);
-                            let t: &[(u8, u32)] = if dt_o { &HUFF_OPD_DT } else { &HUFF_OPD_DF };
+                            let t: &Codebook = if dt_o { &books::OPD_DT } else { &books::OPD_DF };
                             let mut row = Vec::with_capacity(nr_ipdopd);
                             for _ in 0..nr_ipdopd {
-                                row.push(ps_huff_dec(reader, t, 0)?);
+                                row.push(ps_huff_dec(reader, t)?);
                             }
                             opd_deltas.push(row);
                         }
                     }
                     let _reserved_ps = read_flag(reader)?;
                     num_bits_left -= (reader.bit_position() - start) as i64;
-                } else {
+                }
+                else {
                     // Unknown extension id: the remaining block is fill.
                     skip_bits(reader, num_bits_left)?;
                     num_bits_left = 0;
@@ -418,7 +395,8 @@ impl PsData {
                 self.config.nr_ipdopd_par(),
                 None,
             )?;
-        } else {
+        }
+        else {
             // §8.5.2: no IPD/OPD data → parameters are index 0.
             state.ipd.clear();
             state.opd.clear();
@@ -451,16 +429,19 @@ fn resolve_kind(
             // previous frame's last envelope; zeros on a mode change).
             let prev_row: &[i32] = if e > 0 {
                 &rows[e - 1]
-            } else if state.len() == nr_par {
+            }
+            else if state.len() == nr_par {
                 state
-            } else {
+            }
+            else {
                 &[]
             };
             for (b, &d) in row.iter().enumerate().take(nr_par) {
                 let prev = prev_row.get(b).copied().unwrap_or(0);
                 abs.push(accumulate(prev, d, range)?);
             }
-        } else {
+        }
+        else {
             // Frequency differential: band b references band b-1,
             // band 0 references index 0.
             let mut prev = 0i32;
@@ -489,15 +470,7 @@ fn accumulate(prev: i32, delta: i32, range: Option<(i32, i32)>) -> Result<i32> {
     }
 }
 
-#[inline]
-fn read(reader: &mut BitReader<'_>, n: u32) -> Result<u32> {
-    reader.read_u32(n).map_err(|_| Error::PsDataInvalid)
-}
-
-#[inline]
-fn read_flag(reader: &mut BitReader<'_>) -> Result<bool> {
-    reader.read_bit().map_err(|_| Error::PsDataInvalid)
-}
+bit_readers!(Error::PsDataInvalid, read, read_flag);
 
 #[inline]
 fn skip_bits(reader: &mut BitReader<'_>, mut n: i64) -> Result<()> {
@@ -511,8 +484,8 @@ fn skip_bits(reader: &mut BitReader<'_>, mut n: i64) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::super::bits::BitWriter;
+    use super::*;
 
     /// Write the 1-bit codeword for delta 0 in the coarse IID (`0`),
     /// ICC (`0`) tables.
@@ -612,8 +585,8 @@ mod tests {
         w.write_bit(false); // enable_ext = 0
         w.write_bit(false); // FIX
         w.write_u32(2, 2); // num_env = 2
-                           // env 0: freq deltas +1 ×7 then -1 ×3
-                           // (coarse df: +1 = `100`, -1 = `101`).
+        // env 0: freq deltas +1 ×7 then -1 ×3
+        // (coarse df: +1 = `100`, -1 = `101`).
         w.write_bit(false);
         for _ in 0..7 {
             w.write_u32(0b100, 3);

@@ -81,7 +81,8 @@ impl<S: Sample> AudioBuffer<S> {
         // As a matter of practicality, it is not possible to allocate more than usize::MAX bytes
         // of audio samples.
         assert!(
-            capacity <= (usize::MAX / (std::mem::size_of::<S>() * num_channels)),
+            num_channels == 0
+                || capacity <= (usize::MAX / (std::mem::size_of::<S>() * num_channels)),
             "capacity too large"
         );
 
@@ -163,7 +164,7 @@ impl<S: Sample> AudioBuffer<S> {
 
         for (dst, src) in self.planes.iter_mut().zip(src.iter_planes()) {
             // Dispatch to a common helper function.
-            copy_to_slice(&src[start..end], &mut dst[start..end]);
+            copy_to_slice(src, &mut dst[start..end]);
         }
 
         // Commit appended frames.
@@ -610,5 +611,41 @@ impl<'a, S: Sample> Deref for MutableAudioPlaneSlices<'a, S> {
 impl<S: Sample> DerefMut for MutableAudioPlaneSlices<'_, S> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.planes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AudioBuffer;
+    use crate::audio::{Audio, AudioMut, AudioSpec, Channels};
+
+    #[test]
+    fn verify_append_to_non_empty_buffer() {
+        let spec = AudioSpec::new(44100, Channels::Discrete(2));
+
+        let mut src = AudioBuffer::<f32>::new(spec.clone(), 4);
+        src.resize_with_silence(2);
+        src.slice_mut(..).iter_planes_mut().for_each(|p| {
+            p[0] = 0.5;
+            p[1] = -0.5;
+        });
+
+        let mut dst = AudioBuffer::<f32>::new(spec, 4);
+        dst.append(&src);
+        dst.append(&src);
+
+        assert_eq!(dst.frames(), 4);
+        for plane in dst.iter_planes() {
+            assert_eq!(plane, &[0.5, -0.5, 0.5, -0.5]);
+        }
+    }
+
+    #[test]
+    fn verify_new_with_zero_channels() {
+        let buf = AudioBuffer::<f32>::new(AudioSpec::new(44100, Channels::Discrete(0)), 16);
+        assert!(buf.is_unused());
+
+        let buf = AudioBuffer::<f32>::new(AudioSpec::new(44100, Channels::None), 0);
+        assert!(buf.is_unused());
     }
 }

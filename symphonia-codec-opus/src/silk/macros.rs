@@ -17,8 +17,10 @@
 
 #![allow(dead_code)]
 
-pub const SILK_INT16_MAX: i32 = 0x7FFF;
-pub const SILK_INT16_MIN: i32 = -0x8000;
+use symphonia_core::util::clamp::clamp_i16;
+
+pub const SILK_INT16_MAX: i32 = i16::MAX as i32;
+pub const SILK_INT16_MIN: i32 = i16::MIN as i32;
 pub const SILK_INT32_MAX: i32 = 0x7FFF_FFFF;
 pub const SILK_INT32_MIN: i32 = i32::MIN;
 
@@ -86,7 +88,7 @@ pub fn silk_sat8(a: i32) -> i32 {
 }
 #[inline]
 pub fn silk_sat16(a: i32) -> i32 {
-    a.clamp(SILK_INT16_MIN, SILK_INT16_MAX)
+    i32::from(clamp_i16(a))
 }
 #[inline]
 pub fn silk_sat32(a: i64) -> i32 {
@@ -126,25 +128,20 @@ pub fn silk_rshift64(a: i64, shift: i32) -> i64 {
 /// C: `silk_LSHIFT_SAT32`: saturate before shifting.
 #[inline]
 pub fn silk_lshift_sat32(a: i32, shift: i32) -> i32 {
-    silk_lshift(silk_limit(a, silk_rshift(SILK_INT32_MIN, shift), silk_rshift(SILK_INT32_MAX, shift)), shift)
+    silk_lshift(
+        silk_limit(a, silk_rshift(SILK_INT32_MIN, shift), silk_rshift(SILK_INT32_MAX, shift)),
+        shift,
+    )
 }
 /// C: `silk_RSHIFT_ROUND`. Requires `shift > 0`.
 #[inline]
 pub fn silk_rshift_round(a: i32, shift: i32) -> i32 {
-    if shift == 1 {
-        (a >> 1) + (a & 1)
-    } else {
-        ((a >> (shift - 1)) + 1) >> 1
-    }
+    if shift == 1 { (a >> 1) + (a & 1) } else { ((a >> (shift - 1)) + 1) >> 1 }
 }
 /// C: `silk_RSHIFT_ROUND64`.
 #[inline]
 pub fn silk_rshift_round64(a: i64, shift: i32) -> i64 {
-    if shift == 1 {
-        (a >> 1) + (a & 1)
-    } else {
-        ((a >> (shift - 1)) + 1) >> 1
-    }
+    if shift == 1 { (a >> 1) + (a & 1) } else { ((a >> (shift - 1)) + 1) >> 1 }
 }
 /// C: `silk_ADD_LSHIFT32`.
 #[inline]
@@ -168,19 +165,11 @@ pub fn silk_sub_lshift32(a: i32, b: i32, shift: i32) -> i32 {
 
 #[inline]
 pub fn silk_min<T: PartialOrd>(a: T, b: T) -> T {
-    if a < b {
-        a
-    } else {
-        b
-    }
+    if a < b { a } else { b }
 }
 #[inline]
 pub fn silk_max<T: PartialOrd>(a: T, b: T) -> T {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 /// C: `silk_LIMIT` (a.k.a. `silk_LIMIT_16`/`silk_LIMIT_32`/`silk_LIMIT_int`).
 #[inline]
@@ -188,16 +177,21 @@ pub fn silk_limit<T: PartialOrd>(a: T, limit1: T, limit2: T) -> T {
     if limit1 > limit2 {
         if a > limit1 {
             limit1
-        } else if a < limit2 {
+        }
+        else if a < limit2 {
             limit2
-        } else {
+        }
+        else {
             a
         }
-    } else if a > limit2 {
+    }
+    else if a > limit2 {
         limit2
-    } else if a < limit1 {
+    }
+    else if a < limit1 {
         limit1
-    } else {
+    }
+    else {
         a
     }
 }
@@ -206,19 +200,17 @@ pub fn silk_limit<T: PartialOrd>(a: T, limit1: T, limit2: T) -> T {
 /// real two's-complement build does; kept bit-exact rather than "fixed".
 #[inline]
 pub fn silk_abs(a: i32) -> i32 {
-    if a > 0 {
-        a
-    } else {
-        a.wrapping_neg()
-    }
+    if a > 0 { a } else { a.wrapping_neg() }
 }
 #[inline]
 pub fn silk_sign(a: i32) -> i32 {
     if a > 0 {
         1
-    } else if a < 0 {
+    }
+    else if a < 0 {
         -1
-    } else {
+    }
+    else {
         0
     }
 }
@@ -357,9 +349,11 @@ pub fn silk_ror32(a32: i32, rot: i32) -> i32 {
     let x = a32 as u32;
     if rot == 0 {
         a32
-    } else if rot < 0 {
+    }
+    else if rot < 0 {
         x.rotate_left((-rot) as u32) as i32
-    } else {
+    }
+    else {
         x.rotate_right(rot as u32) as i32
     }
 }
@@ -410,9 +404,11 @@ pub fn silk_div32_varq(a32: i32, b32: i32, qres: i32) -> i32 {
     let lshift = 29 + a_headrm - b_headrm - qres;
     if lshift < 0 {
         silk_lshift_sat32(result, -lshift)
-    } else if lshift < 32 {
+    }
+    else if lshift < 32 {
         silk_rshift(result, lshift)
-    } else {
+    }
+    else {
         0
     }
 }
@@ -437,9 +433,11 @@ pub fn silk_inverse32_varq(b32: i32, qres: i32) -> i32 {
     let lshift = 61 - b_headrm - qres;
     if lshift <= 0 {
         silk_lshift_sat32(result, -lshift)
-    } else if lshift < 32 {
+    }
+    else if lshift < 32 {
         silk_rshift(result, lshift)
-    } else {
+    }
+    else {
         0
     }
 }
@@ -473,7 +471,8 @@ pub fn silk_lin2log(in_lin: i32) -> i32 {
 pub fn silk_log2lin(in_log_q7: i32) -> i32 {
     if in_log_q7 < 0 {
         return 0;
-    } else if in_log_q7 >= 3967 {
+    }
+    else if in_log_q7 >= 3967 {
         return SILK_INT32_MAX;
     }
     let mut out = silk_lshift(1, silk_rshift(in_log_q7, 7));
@@ -484,8 +483,13 @@ pub fn silk_log2lin(in_log_q7: i32) -> i32 {
             silk_mul(out, silk_smlawb(frac_q7, silk_smulbb(frac_q7, 128 - frac_q7), -174)),
             7,
         );
-    } else {
-        out = silk_mla(out, silk_rshift(out, 7), silk_smlawb(frac_q7, silk_smulbb(frac_q7, 128 - frac_q7), -174));
+    }
+    else {
+        out = silk_mla(
+            out,
+            silk_rshift(out, 7),
+            silk_smlawb(frac_q7, silk_smulbb(frac_q7, 128 - frac_q7), -174),
+        );
     }
     out
 }
@@ -499,36 +503,6 @@ pub fn silk_add_sat16(a: i16, b: i16) -> i16 {
 #[inline]
 pub fn silk_sub_sat16(a: i16, b: i16) -> i16 {
     silk_sat16(a as i32 - b as i32) as i16
-}
-/// C: `silk_min_32`.
-#[inline]
-pub fn silk_min_32(a: i32, b: i32) -> i32 {
-    silk_min(a, b)
-}
-/// C: `silk_max_32`.
-#[inline]
-pub fn silk_max_32(a: i32, b: i32) -> i32 {
-    silk_max(a, b)
-}
-/// C: `silk_min_int`.
-#[inline]
-pub fn silk_min_int(a: i32, b: i32) -> i32 {
-    silk_min(a, b)
-}
-/// C: `silk_max_int`.
-#[inline]
-pub fn silk_max_int(a: i32, b: i32) -> i32 {
-    silk_max(a, b)
-}
-/// C: `silk_min_16`.
-#[inline]
-pub fn silk_min_16(a: i16, b: i16) -> i16 {
-    silk_min(a, b)
-}
-/// C: `silk_max_16`.
-#[inline]
-pub fn silk_max_16(a: i16, b: i16) -> i16 {
-    silk_max(a, b)
 }
 
 #[cfg(test)]

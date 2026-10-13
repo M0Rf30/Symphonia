@@ -12,6 +12,8 @@ use symphonia_core::audio::{Channels, Position};
 use symphonia_core::codecs::audio::AudioCodecId;
 use symphonia_core::codecs::audio::well_known::{CODEC_ID_MP1, CODEC_ID_MP2, CODEC_ID_MP3};
 
+use crate::mpeg::sync_buf::SyncBuffer;
+
 /// The length of an MPEG audio frame header.
 pub const MPA_HEADER_LEN: usize = 4;
 
@@ -110,9 +112,10 @@ impl MpaFrameInfo {
     }
 }
 
-/// Parse an MPEG audio frame header word. Returns `None` if the word is not a valid header, or the
-/// frame uses the "free" bit-rate (which cannot be framed without a lookahead).
-pub fn parse_header(word: u32) -> Option<MpaFrameInfo> {
+/// Get the bit-rate in bits per second for a (non-free, non-reserved) bit-rate index 1..=14 of the
+/// given MPEG version (`is_mpeg1`, else MPEG-2 or 2.5) and layer (1, 2, or 3). Returns `None` for
+/// the free (0) and reserved (15) indices.
+pub fn bitrate_bps(is_mpeg1: bool, layer: u8, bitrate_idx: usize) -> Option<u32> {
     const BIT_RATES_MPEG1_L1: [u32; 15] =
         [0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448];
     const BIT_RATES_MPEG1_L2: [u32; 15] =
@@ -124,6 +127,52 @@ pub fn parse_header(word: u32) -> Option<MpaFrameInfo> {
     const BIT_RATES_MPEG2_L23: [u32; 15] =
         [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160];
 
+    if bitrate_idx == 0 || bitrate_idx >= 15 {
+        return None;
+    }
+
+    let kbps = match (is_mpeg1, layer) {
+        (true, 1) => BIT_RATES_MPEG1_L1[bitrate_idx],
+        (true, 2) => BIT_RATES_MPEG1_L2[bitrate_idx],
+        (true, _) => BIT_RATES_MPEG1_L3[bitrate_idx],
+        (false, 1) => BIT_RATES_MPEG2_L1[bitrate_idx],
+        (false, _) => BIT_RATES_MPEG2_L23[bitrate_idx],
+    };
+
+    Some(1000 * kbps)
+}
+
+/// Get the sample rate in Hz given the 2-bit MPEG version field (0b00 = MPEG-2.5, 0b10 = MPEG-2,
+/// 0b11 = MPEG-1) and the 2-bit sample rate index. Returns `None` for reserved values.
+pub fn sample_rate_hz(version: u32, sample_rate_idx: u8) -> Option<u32> {
+    match (sample_rate_idx, version) {
+        (0b00, 0b11) => Some(44_100),
+        (0b01, 0b11) => Some(48_000),
+        (0b10, 0b11) => Some(32_000),
+        (0b00, 0b10) => Some(22_050),
+        (0b01, 0b10) => Some(24_000),
+        (0b10, 0b10) => Some(16_000),
+        (0b00, 0b00) => Some(11_025),
+        (0b01, 0b00) => Some(12_000),
+        (0b10, 0b00) => Some(8_000),
+        _ => None,
+    }
+}
+
+/// Returns true if a Layer 2 frame may use `bitrate` (bits per second) with the given channel
+/// mode: some combinations are not allowed by the standard.
+pub fn is_layer2_bitrate_allowed(bitrate: u32, is_mono: bool) -> bool {
+    if is_mono {
+        !matches!(bitrate, 224_000 | 256_000 | 320_000 | 384_000)
+    }
+    else {
+        !matches!(bitrate, 32_000 | 48_000 | 56_000 | 80_000)
+    }
+}
+
+/// Parse an MPEG audio frame header word. Returns `None` if the word is not a valid header, or the
+/// frame uses the "free" bit-rate (which cannot be framed without a lookahead).
+pub fn parse_header(word: u32) -> Option<MpaFrameInfo> {
     if word & 0xffe0_0000 != 0xffe0_0000 {
         return None;
     }
@@ -150,40 +199,15 @@ pub fn parse_header(word: u32) -> Option<MpaFrameInfo> {
         return None;
     }
 
-    let bitrate = 1000
-        * match (is_mpeg1, layer) {
-            (true, 1) => BIT_RATES_MPEG1_L1[bitrate_idx],
-            (true, 2) => BIT_RATES_MPEG1_L2[bitrate_idx],
-            (true, _) => BIT_RATES_MPEG1_L3[bitrate_idx],
-            (false, 1) => BIT_RATES_MPEG2_L1[bitrate_idx],
-            (false, _) => BIT_RATES_MPEG2_L23[bitrate_idx],
-        };
+    let bitrate = bitrate_bps(is_mpeg1, layer, bitrate_idx)?;
 
-    let sample_rate = match ((word >> 10) & 0x3, version) {
-        (0b00, 0b11) => 44_100,
-        (0b01, 0b11) => 48_000,
-        (0b10, 0b11) => 32_000,
-        (0b00, 0b10) => 22_050,
-        (0b01, 0b10) => 24_000,
-        (0b10, 0b10) => 16_000,
-        (0b00, 0b00) => 11_025,
-        (0b01, 0b00) => 12_000,
-        (0b10, 0b00) => 8_000,
-        _ => return None,
-    };
+    let sample_rate = sample_rate_hz(version, ((word >> 10) & 0x3) as u8)?;
 
     let is_mono = (word >> 6) & 0x3 == 0b11;
 
     // Some layer 2 bit-rate and channel mode combinations are not allowed.
-    if layer == 2 {
-        if is_mono {
-            if matches!(bitrate, 224_000 | 256_000 | 320_000 | 384_000) {
-                return None;
-            }
-        }
-        else if matches!(bitrate, 32_000 | 48_000 | 56_000 | 80_000) {
-            return None;
-        }
+    if layer == 2 && !is_layer2_bitrate_allowed(bitrate, is_mono) {
+        return None;
     }
 
     let has_padding = (word >> 9) & 1 == 1;
@@ -235,9 +259,7 @@ pub struct MpaFrame {
 /// An `MpaFramer` finds MPEG audio frames in a stream of bytes of arbitrary chunking.
 #[derive(Default)]
 pub struct MpaFramer {
-    buf: Vec<u8>,
-    /// The absolute offset of the first byte in `buf`.
-    base: u64,
+    buf: SyncBuffer,
     /// The header information of the last frame returned.
     locked: Option<MpaFrameInfo>,
 }
@@ -250,18 +272,17 @@ impl MpaFramer {
 
     /// Append data to the framer.
     pub fn push(&mut self, data: &[u8]) {
-        self.buf.extend_from_slice(data);
+        self.buf.push(data);
     }
 
     /// The absolute offset one past the last byte pushed.
     pub fn end_offset(&self) -> u64 {
-        self.base + self.buf.len() as u64
+        self.buf.end_offset()
     }
 
     /// Discard all buffered data, and forget the synchronisation state. The absolute offset
     /// continues.
     pub fn clear(&mut self) {
-        self.base += self.buf.len() as u64;
         self.buf.clear();
         self.locked = None;
     }
@@ -326,16 +347,14 @@ impl MpaFramer {
         match found {
             Some((i, info, end)) => {
                 let data = self.buf[i..end].to_vec();
-                let start = self.base + i as u64;
-                self.buf.drain(..end);
-                self.base += end as u64;
+                let start = self.buf.base() + i as u64;
+                self.buf.consume(end);
                 self.locked = Some(info);
                 Some(MpaFrame { info, start, data })
             }
             None => {
                 // Discard the bytes before the candidate frame.
-                self.buf.drain(..i);
-                self.base += i as u64;
+                self.buf.consume(i);
                 None
             }
         }

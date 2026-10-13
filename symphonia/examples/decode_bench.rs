@@ -15,18 +15,7 @@ use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
-
-struct Fnv(u64);
-
-impl Fnv {
-    fn new() -> Self {
-        Fnv(0xcbf2_9ce4_8422_2325)
-    }
-
-    fn put(&mut self, v: u32) {
-        self.0 = (self.0 ^ u64::from(v)).wrapping_mul(0x100_0000_01b3);
-    }
-}
+use symphonia_testutil::Fnv;
 
 struct Outcome {
     hash: u64,

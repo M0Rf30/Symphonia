@@ -16,8 +16,8 @@ version.workspace = true
 [dependencies]
 log = { workspace = true }
 lazy_static = { workspace = true }
-symphonia-core = { version = "0.6.1", path = "../symphonia-core" }
-symphonia-common = { version = "0.6.1", path = "../symphonia-common" }
+symphonia-core = { workspace = true }
+symphonia-common = { workspace = true }
 
 [features]
 # Compute the complex QMF banks of SBR with an FFT instead of matrix products: much faster, and the
@@ -26,7 +26,8 @@ symphonia-common = { version = "0.6.1", path = "../symphonia-common" }
 sbr-fft-qmf = []
 
 [dev-dependencies]
-symphonia-format-isomp4 = { version = "0.6.1", path = "../symphonia-format-isomp4" }
+symphonia-testutil = { workspace = true }
+symphonia-format-isomp4 = { workspace = true }
 
 [lints]
 workspace = true

@@ -15,6 +15,7 @@ use symphonia_core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia_core::meta::{StandardTag, StandardVisualKey};
 use symphonia_core::units::Time;
 use symphonia_format_mkv::MkvReader;
+use symphonia_testutil::Lcg64;
 
 // EBML element writing helpers.
 
@@ -22,11 +23,14 @@ use symphonia_format_mkv::MkvReader;
 fn size(n: usize) -> Vec<u8> {
     if n < 0x7f {
         vec![0x80 | n as u8]
-    } else if n < 0x3fff {
+    }
+    else if n < 0x3fff {
         vec![0x40 | (n >> 8) as u8, n as u8]
-    } else if n < 0x1f_ffff {
+    }
+    else if n < 0x1f_ffff {
         vec![0x20 | (n >> 16) as u8, (n >> 8) as u8, n as u8]
-    } else {
+    }
+    else {
         vec![0x10 | (n >> 24) as u8, (n >> 16) as u8, (n >> 8) as u8, n as u8]
     }
 }
@@ -319,7 +323,8 @@ impl File {
                         group.push(sint(&[0x75, 0xa2], padding));
                     }
                     data.extend(el(&[0xa0], &group.concat()));
-                } else {
+                }
+                else {
                     payload.push(0x80);
                     payload.extend(
                         blk.data
@@ -336,7 +341,8 @@ impl File {
             if self.live {
                 cluster.extend(UNKNOWN_SIZE);
                 cluster.extend(&data);
-            } else {
+            }
+            else {
                 cluster.extend(size(data.len()));
                 cluster.extend(&data);
             }
@@ -384,7 +390,8 @@ impl File {
         let mut segment = ID_SEGMENT.to_vec();
         if self.live {
             segment.extend(UNKNOWN_SIZE);
-        } else {
+        }
+        else {
             segment.extend(size_8(payload.len()));
         }
         segment.extend(payload);
@@ -437,7 +444,7 @@ fn seek_time(
     reader.seek(
         SeekMode::Accurate,
         SeekTo::Time {
-            time: Time::try_from_secs_f64(f64::from(millis) / 1000.0).unwrap(),
+            time: Time::try_from_secs_f64(f64::from(millis) / 1000.0).expect("valid time"),
             track_id: None,
         },
     )
@@ -861,16 +868,6 @@ fn opus_packet(toc: u8, tag: u8) -> Vec<u8> {
 
 // Exact timelines.
 
-/// A pseudo-random number generator.
-struct Lcg(u64);
-
-impl Lcg {
-    fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        self.0 >> 33
-    }
-}
-
 /// A little-endian bit writer, as used by the Vorbis setup header.
 #[derive(Default)]
 struct Bits {
@@ -884,7 +881,7 @@ impl Bits {
             if self.len % 8 == 0 {
                 self.bytes.push(0);
             }
-            *self.bytes.last_mut().unwrap() |= ((value & 1) as u8) << (self.len % 8);
+            *self.bytes.last_mut().expect("non-empty") |= ((value & 1) as u8) << (self.len % 8);
             value >>= 1;
             self.len += 1;
         }
@@ -990,14 +987,14 @@ struct Model {
 /// millisecond as a muxer does. Every `cue_every` blocks are indexed by a cue point (if
 /// non-zero).
 fn vorbis_stream(n: usize, cue_every: usize) -> (File, Model) {
-    let mut rng = Lcg(7);
+    let mut rng = Lcg64(7);
 
     // The block size of each packet: 256 or 2048 (1/4 of the packets are long, but runs of long
     // and short packets are common).
     let mut is_long = false;
     let long: Vec<bool> = (0..n)
         .map(|_| {
-            if rng.next() % 3 == 0 {
+            if rng.next_u64() % 3 == 0 {
                 is_long = !is_long;
             }
             is_long
@@ -1111,11 +1108,11 @@ fn vorbis_seeks_in_a_file_with_other_tracks_are_sample_exact() {
     file.cues.clear();
 
     let mut reader = open(file.to_bytes(&vorbis_track()));
-    let mut rng = Lcg(17);
+    let mut rng = Lcg64(17);
     let end = model.pts[1499] + model.dur[1499] as i64;
 
     for _ in 0..100 {
-        let target = (rng.next() % end as u64) as i64;
+        let target = (rng.next_u64() % end as u64) as i64;
         let seeked = seek_ts(&mut reader, target).expect("seek should succeed");
 
         let expected = packet_at(&model, target - 8820);
@@ -1123,7 +1120,7 @@ fn vorbis_seeks_in_a_file_with_other_tracks_are_sample_exact() {
 
         // The first packet of the audio track is next, and the timeline continues from it.
         let packets: Vec<Packet> = (0..30)
-            .map_while(|_| reader.next_packet().unwrap())
+            .map_while(|_| reader.next_packet().expect("packet"))
             .filter(|packet| packet.track_id == 1)
             .collect();
 
@@ -1212,10 +1209,10 @@ fn check_vorbis_seeks(cue_every: usize) {
     let mut reader = open(file.to_bytes(&vorbis_track()));
 
     let end = model.pts[1499] + model.dur[1499] as i64;
-    let mut rng = Lcg(99);
+    let mut rng = Lcg64(99);
 
     let mut targets = vec![0, 1, 127, 128, 129, 8819, 8820, 8821, end - 1, end - 5000, 44100];
-    targets.extend((0..300).map(|_| (rng.next() % end as u64) as i64));
+    targets.extend((0..300).map(|_| (rng.next_u64() % end as u64) as i64));
 
     for target in targets {
         let seeked = seek_ts(&mut reader, target).expect("seek should succeed");
@@ -1228,14 +1225,15 @@ fn check_vorbis_seeks(cue_every: usize) {
 
         // The packets read afterwards have an exact timeline, whose durations depend on the
         // blocks before them.
-        let packets: Vec<Packet> = (0..20).map_while(|_| reader.next_packet().unwrap()).collect();
+        let packets: Vec<Packet> =
+            (0..20).map_while(|_| reader.next_packet().expect("packet")).collect();
         assert_timeline(&packets, &model, expected);
 
         assert!(model.pts[expected] <= target.max(0));
     }
 
     // A seek by time is also exact: 7.5s is 330750 frames.
-    let seeked = seek_time(&mut reader, 7500).unwrap();
+    let seeked = seek_time(&mut reader, 7500).expect("seek");
     assert_eq!(seeked.required_ts.get(), 330750);
     assert_eq!(seeked.actual_ts.get(), model.pts[packet_at(&model, 330750 - 8820)]);
 
@@ -1274,8 +1272,8 @@ const OPUS_PACKETS: [(u8, u64); 8] = [
 
 /// An Opus stream without a default duration, of packets of varying durations.
 fn opus_stream(n: usize, cue_every: usize) -> (File, Model) {
-    let mut rng = Lcg(3);
-    let mut kinds: Vec<usize> = (0..n).map(|_| (rng.next() % 8) as usize).collect();
+    let mut rng = Lcg64(3);
+    let mut kinds: Vec<usize> = (0..n).map(|_| (rng.next_u64() % 8) as usize).collect();
 
     // The first packet must be longer than the pre-skip.
     kinds[0] = 3;
@@ -1354,10 +1352,10 @@ fn opus_seeks_in_varying_packets_are_sample_exact() {
         let mut reader = open(file.to_bytes(&opus_track_without_default_duration()));
 
         let end = model.pts[999] + model.dur[999] as i64;
-        let mut rng = Lcg(5);
+        let mut rng = Lcg64(5);
 
         let mut targets = vec![0, 1, 311, 312, 3839, 3840, 3841, 71_999, 72_000, 72_001, end];
-        targets.extend((0..200).map(|_| (rng.next() % end as u64) as i64));
+        targets.extend((0..200).map(|_| (rng.next_u64() % end as u64) as i64));
 
         let mut silk = false;
 
@@ -1385,7 +1383,7 @@ fn opus_seeks_in_varying_packets_are_sample_exact() {
             assert_eq!(seeked.actual_ts.get(), model.pts[expected], "target {target}");
 
             let packets: Vec<Packet> =
-                (0..20).map_while(|_| reader.next_packet().unwrap()).collect();
+                (0..20).map_while(|_| reader.next_packet().expect("packet")).collect();
 
             for (i, packet) in packets.iter().enumerate() {
                 let k = expected + i;

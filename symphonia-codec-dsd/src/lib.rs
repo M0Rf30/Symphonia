@@ -16,19 +16,21 @@ pub mod fir;
 
 use decimator::{DecimationConfig, DsdDecimator};
 
-use symphonia_core::audio::{AsGenericAudioBufferRef, AudioSpec, GenericAudioBuffer, GenericAudioBufferRef};
+use log::debug;
 use symphonia_core::audio::sample::SampleFormat;
+use symphonia_core::audio::{
+    AsGenericAudioBufferRef, AudioMut, AudioSpec, GenericAudioBuffer, GenericAudioBufferRef,
+};
+use symphonia_core::codecs::CodecInfo;
 use symphonia_core::codecs::audio::{
-    AudioCodecId, AudioCodecParameters, AudioDecoder, AudioDecoderOptions, BitOrder, ChannelDataLayout, FinalizeResult,
+    AudioCodecId, AudioCodecParameters, AudioDecoder, AudioDecoderOptions, BitOrder,
+    ChannelDataLayout, FinalizeResult,
 };
 use symphonia_core::codecs::registry::{RegisterableAudioDecoder, SupportedAudioCodec};
-use symphonia_core::codecs::CodecInfo;
 use symphonia_core::common::FourCc;
-use symphonia_core::errors::{decode_error, unsupported_error, Result};
+use symphonia_core::errors::{Result, decode_error, unsupported_error};
 use symphonia_core::packet::PacketRef;
 use symphonia_core::support_audio_codec;
-use log::debug;
-
 
 /// DSD codec ID
 pub const CODEC_ID_DSD: AudioCodecId = AudioCodecId::new(FourCc::new(*b"DSD\0"));
@@ -149,11 +151,33 @@ impl RegisterableAudioDecoder for DsdDecoder {
     }
 }
 
-
 /// The rate of the frames of the pass-through output buffers: one frame is one byte per channel,
 /// which holds 8 DSD samples.
 fn dsd_byte_rate(dsd_rate: u32) -> u32 {
     (dsd_rate / 8).max(1)
+}
+
+/// Copy channel `ch` of a packet holding `channels` channels of `spc` bytes each into `dst`.
+fn copy_channel(
+    data: &[u8],
+    channels: usize,
+    spc: usize,
+    ch: usize,
+    layout: ChannelDataLayout,
+    dst: &mut [u8],
+) {
+    match layout {
+        ChannelDataLayout::Interleaved => {
+            for (d, s) in dst.iter_mut().zip(data[ch..].iter().step_by(channels)) {
+                *d = *s;
+            }
+        }
+        ChannelDataLayout::Planar => {
+            for (d, s) in dst.iter_mut().zip(&data[ch * spc..(ch + 1) * spc]) {
+                *d = *s;
+            }
+        }
+    }
 }
 
 impl DsdDecoder {
@@ -218,9 +242,14 @@ impl DsdDecoder {
             DecoderMode::Pcm { output_rate } => {
                 // PCM mode
                 let config = DecimationConfig::new(input_sample_rate, output_rate)?;
-                log::info!("DSD decimation: {}x total (CIC={}x, FIR={}x), {} stages, {} taps",
-                          config.total_decimation, config.cic_decimation, config.fir_decimation,
-                          config.cic_stages, config.fir_taps);
+                log::info!(
+                    "DSD decimation: {}x total (CIC={}x, FIR={}x), {} stages, {} taps",
+                    config.total_decimation,
+                    config.cic_decimation,
+                    config.fir_decimation,
+                    config.cic_stages,
+                    config.fir_taps
+                );
                 let decimator = DsdDecimator::new(config, channels_count, bit_order);
 
                 // Calculate PCM buffer size
@@ -228,7 +257,8 @@ impl DsdDecoder {
                 let pcm_duration = ((input_duration * 8) / config.total_decimation as u64).max(512);
 
                 let pcm_spec = AudioSpec::new(output_rate, channels.clone());
-                let pcm_buffer = GenericAudioBuffer::new(SampleFormat::F32, pcm_spec, pcm_duration as usize);
+                let pcm_buffer =
+                    GenericAudioBuffer::new(SampleFormat::F32, pcm_spec, pcm_duration as usize);
 
                 debug!(
                     "DSD decoder (PCM mode): {} Hz -> {} Hz, decimation {}x, channels={}, pcm_duration={}",
@@ -253,7 +283,15 @@ impl DsdDecoder {
         let dsd_duration = params.max_frames_per_packet.unwrap_or(4096);
         let dsd_buf = GenericAudioBuffer::new(SampleFormat::U8, dsd_spec, dsd_duration as usize);
 
-        Ok(DsdDecoder { params: output_params, mode, dsd_buf, pcm_buf, decimator, scratch_dsd: Vec::new(), scratch_pcm: Vec::new() })
+        Ok(DsdDecoder {
+            params: output_params,
+            mode,
+            dsd_buf,
+            pcm_buf,
+            decimator,
+            scratch_dsd: Vec::new(),
+            scratch_pcm: Vec::new(),
+        })
     }
 
     /// Decode in pass-through mode (native DSD output)
@@ -284,21 +322,14 @@ impl DsdDecoder {
 
         match &mut self.dsd_buf {
             GenericAudioBuffer::U8(buf) => {
-                buf.render_with(Some(samples_per_channel), |idx, audio_planes| -> Result<()> {
-                    for (ch, plane) in audio_planes.iter_mut().enumerate() {
-                        let src = match layout {
-                            ChannelDataLayout::Interleaved => idx * channels + ch,
-                            ChannelDataLayout::Planar => ch * spc + idx,
-                        };
-                        if src < data.len() {
-                            plane[idx] = data[src];
-                        } else {
-                            // DSD idle/silence byte: 0x69 = 0b01101001
-                            plane[idx] = 0x69;
-                        }
-                    }
-                    Ok(())
-                })?;
+                buf.render_uninit(Some(spc));
+                for ch in 0..channels {
+                    let Some(plane) = buf.plane_mut(ch)
+                    else {
+                        return decode_error("dsd: missing audio plane");
+                    };
+                    copy_channel(data, channels, spc, ch, layout, plane);
+                }
                 Ok(buf.as_generic_audio_buffer_ref())
             }
             _ => unreachable!(),
@@ -325,16 +356,10 @@ impl DsdDecoder {
 
         // Build per-channel DSD planes in scratch_dsd (inner vecs reused; no hot-path allocation)
         self.scratch_dsd.resize_with(channels, Vec::new);
-        for ch in 0..channels {
-            self.scratch_dsd[ch].clear();
-            match layout {
-                ChannelDataLayout::Interleaved => {
-                    self.scratch_dsd[ch].extend((0..spc).map(|i| data[i * channels + ch]));
-                }
-                ChannelDataLayout::Planar => {
-                    self.scratch_dsd[ch].extend_from_slice(&data[ch * spc..ch * spc + spc]);
-                }
-            }
+        for (ch, scratch) in self.scratch_dsd.iter_mut().enumerate() {
+            scratch.clear();
+            scratch.resize(spc, 0);
+            copy_channel(data, channels, spc, ch, layout, scratch);
         }
 
         // Resize PCM scratch vecs (reuses inner vec capacity after first packet)
@@ -349,7 +374,8 @@ impl DsdDecoder {
         };
 
         let dsd_plane_refs: Vec<&[u8]> = self.scratch_dsd.iter().map(|v| v.as_slice()).collect();
-        let mut pcm_plane_refs: Vec<&mut [f32]> = self.scratch_pcm.iter_mut().map(|v| v.as_mut_slice()).collect();
+        let mut pcm_plane_refs: Vec<&mut [f32]> =
+            self.scratch_pcm.iter_mut().map(|v| v.as_mut_slice()).collect();
         let samples_produced = decimator.process_planar(&dsd_plane_refs, &mut pcm_plane_refs)?;
         drop(pcm_plane_refs);
 

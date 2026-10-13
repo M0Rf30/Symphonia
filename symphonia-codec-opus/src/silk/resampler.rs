@@ -15,8 +15,9 @@
 #![allow(dead_code)]
 
 use crate::silk::macros::{
-    silk_add32, silk_add_lshift32, silk_div32, silk_lshift, silk_min, silk_rshift, silk_rshift_round, silk_sat16,
-    silk_smlabb, silk_smlawb, silk_smulbb, silk_smulwb, silk_sub32,
+    silk_add_lshift32, silk_add32, silk_div32, silk_lshift, silk_min, silk_rshift,
+    silk_rshift_round, silk_sat16, silk_smlabb, silk_smlawb, silk_smulbb, silk_smulwb, silk_smulww,
+    silk_sub32,
 };
 
 /// C: `SILK_RESAMPLER_MAX_FIR_ORDER`.
@@ -44,19 +45,22 @@ const UP2_HQ_0: [i16; 3] = [1746, 14986, -26453];
 const UP2_HQ_1: [i16; 3] = [6854, 25769, -9994];
 
 const RESAMPLER_3_4_COEFS: [i16; 2 + 3 * DOWN_ORDER_FIR0 / 2] = [
-    -20694, -13867, -49, 64, 17, -157, 353, -496, 163, 11047, 22205, -39, 6, 91, -170, 186, 23, -896, 6336, 19928,
-    -19, -36, 102, -89, -24, 328, -951, 2568, 15909,
+    -20694, -13867, -49, 64, 17, -157, 353, -496, 163, 11047, 22205, -39, 6, 91, -170, 186, 23,
+    -896, 6336, 19928, -19, -36, 102, -89, -24, 328, -951, 2568, 15909,
 ];
 const RESAMPLER_2_3_COEFS: [i16; 2 + 2 * DOWN_ORDER_FIR0 / 2] = [
-    -14457, -14019, 64, 128, -122, 36, 310, -768, 584, 9267, 17733, 12, 128, 18, -142, 288, -117, -865, 4123, 14459,
+    -14457, -14019, 64, 128, -122, 36, 310, -768, 584, 9267, 17733, 12, 128, 18, -142, 288, -117,
+    -865, 4123, 14459,
 ];
 const RESAMPLER_1_2_COEFS: [i16; 2 + DOWN_ORDER_FIR1 / 2] =
     [616, -14323, -10, 39, 58, -46, -84, 120, 184, -315, -541, 1284, 5380, 9024];
 const RESAMPLER_1_3_COEFS: [i16; 2 + DOWN_ORDER_FIR2 / 2] = [
-    16102, -15162, -13, 0, 20, 26, 5, -31, -43, -4, 65, 90, 7, -157, -248, -44, 593, 1583, 2612, 3271,
+    16102, -15162, -13, 0, 20, 26, 5, -31, -43, -4, 65, 90, 7, -157, -248, -44, 593, 1583, 2612,
+    3271,
 ];
 const RESAMPLER_1_4_COEFS: [i16; 2 + DOWN_ORDER_FIR2 / 2] = [
-    22500, -15099, 3, -14, -20, -15, 2, 25, 37, 25, -16, -71, -107, -79, 50, 292, 623, 982, 1288, 1464,
+    22500, -15099, 3, -14, -20, -15, 2, 25, 37, 25, -16, -71, -107, -79, 50, 292, 623, 982, 1288,
+    1464,
 ];
 const RESAMPLER_1_6_COEFS: [i16; 2 + DOWN_ORDER_FIR2 / 2] = [
     27540, -15257, 17, 12, 8, 1, -10, -22, -30, -32, -22, 3, 44, 100, 168, 243, 317, 381, 429, 455,
@@ -141,16 +145,26 @@ impl Default for SilkResamplerState {
 
 /// C: `silk_resampler_init`. `for_enc` selects the encoder's wider sample-rate range; the
 /// decoder always passes `false`.
-pub(crate) fn silk_resampler_init(s: &mut SilkResamplerState, fs_hz_in: i32, fs_hz_out: i32, for_enc: bool) -> i32 {
+pub(crate) fn silk_resampler_init(
+    s: &mut SilkResamplerState,
+    fs_hz_in: i32,
+    fs_hz_out: i32,
+    for_enc: bool,
+) -> i32 {
     *s = SilkResamplerState::default();
 
     if for_enc {
-        if !matches!(fs_hz_in, 8000 | 12000 | 16000 | 24000 | 48000) || !matches!(fs_hz_out, 8000 | 12000 | 16000) {
+        if !matches!(fs_hz_in, 8000 | 12000 | 16000 | 24000 | 48000)
+            || !matches!(fs_hz_out, 8000 | 12000 | 16000)
+        {
             return -1;
         }
         s.input_delay = DELAY_MATRIX_ENC[rate_id(fs_hz_in)][rate_id(fs_hz_out)] as i32;
-    } else {
-        if !matches!(fs_hz_in, 8000 | 12000 | 16000) || !matches!(fs_hz_out, 8000 | 12000 | 16000 | 24000 | 48000) {
+    }
+    else {
+        if !matches!(fs_hz_in, 8000 | 12000 | 16000)
+            || !matches!(fs_hz_out, 8000 | 12000 | 16000 | 24000 | 48000)
+        {
             return -1;
         }
         s.input_delay = DELAY_MATRIX_DEC[rate_id(fs_hz_in)][rate_id(fs_hz_out)] as i32;
@@ -168,41 +182,50 @@ pub(crate) fn silk_resampler_init(s: &mut SilkResamplerState, fs_hz_in: i32, fs_
         // Upsample.
         if fs_hz_out == fs_hz_in * 2 {
             s.resampler_function = ResamplerFn::Up2HqWrapper;
-        } else {
+        }
+        else {
             s.resampler_function = ResamplerFn::IirFir;
             up2x = 1;
         }
-    } else if fs_hz_out < fs_hz_in {
+    }
+    else if fs_hz_out < fs_hz_in {
         // Downsample.
         s.resampler_function = ResamplerFn::DownFir;
         if fs_hz_out * 4 == fs_hz_in * 3 {
             s.fir_fracs = 3;
             s.fir_order = DOWN_ORDER_FIR0;
             s.coefs = &RESAMPLER_3_4_COEFS;
-        } else if fs_hz_out * 3 == fs_hz_in * 2 {
+        }
+        else if fs_hz_out * 3 == fs_hz_in * 2 {
             s.fir_fracs = 2;
             s.fir_order = DOWN_ORDER_FIR0;
             s.coefs = &RESAMPLER_2_3_COEFS;
-        } else if fs_hz_out * 2 == fs_hz_in {
+        }
+        else if fs_hz_out * 2 == fs_hz_in {
             s.fir_fracs = 1;
             s.fir_order = DOWN_ORDER_FIR1;
             s.coefs = &RESAMPLER_1_2_COEFS;
-        } else if fs_hz_out * 3 == fs_hz_in {
+        }
+        else if fs_hz_out * 3 == fs_hz_in {
             s.fir_fracs = 1;
             s.fir_order = DOWN_ORDER_FIR2;
             s.coefs = &RESAMPLER_1_3_COEFS;
-        } else if fs_hz_out * 4 == fs_hz_in {
+        }
+        else if fs_hz_out * 4 == fs_hz_in {
             s.fir_fracs = 1;
             s.fir_order = DOWN_ORDER_FIR2;
             s.coefs = &RESAMPLER_1_4_COEFS;
-        } else if fs_hz_out * 6 == fs_hz_in {
+        }
+        else if fs_hz_out * 6 == fs_hz_in {
             s.fir_fracs = 1;
             s.fir_order = DOWN_ORDER_FIR2;
             s.coefs = &RESAMPLER_1_6_COEFS;
-        } else {
+        }
+        else {
             return -1;
         }
-    } else {
+    }
+    else {
         // Input and output sampling rates are equal: copy.
         s.resampler_function = ResamplerFn::Copy;
     }
@@ -210,30 +233,29 @@ pub(crate) fn silk_resampler_init(s: &mut SilkResamplerState, fs_hz_in: i32, fs_
     // Ratio of input/output samples.
     s.inv_ratio_q16 = silk_lshift(silk_div32(silk_lshift(fs_hz_in, 14 + up2x), fs_hz_out), 2);
     // Make sure the ratio is rounded up.
-    while silk_smulww_i64(s.inv_ratio_q16, fs_hz_out) < silk_lshift(fs_hz_in, up2x) {
+    while silk_smulww(s.inv_ratio_q16, fs_hz_out) < silk_lshift(fs_hz_in, up2x) {
         s.inv_ratio_q16 += 1;
     }
 
     0
 }
 
-/// `silk_SMULWW`-precision helper for the `invRatio_Q16` rounding loop above (both operands can
-/// exceed 16 bits, unlike `silk_SMULWB`).
-#[inline]
-fn silk_smulww_i64(a: i32, b: i32) -> i32 {
-    (((a as i64) * (b as i64)) >> 16) as i32
-}
-
 /// C: `silk_resampler`. Resamples `input[0..in_len]` into `out`, returning the number of
 /// samples written.
-pub(crate) fn silk_resampler(s: &mut SilkResamplerState, out: &mut [i16], input: &[i16], in_len: i32) -> i32 {
+pub(crate) fn silk_resampler(
+    s: &mut SilkResamplerState,
+    out: &mut [i16],
+    input: &[i16],
+    in_len: i32,
+) -> i32 {
     debug_assert!(in_len >= s.fs_in_khz);
     debug_assert!(s.input_delay <= s.fs_in_khz);
 
     let n_samples = (s.fs_in_khz - s.input_delay) as usize;
 
     // Copy to delay buffer.
-    s.delay_buf[s.input_delay as usize..s.input_delay as usize + n_samples].copy_from_slice(&input[..n_samples]);
+    s.delay_buf[s.input_delay as usize..s.input_delay as usize + n_samples]
+        .copy_from_slice(&input[..n_samples]);
 
     let fs_in_khz = s.fs_in_khz as usize;
     let fs_out_khz = s.fs_out_khz as usize;
@@ -262,7 +284,8 @@ pub(crate) fn silk_resampler(s: &mut SilkResamplerState, out: &mut [i16], input:
 
     // Copy to delay buffer.
     let tail_start = in_len as usize - s.input_delay as usize;
-    s.delay_buf[..s.input_delay as usize].copy_from_slice(&input[tail_start..tail_start + s.input_delay as usize]);
+    s.delay_buf[..s.input_delay as usize]
+        .copy_from_slice(&input[tail_start..tail_start + s.input_delay as usize]);
 
     silk_div32(in_len * s.fs_out_khz, s.fs_in_khz)
 }
@@ -322,7 +345,12 @@ fn up2_hq(state: &mut [i32; MAX_IIR_ORDER], out: &mut [i16], input: &[i16]) {
 // `silk_resampler_private_IIR_FIR`
 // -------------------------------------------------------------------------------------------
 
-fn iir_fir_interpol(out: &mut [i16], buf: &[i16], max_index_q16: i32, index_increment_q16: i32) -> usize {
+fn iir_fir_interpol(
+    out: &mut [i16],
+    buf: &[i16],
+    max_index_q16: i32,
+    index_increment_q16: i32,
+) -> usize {
     let mut n = 0usize;
     let mut index_q16 = 0i32;
     while index_q16 < max_index_q16 {
@@ -373,7 +401,8 @@ fn iir_fir(s: &mut SilkResamplerState, mut out: &mut [i16], mut input: &[i16]) {
             for j in 0..ORDER_FIR_12 {
                 buf[j] = buf[src + j];
             }
-        } else {
+        }
+        else {
             break;
         }
     }
@@ -421,7 +450,8 @@ fn down_fir_interpol(
                 for j in 1..9 {
                     res_q6 = silk_smlawb(res_q6, buf[b + j], ip[j] as i32);
                 }
-                let ip2 = &fir_coefs[DOWN_ORDER_FIR0 / 2 * (fir_fracs as usize - 1 - interpol_ind)..];
+                let ip2 =
+                    &fir_coefs[DOWN_ORDER_FIR0 / 2 * (fir_fracs as usize - 1 - interpol_ind)..];
                 for j in 0..9 {
                     res_q6 = silk_smlawb(res_q6, buf[b + 17 - j], ip2[j] as i32);
                 }
@@ -435,7 +465,11 @@ fn down_fir_interpol(
                 let b = silk_rshift(index_q16, 16) as usize;
                 let mut res_q6 = silk_smulwb(silk_add32(buf[b], buf[b + 23]), fir_coefs[0] as i32);
                 for j in 1..12 {
-                    res_q6 = silk_smlawb(res_q6, silk_add32(buf[b + j], buf[b + 23 - j]), fir_coefs[j] as i32);
+                    res_q6 = silk_smlawb(
+                        res_q6,
+                        silk_add32(buf[b + j], buf[b + 23 - j]),
+                        fir_coefs[j] as i32,
+                    );
                 }
                 out[n] = silk_sat16(silk_rshift_round(res_q6, 6)) as i16;
                 n += 1;
@@ -447,7 +481,11 @@ fn down_fir_interpol(
                 let b = silk_rshift(index_q16, 16) as usize;
                 let mut res_q6 = silk_smulwb(silk_add32(buf[b], buf[b + 35]), fir_coefs[0] as i32);
                 for j in 1..18 {
-                    res_q6 = silk_smlawb(res_q6, silk_add32(buf[b + j], buf[b + 35 - j]), fir_coefs[j] as i32);
+                    res_q6 = silk_smlawb(
+                        res_q6,
+                        silk_add32(buf[b + j], buf[b + 35 - j]),
+                        fir_coefs[j] as i32,
+                    );
                 }
                 out[n] = silk_sat16(silk_rshift_round(res_q6, 6)) as i16;
                 n += 1;
@@ -477,10 +515,23 @@ fn down_fir(s: &mut SilkResamplerState, mut out: &mut [i16], mut input: &[i16]) 
         n_samples_in = silk_min(in_len, s.batch_size) as usize;
 
         // Second-order AR filter (output in Q8).
-        ar2(&mut s.s_iir[..2], &mut buf[fir_order..fir_order + n_samples_in], &input[..n_samples_in], &ar_coefs);
+        ar2(
+            &mut s.s_iir[..2],
+            &mut buf[fir_order..fir_order + n_samples_in],
+            &input[..n_samples_in],
+            &ar_coefs,
+        );
 
         let max_index_q16 = silk_lshift(n_samples_in as i32, 16);
-        let n = down_fir_interpol(out, &buf, fir_coefs, fir_order, s.fir_fracs, max_index_q16, index_increment_q16);
+        let n = down_fir_interpol(
+            out,
+            &buf,
+            fir_coefs,
+            fir_order,
+            s.fir_fracs,
+            max_index_q16,
+            index_increment_q16,
+        );
         out = &mut out[n..];
 
         input = &input[n_samples_in..];
@@ -492,7 +543,8 @@ fn down_fir(s: &mut SilkResamplerState, mut out: &mut [i16], mut input: &[i16]) 
             for j in 0..fir_order {
                 buf[j] = buf[src + j];
             }
-        } else {
+        }
+        else {
             break;
         }
     }
@@ -518,7 +570,12 @@ mod tests {
         let mut in_pos = 0usize;
         let mut out_pos = 0usize;
         while in_pos + step <= total_in {
-            let n = silk_resampler(&mut state, &mut out[out_pos..], &input[in_pos..in_pos + step], step as i32);
+            let n = silk_resampler(
+                &mut state,
+                &mut out[out_pos..],
+                &input[in_pos..in_pos + step],
+                step as i32,
+            );
             out_pos += n as usize;
             in_pos += step;
         }

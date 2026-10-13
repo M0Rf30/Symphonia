@@ -629,30 +629,19 @@ impl<R: ReadEbml, S: EbmlSchema> EbmlIterator<R, S> {
     /// Read the value of an element containing unsigned integer data. If the element is empty,
     /// returns `None`.
     pub(crate) fn read_u64(&mut self) -> Result<Option<u64>> {
-        let element = self.current_or_err()?;
-
-        match element.element_info {
-            Some(info) => match info.data_type() {
-                EbmlDataType::Master => Err(EbmlError::ExpectedNonMasterElement),
-                EbmlDataType::Unsigned => {
-                    let size = element.data_size.ok_or(EbmlError::UnknownElementDataSize)? as usize;
-                    match size {
-                        0 => {
-                            self.discard_current();
-                            Ok(None)
-                        }
-                        1..=8 => {
-                            let mut buf = [0u8; 8];
-                            self.reader.read_buf_exact(&mut buf[8 - size..])?;
-                            self.discard_current();
-                            Ok(Some(u64::from_be_bytes(buf)))
-                        }
-                        _ => Err(EbmlError::UnexpectedElementDataSize),
-                    }
-                }
-                _ => Err(EbmlError::UnexpectedElementDataType),
-            },
-            _ => Err(EbmlError::UnknownElement),
+        let size = self.checked_data_size(EbmlDataType::Unsigned)?;
+        match size {
+            0 => {
+                self.discard_current();
+                Ok(None)
+            }
+            1..=8 => {
+                let mut buf = [0u8; 8];
+                self.reader.read_buf_exact(&mut buf[8 - size..])?;
+                self.discard_current();
+                Ok(Some(u64::from_be_bytes(buf)))
+            }
+            _ => Err(EbmlError::UnexpectedElementDataSize),
         }
     }
 
@@ -675,33 +664,20 @@ impl<R: ReadEbml, S: EbmlSchema> EbmlIterator<R, S> {
     /// Read the value of an element containing signed integer data. If the element is empty,
     /// returns `None`.
     pub(crate) fn read_i64(&mut self) -> Result<Option<i64>> {
-        let element = self.current_or_err()?;
-
-        match element.element_info {
-            Some(info) => match info.data_type() {
-                EbmlDataType::Master => Err(EbmlError::ExpectedNonMasterElement),
-                EbmlDataType::Signed => {
-                    let size = element.data_size.ok_or(EbmlError::UnknownElementDataSize)? as usize;
-
-                    match size {
-                        0 => {
-                            self.discard_current();
-                            Ok(None)
-                        }
-                        1..=8 => {
-                            let mut buf = [0u8; 8];
-                            self.reader.read_buf_exact(&mut buf[8 - size..])?;
-                            self.discard_current();
-                            let signed =
-                                sign_extend_leq64_to_i64(u64::from_be_bytes(buf), 8 * size as u32);
-                            Ok(Some(signed))
-                        }
-                        _ => Err(EbmlError::UnexpectedElementDataSize),
-                    }
-                }
-                _ => Err(EbmlError::UnexpectedElementDataType),
-            },
-            _ => Err(EbmlError::UnknownElement),
+        let size = self.checked_data_size(EbmlDataType::Signed)?;
+        match size {
+            0 => {
+                self.discard_current();
+                Ok(None)
+            }
+            1..=8 => {
+                let mut buf = [0u8; 8];
+                self.reader.read_buf_exact(&mut buf[8 - size..])?;
+                self.discard_current();
+                let signed = sign_extend_leq64_to_i64(u64::from_be_bytes(buf), 8 * size as u32);
+                Ok(Some(signed))
+            }
+            _ => Err(EbmlError::UnexpectedElementDataSize),
         }
     }
 
@@ -724,34 +700,23 @@ impl<R: ReadEbml, S: EbmlSchema> EbmlIterator<R, S> {
     /// Read the value of an element containing floating-point data. If the element is empty,
     /// returns `None`.
     pub(crate) fn read_f64(&mut self) -> Result<Option<f64>> {
-        let element = self.current_or_err()?;
-
-        match element.element_info {
-            Some(info) => match info.data_type() {
-                EbmlDataType::Master => Err(EbmlError::ExpectedNonMasterElement),
-                EbmlDataType::Float => {
-                    let size = element.data_size.ok_or(EbmlError::UnknownElementDataSize)?;
-                    match size {
-                        0 => {
-                            self.discard_current();
-                            Ok(None)
-                        }
-                        4 => {
-                            let value = self.reader.read_be_f32()?;
-                            self.discard_current();
-                            Ok(Some(f64::from(value)))
-                        }
-                        8 => {
-                            let value = self.reader.read_be_f64()?;
-                            self.discard_current();
-                            Ok(Some(value))
-                        }
-                        _ => Err(EbmlError::UnexpectedElementDataSize),
-                    }
-                }
-                _ => Err(EbmlError::UnexpectedElementDataType),
-            },
-            _ => Err(EbmlError::UnknownElement),
+        let size = self.checked_data_size(EbmlDataType::Float)?;
+        match size {
+            0 => {
+                self.discard_current();
+                Ok(None)
+            }
+            4 => {
+                let value = self.reader.read_be_f32()?;
+                self.discard_current();
+                Ok(Some(f64::from(value)))
+            }
+            8 => {
+                let value = self.reader.read_be_f64()?;
+                self.discard_current();
+                Ok(Some(value))
+            }
+            _ => Err(EbmlError::UnexpectedElementDataSize),
         }
     }
 
@@ -797,29 +762,18 @@ impl<R: ReadEbml, S: EbmlSchema> EbmlIterator<R, S> {
     /// Read the value of an element containing string data. If the element is empty, returns
     /// `None`.
     pub(crate) fn read_string(&mut self) -> Result<Option<String>> {
-        let element = self.current_or_err()?;
-
-        match element.element_info {
-            Some(info) => match info.data_type() {
-                EbmlDataType::Master => Err(EbmlError::ExpectedNonMasterElement),
-                EbmlDataType::String => {
-                    let size = element.data_size.ok_or(EbmlError::UnknownElementDataSize)? as usize;
-                    match size {
-                        0 => {
-                            self.discard_current();
-                            Ok(None)
-                        }
-                        _ => {
-                            let data = self.reader.read_boxed_slice_exact(size)?;
-                            self.discard_current();
-                            let bytes = data.split(|b| *b == 0).next().unwrap_or(&data);
-                            Ok(Some(String::from_utf8_lossy(bytes).into_owned()))
-                        }
-                    }
-                }
-                _ => Err(EbmlError::UnexpectedElementDataType),
-            },
-            _ => Err(EbmlError::UnknownElement),
+        let size = self.checked_data_size(EbmlDataType::String)?;
+        match size {
+            0 => {
+                self.discard_current();
+                Ok(None)
+            }
+            _ => {
+                let data = self.reader.read_boxed_slice_exact(size)?;
+                self.discard_current();
+                let bytes = data.split(|b| *b == 0).next().unwrap_or(&data);
+                Ok(Some(String::from_utf8_lossy(bytes).into_owned()))
+            }
         }
     }
 
@@ -841,68 +795,53 @@ impl<R: ReadEbml, S: EbmlSchema> EbmlIterator<R, S> {
 
     /// Read a boxed slice of the binary data carried by a binary element.
     pub(crate) fn read_binary(&mut self) -> Result<Box<[u8]>> {
-        let element = self.current_or_err()?;
-
-        match element.element_info {
-            Some(info) => match info.data_type() {
-                EbmlDataType::Master => Err(EbmlError::ExpectedNonMasterElement),
-                EbmlDataType::Binary => {
-                    let size = element.data_size.ok_or(EbmlError::UnknownElementDataSize)? as usize;
-                    let data = self.reader.read_boxed_slice_exact(size)?;
-                    self.discard_current();
-                    Ok(data)
-                }
-                _ => Err(EbmlError::UnexpectedElementDataType),
-            },
-            _ => Err(EbmlError::UnknownElement),
-        }
+        let size = self.checked_data_size(EbmlDataType::Binary)?;
+        let data = self.reader.read_boxed_slice_exact(size)?;
+        self.discard_current();
+        Ok(data)
     }
 
     /// Read the binary data carried by a binary element into a provided byte slice.
     ///
     /// It is an error if the buffer is too small.
     pub(crate) fn read_binary_into(&mut self, buf: &mut [u8]) -> Result<usize> {
-        let element = self.current_or_err()?;
-
-        match element.element_info {
-            Some(info) => match info.data_type() {
-                EbmlDataType::Master => Err(EbmlError::ExpectedNonMasterElement),
-                EbmlDataType::Binary => {
-                    let size = element.data_size.ok_or(EbmlError::UnknownElementDataSize)? as usize;
-                    if size > buf.len() {
-                        return Err(EbmlError::BufferTooSmall);
-                    }
-                    self.reader.read_buf_exact(&mut buf[..size])?;
-                    self.discard_current();
-                    Ok(size)
-                }
-                _ => Err(EbmlError::UnexpectedElementDataType),
-            },
-            _ => Err(EbmlError::UnknownElement),
+        let size = self.checked_data_size(EbmlDataType::Binary)?;
+        if size > buf.len() {
+            return Err(EbmlError::BufferTooSmall);
         }
+        self.reader.read_buf_exact(&mut buf[..size])?;
+        self.discard_current();
+        Ok(size)
     }
 
     /// Copy up to the first `buf.len()` bytes of the data carried by a binary element into a
     /// provided byte slice, without consuming them. Returns the number of bytes copied.
     pub(crate) fn peek_binary(&mut self, buf: &mut [u8]) -> Result<usize> {
+        let size = self.checked_data_size(EbmlDataType::Binary)?;
+        let len = buf.len().min(size);
+
+        let pos = self.reader.pos();
+        self.reader.read_buf_exact(&mut buf[..len])?;
+        self.reader.seek_buffered(pos);
+        Ok(len)
+    }
+
+    /// Get the data size of the current element as a `usize`, after checking the element is of the
+    /// `expected` data type.
+    fn checked_data_size(&self, expected: EbmlDataType) -> Result<usize> {
         let element = self.current_or_err()?;
 
-        match element.element_info {
-            Some(info) => match info.data_type() {
-                EbmlDataType::Master => Err(EbmlError::ExpectedNonMasterElement),
-                EbmlDataType::Binary => {
-                    let size = element.data_size.ok_or(EbmlError::UnknownElementDataSize)?;
-                    let len = buf.len().min(usize::try_from(size).unwrap_or(usize::MAX));
+        let info = element.element_info.ok_or(EbmlError::UnknownElement)?;
 
-                    let pos = self.reader.pos();
-                    self.reader.read_buf_exact(&mut buf[..len])?;
-                    self.reader.seek_buffered(pos);
-                    Ok(len)
-                }
-                _ => Err(EbmlError::UnexpectedElementDataType),
-            },
-            _ => Err(EbmlError::UnknownElement),
+        match info.data_type() {
+            EbmlDataType::Master => return Err(EbmlError::ExpectedNonMasterElement),
+            data_type if data_type != expected => return Err(EbmlError::UnexpectedElementDataType),
+            _ => (),
         }
+
+        let size = element.data_size.ok_or(EbmlError::UnknownElementDataSize)?;
+
+        usize::try_from(size).map_err(|_| EbmlError::UnexpectedElementDataSize)
     }
 
     /// Get the current element or return an error if there is no current element.

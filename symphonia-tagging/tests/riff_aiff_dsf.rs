@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+// Test code: a panic is a test failure.
 // Symphonia
 // Copyright (c) 2019-2026 The Project Symphonia Developers.
 //
@@ -161,7 +163,8 @@ fn decode_all(path: &Path, ext: &str) -> usize {
 
     let track = format.default_track(TrackType::Audio).expect("audio track");
     let track_id = track.id;
-    let Some(CodecParameters::Audio(params)) = track.codec_params.clone() else {
+    let Some(CodecParameters::Audio(params)) = track.codec_params.clone()
+    else {
         panic!("not an audio track");
     };
     let mut decoder = symphonia::default::get_codecs()
@@ -277,7 +280,7 @@ fn wav_samples() -> Vec<u8> {
 }
 
 fn syncsafe(n: usize) -> [u8; 4] {
-    [((n >> 21) & 0x7f) as u8, ((n >> 14) & 0x7f) as u8, ((n >> 7) & 0x7f) as u8, (n & 0x7f) as u8]
+    symphonia_metadata::id3v2::write::encode_synchsafe(u32::try_from(n).unwrap())
 }
 
 /// An ID3v2.4 tag.
@@ -310,11 +313,7 @@ fn old_id3_with_priv_popm() -> Vec<u8> {
     popm.push(196);
     popm.extend_from_slice(&7u32.to_be_bytes());
 
-    id3_tag(&[
-        (b"TIT2", text_frame("Old Title")),
-        (b"PRIV", priv_frame),
-        (b"POPM", popm),
-    ])
+    id3_tag(&[(b"TIT2", text_frame("Old Title")), (b"PRIV", priv_frame), (b"POPM", popm)])
 }
 
 fn info_list(subchunks: &[(&[u8; 4], &str)]) -> Vec<u8> {
@@ -470,10 +469,8 @@ fn wav_rewrites_tags_and_preserves_everything_else() {
         assert_eq!(id3_pos, old_id3_pos);
 
         // One INFO list, in place, with the new tags and the unmanaged sub-chunk.
-        let infos: Vec<_> = new_chunks
-            .iter()
-            .filter(|c| c.id == *b"LIST" && &c.payload[..4] == b"INFO")
-            .collect();
+        let infos: Vec<_> =
+            new_chunks.iter().filter(|c| c.id == *b"LIST" && &c.payload[..4] == b"INFO").collect();
         assert_eq!(infos.len(), 1);
         let info = &infos[0].payload;
         assert!(contains(info, b"INAM"));
@@ -494,7 +491,10 @@ fn wav_rewrites_tags_and_preserves_everything_else() {
             .collect();
         expected.extend(extra);
         assert_eq!(back.std, expected);
-        assert_eq!(back.visuals, vec![(Some(StandardVisualKey::FrontCover), visuals[0].data.to_vec())]);
+        assert_eq!(
+            back.visuals,
+            vec![(Some(StandardVisualKey::FrontCover), visuals[0].data.to_vec())]
+        );
 
         // Audio is untouched.
         assert_eq!(audio_bytes(&path, "wav"), before_audio);
@@ -506,12 +506,8 @@ fn wav_rewrites_tags_and_preserves_everything_else() {
 
 #[test]
 fn wav_without_tags_gets_chunks_after_the_data() {
-    let original = riff_file(
-        b"RIFF",
-        b"WAVE",
-        false,
-        &[wav_fmt(), chunk(b"data", &wav_samples(), false)],
-    );
+    let original =
+        riff_file(b"RIFF", b"WAVE", false, &[wav_fmt(), chunk(b"data", &wav_samples(), false)]);
     let path = work_file("bare.wav", &original);
     let before_audio = audio_bytes(&path, "wav");
 
@@ -620,9 +616,12 @@ fn wav_trailing_junk_and_a_missing_final_pad_are_handled() {
     let out = fs::read(&path).unwrap();
     let (chunks, junk) = chunks_of(&out, false);
     assert_eq!(junk, b"\0\x01junk");
-    assert_eq!(u32::from_le_bytes(out[4..8].try_into().unwrap()) as usize, out.len() - 8 - junk.len());
+    assert_eq!(
+        u32::from_le_bytes(out[4..8].try_into().unwrap()) as usize,
+        out.len() - 8 - junk.len()
+    );
     assert_eq!(find(&chunks, b"id3 ").len(), 1);
-    assert_eq!(read_back(&path, "wav").std.contains("TrackTitle(\"New Title\")"), true);
+    assert!(read_back(&path, "wav").std.contains("TrackTitle(\"New Title\")"));
     cleanup(&path);
 }
 
@@ -638,28 +637,22 @@ fn wav_rf64_is_unsupported_and_left_alone() {
     data.extend_from_slice(&u32::MAX.to_le_bytes());
     data.extend_from_slice(&wav_samples());
 
-    let mut original = riff_file(b"RF64", b"WAVE", false, &[chunk(b"ds64", &ds64, false), wav_fmt()]);
+    let mut original =
+        riff_file(b"RF64", b"WAVE", false, &[chunk(b"ds64", &ds64, false), wav_fmt()]);
     original[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
     original.extend_from_slice(&data);
 
     let path = work_file("big.wav", &original);
     assert_eq!(sniff(&path).unwrap(), Container::Wav);
-    assert!(matches!(
-        write_file(&path, &sample_tags(), &[], &opts()),
-        Err(Error::Unsupported(_))
-    ));
+    assert!(matches!(write_file(&path, &sample_tags(), &[], &opts()), Err(Error::Unsupported(_))));
     assert_eq!(fs::read(&path).unwrap(), original);
     cleanup(&path);
 }
 
 #[test]
 fn wav_with_a_truncated_chunk_is_malformed() {
-    let mut original = riff_file(
-        b"RIFF",
-        b"WAVE",
-        false,
-        &[wav_fmt(), chunk(b"data", &wav_samples(), false)],
-    );
+    let mut original =
+        riff_file(b"RIFF", b"WAVE", false, &[wav_fmt(), chunk(b"data", &wav_samples(), false)]);
     original.truncate(original.len() - 10);
     let path = work_file("cut.wav", &original);
     assert!(matches!(write_file(&path, &sample_tags(), &[], &opts()), Err(Error::Malformed(_))));
@@ -738,7 +731,9 @@ fn aiff_rewrites_tags_and_preserves_everything_else() {
         assert_eq!(&out[8..12], b"AIFF");
 
         let is_tag = |c: &RawChunk| {
-            c.id == *b"ID3 " || c.id == *b"id3 " || [*b"NAME", *b"AUTH", *b"(c) ", *b"ANNO"].contains(&c.id)
+            c.id == *b"ID3 "
+                || c.id == *b"id3 "
+                || [*b"NAME", *b"AUTH", *b"(c) ", *b"ANNO"].contains(&c.id)
         };
         let kept = |chunks: &[RawChunk]| -> Vec<RawChunk> {
             chunks.iter().filter(|c| !is_tag(c)).cloned().collect()
@@ -746,7 +741,8 @@ fn aiff_rewrites_tags_and_preserves_everything_else() {
         assert_eq!(kept(&old_chunks), kept(&new_chunks));
 
         // The ID3 chunk replaced the old one in place, and kept its unmanaged frames.
-        let id3: Vec<_> = new_chunks.iter().filter(|c| c.id == *b"ID3 " || c.id == *b"id3 ").collect();
+        let id3: Vec<_> =
+            new_chunks.iter().filter(|c| c.id == *b"ID3 " || c.id == *b"id3 ").collect();
         assert_eq!(id3.len(), 1);
         assert_eq!(id3[0].id, *b"ID3 ");
         assert!(contains(&id3[0].payload, b"PRIV"));
@@ -763,10 +759,16 @@ fn aiff_rewrites_tags_and_preserves_everything_else() {
         let back = read_back(&path, "aiff");
         let mut expected = sample_std();
         expected.extend(
-            back.std.iter().filter(|t| t.starts_with("Rating") || t.starts_with("PlayCounter")).cloned(),
+            back.std
+                .iter()
+                .filter(|t| t.starts_with("Rating") || t.starts_with("PlayCounter"))
+                .cloned(),
         );
         assert_eq!(back.std, expected);
-        assert_eq!(back.visuals, vec![(Some(StandardVisualKey::FrontCover), visuals[0].data.to_vec())]);
+        assert_eq!(
+            back.visuals,
+            vec![(Some(StandardVisualKey::FrontCover), visuals[0].data.to_vec())]
+        );
 
         assert_eq!(audio_bytes(&path, "aiff"), before_audio);
         assert_eq!(decode_all(&path, "aiff"), frames);
@@ -904,7 +906,10 @@ fn dsf_replaces_a_tag_and_keeps_its_unmanaged_frames() {
     let back = read_back(&path, "dsf");
     let mut expected = sample_std();
     expected.extend(
-        back.std.iter().filter(|t| t.starts_with("Rating") || t.starts_with("PlayCounter")).cloned(),
+        back.std
+            .iter()
+            .filter(|t| t.starts_with("Rating") || t.starts_with("PlayCounter"))
+            .cloned(),
     );
     assert_eq!(back.std, expected);
     assert_eq!(audio_bytes(&path, "dsf"), before_audio);

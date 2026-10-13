@@ -14,16 +14,16 @@ use symphonia_core::formats::probe::{Score, Scoreable};
 use symphonia_core::formats::{FormatOptions, FormatReader};
 use symphonia_core::io::{MediaSourceStream, MediaSourceStreamOptions, ScopedStream};
 
-/// A minimal, valid current-format (version 3990) APE descriptor + header, with no seek table,
-/// no WAV header data, and no frame data (`total_frames = 1`, `blocks_per_frame =
-/// final_frame_blocks = sample_rate = 44100`, 16-bit stereo). This is enough for
+/// A minimal, valid current-format (version 3990) APE descriptor + header, with a single-entry
+/// seek table, no WAV header data, and no frame data (`total_frames = 1`, `blocks_per_frame =
+/// final_frame_blocks = sample_rate = 44100`, 16-bit stereo, one seek table entry). This is enough for
 /// `mac::format::parse` to succeed and derive a 1 second duration.
-const SYNTHETIC_APE_HEADER: [u8; 76] = [
+const SYNTHETIC_APE_HEADER: [u8; 80] = [
     0x4d, 0x41, 0x43, 0x20, 0x96, 0x0f, 0x00, 0x00, 0x34, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0xd0, 0x07, 0x00, 0x00, 0x44, 0xac, 0x00, 0x00, 0x44, 0xac, 0x00, 0x00,
-    0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x02, 0x00, 0x44, 0xac, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x02, 0x00, 0x44, 0xac, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
 fn create_stream(data: Vec<u8>) -> MediaSourceStream<'static> {
@@ -52,8 +52,7 @@ fn parses_header_and_derives_duration() {
     let reader = ApeReader::try_new(mss, FormatOptions::default()).expect("valid synthetic header");
 
     let track = reader.tracks().first().expect("one track");
-    let CodecParameters::Audio(params) =
-        track.codec_params.as_ref().expect("codec params present")
+    let CodecParameters::Audio(params) = track.codec_params.as_ref().expect("codec params present")
     else {
         panic!("expected audio codec parameters");
     };
@@ -67,9 +66,9 @@ fn parses_header_and_derives_duration() {
     assert_eq!(track.num_frames, Some(44_100));
 
     let time_base = track.time_base.expect("time base derived from sample rate");
-    let duration_ticks = track
-        .duration
-        .unwrap_or_else(|| symphonia_core::units::Duration::new(track.num_frames.expect("num_frames set")));
+    let duration_ticks = track.duration.unwrap_or_else(|| {
+        symphonia_core::units::Duration::new(track.num_frames.expect("num_frames set"))
+    });
     let duration = time_base.calc_duration(duration_ticks).expect("duration fits");
 
     // 44100 samples at 44100 Hz is exactly 1 second.

@@ -17,5 +17,7 @@ pub mod es;
 pub mod formats;
 pub mod pes;
 pub mod seek;
+pub(crate) mod sync_buf;
 pub mod timeline;
+pub mod track;
 pub mod video;

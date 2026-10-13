@@ -19,6 +19,8 @@
 
 use std::sync::OnceLock;
 
+use symphonia_core::io::read_base128_be_u64;
+
 /// A big-endian, MSB-first bit reader over a byte slice.
 #[derive(Clone)]
 pub struct BitReader<'a> {
@@ -38,8 +40,8 @@ impl<'a> BitReader<'a> {
         self.pos
     }
 
-    /// Seek to an absolute bit position. Out-of-range positions are clamped to the buffer's
-    /// bit length (subsequent reads then behave as if at end-of-stream, returning zero bits).
+    /// Seek to an absolute bit position. Positions beyond the end of the buffer are stored
+    /// unchanged (`bit_pos` reports them as given); reads from them return zero bits.
     #[inline]
     pub fn set_bit_pos(&mut self, pos: u64) {
         self.pos = pos;
@@ -104,18 +106,12 @@ impl<'a> BitReader<'a> {
     ///
     /// Reads a big-endian base-128 varint (7 payload bits per byte, MSB = continuation flag).
     /// Returns `(value, bytes_consumed)`.
+    ///
+    /// An unterminated or overflowing value (corrupt input) yields `(0, 10)`.
     pub fn read_size(&mut self) -> (u64, u32) {
-        let mut size: u64 = 0;
-        let mut n = 0u32;
-        loop {
-            let byte = self.read_bits(8) as u8;
-            size = (size << 7) | u64::from(byte & 0x7F);
-            n += 1;
-            if byte & 0x80 == 0 || n >= 10 {
-                break;
-            }
-        }
-        (size, n)
+        read_base128_be_u64::<std::convert::Infallible>(10, || Ok(self.read_bits(8) as u8))
+            .unwrap_or_default()
+            .unwrap_or((0, 10))
     }
 }
 

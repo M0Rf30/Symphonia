@@ -13,18 +13,25 @@
 
 use crate::silk::lpc_analysis_filter::silk_lpc_analysis_filter;
 use crate::silk::macros::{
-    silk_add_lshift32, silk_add_sat32, silk_div32_varq, silk_inverse32_varq, silk_lshift, silk_lshift_sat32,
-    silk_rand, silk_rshift, silk_rshift_round, silk_sat16, silk_smlawb, silk_smulwb, silk_smulww, silk_fix_const,
+    silk_add_lshift32, silk_add_sat32, silk_div32_varq, silk_fix_const, silk_inverse32_varq,
+    silk_lshift, silk_lshift_sat32, silk_rand, silk_rshift, silk_rshift_round, silk_sat16,
+    silk_smlawb, silk_smulwb, silk_smulww,
 };
 use crate::silk::structs::{
-    SilkDecoderControl, SilkDecoderState, LTP_ORDER, MAX_FRAME_LENGTH, MAX_LPC_ORDER, MAX_LTP_MEM_LENGTH,
-    MAX_NB_SUBFR, MAX_SUB_FRAME_LENGTH, QUANT_LEVEL_ADJUST_Q10, TYPE_VOICED,
+    LTP_ORDER, MAX_FRAME_LENGTH, MAX_LPC_ORDER, MAX_LTP_MEM_LENGTH, MAX_NB_SUBFR,
+    MAX_SUB_FRAME_LENGTH, QUANT_LEVEL_ADJUST_Q10, SilkDecoderControl, SilkDecoderState,
+    TYPE_VOICED,
 };
 use crate::silk::tables::QUANTIZATION_OFFSETS_Q10;
 
 /// C: `silk_decode_core`. `pulses` holds `psDec->frame_length` excitation pulses; `xq` receives
 /// `psDec->frame_length` decoded PCM samples.
-pub(crate) fn silk_decode_core(dec: &mut SilkDecoderState, ctrl: &SilkDecoderControl, xq: &mut [i16], pulses: &[i16]) {
+pub(crate) fn silk_decode_core(
+    dec: &mut SilkDecoderState,
+    ctrl: &SilkDecoderControl,
+    xq: &mut [i16],
+    pulses: &[i16],
+) {
     debug_assert!(dec.prev_gain_q16 != 0);
 
     let nb_subfr = dec.nb_subfr as usize;
@@ -38,19 +45,21 @@ pub(crate) fn silk_decode_core(dec: &mut SilkDecoderState, ctrl: &SilkDecoderCon
     let mut res_q14 = [0i32; MAX_SUB_FRAME_LENGTH];
     let mut s_lpc_q14 = [0i32; MAX_SUB_FRAME_LENGTH + MAX_LPC_ORDER];
 
-    let offset_q10 =
-        QUANTIZATION_OFFSETS_Q10[(dec.indices.signal_type as usize) >> 1][dec.indices.quant_offset_type as usize] as i32;
+    let offset_q10 = QUANTIZATION_OFFSETS_Q10[(dec.indices.signal_type as usize) >> 1]
+        [dec.indices.quant_offset_type as usize] as i32;
 
     let nlsf_interpolation_flag = dec.indices.nlsf_interp_coef_q2 < 4;
 
     // Decode excitation.
     let mut rand_seed = dec.indices.seed as i32;
+    #[allow(clippy::needless_range_loop)] // index shared across several buffers, mirrors the C loop
     for i in 0..frame_length {
         rand_seed = silk_rand(rand_seed);
         let mut exc = silk_lshift(pulses[i] as i32, 14);
         if exc > 0 {
             exc -= QUANT_LEVEL_ADJUST_Q10 << 4;
-        } else if exc < 0 {
+        }
+        else if exc < 0 {
             exc += QUANT_LEVEL_ADJUST_Q10 << 4;
         }
         exc += offset_q10 << 4;
@@ -88,7 +97,8 @@ pub(crate) fn silk_decode_core(dec: &mut SilkDecoderState, ctrl: &SilkDecoderCon
                 *v = silk_smulww(g, *v);
             }
             g
-        } else {
+        }
+        else {
             1i32 << 16
         };
 
@@ -99,12 +109,16 @@ pub(crate) fn silk_decode_core(dec: &mut SilkDecoderState, ctrl: &SilkDecoderCon
         let mut b_q14 = [0i16; LTP_ORDER];
         let mut signal_type = signal_type_orig;
         let mut pitch_l_k = ctrl.pitch_l[k];
-        if dec.loss_cnt != 0 && dec.prev_signal_type == TYPE_VOICED && signal_type_orig != TYPE_VOICED && k < MAX_NB_SUBFR / 2
+        if dec.loss_cnt != 0
+            && dec.prev_signal_type == TYPE_VOICED
+            && signal_type_orig != TYPE_VOICED
+            && k < MAX_NB_SUBFR / 2
         {
             b_q14[LTP_ORDER / 2] = silk_fix_const(0.25, 14) as i16;
             signal_type = TYPE_VOICED;
             pitch_l_k = dec.lag_prev;
-        } else {
+        }
+        else {
             b_q14.copy_from_slice(&ctrl.ltp_coef_q14[b_q14_base..b_q14_base + LTP_ORDER]);
         }
 
@@ -115,7 +129,10 @@ pub(crate) fn silk_decode_core(dec: &mut SilkDecoderState, ctrl: &SilkDecoderCon
             // Re-whitening.
             if k == 0 || (k == 2 && nlsf_interpolation_flag) {
                 // Rewhiten with new A coefs.
-                let start_idx = ltp_mem_length as isize - lag as isize - lpc_order as isize - (LTP_ORDER / 2) as isize;
+                let start_idx = ltp_mem_length as isize
+                    - lag as isize
+                    - lpc_order as isize
+                    - (LTP_ORDER / 2) as isize;
                 debug_assert!(start_idx > 0);
                 let start_idx = start_idx as usize;
 
@@ -127,9 +144,16 @@ pub(crate) fn silk_decode_core(dec: &mut SilkDecoderState, ctrl: &SilkDecoderCon
                 let in_slice_start = start_idx + k * subfr_length;
                 let filt_len = ltp_mem_length - start_idx;
                 let mut in_local = [0i16; MAX_LTP_MEM_LENGTH];
-                in_local[..filt_len].copy_from_slice(&dec.out_buf[in_slice_start..in_slice_start + filt_len]);
+                in_local[..filt_len]
+                    .copy_from_slice(&dec.out_buf[in_slice_start..in_slice_start + filt_len]);
                 let mut out_local = [0i16; MAX_LTP_MEM_LENGTH];
-                silk_lpc_analysis_filter(&mut out_local[..filt_len], &in_local[..filt_len], &a_q12_tmp[..lpc_order], filt_len, lpc_order);
+                silk_lpc_analysis_filter(
+                    &mut out_local[..filt_len],
+                    &in_local[..filt_len],
+                    &a_q12_tmp[..lpc_order],
+                    filt_len,
+                    lpc_order,
+                );
                 s_ltp[start_idx..ltp_mem_length].copy_from_slice(&out_local[..filt_len]);
 
                 // After rewhitening the LTP state is unscaled.
@@ -138,13 +162,16 @@ pub(crate) fn silk_decode_core(dec: &mut SilkDecoderState, ctrl: &SilkDecoderCon
                     inv_gain_q31 = silk_lshift(silk_smulwb(inv_gain_q31, ctrl.ltp_scale_q14), 2);
                 }
                 for i in 0..lag + LTP_ORDER / 2 {
-                    s_ltp_q15[s_ltp_buf_idx - i - 1] = silk_smulwb(inv_gain_q31, s_ltp[ltp_mem_length - i - 1] as i32);
+                    s_ltp_q15[s_ltp_buf_idx - i - 1] =
+                        silk_smulwb(inv_gain_q31, s_ltp[ltp_mem_length - i - 1] as i32);
                 }
-            } else {
+            }
+            else {
                 // Update LTP state when Gain changes.
                 if gain_adj_q16 != 1i32 << 16 {
                     for i in 0..lag + LTP_ORDER / 2 {
-                        s_ltp_q15[s_ltp_buf_idx - i - 1] = silk_smulww(gain_adj_q16, s_ltp_q15[s_ltp_buf_idx - i - 1]);
+                        s_ltp_q15[s_ltp_buf_idx - i - 1] =
+                            silk_smulww(gain_adj_q16, s_ltp_q15[s_ltp_buf_idx - i - 1]);
                     }
                 }
             }
@@ -154,16 +181,22 @@ pub(crate) fn silk_decode_core(dec: &mut SilkDecoderState, ctrl: &SilkDecoderCon
         // `pres_q14` either points at `res_q14` (voiced) or is `dec.exc_q14[pexc_idx..]` (unvoiced).
         if signal_type == TYPE_VOICED {
             let pred_lag_base = s_ltp_buf_idx as isize - lag as isize + (LTP_ORDER / 2) as isize;
+            #[allow(clippy::needless_range_loop)]
+            // index shared across several buffers, mirrors the C loop
             for i in 0..subfr_length {
                 let p = pred_lag_base + i as isize;
                 // Unrolled loop. Avoids introducing a bias because silk_SMLAWB() always rounds
                 // to -inf.
                 let mut ltp_pred_q13: i32 = 2;
                 ltp_pred_q13 = silk_smlawb(ltp_pred_q13, s_ltp_q15[(p) as usize], b_q14[0] as i32);
-                ltp_pred_q13 = silk_smlawb(ltp_pred_q13, s_ltp_q15[(p - 1) as usize], b_q14[1] as i32);
-                ltp_pred_q13 = silk_smlawb(ltp_pred_q13, s_ltp_q15[(p - 2) as usize], b_q14[2] as i32);
-                ltp_pred_q13 = silk_smlawb(ltp_pred_q13, s_ltp_q15[(p - 3) as usize], b_q14[3] as i32);
-                ltp_pred_q13 = silk_smlawb(ltp_pred_q13, s_ltp_q15[(p - 4) as usize], b_q14[4] as i32);
+                ltp_pred_q13 =
+                    silk_smlawb(ltp_pred_q13, s_ltp_q15[(p - 1) as usize], b_q14[1] as i32);
+                ltp_pred_q13 =
+                    silk_smlawb(ltp_pred_q13, s_ltp_q15[(p - 2) as usize], b_q14[2] as i32);
+                ltp_pred_q13 =
+                    silk_smlawb(ltp_pred_q13, s_ltp_q15[(p - 3) as usize], b_q14[3] as i32);
+                ltp_pred_q13 =
+                    silk_smlawb(ltp_pred_q13, s_ltp_q15[(p - 4) as usize], b_q14[4] as i32);
 
                 // Generate LPC excitation.
                 res_q14[i] = silk_add_lshift32(dec.exc_q14[pexc_idx + i], ltp_pred_q13, 1);
@@ -172,8 +205,10 @@ pub(crate) fn silk_decode_core(dec: &mut SilkDecoderState, ctrl: &SilkDecoderCon
                 s_ltp_q15[s_ltp_buf_idx] = silk_lshift(res_q14[i], 1);
                 s_ltp_buf_idx += 1;
             }
-        } else {
-            res_q14[..subfr_length].copy_from_slice(&dec.exc_q14[pexc_idx..pexc_idx + subfr_length]);
+        }
+        else {
+            res_q14[..subfr_length]
+                .copy_from_slice(&dec.exc_q14[pexc_idx..pexc_idx + subfr_length]);
         }
 
         for i in 0..subfr_length {
@@ -193,19 +228,26 @@ pub(crate) fn silk_decode_core(dec: &mut SilkDecoderState, ctrl: &SilkDecoderCon
             lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s_lpc_q14[base - 9], a_q12_tmp[8] as i32);
             lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s_lpc_q14[base - 10], a_q12_tmp[9] as i32);
             if lpc_order == 16 {
-                lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s_lpc_q14[base - 11], a_q12_tmp[10] as i32);
-                lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s_lpc_q14[base - 12], a_q12_tmp[11] as i32);
-                lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s_lpc_q14[base - 13], a_q12_tmp[12] as i32);
-                lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s_lpc_q14[base - 14], a_q12_tmp[13] as i32);
-                lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s_lpc_q14[base - 15], a_q12_tmp[14] as i32);
-                lpc_pred_q10 = silk_smlawb(lpc_pred_q10, s_lpc_q14[base - 16], a_q12_tmp[15] as i32);
+                lpc_pred_q10 =
+                    silk_smlawb(lpc_pred_q10, s_lpc_q14[base - 11], a_q12_tmp[10] as i32);
+                lpc_pred_q10 =
+                    silk_smlawb(lpc_pred_q10, s_lpc_q14[base - 12], a_q12_tmp[11] as i32);
+                lpc_pred_q10 =
+                    silk_smlawb(lpc_pred_q10, s_lpc_q14[base - 13], a_q12_tmp[12] as i32);
+                lpc_pred_q10 =
+                    silk_smlawb(lpc_pred_q10, s_lpc_q14[base - 14], a_q12_tmp[13] as i32);
+                lpc_pred_q10 =
+                    silk_smlawb(lpc_pred_q10, s_lpc_q14[base - 15], a_q12_tmp[14] as i32);
+                lpc_pred_q10 =
+                    silk_smlawb(lpc_pred_q10, s_lpc_q14[base - 16], a_q12_tmp[15] as i32);
             }
 
             // Add prediction to LPC excitation.
             s_lpc_q14[base] = silk_add_sat32(res_q14[i], silk_lshift_sat32(lpc_pred_q10, 4));
 
             // Scale with gain.
-            xq[pxq_idx + i] = silk_sat16(silk_rshift_round(silk_smulww(s_lpc_q14[base], gain_q10), 8)) as i16;
+            xq[pxq_idx + i] =
+                silk_sat16(silk_rshift_round(silk_smulww(s_lpc_q14[base], gain_q10), 8)) as i16;
         }
 
         // Update LPC filter state.

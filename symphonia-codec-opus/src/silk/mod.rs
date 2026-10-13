@@ -44,12 +44,12 @@ mod tables;
 mod tables_nlsf;
 
 use crate::range::RangeDecoder;
-use crate::silk::decode_frame::{silk_decode_frame, LostFlag};
+use crate::silk::decode_frame::{LostFlag, silk_decode_frame};
 use crate::silk::stereo_decode_pred::{silk_stereo_decode_mid_only, silk_stereo_decode_pred};
 use crate::silk::stereo_ms_to_lr::silk_stereo_ms_to_lr;
 use crate::silk::structs::{
-    SilkDecoderState, StereoDecState, CODE_CONDITIONALLY, CODE_INDEPENDENTLY, CODE_INDEPENDENTLY_NO_LTP_SCALING,
-    MAX_FRAME_LENGTH, MAX_LPC_ORDER, MAX_SUB_FRAME_LENGTH, TYPE_NO_VOICE_ACTIVITY,
+    CODE_CONDITIONALLY, CODE_INDEPENDENTLY, CODE_INDEPENDENTLY_NO_LTP_SCALING, MAX_FRAME_LENGTH,
+    MAX_LPC_ORDER, MAX_SUB_FRAME_LENGTH, SilkDecoderState, StereoDecState, TYPE_NO_VOICE_ACTIVITY,
 };
 use crate::silk::tables::LBRR_FLAGS_ICDF_PTR;
 
@@ -206,13 +206,18 @@ impl SilkDecoder {
             }
             // Decode LBRR flags.
             for n in 0..n_channels_internal {
-                self.channel_state[n].lbrr_flags = [false; crate::silk::structs::MAX_FRAMES_PER_PACKET];
+                self.channel_state[n].lbrr_flags =
+                    [false; crate::silk::structs::MAX_FRAMES_PER_PACKET];
                 if self.channel_state[n].lbrr_flag {
                     if self.channel_state[n].n_frames_per_packet == 1 {
                         self.channel_state[n].lbrr_flags[0] = true;
-                    } else {
-                        let lbrr_symbol =
-                            rd.dec_icdf(LBRR_FLAGS_ICDF_PTR[self.channel_state[n].n_frames_per_packet as usize - 2], 8) + 1;
+                    }
+                    else {
+                        let lbrr_symbol = rd.dec_icdf(
+                            LBRR_FLAGS_ICDF_PTR
+                                [self.channel_state[n].n_frames_per_packet as usize - 2],
+                            8,
+                        ) + 1;
                         for i in 0..self.channel_state[n].n_frames_per_packet as usize {
                             self.channel_state[n].lbrr_flags[i] = ((lbrr_symbol >> i) & 1) != 0;
                         }
@@ -235,10 +240,17 @@ impl SilkDecoder {
                             }
                             let cond_coding = if i > 0 && self.channel_state[n].lbrr_flags[i - 1] {
                                 CODE_CONDITIONALLY
-                            } else {
+                            }
+                            else {
                                 CODE_INDEPENDENTLY
                             };
-                            decode_indices::silk_decode_indices(&mut self.channel_state[n], rd, i, true, cond_coding);
+                            decode_indices::silk_decode_indices(
+                                &mut self.channel_state[n],
+                                rd,
+                                i,
+                                true,
+                                cond_coding,
+                            );
                             let l = self.channel_state[n].frame_length as usize;
                             let padded_l = (l + 15) & !15;
                             decode_pulses::silk_decode_pulses(
@@ -258,17 +270,22 @@ impl SilkDecoder {
         if n_channels_internal == 2 {
             let n_frames_decoded0 = self.channel_state[0].n_frames_decoded as usize;
             if lost_flag == DecodeFlag::Normal
-                || (lost_flag == DecodeFlag::Lbrr && self.channel_state[0].lbrr_flags[n_frames_decoded0])
+                || (lost_flag == DecodeFlag::Lbrr
+                    && self.channel_state[0].lbrr_flags[n_frames_decoded0])
             {
                 ms_pred_q13 = silk_stereo_decode_pred_arr(rd);
-                if (lost_flag == DecodeFlag::Normal && !self.channel_state[1].vad_flags[n_frames_decoded0])
-                    || (lost_flag == DecodeFlag::Lbrr && !self.channel_state[1].lbrr_flags[n_frames_decoded0])
+                if (lost_flag == DecodeFlag::Normal
+                    && !self.channel_state[1].vad_flags[n_frames_decoded0])
+                    || (lost_flag == DecodeFlag::Lbrr
+                        && !self.channel_state[1].lbrr_flags[n_frames_decoded0])
                 {
                     decode_only_middle = silk_stereo_decode_mid_only(rd);
-                } else {
+                }
+                else {
                     decode_only_middle = false;
                 }
-            } else {
+            }
+            else {
                 ms_pred_q13 = self.s_stereo.pred_prev_q13;
             }
         }
@@ -285,30 +302,38 @@ impl SilkDecoder {
 
         let has_side = if lost_flag == DecodeFlag::Normal {
             !decode_only_middle
-        } else {
+        }
+        else {
             !self.prev_decode_only_middle
                 || (n_channels_internal == 2
                     && lost_flag == DecodeFlag::Lbrr
-                    && self.channel_state[1].lbrr_flags[self.channel_state[1].n_frames_decoded as usize])
+                    && self.channel_state[1].lbrr_flags
+                        [self.channel_state[1].n_frames_decoded as usize])
         };
 
         // Call decoder for one frame.
         let mut samples_out1 = [[0i16; MAX_FRAME_LENGTH + 2]; 2];
         let mut n_samples_out_dec = 0usize;
+        #[allow(clippy::needless_range_loop)]
+        // index shared across several buffers, mirrors the C loop
         for n in 0..n_channels_internal {
             if n == 0 || has_side {
                 let frame_index = self.channel_state[0].n_frames_decoded - n as i32;
                 let cond_coding = if frame_index <= 0 {
                     CODE_INDEPENDENTLY
-                } else if lost_flag == DecodeFlag::Lbrr {
+                }
+                else if lost_flag == DecodeFlag::Lbrr {
                     if self.channel_state[n].lbrr_flags[frame_index as usize - 1] {
                         CODE_CONDITIONALLY
-                    } else {
+                    }
+                    else {
                         CODE_INDEPENDENTLY
                     }
-                } else if n > 0 && self.prev_decode_only_middle {
+                }
+                else if n > 0 && self.prev_decode_only_middle {
                     CODE_INDEPENDENTLY_NO_LTP_SCALING
-                } else {
+                }
+                else {
                     CODE_CONDITIONALLY
                 };
 
@@ -317,8 +342,15 @@ impl SilkDecoder {
                     DecodeFlag::Lbrr => LostFlag::DecodeLbrr,
                     DecodeFlag::Normal => LostFlag::DecodeNormal,
                 };
-                n_samples_out_dec = silk_decode_frame(&mut self.channel_state[n], rd, &mut samples_out1[n][2..], lost, cond_coding);
-            } else {
+                n_samples_out_dec = silk_decode_frame(
+                    &mut self.channel_state[n],
+                    rd,
+                    &mut samples_out1[n][2..],
+                    lost,
+                    cond_coding,
+                );
+            }
+            else {
                 for v in samples_out1[n][2..2 + n_samples_out_dec].iter_mut() {
                     *v = 0;
                 }
@@ -337,15 +369,18 @@ impl SilkDecoder {
                 self.channel_state[0].fs_khz,
                 n_samples_out_dec,
             );
-        } else {
+        }
+        else {
             // Buffering.
             samples_out1[0][0..2].copy_from_slice(&self.s_stereo.s_mid);
-            self.s_stereo.s_mid.copy_from_slice(&samples_out1[0][n_samples_out_dec..n_samples_out_dec + 2]);
+            self.s_stereo
+                .s_mid
+                .copy_from_slice(&samples_out1[0][n_samples_out_dec..n_samples_out_dec + 2]);
         }
 
         // Number of output samples.
-        *n_samples_out =
-            (n_samples_out_dec as i64 * ctl.api_sample_rate as i64 / (self.channel_state[0].fs_khz as i64 * 1000)) as usize;
+        *n_samples_out = (n_samples_out_dec as i64 * ctl.api_sample_rate as i64
+            / (self.channel_state[0].fs_khz as i64 * 1000)) as usize;
 
         let n_channels_api = ctl.n_channels_api as usize;
         for n in 0..n_channels_internal.min(n_channels_api) {
@@ -362,7 +397,8 @@ impl SilkDecoder {
                 for i in 0..*n_samples_out {
                     out[n + 2 * i] = resample_out[i];
                 }
-            } else {
+            }
+            else {
                 out[..*n_samples_out].copy_from_slice(&resample_out[..*n_samples_out]);
             }
         }
@@ -380,7 +416,8 @@ impl SilkDecoder {
                 for i in 0..*n_samples_out {
                     out[1 + 2 * i] = resample_out[i];
                 }
-            } else {
+            }
+            else {
                 for i in 0..*n_samples_out {
                     out[1 + 2 * i] = out[2 * i];
                 }
@@ -390,9 +427,10 @@ impl SilkDecoder {
         // Export pitch lag, measured at 48 kHz sampling rate.
         if self.channel_state[0].prev_signal_type == crate::silk::structs::TYPE_VOICED {
             const MULT_TAB: [i32; 3] = [6, 4, 3];
-            ctl.prev_pitch_lag =
-                self.channel_state[0].lag_prev * MULT_TAB[((self.channel_state[0].fs_khz - 8) >> 2) as usize];
-        } else {
+            ctl.prev_pitch_lag = self.channel_state[0].lag_prev
+                * MULT_TAB[((self.channel_state[0].fs_khz - 8) >> 2) as usize];
+        }
+        else {
             ctl.prev_pitch_lag = 0;
         }
 
@@ -402,7 +440,8 @@ impl SilkDecoder {
             for i in 0..self.n_channels_internal as usize {
                 self.channel_state[i].last_gain_index = 10;
             }
-        } else {
+        }
+        else {
             self.prev_decode_only_middle = decode_only_middle;
         }
 

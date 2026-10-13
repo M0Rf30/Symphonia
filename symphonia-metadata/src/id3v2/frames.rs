@@ -20,7 +20,7 @@ use log::warn;
 use smallvec::SmallVec;
 
 use crate::id3v2::sub_fields::*;
-use crate::id3v2::unsync::{decode_unsynchronisation, read_syncsafe_leq32};
+use crate::id3v2::unsync::{decode_synchsafe, decode_unsynchronisation, read_syncsafe_leq32};
 use crate::utils::inflate::zlib_decompress;
 use crate::utils::std_tag::*;
 
@@ -718,7 +718,7 @@ pub(super) fn id3v2p4_frame_size(raw: [u8; 4], after_header: &[u8]) -> u32 {
         return plain;
     }
 
-    let syncsafe = raw.iter().fold(0u32, |size, &b| (size << 7) | u32::from(b));
+    let syncsafe = decode_synchsafe(&raw);
 
     // The two interpretations are the same for sizes below 128.
     if plain == syncsafe {

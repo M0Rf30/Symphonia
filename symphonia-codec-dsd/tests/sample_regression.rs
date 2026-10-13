@@ -1,5 +1,6 @@
 // Regression tests that decode real DSD sample files. They run only when the `RMPD_SAMPLES`
 // environment variable points at the sample directory (containing `dsd/`).
+#![allow(clippy::unwrap_used)]
 
 use std::fs::File;
 use std::path::PathBuf;

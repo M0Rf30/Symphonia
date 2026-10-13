@@ -6,32 +6,43 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 mod bits;
-mod words;
+mod floats;
 mod v3;
 mod v4v5;
-mod floats;
+mod words;
 
-use symphonia_core::audio::{AsGenericAudioBufferRef, AudioSpec, GenericAudioBuffer, GenericAudioBufferRef};
+/// Fold `value` into a running WavPack checksum.
+#[inline(always)]
+fn crc_accumulate(crc: u32, value: u32) -> u32 {
+    crc.wrapping_mul(3).wrapping_add(value)
+}
+
 use symphonia_core::audio::sample::SampleFormat;
+use symphonia_core::audio::{
+    AsGenericAudioBufferRef, AudioSpec, GenericAudioBuffer, GenericAudioBufferRef,
+};
 use symphonia_core::codecs::CodecInfo;
-use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions, FinalizeResult};
 use symphonia_core::codecs::audio::well_known::CODEC_ID_WAVPACK;
+use symphonia_core::codecs::audio::{
+    AudioCodecParameters, AudioDecoder, AudioDecoderOptions, FinalizeResult,
+};
 use symphonia_core::codecs::registry::{RegisterableAudioDecoder, SupportedAudioCodec};
-use symphonia_core::errors::{decode_error, unsupported_error, Result};
+use symphonia_core::errors::{Result, decode_error, unsupported_error};
 use symphonia_core::packet::PacketRef;
 use symphonia_core::support_audio_codec;
 
 use crate::reader::matroska_block_to_packet;
 
-use v3::{DecorrPass, DcState, unpack_init3, unpack_samples_v3, MAX_BLOCK_SAMPLES as MAX_V3_BLOCK_SAMPLES, MONO_FLAG};
-use words::WordState;
-use v4v5::{
-    DecorrPass as DecorrPass45, WordsState as WordsState45,
-    PACKET_MAGIC, WvxInput, WvcInput,
-    parse_decorr_terms, parse_decorr_weights, parse_decorr_samples,
-    parse_entropy_vars, parse_int32_info,
-    unpack_samples_v4v5,
+use v3::{
+    DcState, DecorrPass, MAX_BLOCK_SAMPLES as MAX_V3_BLOCK_SAMPLES, MONO_FLAG, unpack_init3,
+    unpack_samples_v3,
 };
+use v4v5::{
+    DecorrPass as DecorrPass45, PACKET_MAGIC, WordsState as WordsState45, WvcInput, WvxInput,
+    parse_decorr_samples, parse_decorr_terms, parse_decorr_weights, parse_entropy_vars,
+    parse_int32_info, unpack_samples_v4v5,
+};
+use words::WordState;
 
 // The layout of the per-stream mini-blocks the reader builds (see `STREAM_HDR`).
 pub(crate) use v4v5::{EXT_WVC_WVX_NEW, EXT_WVX_NEW, STREAM_HDR};
@@ -71,15 +82,15 @@ const PREFIX_LEN: usize = 32;
 
 #[derive(Debug)]
 struct BlockHeader {
-    version:       i16,
-    bits:          i16,
-    flags:         i16,
-    shift:         i16,
+    version: i16,
+    bits: i16,
+    flags: i16,
+    shift: i16,
     total_samples: i32,
-    crc:           i32,
+    crc: i32,
     #[allow(dead_code)]
-    crc2:          i32,
-    num_channels:  u16,
+    crc2: i32,
+    num_channels: u16,
     #[allow(dead_code)]
     bytes_per_sample: u16,
 }
@@ -89,15 +100,15 @@ fn parse_prefix(data: &[u8]) -> Option<(BlockHeader, &[u8])> {
         return None;
     }
     let hdr = BlockHeader {
-        version:          i16::from_le_bytes([data[0],  data[1]]),
-        bits:             i16::from_le_bytes([data[2],  data[3]]),
-        flags:            i16::from_le_bytes([data[4],  data[5]]),
-        shift:            i16::from_le_bytes([data[6],  data[7]]),
-        total_samples:    i32::from_le_bytes([data[8],  data[9],  data[10], data[11]]),
-        crc:              i32::from_le_bytes([data[12], data[13], data[14], data[15]]),
-        crc2:             i32::from_le_bytes([data[16], data[17], data[18], data[19]]),
+        version: i16::from_le_bytes([data[0], data[1]]),
+        bits: i16::from_le_bytes([data[2], data[3]]),
+        flags: i16::from_le_bytes([data[4], data[5]]),
+        shift: i16::from_le_bytes([data[6], data[7]]),
+        total_samples: i32::from_le_bytes([data[8], data[9], data[10], data[11]]),
+        crc: i32::from_le_bytes([data[12], data[13], data[14], data[15]]),
+        crc2: i32::from_le_bytes([data[16], data[17], data[18], data[19]]),
         // [20..24] ext, [24] extra_bc, [25..28] extras — unused in decode
-        num_channels:     u16::from_le_bytes([data[28], data[29]]),
+        num_channels: u16::from_le_bytes([data[28], data[29]]),
         bytes_per_sample: u16::from_le_bytes([data[30], data[31]]),
     };
     Some((hdr, &data[PREFIX_LEN..]))
@@ -108,17 +119,17 @@ fn parse_prefix(data: &[u8]) -> Option<(BlockHeader, &[u8])> {
 // ---------------------------------------------------------------------------
 
 pub struct WavPackDecoder {
-    params:      AudioCodecParameters,
+    params: AudioCodecParameters,
     // v3 per-stream state
-    dc:          DcState,
-    decorr:      Vec<DecorrPass>,
-    num_terms:   usize,
-    word_state:  WordState,
+    dc: DcState,
+    decorr: Vec<DecorrPass>,
+    num_terms: usize,
+    word_state: WordState,
     initialized: bool,
-    last_flags:  i16,
+    last_flags: i16,
     /// The stream comes from Matroska/WebM (`A_WAVPACK4`): packets are bare WavPack frames
     /// without block headers (see `matroska_block_to_packet`).
-    matroska:    bool,
+    matroska: bool,
     // Output buffer
     buf: GenericAudioBuffer,
 }
@@ -221,8 +232,9 @@ impl WavPackDecoder {
                 b.render_with(Some(decoded_frames), |idx, planes| {
                     if is_mono {
                         planes[0][idx] = samples[idx].clamp(-32768, 32767) as i16;
-                    } else {
-                        planes[0][idx] = samples[idx * 2    ].clamp(-32768, 32767) as i16;
+                    }
+                    else {
+                        planes[0][idx] = samples[idx * 2].clamp(-32768, 32767) as i16;
                         planes[1][idx] = samples[idx * 2 + 1].clamp(-32768, 32767) as i16;
                     }
                     Ok(())
@@ -233,7 +245,8 @@ impl WavPackDecoder {
                 b.render_with(Some(decoded_frames), |idx, planes| {
                     if is_mono {
                         planes[0][idx] = samples[idx];
-                    } else {
+                    }
+                    else {
                         planes[0][idx] = samples[idx * 2];
                         planes[1][idx] = samples[idx * 2 + 1];
                     }
@@ -247,7 +260,8 @@ impl WavPackDecoder {
                     let clamp = |v: i32| i24::from(v.clamp(-8_388_608, 8_388_607));
                     if is_mono {
                         planes[0][idx] = clamp(samples[idx]);
-                    } else {
+                    }
+                    else {
                         planes[0][idx] = clamp(samples[idx * 2]);
                         planes[1][idx] = clamp(samples[idx * 2 + 1]);
                     }
@@ -259,8 +273,9 @@ impl WavPackDecoder {
                 b.render_with(Some(decoded_frames), |idx, planes| {
                     if is_mono {
                         planes[0][idx] = samples[idx].clamp(-128, 127) as i8;
-                    } else {
-                        planes[0][idx] = samples[idx * 2    ].clamp(-128, 127) as i8;
+                    }
+                    else {
+                        planes[0][idx] = samples[idx * 2].clamp(-128, 127) as i8;
                         planes[1][idx] = samples[idx * 2 + 1].clamp(-128, 127) as i8;
                     }
                     Ok(())
@@ -270,7 +285,7 @@ impl WavPackDecoder {
         }
 
         // Optional CRC check (version 3 only, lossless)
-        if hdr.version == 3 && hdr.bits == 0 && self.dc.crc != hdr.crc {
+        if hdr.version == 3 && hdr.bits == 0 && self.dc.crc != hdr.crc as u32 {
             log::warn!("wavpack: CRC mismatch (expected {:08x}, got {:08x})", hdr.crc, self.dc.crc);
         }
 
@@ -287,18 +302,25 @@ impl WavPackDecoder {
             return decode_error("wavpack v4/v5: stream block too short");
         }
 
-        let flags         = u32::from_le_bytes([stream_data[0], stream_data[1], stream_data[2], stream_data[3]]);
-        let block_samples = u32::from_le_bytes([stream_data[4], stream_data[5], stream_data[6], stream_data[7]]);
+        let flags =
+            u32::from_le_bytes([stream_data[0], stream_data[1], stream_data[2], stream_data[3]]);
+        let block_samples =
+            u32::from_le_bytes([stream_data[4], stream_data[5], stream_data[6], stream_data[7]]);
         let read_u32 = |off: usize| {
-            u32::from_le_bytes([stream_data[off], stream_data[off+1], stream_data[off+2], stream_data[off+3]]) as usize
+            u32::from_le_bytes([
+                stream_data[off],
+                stream_data[off + 1],
+                stream_data[off + 2],
+                stream_data[off + 3],
+            ]) as usize
         };
-        let tl  = read_u32(12);
-        let wl  = read_u32(16);
-        let sl  = read_u32(20);
-        let el  = read_u32(24);
+        let tl = read_u32(12);
+        let wl = read_u32(16);
+        let sl = read_u32(20);
+        let el = read_u32(24);
         let hpl = read_u32(28); // hybrid profile
         let fil = read_u32(32); // float info
-        let il  = read_u32(36); // int32 info
+        let il = read_u32(36); // int32 info
         let wxl = read_u32(40); // wvx (float/int32 extension) bitstream
         let shl = read_u32(44); // shaping weights (from the .wvc block)
         let wcl = read_u32(48); // wvc correction bitstream
@@ -307,20 +329,31 @@ impl WavPackDecoder {
         let ext_flags = read_u32(60) as u32;
 
         let mut pos = STREAM_HDR;
-        let end     = stream_data.len();
+        let end = stream_data.len();
 
-        let terms_raw   = &stream_data[pos..pos.saturating_add(tl).min(end)];  pos = pos.saturating_add(tl);
-        let weights_raw = &stream_data[pos.min(end)..pos.saturating_add(wl).min(end)];  pos = pos.saturating_add(wl);
-        let samples_raw = &stream_data[pos.min(end)..pos.saturating_add(sl).min(end)];  pos = pos.saturating_add(sl);
-        let entropy_raw = &stream_data[pos.min(end)..pos.saturating_add(el).min(end)];  pos = pos.saturating_add(el);
-        let hybrid_raw  = &stream_data[pos.min(end)..pos.saturating_add(hpl).min(end)]; pos = pos.saturating_add(hpl);
-        let float_raw   = &stream_data[pos.min(end)..pos.saturating_add(fil).min(end)]; pos = pos.saturating_add(fil);
-        let int32_raw   = &stream_data[pos.min(end)..pos.saturating_add(il).min(end)];  pos = pos.saturating_add(il);
-        let wvx_raw     = &stream_data[pos.min(end)..pos.saturating_add(wxl).min(end)]; pos = pos.saturating_add(wxl);
-        let shaping_raw = &stream_data[pos.min(end)..pos.saturating_add(shl).min(end)]; pos = pos.saturating_add(shl);
-        let wvc_raw     = &stream_data[pos.min(end)..pos.saturating_add(wcl).min(end)]; pos = pos.saturating_add(wcl);
-        let wvc_wvx_raw = &stream_data[pos.min(end)..pos.saturating_add(wcxl).min(end)]; pos = pos.saturating_add(wcxl);
-        let audio       = &stream_data[pos.min(end)..];
+        let terms_raw = &stream_data[pos..pos.saturating_add(tl).min(end)];
+        pos = pos.saturating_add(tl);
+        let weights_raw = &stream_data[pos.min(end)..pos.saturating_add(wl).min(end)];
+        pos = pos.saturating_add(wl);
+        let samples_raw = &stream_data[pos.min(end)..pos.saturating_add(sl).min(end)];
+        pos = pos.saturating_add(sl);
+        let entropy_raw = &stream_data[pos.min(end)..pos.saturating_add(el).min(end)];
+        pos = pos.saturating_add(el);
+        let hybrid_raw = &stream_data[pos.min(end)..pos.saturating_add(hpl).min(end)];
+        pos = pos.saturating_add(hpl);
+        let float_raw = &stream_data[pos.min(end)..pos.saturating_add(fil).min(end)];
+        pos = pos.saturating_add(fil);
+        let int32_raw = &stream_data[pos.min(end)..pos.saturating_add(il).min(end)];
+        pos = pos.saturating_add(il);
+        let wvx_raw = &stream_data[pos.min(end)..pos.saturating_add(wxl).min(end)];
+        pos = pos.saturating_add(wxl);
+        let shaping_raw = &stream_data[pos.min(end)..pos.saturating_add(shl).min(end)];
+        pos = pos.saturating_add(shl);
+        let wvc_raw = &stream_data[pos.min(end)..pos.saturating_add(wcl).min(end)];
+        pos = pos.saturating_add(wcl);
+        let wvc_wvx_raw = &stream_data[pos.min(end)..pos.saturating_add(wcxl).min(end)];
+        pos = pos.saturating_add(wcxl);
+        let audio = &stream_data[pos.min(end)..];
 
         let is_mono = (flags & v4v5::MONO_DATA) != 0;
         // WavPack's "false stereo" optimization: both channels are identical, so the encoder
@@ -350,10 +383,10 @@ impl WavPackDecoder {
         }
         else {
             Some(WvcInput {
-                bits:    wvc_raw,
-                crc:     wvc_crc,
+                bits: wvc_raw,
+                crc: wvc_crc,
                 shaping: shaping_raw,
-                wvx:     WvxInput::parse(wvc_wvx_raw, ext_flags & EXT_WVC_WVX_NEW != 0),
+                wvx: WvxInput::parse(wvc_wvx_raw, ext_flags & EXT_WVC_WVX_NEW != 0),
             })
         };
 
@@ -362,7 +395,8 @@ impl WavPackDecoder {
         }
         else {
             unpack_samples_v4v5(
-                flags, block_samples,
+                flags,
+                block_samples,
                 &mut decorr,
                 &mut words,
                 &i32info,
@@ -370,8 +404,9 @@ impl WavPackDecoder {
                 main_wvx,
                 wvc.as_ref(),
                 audio,
-            ).ok_or(symphonia_core::errors::Error::DecodeError(
-                "wavpack v4/v5: unsupported encoding"
+            )
+            .ok_or(symphonia_core::errors::Error::DecodeError(
+                "wavpack v4/v5: unsupported encoding",
             ))?
         };
 
@@ -406,7 +441,8 @@ impl WavPackDecoder {
             if pos + 4 > end {
                 break; // truncated packet: decode whatever complete streams remain
             }
-            let slen = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+            let slen = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                as usize;
             pos += 4;
             let stream_end = pos.saturating_add(slen).min(end);
             let stream_data = &data[pos..stream_end];

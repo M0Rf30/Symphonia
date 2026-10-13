@@ -17,13 +17,15 @@
 //! "CeltBitstream") plus this module's own [`crate::celt::mdct`]/[`crate::celt::kiss_fft`]/
 //! [`crate::celt::pitch`]/[`crate::celt::lpc`]/[`crate::celt::celt`] helpers.
 
+use crate::celt::bands::{SPREAD_NORMAL, celt_lcg_rand};
 use crate::celt::celt;
 use crate::celt::lpc::{self, CELT_LPC_ORDER};
 use crate::celt::mdct::MDCT_LOOKUP_960;
 use crate::celt::modes::CeltMode;
 use crate::celt::pitch;
 use crate::celt::{bands, quant_bands, rate};
-use crate::range::{RangeDecoder, BITRES};
+use crate::range::{BITRES, RangeDecoder};
+use symphonia_core::audio::conv::I16_SCALE_INV;
 
 /// C: `DECODE_BUFFER_SIZE`.
 const DECODE_BUFFER_SIZE: usize = 2048;
@@ -37,6 +39,7 @@ const PLC_PITCH_LAG_MIN: i32 = 100;
 /// `{0.85000610f, 0.0000000f, 1.0000000f, 1.0000000f}`; only `preemph[0]` matters since
 /// `preemph[1] == 0` disables the `CUSTOM_MODES`-only FIR-deemphasis branch, and `preemph[2]`/
 /// `preemph[3]` are exactly `1` for this mode).
+#[allow(clippy::excessive_precision)]
 const PREEMPH_COEF0: f32 = 0.85000610;
 
 /// C: `tapset_icdf[3]`.
@@ -45,8 +48,6 @@ const TAPSET_ICDF: [u8; 3] = [2, 1, 0];
 const SPREAD_ICDF: [u8; 4] = [25, 23, 2, 0];
 /// C: `trim_icdf[11]`.
 const TRIM_ICDF: [u8; 11] = [126, 124, 119, 109, 87, 41, 19, 9, 4, 2, 0];
-/// C: `SPREAD_NORMAL` (`celt/bands.h`).
-const SPREAD_NORMAL: i32 = 2;
 
 const OPUS_BAD_ARG: i32 = -1;
 const OPUS_INTERNAL_ERROR: i32 = -3;
@@ -221,8 +222,11 @@ impl CeltDecoder {
     /// `deemphasis` converts it to the `[-1, 1]`-ish range the float API (and thus this crate's
     /// `f32` PCM contract) actually uses. `SIG2WORD16` is the identity in the float build.
     fn deemphasis(&mut self, out: &mut [f32], n: i32, cc: i32, accum: bool) {
-        debug_assert!(!accum, "accum is FIXED_POINT-only in libopus; the float build never sets it");
-        const SCALEOUT: f32 = 1.0 / 32768.0;
+        debug_assert!(
+            !accum,
+            "accum is FIXED_POINT-only in libopus; the float build never sets it"
+        );
+        const SCALEOUT: f32 = I16_SCALE_INV;
         let n = n as usize;
         let cc = cc as usize;
         let downsample = self.downsample as usize;
@@ -254,10 +258,10 @@ impl CeltDecoder {
             let base = c * stride + (DECODE_BUFFER_SIZE - n);
             if downsample > 1 {
                 let scratch = &mut self.deemphasis_scratch[..n];
-                for j in 0..n {
-                    let tmp = self.decode_mem[base + j] + m;
+                for (s, &d) in scratch.iter_mut().zip(&self.decode_mem[base..base + n]) {
+                    let tmp = d + m;
                     m = PREEMPH_COEF0 * tmp;
-                    scratch[j] = tmp;
+                    *s = tmp;
                 }
                 for j in 0..nd {
                     out[c + j * cc] = scratch[j * downsample] * SCALEOUT;
@@ -316,7 +320,17 @@ impl CeltDecoder {
 
         if cc == 2 && c == 1 {
             // Copying a mono stream to two channels.
-            bands::denormalise_bands(mode, x, &mut freq[..], &self.old_e_bands, start, eff_end, m, downsample, silence);
+            bands::denormalise_bands(
+                mode,
+                x,
+                &mut freq[..],
+                &self.old_e_bands,
+                start,
+                eff_end,
+                m,
+                downsample,
+                silence,
+            );
             freq2.copy_from_slice(&freq[..]);
             let (chan0, chan1) = self.decode_mem.split_at_mut(stride);
             let out0 = &mut chan0[DECODE_BUFFER_SIZE - n..];
@@ -344,7 +358,17 @@ impl CeltDecoder {
         }
         else if cc == 1 && c == 2 {
             // Downmixing a stereo stream to mono.
-            bands::denormalise_bands(mode, x, &mut freq[..], &self.old_e_bands, start, eff_end, m, downsample, silence);
+            bands::denormalise_bands(
+                mode,
+                x,
+                &mut freq[..],
+                &self.old_e_bands,
+                start,
+                eff_end,
+                m,
+                downsample,
+                silence,
+            );
             bands::denormalise_bands(
                 mode,
                 &x[n..],
@@ -418,7 +442,7 @@ impl CeltDecoder {
         let budget = total_bits as i64;
         let mut tell = rd.tell() as i64;
         let mut logp: u32 = if is_transient { 2 } else { 4 };
-        let tf_select_rsv = lm > 0 && tell + logp as i64 + 1 <= budget;
+        let tf_select_rsv = lm > 0 && tell + (logp as i64) < budget;
         let budget = budget - tf_select_rsv as i64;
         let mut tf_changed = false;
         let mut curr = false;
@@ -433,8 +457,10 @@ impl CeltDecoder {
         }
         let mut tf_select = 0usize;
         if tf_select_rsv {
-            let a = celt::TF_SELECT_TABLE[lm as usize][4 * is_transient as usize + tf_changed as usize];
-            let b = celt::TF_SELECT_TABLE[lm as usize][4 * is_transient as usize + 2 + tf_changed as usize];
+            let a =
+                celt::TF_SELECT_TABLE[lm as usize][4 * is_transient as usize + tf_changed as usize];
+            let b = celt::TF_SELECT_TABLE[lm as usize]
+                [4 * is_transient as usize + 2 + tf_changed as usize];
             if a != b {
                 tf_select = rd.dec_bit_logp(1) as usize;
             }
@@ -454,11 +480,15 @@ impl CeltDecoder {
         let cc = self.channels as usize;
         let stride = self.decode_mem_stride();
         let n = n as usize;
-        let mut etmp = vec![0f32; overlap];
+        // The built-in 48 kHz mode has a 120-sample overlap.
+        const MAX_OVERLAP: usize = 120;
+        debug_assert!(overlap <= MAX_OVERLAP);
+        let mut etmp_buf = [0f32; MAX_OVERLAP];
+        let etmp = &mut etmp_buf[..overlap];
         for c in 0..cc {
             let base = c * stride + DECODE_BUFFER_SIZE - n;
             celt::comb_filter_copy(
-                &mut etmp,
+                etmp,
                 &self.decode_mem,
                 base,
                 self.postfilter_period,
@@ -481,10 +511,17 @@ impl CeltDecoder {
     fn celt_plc_pitch_search(&self) -> i32 {
         let cc = self.channels as usize;
         let stride = self.decode_mem_stride();
-        let bufs: Vec<&[f32]> =
-            (0..cc).map(|c| &self.decode_mem[c * stride..c * stride + DECODE_BUFFER_SIZE]).collect();
-        let mut lp_pitch_buf = vec![0f32; DECODE_BUFFER_SIZE / 2];
-        pitch::pitch_downsample(&bufs, &mut lp_pitch_buf, DECODE_BUFFER_SIZE as i32, cc as i32);
+        let first = &self.decode_mem[..DECODE_BUFFER_SIZE];
+        let second =
+            if cc > 1 { &self.decode_mem[stride..stride + DECODE_BUFFER_SIZE] } else { first };
+        let bufs = [first, second];
+        let mut lp_pitch_buf = [0f32; DECODE_BUFFER_SIZE / 2];
+        pitch::pitch_downsample(
+            &bufs[..cc],
+            &mut lp_pitch_buf,
+            DECODE_BUFFER_SIZE as i32,
+            cc as i32,
+        );
         let pitch_index = pitch::pitch_search(
             &lp_pitch_buf[(PLC_PITCH_LAG_MAX / 2) as usize..],
             &lp_pitch_buf,
@@ -509,7 +546,10 @@ impl CeltDecoder {
         if noise_based {
             let end = self.end;
             let eff_end = start.max(end.min(mode.effective_ebands));
-            let mut x = vec![0f32; (cc * n) as usize];
+            const MAX_N: usize = 960;
+            debug_assert!((cc * n) as usize <= 2 * MAX_N);
+            let mut x_buf = [0f32; 2 * MAX_N];
+            let x = &mut x_buf[..(cc * n) as usize];
             for c in 0..cc as usize {
                 let base = c * stride;
                 self.decode_mem.copy_within(base + n as usize..base + stride, base);
@@ -518,7 +558,8 @@ impl CeltDecoder {
             for c in 0..cc as usize {
                 for i in (start as usize)..(end as usize) {
                     let idx = c * nb_ebands + i;
-                    self.old_e_bands[idx] = self.background_log_e[idx].max(self.old_e_bands[idx] - decay);
+                    self.old_e_bands[idx] =
+                        self.background_log_e[idx].max(self.old_e_bands[idx] - decay);
                 }
             }
             let mut seed = self.rng;
@@ -531,17 +572,20 @@ impl CeltDecoder {
                         seed = celt_lcg_rand(seed);
                         x[boffs + j] = ((seed as i32) >> 20) as f32;
                     }
-                    crate::celt::vq::renormalise_vector(&mut x[boffs..boffs + blen], blen as i32, 1.0);
+                    crate::celt::vq::renormalise_vector(
+                        &mut x[boffs..boffs + blen],
+                        blen as i32,
+                        1.0,
+                    );
                 }
             }
             self.rng = seed;
 
-            self.celt_synthesis(&x, start, eff_end, cc, cc, false, lm, false);
+            self.celt_synthesis(x, start, eff_end, cc, cc, false, lm, false);
             self.prefilter_and_fold = false;
             self.skip_plc = true;
         }
         else {
-            let exc_length;
             let mut fade = 1.0f32;
             let pitch_index;
             if loss_duration == 0 {
@@ -552,15 +596,16 @@ impl CeltDecoder {
                 pitch_index = self.last_pitch_index;
                 fade = 0.8;
             }
-            exc_length = (2 * pitch_index).min(MAX_PERIOD as i32) as usize;
+            let exc_length = (2 * pitch_index).min(MAX_PERIOD as i32) as usize;
 
             let window = self.mode.window;
             for c in 0..cc as usize {
-                let mut exc_full = vec![0f32; MAX_PERIOD + CELT_LPC_ORDER];
                 let base = c * stride;
-                for i in 0..MAX_PERIOD + CELT_LPC_ORDER {
-                    exc_full[i] = self.decode_mem[base + DECODE_BUFFER_SIZE - MAX_PERIOD - CELT_LPC_ORDER + i];
-                }
+                let hist_start = base + DECODE_BUFFER_SIZE - MAX_PERIOD - CELT_LPC_ORDER;
+                let mut exc_full = [0f32; MAX_PERIOD + CELT_LPC_ORDER];
+                exc_full.copy_from_slice(
+                    &self.decode_mem[hist_start..hist_start + MAX_PERIOD + CELT_LPC_ORDER],
+                );
 
                 if loss_duration == 0 {
                     let mut ac = [0f32; CELT_LPC_ORDER + 1];
@@ -573,8 +618,8 @@ impl CeltDecoder {
                         MAX_PERIOD as i32,
                     );
                     ac[0] *= 1.0001;
-                    for i in 1..=CELT_LPC_ORDER {
-                        ac[i] -= ac[i] * (0.008 * i as f32) * (0.008 * i as f32);
+                    for (i, a) in ac.iter_mut().enumerate().skip(1) {
+                        *a -= *a * (0.008 * i as f32) * (0.008 * i as f32);
                     }
                     lpc::celt_lpc(&mut self.lpc[c * CELT_LPC_ORDER..], &ac, CELT_LPC_ORDER as i32);
                 }
@@ -587,18 +632,19 @@ impl CeltDecoder {
                     // sliced view), only exist in the un-sliced `exc_full` prefix. Pass the
                     // un-sliced buffer with the correspondingly shifted `x_pos` instead of slicing
                     // away that history.
-                    let mut fir_tmp = vec![0f32; exc_length];
-                    let lpc_c = self.lpc[c * CELT_LPC_ORDER..c * CELT_LPC_ORDER + CELT_LPC_ORDER].to_vec();
+                    let mut fir_tmp_buf = [0f32; MAX_PERIOD];
+                    let fir_tmp = &mut fir_tmp_buf[..exc_length];
+                    let lpc_c = &self.lpc[c * CELT_LPC_ORDER..(c + 1) * CELT_LPC_ORDER];
                     lpc::celt_fir(
                         &exc_full,
                         CELT_LPC_ORDER + MAX_PERIOD - exc_length,
-                        &lpc_c,
-                        &mut fir_tmp,
+                        lpc_c,
+                        fir_tmp,
                         exc_length as i32,
                         CELT_LPC_ORDER as i32,
                     );
                     exc_full[CELT_LPC_ORDER + MAX_PERIOD - exc_length..CELT_LPC_ORDER + MAX_PERIOD]
-                        .copy_from_slice(&fir_tmp);
+                        .copy_from_slice(fir_tmp);
                 }
 
                 let exc = &mut exc_full[CELT_LPC_ORDER..];
@@ -622,7 +668,7 @@ impl CeltDecoder {
                 self.decode_mem.copy_within(base + n as usize..base + DECODE_BUFFER_SIZE, base);
 
                 let extrapolation_offset = MAX_PERIOD as i32 - pitch_index;
-                let extrapolation_len = n as i32 + overlap;
+                let extrapolation_len = n + overlap;
                 let mut attenuation = fade * decay;
                 let mut s1 = 0f32;
                 let mut j = 0i32;
@@ -633,23 +679,37 @@ impl CeltDecoder {
                     }
                     let val = attenuation * exc[(extrapolation_offset + j) as usize];
                     self.decode_mem[base + DECODE_BUFFER_SIZE - n as usize + i as usize] = val;
-                    let tmp = self.decode_mem
-                        [base + DECODE_BUFFER_SIZE - MAX_PERIOD - n as usize + (extrapolation_offset + j) as usize];
+                    let tmp = self.decode_mem[base + DECODE_BUFFER_SIZE - MAX_PERIOD - n as usize
+                        + (extrapolation_offset + j) as usize];
                     s1 += tmp * tmp * (1.0 / 1024.0);
                     j += 1;
                 }
 
                 {
                     let mut lpc_mem = [0f32; CELT_LPC_ORDER];
-                    for i in 0..CELT_LPC_ORDER {
-                        lpc_mem[i] = self.decode_mem[base + DECODE_BUFFER_SIZE - n as usize - 1 - i];
+                    for (i, m) in lpc_mem.iter_mut().enumerate() {
+                        *m = self.decode_mem[base + DECODE_BUFFER_SIZE - n as usize - 1 - i];
                     }
                     let start_idx = base + DECODE_BUFFER_SIZE - n as usize;
-                    let seg: Vec<f32> = self.decode_mem[start_idx..start_idx + extrapolation_len as usize].to_vec();
-                    let mut y = vec![0f32; extrapolation_len as usize];
-                    let lpc_c = self.lpc[c * CELT_LPC_ORDER..c * CELT_LPC_ORDER + CELT_LPC_ORDER].to_vec();
-                    lpc::celt_iir(&seg, &lpc_c, &mut y, extrapolation_len, CELT_LPC_ORDER as i32, &mut lpc_mem);
-                    self.decode_mem[start_idx..start_idx + extrapolation_len as usize].copy_from_slice(&y);
+                    // `n <= 960` and `overlap <= 120` bound the extrapolation length.
+                    const MAX_EXTRAPOLATION: usize = 960 + 120;
+                    debug_assert!(extrapolation_len as usize <= MAX_EXTRAPOLATION);
+                    let ext_len = extrapolation_len as usize;
+                    let mut seg_buf = [0f32; MAX_EXTRAPOLATION];
+                    seg_buf[..ext_len]
+                        .copy_from_slice(&self.decode_mem[start_idx..start_idx + ext_len]);
+                    let mut y_buf = [0f32; MAX_EXTRAPOLATION];
+                    let lpc_c = &self.lpc[c * CELT_LPC_ORDER..(c + 1) * CELT_LPC_ORDER];
+                    lpc::celt_iir(
+                        &seg_buf[..ext_len],
+                        lpc_c,
+                        &mut y_buf[..ext_len],
+                        extrapolation_len,
+                        CELT_LPC_ORDER as i32,
+                        &mut lpc_mem,
+                    );
+                    self.decode_mem[start_idx..start_idx + ext_len]
+                        .copy_from_slice(&y_buf[..ext_len]);
                 }
 
                 {
@@ -659,7 +719,8 @@ impl CeltDecoder {
                         let tmp = self.decode_mem[start_idx + i];
                         s2 += tmp * tmp * (1.0 / 1024.0);
                     }
-                    if !(s1 > 0.2 * s2) {
+                    // Also true when `s1`/`s2` is NaN, matching the C `!(s1 > 0.2f*s2)`.
+                    if s1.partial_cmp(&(0.2 * s2)) != Some(core::cmp::Ordering::Greater) {
                         for i in 0..extrapolation_len as usize {
                             self.decode_mem[start_idx + i] = 0.0;
                         }
@@ -667,8 +728,8 @@ impl CeltDecoder {
                     else if s1 < s2 {
                         let ratio = (0.5 * s1 + 1.0) / (s2 + 1.0);
                         let ratio = ratio.sqrt();
-                        for i in 0..overlap as usize {
-                            let tmp_g = 1.0 - window[i] * (1.0 - ratio);
+                        for (i, &w) in window.iter().enumerate().take(overlap as usize) {
+                            let tmp_g = 1.0 - w * (1.0 - ratio);
                             self.decode_mem[start_idx + i] *= tmp_g;
                         }
                         for i in overlap as usize..extrapolation_len as usize {
@@ -715,12 +776,14 @@ impl CeltDecoder {
 
         let eff_end = end.min(mode.effective_ebands);
 
-        if data.map_or(true, |d| d.len() <= 1) {
-            self.celt_decode_lost(n, lm);
-            self.deemphasis(out, n, cc, accum);
-            return Ok((frame_size / self.downsample) as usize);
-        }
-        let data = data.unwrap();
+        let data = match data {
+            Some(d) if d.len() > 1 => d,
+            _ => {
+                self.celt_decode_lost(n, lm);
+                self.deemphasis(out, n, cc, accum);
+                return Ok((frame_size / self.downsample) as usize);
+            }
+        };
         let len = data.len() as i32;
         if len > 1275 {
             return Err(OPUS_BAD_ARG);
@@ -749,7 +812,15 @@ impl CeltDecoder {
         let mut total_bits = len * 8;
         let mut tell = rd.tell();
 
-        let silence = if tell >= total_bits { true } else if tell == 1 { rd.dec_bit_logp(15) } else { false };
+        let silence = if tell >= total_bits {
+            true
+        }
+        else if tell == 1 {
+            rd.dec_bit_logp(15)
+        }
+        else {
+            false
+        };
         if silence {
             // Pretend we've read all the remaining bits, so that every later `tell()` /
             // `tell_frac()` (including inside the energy and allocation decoding) observes the
@@ -814,7 +885,17 @@ impl CeltDecoder {
             }
         }
 
-        quant_bands::unquant_coarse_energy(mode, start, end, &mut self.old_e_bands, intra_ener, rd, c, lm, len * 8);
+        quant_bands::unquant_coarse_energy(
+            mode,
+            start,
+            end,
+            &mut self.old_e_bands,
+            intra_ener,
+            rd,
+            c,
+            lm,
+            len * 8,
+        );
 
         // `nb_ebands` (21), `c*nb_ebands` (<=42), and `c*n`/`n` (<=2*960/960) are all bounded
         // compile-time constants for the single built-in 48 kHz mode this crate supports (see
@@ -829,7 +910,8 @@ impl CeltDecoder {
         Self::tf_decode(start, end, is_transient, tf_res, lm, rd, total_bits);
 
         tell = rd.tell();
-        let spread_decision = if tell + 4 <= total_bits { rd.dec_icdf(&SPREAD_ICDF, 5) } else { SPREAD_NORMAL };
+        let spread_decision =
+            if tell + 4 <= total_bits { rd.dec_icdf(&SPREAD_ICDF, 5) } else { SPREAD_NORMAL };
 
         let mut cap_buf = [0i32; MAX_NB_EBANDS];
         let cap = &mut cap_buf[..nb_ebands];
@@ -862,10 +944,12 @@ impl CeltDecoder {
             }
         }
 
-        let alloc_trim = if tell_frac + (6 << BITRES) <= total_bits { rd.dec_icdf(&TRIM_ICDF, 7) } else { 5 };
+        let alloc_trim =
+            if tell_frac + (6 << BITRES) <= total_bits { rd.dec_icdf(&TRIM_ICDF, 7) } else { 5 };
 
         let mut bits = ((len * 8) << BITRES) - rd.tell_frac() as i32 - 1;
-        let anti_collapse_rsv = if is_transient && lm >= 2 && bits >= ((lm + 2) << BITRES) { 1 << BITRES } else { 0 };
+        let anti_collapse_rsv =
+            if is_transient && lm >= 2 && bits >= ((lm + 2) << BITRES) { 1 << BITRES } else { 0 };
         bits -= anti_collapse_rsv;
 
         let mut pulses_buf = [0i32; MAX_NB_EBANDS];
@@ -875,10 +959,30 @@ impl CeltDecoder {
         let fine_energy_bits = &mut fine_energy_bits_buf[..nb_ebands];
         let fine_priority = &mut fine_priority_buf[..nb_ebands];
         let alloc = rate::clt_compute_allocation(
-            mode, start, end, offsets, cap, alloc_trim, bits, lm, c, rd, pulses, fine_energy_bits, fine_priority,
+            mode,
+            start,
+            end,
+            offsets,
+            cap,
+            alloc_trim,
+            bits,
+            lm,
+            c,
+            rd,
+            pulses,
+            fine_energy_bits,
+            fine_priority,
         );
 
-        quant_bands::unquant_fine_energy(mode, start, end, &mut self.old_e_bands, fine_energy_bits, rd, c);
+        quant_bands::unquant_fine_energy(
+            mode,
+            start,
+            end,
+            &mut self.old_e_bands,
+            fine_energy_bits,
+            rd,
+            c,
+        );
 
         let stride = self.decode_mem_stride();
         for ch in 0..cc as usize {
@@ -1028,7 +1132,8 @@ impl CeltDecoder {
 
         let max_background_increase = (160.min(self.loss_duration + m)) as f32 * 0.001;
         for i in 0..2 * nb_ebands {
-            self.background_log_e[i] = (self.background_log_e[i] + max_background_increase).min(self.old_e_bands[i]);
+            self.background_log_e[i] =
+                (self.background_log_e[i] + max_background_increase).min(self.old_e_bands[i]);
         }
 
         for ch in 0..2usize {
@@ -1057,9 +1162,4 @@ impl CeltDecoder {
         }
         Ok((frame_size / self.downsample) as usize)
     }
-}
-
-/// C: `celt_lcg_rand`.
-fn celt_lcg_rand(seed: u32) -> u32 {
-    1664525u32.wrapping_mul(seed).wrapping_add(1013904223)
 }

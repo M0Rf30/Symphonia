@@ -29,8 +29,8 @@
 //! with the `limiterBandsPerOctave = {1.2, 2, 3}` selector. No part of
 //! this implementation is derived from any external decoder.
 
-use super::freq_bands::HiLoTables;
 use super::error::{SbrError as Error, SbrResult as Result};
+use super::freq_bands::HiLoTables;
 
 /// §4.6.18.3.2.3 / Figure 4.41 — build `fTableLim`.
 ///
@@ -77,18 +77,22 @@ pub fn limiter_table(
             if lim_table[k] == lim_table[k - 1] {
                 // Duplicate border: drop one copy.
                 lim_table.remove(k);
-            } else if !patch_borders.contains(&lim_table[k]) {
+            }
+            else if !patch_borders.contains(&lim_table[k]) {
                 // The upper border is droppable (an envelope border).
                 lim_table.remove(k);
-            } else if !patch_borders.contains(&lim_table[k - 1]) {
+            }
+            else if !patch_borders.contains(&lim_table[k - 1]) {
                 // The upper border is a patch border; drop the lower
                 // envelope border instead.
                 lim_table.remove(k - 1);
-            } else {
+            }
+            else {
                 // Both are patch borders: keep both.
                 k += 1;
             }
-        } else {
+        }
+        else {
             k += 1;
         }
     }

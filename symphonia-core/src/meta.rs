@@ -56,7 +56,7 @@ use std::fmt;
 use std::num::NonZeroU8;
 use std::sync::Arc;
 
-use crate::common::{FourCc, Limit};
+use crate::common::Limit;
 use crate::errors::Result;
 use crate::io::MediaSourceStream;
 use crate::units::Time;
@@ -65,25 +65,7 @@ use crate::units::Time;
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct MetadataId(u32);
 
-impl MetadataId {
-    /// Create a new metadata ID from a FourCC.
-    pub const fn new(cc: FourCc) -> MetadataId {
-        // A FourCc always only contains ASCII characters. Therefore, the upper bits are always 0.
-        Self(0x8000_0000 | u32::from_be_bytes(cc.get()))
-    }
-}
-
-impl From<FourCc> for MetadataId {
-    fn from(value: FourCc) -> Self {
-        MetadataId::new(value)
-    }
-}
-
-impl fmt::Display for MetadataId {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:#x}", self.0)
-    }
-}
+crate::common::impl_fourcc_id!(MetadataId);
 
 /// Null metadata format
 pub const METADATA_ID_NULL: MetadataId = MetadataId(0x0);

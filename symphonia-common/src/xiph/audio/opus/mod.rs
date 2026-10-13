@@ -187,7 +187,7 @@ mod tests {
         v.extend_from_slice(&0i16.to_le_bytes());
         v.push(family);
         if family != 0 {
-            v.extend_from_slice(&[u8::from(channels), 0]);
+            v.extend_from_slice(&[channels, 0]);
             v.extend(0..channels);
         }
         v

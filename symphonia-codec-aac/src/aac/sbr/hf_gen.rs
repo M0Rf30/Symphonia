@@ -44,9 +44,9 @@
 //! Table 4.175, and the Figure 4.48 flowchart of the staged spec. No
 //! part of this implementation is derived from any external decoder.
 
+use super::error::{SbrError as Error, SbrResult as Result};
 use super::freq_bands::HiLoTables;
 use super::qmf::Complex;
-use super::error::{SbrError as Error, SbrResult as Result};
 
 /// `tHFAdj = 2` — the envelope-adjuster offset (§4.6.18.5).
 pub const T_HF_ADJ: usize = 2;
@@ -67,6 +67,7 @@ pub struct Patches {
 }
 
 impl Patches {
+    #[cfg(test)]
     /// `numPatches`.
     #[inline]
     #[must_use]
@@ -126,12 +127,14 @@ pub fn build_patches(f_master: &[i32], k0: i32, k_x: i32, m: i32, fs_sbr: u32) -
         for (i, &f) in f_master.iter().enumerate() {
             if f < goal_sb {
                 kk = i + 1;
-            } else {
+            }
+            else {
                 break;
             }
         }
         kk
-    } else {
+    }
+    else {
         n_master
     };
 
@@ -170,7 +173,8 @@ pub fn build_patches(f_master: &[i32], k0: i32, k_x: i32, m: i32, fs_sbr: u32) -
             num.push(n as usize);
             usb = sb;
             msb = sb;
-        } else {
+        }
+        else {
             msb = k_x;
         }
 
@@ -184,7 +188,7 @@ pub fn build_patches(f_master: &[i32], k0: i32, k_x: i32, m: i32, fs_sbr: u32) -
 
     // Trailing small-patch trim: drop a final patch narrower than 3
     // subbands when more than one patch was built.
-    if num.len() > 1 && *num.last().unwrap() < 3 {
+    if num.len() > 1 && num.last().is_some_and(|&n| n < 3) {
         num.pop();
         start.pop();
     }
@@ -220,14 +224,11 @@ pub fn chirp_factors(cur_invf: &[u8], prev_invf: &[u8], prev_bw: &[f64]) -> Vec<
             let nb = new_bw(prev_mode, cur);
             let temp = if nb < bw_prev {
                 0.75 * nb + 0.25 * bw_prev
-            } else {
+            }
+            else {
                 0.90625 * nb + 0.09375 * bw_prev
             };
-            if temp < 0.015625 {
-                0.0
-            } else {
-                temp
-            }
+            if temp < 0.015625 { 0.0 } else { temp }
         })
         .collect()
 }
@@ -271,13 +272,15 @@ pub fn prediction_coefficients(
     let alpha1 = if d != 0.0 {
         let numer = phi01 * phi12 - phi02 * phi11.re;
         Complex::new(numer.re / d, numer.im / d)
-    } else {
+    }
+    else {
         Complex::default()
     };
     let alpha0 = if phi11.re != 0.0 {
         let numer = phi01 + alpha1 * phi12.conj();
         Complex::new(-numer.re / phi11.re, -numer.im / phi11.re)
-    } else {
+    }
+    else {
         Complex::default()
     };
 
@@ -310,11 +313,7 @@ pub fn reflection_coefficient(
         phi01 += a * b;
         phi11 += b * b;
     }
-    Ok(if phi11 != 0.0 {
-        (-phi01 / phi11).clamp(-1.0, 1.0)
-    } else {
-        0.0
-    })
+    Ok(if phi11 != 0.0 { (-phi01 / phi11).clamp(-1.0, 1.0) } else { 0.0 })
 }
 
 /// §4.6.18.6.3 — generate `XHigh` from `XLow` over the patch mapping.
@@ -372,9 +371,7 @@ pub fn generate_hf(
                     a
                 }
             };
-            let bw = *bw_array
-                .get(g_of(k as i32)?)
-                .ok_or(Error::SbrFreqBandInvalid)?;
+            let bw = *bw_array.get(g_of(k as i32)?).ok_or(Error::SbrFreqBandInvalid)?;
             let bw2 = bw * bw;
             for l in l_range.clone() {
                 let c = usize::try_from(l).map_err(|_| Error::SbrFreqBandInvalid)? + T_HF_ADJ;
@@ -556,10 +553,7 @@ mod tests {
         let a1 = Complex::new(0.8, 0.2);
         let a2 = Complex::new(-0.4, 0.0);
         let x = ar2_xlow(2, a1, a2, 40);
-        let patches = Patches {
-            start: vec![2],
-            num: vec![8],
-        };
+        let patches = Patches { start: vec![2], num: vec![8] };
         let bands = tiny_bands();
         // bw = 0: XHigh(k) == XLow(p) on the generated range. Patch
         // maps source 2..10 → 8..16; k = 8 comes from p = 2.

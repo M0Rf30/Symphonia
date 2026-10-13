@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+// Test code: a panic is a test failure.
 // Symphonia
 // Copyright (c) 2019-2026 The Project Symphonia Developers.
 //
@@ -15,8 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use symphonia::core::meta::{RawTag, RawValue, StandardTag, StandardVisualKey, Tag, Visual};
 use symphonia_tagging::{
-    ApePolicy, Container, Error, Id3v1Policy, ReadTags, WriteOptions, read_tags, sniff,
-    write_file,
+    ApePolicy, Container, Error, Id3v1Policy, ReadTags, WriteOptions, read_tags, sniff, write_file,
 };
 
 const APE_MAGIC: &[u8] = b"APETAGEX";
@@ -202,6 +203,18 @@ fn sniff_recognises_the_new_containers() {
 }
 
 #[test]
+fn sniff_ignores_the_footer_flag_of_id3v2_3_tags() {
+    // In ID3v2.3 the 0x10 flag bit is undefined: it does not announce a footer.
+    let mut bytes = b"ID3\x03\x00\x10\x00\x00\x00\x14".to_vec();
+    bytes.extend_from_slice(&[0; 20]);
+    bytes.extend(headed(b"wvpk"));
+
+    let path = make_file("a.wv", &bytes);
+    assert_eq!(sniff(&path).unwrap(), Container::WavPack);
+    cleanup(&path);
+}
+
+#[test]
 fn mpeg_audio_is_still_mpeg_audio() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
 
@@ -248,8 +261,13 @@ fn write_then_read_round_trips_the_tags_and_a_cover() {
                 let empty = read_tags(&path).unwrap();
                 assert!(empty.tags.is_empty() && empty.visuals.is_empty(), "{name}");
 
-                write_file(&path, &new_tags("New Title"), &[front_cover()], &WriteOptions::default())
-                    .unwrap();
+                write_file(
+                    &path,
+                    &new_tags("New Title"),
+                    &[front_cover()],
+                    &WriteOptions::default(),
+                )
+                .unwrap();
                 assert_eq!(sniff(&path).unwrap(), container);
 
                 let written = fs::read(&path).unwrap();
@@ -275,8 +293,13 @@ fn rewriting_replaces_the_ape_tag() {
 
             write_file(&path, &new_tags("First Title"), &[front_cover()], &WriteOptions::default())
                 .unwrap();
-            write_file(&path, &new_tags("Second Title"), &[front_cover()], &WriteOptions::default())
-                .unwrap();
+            write_file(
+                &path,
+                &new_tags("Second Title"),
+                &[front_cover()],
+                &WriteOptions::default(),
+            )
+            .unwrap();
 
             let bytes = fs::read(&path).unwrap();
             assert_eq!(count(&bytes, APE_MAGIC), 2, "{name}: one header and one footer");
@@ -296,7 +319,8 @@ fn rewriting_replaces_the_ape_tag() {
 
 #[test]
 fn ape_policies_of_aac_and_ac3() {
-    let subjects = [("a.aac", Container::Aac, adts(6, 180)), ("a.ac3", Container::Ac3, ac3(5, 128))];
+    let subjects =
+        [("a.aac", Container::Aac, adts(6, 180)), ("a.ac3", Container::Ac3, ac3(5, 128))];
 
     for (name, _, audio) in subjects {
         let options = |policy| {
@@ -319,7 +343,9 @@ fn ape_policies_of_aac_and_ac3() {
         cleanup(&path);
 
         // Keep: neither tags nor policy-less rewrites change the file, whatever the tags are.
-        for (start, tags) in [(&tagged, new_tags("New")), (&with_ape, new_tags("New")), (&with_ape, vec![])] {
+        for (start, tags) in
+            [(&tagged, new_tags("New")), (&with_ape, new_tags("New")), (&with_ape, vec![])]
+        {
             let path = make_file(name, start);
             write_file(&path, &tags, &[front_cover()], &options(ApePolicy::Keep)).unwrap();
             assert_eq!(&fs::read(&path).unwrap(), start, "{name}: Keep must not touch the file");

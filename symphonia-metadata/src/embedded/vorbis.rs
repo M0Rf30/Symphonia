@@ -25,7 +25,7 @@ use symphonia_core::util::text;
 
 use crate::embedded::flac;
 use crate::utils::base64;
-use crate::utils::images::try_get_image_info;
+use crate::utils::images::{try_get_image_info, visual_from_image_data};
 use crate::utils::std_tag::*;
 
 #[cfg(feature = "write")]
@@ -190,14 +190,14 @@ fn parse_base64_cover_art(b64: &str) -> Result<ParsedComment> {
         return decode_error("meta (vorbis): could not detect cover art image format");
     };
 
-    Ok(ParsedComment::Visual(Visual {
-        media_type: Some(image_info.media_type),
-        dimensions: Some(image_info.dimensions),
-        color_mode: Some(image_info.color_mode),
-        usage: None,
-        tags: vec![],
+    Ok(ParsedComment::Visual(visual_from_image_data(
         data,
-    }))
+        Some(image_info),
+        None,
+        None,
+        None,
+        vec![],
+    )))
 }
 
 /// Parse a chapter timestamp in the HH:MM:SS.SSS format.
@@ -421,8 +421,8 @@ pub fn read_vorbis_comment<B: ReadBytes>(
         // Read the comment string length in bytes.
         let comment_length = reader.read_u32()?;
 
-        // Read the comment string.
-        // TODO: Apply a limit.
+        // Read the comment string. The read allocates incrementally and fails at the end of the
+        // stream, so the allocation is bounded by the data actually present.
         let comment_data = reader.read_boxed_slice_exact(comment_length as usize)?;
 
         // Parse the Vorbis comment and handle the parsed output.

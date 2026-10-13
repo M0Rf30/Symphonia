@@ -20,9 +20,9 @@ writer = ["symphonia-metadata/write"]
 
 [dependencies]
 log = { workspace = true }
-symphonia-core = { version = "0.6.1", path = "../symphonia-core" }
-symphonia-common = { version = "0.6.1", path = "../symphonia-common" }
-symphonia-metadata = { version = "0.6.1", path = "../symphonia-metadata", default-features = false, features = ["riff-id3"] }
+symphonia-core = { workspace = true }
+symphonia-common = { workspace = true }
+symphonia-metadata = { workspace = true, features = ["riff-id3"] }
 
 [lints]
 workspace = true

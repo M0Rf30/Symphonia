@@ -1,0 +1,14 @@
+[package]
+name = "symphonia-testutil"
+description = "Dev-only test support helpers shared by the Symphonia workspace (not published)."
+publish = false
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+symphonia-core = { workspace = true }
+
+[lints]
+workspace = true

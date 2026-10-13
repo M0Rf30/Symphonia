@@ -48,7 +48,7 @@ fn seek_secs(
     reader: &mut MkvReader<'_>,
     secs: f64,
 ) -> Result<SeekedTo, symphonia_core::errors::Error> {
-    let time = Time::try_from_secs_f64(secs).unwrap();
+    let time = Time::try_from_secs_f64(secs).expect("valid time");
     reader.seek(SeekMode::Accurate, SeekTo::Time { time, track_id: None })
 }
 

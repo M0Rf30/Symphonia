@@ -14,15 +14,15 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
-symphonia-codec-aac = { version = "0.6.1", path = "../symphonia-codec-aac" }
+symphonia-codec-aac = { workspace = true }
 log = { workspace = true }
-symphonia-common = { version = "0.6.1", path = "../symphonia-common" }
-symphonia-core = { version = "0.6.1", path = "../symphonia-core" }
+symphonia-common = { workspace = true }
+symphonia-core = { workspace = true }
 
 [dev-dependencies]
-symphonia-bundle-mp3 = { version = "0.6.1", path = "../symphonia-bundle-mp3" }
-symphonia-codec-pcm = { version = "0.6.1", path = "../symphonia-codec-pcm" }
-symphonia-format-isomp4 = { version = "0.6.1", path = "../symphonia-format-isomp4" }
+symphonia-bundle-mp3 = { workspace = true, features = ["mp1", "mp2", "mp3"] }
+symphonia-codec-pcm = { workspace = true }
+symphonia-format-isomp4 = { workspace = true }
 
 [lints]
 workspace = true

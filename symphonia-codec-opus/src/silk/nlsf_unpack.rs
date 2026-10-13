@@ -10,7 +10,7 @@
 
 #![allow(dead_code)]
 
-use crate::silk::structs::{NlsfCbStruct, MAX_LPC_ORDER, NLSF_QUANT_MAX_AMPLITUDE};
+use crate::silk::structs::{MAX_LPC_ORDER, NLSF_QUANT_MAX_AMPLITUDE, NlsfCbStruct};
 
 /// C: `silk_NLSF_unpack`. Fills `ec_ix` (indices into `psNLSF_CB->ec_iCDF`) and `pred_q8`
 /// (backward predictor coefficients) for `CB1_index`'s entropy path, `order` entries each.

@@ -10,12 +10,12 @@ use std::io::{ErrorKind, Seek, SeekFrom};
 
 use symphonia_codec_aac::detect_implicit_sbr;
 use symphonia_common::mpeg::es::{AdtsEs, EsParser, EsTrack, LatmEs, MpaEs, OpusEs};
-use symphonia_common::mpeg::pes::{
-    PTS_MODULUS, PesHeader, parse_pes_header, pts_delta, unwrap_pts,
-};
-use symphonia_common::mpeg::seek::bisect;
+use symphonia_common::mpeg::pes::{parse_pes_header, split_pes};
 use symphonia_common::mpeg::timeline::ticks_to_clock;
-use symphonia_core::codecs::CodecParameters;
+use symphonia_common::mpeg::track::{
+    LastPes, PROBE_SCAN_LEN, SeekPlan, bisect_pts, build_audio_track, check_forward_only,
+    earliest_base, find_seek_packet, plan_seek, scan_tail, tail_ends,
+};
 use symphonia_core::common::FourCc;
 use symphonia_core::errors::{Error, Result, SeekErrorKind, seek_error, unsupported_error};
 use symphonia_core::formats::TrackFlags;
@@ -24,7 +24,6 @@ use symphonia_core::formats::probe::{ProbeFormatData, ProbeableFormat, Score, Sc
 use symphonia_core::io::*;
 use symphonia_core::meta::{Metadata, MetadataLog};
 use symphonia_core::support_format;
-use symphonia_core::units::{Duration, TimeBase, Timestamp};
 
 use log::{debug, info, warn};
 
@@ -52,15 +51,9 @@ const MAX_PSI_SCAN_LEN: u64 = 2 * 1024 * 1024;
 /// The maximum number of bytes to scan for the first frames of the audio streams.
 const MAX_ES_PROBE_LEN: u64 = 4 * 1024 * 1024;
 
-/// The maximum number of bytes at the end of the stream to scan for the last PES packets of the
-/// streams, to find the duration.
-const MAX_TAIL_WINDOW: u64 = 64 * 1024 * 1024;
-
-/// The range, in bytes, below which the bisection stops, and the stream is scanned forward.
-const BISECT_MIN_GAP: u64 = 64 * 1024;
-
-/// The number of bytes to scan for a PES packet with a PTS when probing during a seek.
-const PROBE_SCAN_LEN: u64 = 512 * 1024;
+/// The maximum size of a PES packet that is assembled: the largest PES packet with a bounded
+/// length. A PES packet of unbounded length (only allowed for video) is released at this size.
+const MAX_PES_LEN: usize = 6 + 65535;
 
 const MPEGTS_FORMAT_INFO: FormatInfo = FormatInfo {
     format: FormatId::new(FourCc::new(*b"MPTS")),
@@ -222,6 +215,13 @@ impl PesAssembler {
             return;
         }
 
+        if self.buf.len() >= MAX_PES_LEN {
+            self.buf.truncate(MAX_PES_LEN);
+            out.push(std::mem::take(&mut self.buf));
+            self.active = false;
+            return;
+        }
+
         // A bounded PES packet is complete once all of its bytes have been received.
         if self.buf.len() >= 6 && self.buf[..3] == [0, 0, 1] {
             let len = usize::from(u16::from_be_bytes([self.buf[4], self.buf[5]]));
@@ -244,19 +244,6 @@ impl PesAssembler {
         self.active = false;
     }
 }
-
-/// Split a complete PES packet into the PES header and the payload.
-fn split_pes(pes: &[u8]) -> Option<(PesHeader, &[u8])> {
-    let hdr = parse_pes_header(pes)?;
-
-    let end = if hdr.packet_len != 0 { (6 + hdr.packet_len).min(pes.len()) } else { pes.len() };
-    let payload = pes.get(hdr.payload_offset..end)?;
-
-    Some((hdr, payload))
-}
-
-/// The PTS and the payloads of the last PES packet with a PTS of a stream, and of those after it.
-type LastPes = Option<(u64, Vec<Vec<u8>>)>;
 
 /// An audio elementary stream.
 struct Stream {
@@ -554,23 +541,7 @@ impl<'s> MpegTsReader<'s> {
     fn build_tracks(&mut self) -> Result<()> {
         // The timeline begins at the earliest first PTS, adjusted so that the first sample that is
         // not trimmed has the timestamp 0 for a single stream.
-        let mut base: Option<u64> = None;
-
-        for stream in &self.streams {
-            let Some(pts) = stream.first_pts
-            else {
-                continue;
-            };
-
-            let rate = stream.es.info().map_or(1, |i| i.rate);
-            let lead = ticks_to_clock(stream.es.lead_in().unwrap_or(0) as i64, rate);
-            let pts = (pts + lead as u64) % PTS_MODULUS;
-
-            base = Some(match base {
-                Some(b) if pts_delta(pts, b) >= 0 => b,
-                _ => pts,
-            });
-        }
+        let base = earliest_base(self.streams.iter().map(|s| (&s.es, s.first_pts)));
 
         self.base_pts = base;
 
@@ -582,16 +553,14 @@ impl<'s> MpegTsReader<'s> {
         let ends = self.scan_tail()?;
 
         for (i, stream) in self.streams.iter().enumerate() {
-            let info = stream.es.info().expect("stream was probed");
-            let rate = info.rate;
-
-            let mut track = Track::new(u32::from(stream.pid));
-
-            track.with_time_base(
-                TimeBase::try_from_recip(rate)
-                    .ok_or(Error::DecodeError("mpegts: invalid sample rate"))?,
-            );
-            track.with_codec_params(CodecParameters::Audio(info.params.clone()));
+            let mut track = build_audio_track(
+                u32::from(stream.pid),
+                &stream.es,
+                stream.first_pts,
+                base,
+                ends.get(i).copied().flatten(),
+                "mpegts: invalid sample rate",
+            )?;
 
             if let Some(lang) = &stream.language {
                 track.with_language(lang);
@@ -599,31 +568,6 @@ impl<'s> MpegTsReader<'s> {
 
             if i == 0 {
                 track.with_flags(TrackFlags::DEFAULT);
-            }
-
-            // The timestamp of the first sample that is not trimmed.
-            let lead_in = stream.es.lead_in().unwrap_or(0) as i64;
-
-            let start_ts = match (stream.first_pts, base) {
-                (Some(pts), Some(base)) => {
-                    stream.es.timeline().ticks_for_clock(pts_delta(pts, base)) + lead_in
-                }
-                _ => 0,
-            };
-
-            if lead_in > 0 {
-                track.with_delay(lead_in as u32);
-            }
-
-            track.with_start_ts(Timestamp::new(start_ts));
-
-            if let Some(end_ts) = ends.get(i).copied().flatten() {
-                if end_ts > start_ts {
-                    let dur = (end_ts - start_ts) as u64;
-                    let out_rate = info.params.sample_rate.unwrap_or(rate);
-                    track.with_duration(Duration::new(dur));
-                    track.with_num_frames(dur * u64::from(out_rate) / u64::from(rate));
-                }
             }
 
             self.tracks.push(track);
@@ -637,39 +581,30 @@ impl<'s> MpegTsReader<'s> {
     /// Scan the end of the stream for the last PES packets, and return the end timestamp of each
     /// stream in the stream's timebase.
     fn scan_tail(&mut self) -> Result<Vec<Option<i64>>> {
-        let mut ends = vec![None; self.streams.len()];
-
         let (Some(len), true) = (self.reader.byte_len(), self.reader.is_seekable())
         else {
-            return Ok(ends);
+            return Ok(vec![None; self.streams.len()]);
         };
 
         let restore = self.reader.pos();
         let size = self.packet_size as u64;
+        let start_pos = self.start_pos;
         let mut buf = [0u8; MAX_PACKET_SIZE];
 
-        let mut window = 1024 * 1024u64;
-
-        loop {
-            let begin = len.saturating_sub(window).max(self.start_pos);
-            let aligned = self.start_pos + (begin - self.start_pos).div_ceil(size) * size;
+        let last = scan_tail(len, start_pos, self.streams.len(), |begin, last| {
+            let aligned = start_pos + (begin - start_pos).div_ceil(size) * size;
 
             self.reader.seek(SeekFrom::Start(aligned))?;
 
             let mut asms: Vec<PesAssembler> =
                 self.streams.iter().map(|_| Default::default()).collect();
-            let mut last: Vec<LastPes> = vec![None; self.streams.len()];
             let mut completed = vec![];
 
             // Keep the payload of the last PES packet with a PTS, and of the packets after it
             // (which may complete its last frame).
-            let record = |i: usize, pes: &[u8], last: &mut [LastPes]| {
+            let record = |pes: &[u8], last: &mut LastPes| {
                 if let Some((hdr, payload)) = split_pes(pes) {
-                    match (hdr.pts, last[i].as_mut()) {
-                        (Some(pts), _) => last[i] = Some((pts, vec![payload.to_vec()])),
-                        (None, Some((_, data))) => data.push(payload.to_vec()),
-                        (None, None) => (),
-                    }
+                    last.record(hdr.pts, payload);
                 }
             };
 
@@ -679,44 +614,23 @@ impl<'s> MpegTsReader<'s> {
                     asms[i].push(pkt.pusi, &buf[pkt.payload.clone()], &mut completed);
 
                     for pes in completed.drain(..) {
-                        record(i, &pes, &mut last);
+                        record(&pes, &mut last[i]);
                     }
                 }
             }
 
             for (i, asm) in asms.iter_mut().enumerate() {
                 if let Some(pes) = asm.flush() {
-                    record(i, &pes, &mut last);
+                    record(&pes, &mut last[i]);
                 }
             }
 
-            let complete = last.iter().all(|l| l.is_some());
-
-            if complete || aligned <= self.start_pos || window >= MAX_TAIL_WINDOW {
-                for (i, l) in last.into_iter().enumerate() {
-                    let Some((pts, payload)) = l
-                    else {
-                        continue;
-                    };
-
-                    let stream = &self.streams[i];
-                    if let Some(base) = self.base_pts {
-                        let clock = pts_delta(pts, base);
-                        let end = stream.es.timeline().ticks_for_clock(clock)
-                            + stream.es.payload_duration(&payload) as i64;
-                        ends[i] = Some(end);
-                    }
-                }
-
-                break;
-            }
-
-            window = window.saturating_mul(8);
-        }
+            Ok::<_, Error>(aligned)
+        })?;
 
         self.reader.seek(SeekFrom::Start(restore))?;
 
-        Ok(ends)
+        Ok(tail_ends(&last, self.streams.iter().map(|s| &s.es), self.base_pts))
     }
 
     /// Find the first PES packet that starts with a PTS, of the stream with `pid`, at or after the
@@ -888,57 +802,8 @@ impl FormatReader for MpegTsReader<'_> {
     }
 
     fn seek(&mut self, _mode: SeekMode, to: SeekTo) -> Result<SeekedTo> {
-        // Select the track, and the timestamp in its timebase.
-        let (track_idx, required_ts) = match to {
-            SeekTo::Timestamp { ts, track_id } => {
-                match self.tracks.iter().position(|t| t.id == track_id) {
-                    Some(idx) => (idx, ts),
-                    None => return seek_error(SeekErrorKind::Unseekable),
-                }
-            }
-            SeekTo::Time { time, track_id } => {
-                let idx = match track_id {
-                    Some(id) => self.tracks.iter().position(|t| t.id == id),
-                    None => Some(0),
-                };
-
-                let Some(idx) = idx
-                else {
-                    return seek_error(SeekErrorKind::Unseekable);
-                };
-
-                let tb = self.tracks[idx]
-                    .time_base
-                    .ok_or(Error::SeekError(SeekErrorKind::Unseekable))?;
-                let ts =
-                    tb.calc_timestamp(time).ok_or(Error::SeekError(SeekErrorKind::OutOfRange))?;
-
-                (idx, ts)
-            }
-        };
-
-        let track_id = self.tracks[track_idx].id;
-        let track_start = self.tracks[track_idx].start_ts;
-        let rate = self.streams[track_idx].es.info().map_or(1, |i| i.rate);
-
-        if required_ts.is_negative() {
-            return seek_error(SeekErrorKind::OutOfRange);
-        }
-
-        // The timestamp must be within the duration, if it is known.
-        if let Some(dur) = self.tracks[track_idx].duration {
-            if required_ts.get() > track_start.get().saturating_add(dur.get() as i64) {
-                return seek_error(SeekErrorKind::OutOfRange);
-            }
-        }
-
-        // The timestamp to start decoding from, so that a decoder reproduces a continuous decode
-        // at the required timestamp.
-        let start_ts = self.streams[track_idx]
-            .es
-            .parser()
-            .seek_start_ts(required_ts.get())
-            .max(track_start.get());
+        let SeekPlan { track_idx, track_id, required_ts, start_ts, rate } =
+            plan_seek(&self.tracks, self.streams.iter().map(|s| &s.es), to)?;
 
         debug!("mpegts: seeking to ts={required_ts} (start from {start_ts})");
 
@@ -956,12 +821,8 @@ impl FormatReader for MpegTsReader<'_> {
             // Find the position of the last PES packet that is at or before the target.
             let start_pos = self.start_pos;
 
-            let pos = bisect(start_pos, len, target_clock, BISECT_MIN_GAP, |pos| {
-                Ok::<_, Error>(
-                    self.probe_pes(pos, pid)?
-                        .map(|(pos, pts)| (pos, unwrap_pts(pts, base, target_clock))),
-                )
-            })?;
+            let pos =
+                bisect_pts(start_pos, len, base, target_clock, |pos| self.probe_pes(pos, pid))?;
 
             self.reader.seek(SeekFrom::Start(pos))?;
             self.out.clear();
@@ -972,31 +833,21 @@ impl FormatReader for MpegTsReader<'_> {
                 stream.es.seek(target_clock);
             }
         }
-        else if self.last_ts.is_some_and(|(id, ts)| id == track_id && required_ts.get() < ts) {
-            return seek_error(SeekErrorKind::ForwardOnly);
+        else {
+            check_forward_only(self.last_ts, track_id, required_ts)?;
         }
 
         // Scan forward to the first packet that ends after the timestamp to start from.
-        loop {
-            match self.next_packet_inner()? {
-                Some(packet)
-                    if packet.track_id == track_id
-                        && packet.pts.get().saturating_add(packet.dur.get() as i64) > start_ts =>
-                {
-                    let actual_ts = packet.pts;
-                    self.out.push_front(packet);
+        let packet = find_seek_packet(|| self.next_packet_inner(), track_id, start_ts)?;
+        let actual_ts = packet.pts;
+        self.out.push_front(packet);
 
-                    // The packet returned next is at the position seeked to.
-                    self.last_ts = Some((track_id, actual_ts.get()));
+        // The packet returned next is at the position seeked to.
+        self.last_ts = Some((track_id, actual_ts.get()));
 
-                    info!("mpegts: seeked to ts={actual_ts}");
+        info!("mpegts: seeked to ts={actual_ts}");
 
-                    return Ok(SeekedTo { track_id, required_ts, actual_ts });
-                }
-                Some(_) => (),
-                None => return seek_error(SeekErrorKind::OutOfRange),
-            }
-        }
+        Ok(SeekedTo { track_id, required_ts, actual_ts })
     }
 
     fn into_inner<'s>(self: Box<Self>) -> MediaSourceStream<'s>
@@ -1004,5 +855,30 @@ impl FormatReader for MpegTsReader<'_> {
         Self: 's,
     {
         self.reader
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_unbounded_pes_is_capped() {
+        // A PES packet of an audio PID with the packet length 0, followed by a long run of
+        // continuation packets.
+        let mut asm = PesAssembler::default();
+        let mut out = vec![];
+
+        let mut first = vec![0, 0, 1, 0xc0, 0, 0, 0x80, 0, 0];
+        first.resize(184, 0xaa);
+        asm.push(true, &first, &mut out);
+
+        for _ in 0..10_000 {
+            asm.push(false, &[0xaa; 184], &mut out);
+            assert!(asm.buf.len() <= MAX_PES_LEN);
+        }
+
+        assert!(!out.is_empty());
+        assert!(out.iter().all(|pes| pes.len() <= MAX_PES_LEN));
     }
 }

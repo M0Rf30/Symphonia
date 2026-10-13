@@ -52,6 +52,7 @@ const INTENSITY_THRESHOLDS: [f32; 21] = [
 const INTENSITY_HYSTERESIS: [f32; 21] =
     [1., 1., 1., 1., 1., 1., 1., 2., 2., 2., 2., 2., 2., 2., 3., 3., 4., 5., 6., 8., 8.];
 /// C: `mode->preemph[0]` of the 48 kHz mode.
+#[allow(clippy::excessive_precision)] // value copied from the C reference
 const PREEMPH_COEF: f32 = 0.85000610;
 /// C: `CELT_SIG_SCALE`.
 const SIG_SCALE: f32 = 32768.0;
@@ -353,7 +354,7 @@ impl CeltEncoder {
         if second_mdct {
             self.compute_mdcts(false, &input, &mut freq);
             compute_band_energies(mode, &freq, &mut *band_e, eff_end, ci, LM);
-            amp2_log2(mode, eff_end, end, &band_e, &mut *band_log_e2, ci);
+            amp2_log2(mode, eff_end, end, band_e, &mut *band_log_e2, ci);
             for c in 0..cc {
                 for i in 0..end as usize {
                     band_log_e2[nb * c + i] += 0.5 * LM as f32;
@@ -362,7 +363,7 @@ impl CeltEncoder {
         }
         self.compute_mdcts(short_blocks, &input, &mut freq);
         compute_band_energies(mode, &freq, &mut *band_e, eff_end, ci, LM);
-        amp2_log2(mode, eff_end, end, &band_e, &mut *band_log_e, ci);
+        amp2_log2(mode, eff_end, end, band_e, &mut *band_log_e, ci);
 
         // Temporal VBR.
         let temporal_vbr = {
@@ -383,7 +384,7 @@ impl CeltEncoder {
         };
 
         if !second_mdct {
-            band_log_e2.copy_from_slice(&band_log_e);
+            band_log_e2.copy_from_slice(band_log_e);
         }
 
         // Last chance to catch any transient missed by the time-domain analysis.
@@ -391,7 +392,7 @@ impl CeltEncoder {
             && !is_transient
             && cfg.complexity >= 5
             && patch_transient_decision(
-                &band_log_e,
+                band_log_e,
                 &self.old_band_e,
                 nb,
                 start as usize,
@@ -403,7 +404,7 @@ impl CeltEncoder {
             short_blocks = true;
             self.compute_mdcts(true, &input, &mut freq);
             compute_band_energies(mode, &freq, &mut *band_e, eff_end, ci, LM);
-            amp2_log2(mode, eff_end, end, &band_e, &mut *band_log_e, ci);
+            amp2_log2(mode, eff_end, end, band_e, &mut *band_log_e, ci);
             // Compensate for the scaling of short vs long MDCTs.
             for c in 0..cc {
                 for i in 0..end as usize {
@@ -419,7 +420,7 @@ impl CeltEncoder {
 
         // Band normalisation.
         let mut x = vec![0f32; cc * n];
-        normalise_bands(mode, &freq, &mut x, &band_e, eff_end, ci, m);
+        normalise_bands(mode, &freq, &mut x, band_e, eff_end, ci, m);
 
         let enable_tf_analysis = effective_bytes >= 15 * ci && cfg.complexity >= 2;
 
@@ -431,8 +432,8 @@ impl CeltEncoder {
         let spread_weight = &mut spread_weight_buf[..nb];
         let dyn_alloc = dynalloc_analysis(
             mode,
-            &band_log_e,
-            &band_log_e2,
+            band_log_e,
+            band_log_e2,
             start as usize,
             end as usize,
             cc,
@@ -462,7 +463,7 @@ impl CeltEncoder {
                 LM,
                 tf_estimate,
                 tf_chan,
-                &importance,
+                importance,
             );
             for i in eff_end as usize..end as usize {
                 tf_res[i] = tf_res[eff_end as usize - 1];
@@ -493,7 +494,7 @@ impl CeltEncoder {
             start,
             end,
             eff_end,
-            &band_log_e,
+            band_log_e,
             &mut self.old_band_e,
             total_bits as u32,
             &mut *error,
@@ -530,7 +531,7 @@ impl CeltEncoder {
                     eff_end,
                     ci,
                     m,
-                    &spread_weight,
+                    spread_weight,
                 );
             }
             enc.enc_icdf(self.spread_decision, &SPREAD_ICDF, 5);
@@ -596,7 +597,7 @@ impl CeltEncoder {
             alloc_trim = alloc_trim_analysis(
                 mode,
                 &x,
-                &band_log_e,
+                band_log_e,
                 end as usize,
                 LM,
                 cc,
@@ -711,8 +712,8 @@ impl CeltEncoder {
                 mode,
                 start,
                 end,
-                &offsets,
-                &cap,
+                offsets,
+                cap,
                 alloc_trim,
                 bits,
                 LM,
@@ -739,7 +740,7 @@ impl CeltEncoder {
             end,
             &mut self.old_band_e,
             &mut *error,
-            &fine_quant,
+            fine_quant,
             &mut enc,
             ci,
         );
@@ -753,12 +754,12 @@ impl CeltEncoder {
                 &QuantParams {
                     start,
                     end,
-                    pulses: &pulses,
+                    pulses,
                     short_blocks,
                     spread: self.spread_decision,
                     dual_stereo,
                     intensity: self.intensity,
-                    tf_res: &tf_res,
+                    tf_res,
                     total_bits: nb_compressed_bytes * (8 << BITRES) - anti_collapse_rsv,
                     balance: alloc.balance,
                     lm: LM,
@@ -766,7 +767,7 @@ impl CeltEncoder {
                 },
                 x0,
                 if cc == 2 { Some(x1) } else { None },
-                &band_e,
+                band_e,
                 &mut enc,
             );
         }
@@ -781,8 +782,8 @@ impl CeltEncoder {
             end,
             &mut self.old_band_e,
             &mut *error,
-            &fine_quant,
-            &fine_priority,
+            fine_quant,
+            fine_priority,
             nb_compressed_bytes * 8 - enc.tell(),
             &mut enc,
             ci,

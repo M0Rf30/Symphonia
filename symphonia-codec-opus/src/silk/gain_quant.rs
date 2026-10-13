@@ -9,10 +9,14 @@
 //! `silk_gains_quant`/`silk_gains_ID` are encoder-only and excluded). BSD-3-Clause, see NOTICE.
 
 use crate::silk::macros::*;
-use crate::silk::structs::{MAX_DELTA_GAIN_QUANT, MAX_NB_SUBFR, MIN_DELTA_GAIN_QUANT, MAX_QGAIN_DB, MIN_QGAIN_DB, N_LEVELS_QGAIN};
+use crate::silk::structs::{
+    MAX_DELTA_GAIN_QUANT, MAX_NB_SUBFR, MAX_QGAIN_DB, MIN_DELTA_GAIN_QUANT, MIN_QGAIN_DB,
+    N_LEVELS_QGAIN,
+};
 
 const OFFSET: i32 = (MIN_QGAIN_DB * 128) / 6 + 16 * 128;
-const INV_SCALE_Q16: i32 = (65536 * (((MAX_QGAIN_DB - MIN_QGAIN_DB) * 128) / 6)) / (N_LEVELS_QGAIN - 1);
+const INV_SCALE_Q16: i32 =
+    (65536 * (((MAX_QGAIN_DB - MIN_QGAIN_DB) * 128) / 6)) / (N_LEVELS_QGAIN - 1);
 
 /// C: `silk_gains_dequant`. Gains scalar dequantization, uniform on log scale.
 pub fn silk_gains_dequant(

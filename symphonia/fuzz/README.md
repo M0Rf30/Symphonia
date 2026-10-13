@@ -19,6 +19,11 @@ These targets bypass the demuxer and feed data directly to the codec implementat
 * **`decode_pcm`**: PCM (All supported integer/float formats)
 * **`decode_adpcm`**: ADPCM (Microsoft, IMA-WAV, IMA-QT)
 * **`decode_alac`**: Apple Lossless (ALAC)
+* **`decode_ape`**: Monkey's Audio (APE)
+* **`decode_musepack`**: Musepack
+* **`decode_opus`**: Opus
+* **`decode_wavpack`**: WavPack
+* **`decode_dsd`**: DSD
 
 ### Component Demuxer Fuzzers
 
@@ -31,6 +36,20 @@ These targets instantiate a specific `FormatReader` directly, bypassing probing.
 * **`demux_wav`**: WAV / RIFF
 * **`demux_aiff`**: AIFF
 * **`demux_caf`**: CAF
+* **`demux_mpegts`**: MPEG-TS
+* **`demux_mpegps`**: MPEG-PS
+* **`demux_flv`**: FLV
+* **`demux_dsf`**: DSF
+* **`demux_dff`**: DFF
+* **`demux_mp3`**: MPEG Audio (MP1/MP2/MP3) elementary stream
+* **`demux_ape`**: Monkey's Audio (APE)
+* **`demux_musepack`**: Musepack
+* **`demux_wavpack`**: WavPack
+* **`demux_adts`**: AAC ADTS
+* **`demux_adif`**: AAC ADIF
+* **`demux_loas`**: AAC LOAS/LATM
+
+Each target is a `[[bin]]` entry in `Cargo.toml` plus a file in `fuzz_targets/`. `run_all.sh` enumerates `fuzz_targets/*.rs`, so new targets only need those two.
 
 ## How to Run
 

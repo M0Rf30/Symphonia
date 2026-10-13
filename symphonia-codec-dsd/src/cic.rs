@@ -322,6 +322,7 @@ impl CicFilter {
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
+    use symphonia_core::audio::conv::I16_SCALE;
 
     /// The classic integrator/comb cascade operating on `f32` samples with a scale of 2^15, as it
     /// was implemented before the table-driven filter. Used as a bit-exactness oracle.
@@ -345,7 +346,7 @@ pub(crate) mod test_support {
         }
 
         pub(crate) fn process(&mut self, input: f32) -> Option<f32> {
-            let mut value = (input * 32768.0) as i64;
+            let mut value = (input * I16_SCALE) as i64;
 
             for integrator in &mut self.integrators {
                 value = value.wrapping_add(*integrator);
@@ -365,7 +366,7 @@ pub(crate) mod test_support {
             }
 
             let gain = (self.decimation as f64).powi(self.stages as i32);
-            Some((value as f64 / gain / 32768.0) as f32)
+            Some((value as f64 / gain / f64::from(I16_SCALE)) as f32)
         }
 
         pub(crate) fn process_bytes(

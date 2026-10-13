@@ -21,7 +21,7 @@ use symphonia_core::errors::{Error, Result, decode_error, unsupported_error};
 use symphonia_core::io::{BitReaderLtr, BufReader, ReadBitsLtr};
 use symphonia_core::packet::PacketRef;
 use symphonia_core::support_audio_codec;
-use symphonia_core::util::bits::sign_extend_leq32_to_i32;
+use symphonia_core::util::bits::{sign_extend_leq32_to_i32, sign_extend_leq64_to_i64};
 
 use log::{debug, log_enabled, warn};
 
@@ -80,12 +80,37 @@ fn decorrelate_right_side(right: &[i32], side: &mut [i32]) {
     }
 }
 
+/// Left/Side decorrelation for a 33-bit side channel. The output replaces the side plane.
+fn decorrelate_left_side_wide(left: &[i32], wide_side: &[i64], side: &mut [i32]) {
+    for ((s, &ws), &l) in side.iter_mut().zip(wide_side).zip(left) {
+        *s = (i64::from(l) - ws) as i32;
+    }
+}
+
+/// Mid/Side decorrelation for a 33-bit side channel. See [`decorrelate_mid_side`].
+fn decorrelate_mid_side_wide(mid: &mut [i32], wide_side: &[i64], side: &mut [i32]) {
+    for ((m, s), &ws) in mid.iter_mut().zip(side).zip(wide_side) {
+        let mid = (i64::from(*m) << 1) | (ws & 1);
+        *m = ((mid + ws) >> 1) as i32;
+        *s = ((mid - ws) >> 1) as i32;
+    }
+}
+
+/// Right/Side decorrelation for a 33-bit side channel. The output replaces the side plane.
+fn decorrelate_right_side_wide(right: &[i32], wide_side: &[i64], side: &mut [i32]) {
+    for ((s, &ws), &r) in side.iter_mut().zip(wide_side).zip(right) {
+        *s = (ws + i64::from(r)) as i32;
+    }
+}
+
 /// Free Lossless Audio Codec (FLAC) decoder.
 pub struct FlacDecoder {
     params: AudioCodecParameters,
     is_validating: bool,
     validator: Validator,
     buf: AudioBuffer<i32>,
+    /// The side channel of decorrelated 32-bit frames, which needs 33 bits per sample.
+    wide_side: Vec<i64>,
 }
 
 impl FlacDecoder {
@@ -131,6 +156,7 @@ impl FlacDecoder {
             is_validating: options.verify,
             validator: Default::default(),
             buf,
+            wide_side: Vec::new(),
         })
     }
 
@@ -198,9 +224,16 @@ impl FlacDecoder {
                         .ok_or(Error::DecodeError("flac: unexpected channel assignment"))?;
 
                     read_subframe(&mut bs, bits_per_sample, left)?;
-                    read_subframe(&mut bs, bits_per_sample + 1, side)?;
 
-                    decorrelate_left_side(left, side);
+                    if bits_per_sample < u32::BITS {
+                        read_subframe(&mut bs, bits_per_sample + 1, side)?;
+                        decorrelate_left_side(left, side);
+                    }
+                    else {
+                        let wide = wide_plane(&mut self.wide_side, side.len());
+                        read_subframe_wide(&mut bs, bits_per_sample + 1, side, wide)?;
+                        decorrelate_left_side_wide(left, wide, side);
+                    }
                 }
                 ChannelAssignment::MidSide => {
                     let (mid, side) = self
@@ -209,9 +242,16 @@ impl FlacDecoder {
                         .ok_or(Error::DecodeError("flac: unexpected channel assignment"))?;
 
                     read_subframe(&mut bs, bits_per_sample, mid)?;
-                    read_subframe(&mut bs, bits_per_sample + 1, side)?;
 
-                    decorrelate_mid_side(mid, side);
+                    if bits_per_sample < u32::BITS {
+                        read_subframe(&mut bs, bits_per_sample + 1, side)?;
+                        decorrelate_mid_side(mid, side);
+                    }
+                    else {
+                        let wide = wide_plane(&mut self.wide_side, side.len());
+                        read_subframe_wide(&mut bs, bits_per_sample + 1, side, wide)?;
+                        decorrelate_mid_side_wide(mid, wide, side);
+                    }
                 }
                 ChannelAssignment::RightSide => {
                     let (side, right) = self
@@ -219,10 +259,17 @@ impl FlacDecoder {
                         .plane_pair_mut(0, 1)
                         .ok_or(Error::DecodeError("flac: unexpected channel assignment"))?;
 
-                    read_subframe(&mut bs, bits_per_sample + 1, side)?;
-                    read_subframe(&mut bs, bits_per_sample, right)?;
-
-                    decorrelate_right_side(right, side);
+                    if bits_per_sample < u32::BITS {
+                        read_subframe(&mut bs, bits_per_sample + 1, side)?;
+                        read_subframe(&mut bs, bits_per_sample, right)?;
+                        decorrelate_right_side(right, side);
+                    }
+                    else {
+                        let wide = wide_plane(&mut self.wide_side, side.len());
+                        read_subframe_wide(&mut bs, bits_per_sample + 1, side, wide)?;
+                        read_subframe(&mut bs, bits_per_sample, right)?;
+                        decorrelate_right_side_wide(right, wide, side);
+                    }
                 }
             }
         }
@@ -337,7 +384,15 @@ enum SubFrameType {
     Linear(u32),
 }
 
-fn read_subframe<B: ReadBitsLtr>(bs: &mut B, frame_bps: u32, buf: &mut [i32]) -> Result<()> {
+/// Get a zeroed slice of `len` samples from `buf`, growing it if necessary.
+fn wide_plane(buf: &mut Vec<i64>, len: usize) -> &mut [i64] {
+    buf.clear();
+    buf.resize(len, 0);
+    buf
+}
+
+/// Reads a sub-frame header, returning the sub-frame type and the number of dropped bits.
+fn read_subframe_header<B: ReadBitsLtr>(bs: &mut B, frame_bps: u32) -> Result<(SubFrameType, u32)> {
     // First sub-frame bit must always 0.
     if bs.read_bool()? {
         return decode_error("flac: subframe padding is not 0");
@@ -373,17 +428,20 @@ fn read_subframe<B: ReadBitsLtr>(bs: &mut B, frame_bps: u32, buf: &mut [i32]) ->
         );
     }
 
+    Ok((subframe_type, dropped_bps))
+}
+
+fn read_subframe<B: ReadBitsLtr>(bs: &mut B, frame_bps: u32, buf: &mut [i32]) -> Result<()> {
+    debug_assert!(frame_bps <= u32::BITS);
+
+    let (subframe_type, dropped_bps) = read_subframe_header(bs, frame_bps)?;
+
     // The bits per sample stated in the frame header is for the decoded audio sub-block samples.
     // However, it is likely that the lower order bits of all the samples are simply 0. Therefore,
     // the encoder will truncate `dropped_bps` of lower order bits for every sample in a sub-block.
     // The decoder simply needs to shift left all samples by `dropped_bps` after decoding the
     // sub-frame and obtaining the truncated audio sub-block samples.
     let bps = frame_bps - dropped_bps;
-
-    // trace!("\tsubframe: type={:?}, bps={}, dropped_bps={}",
-    //     &subframe_type,
-    //     bps,
-    //     dropped_bps);
 
     match subframe_type {
         SubFrameType::Constant => decode_constant(bs, bps, buf)?,
@@ -394,6 +452,108 @@ fn read_subframe<B: ReadBitsLtr>(bs: &mut B, frame_bps: u32, buf: &mut [i32]) ->
 
     // Shift the samples to account for the dropped bits.
     samples_shl(dropped_bps, buf);
+
+    Ok(())
+}
+
+/// Reads a sub-frame with up-to 64 bits per sample into `buf`. This is required for the 33-bit side
+/// channel of decorrelated 32-bit frames. Residuals are always 32-bit, and are decoded into `res`.
+fn read_subframe_wide<B: ReadBitsLtr>(
+    bs: &mut B,
+    frame_bps: u32,
+    res: &mut [i32],
+    buf: &mut [i64],
+) -> Result<()> {
+    debug_assert!(frame_bps <= u64::BITS && res.len() == buf.len());
+
+    let (subframe_type, dropped_bps) = read_subframe_header(bs, frame_bps)?;
+    let bps = frame_bps - dropped_bps;
+
+    let read_sample =
+        |bs: &mut B| -> Result<i64> { Ok(sign_extend_leq64_to_i64(bs.read_bits_leq64(bps)?, bps)) };
+
+    match subframe_type {
+        SubFrameType::Constant => {
+            let sample = read_sample(bs)?;
+            buf.fill(sample);
+        }
+        SubFrameType::Verbatim => {
+            for sample in buf.iter_mut() {
+                *sample = read_sample(bs)?;
+            }
+        }
+        SubFrameType::FixedLinear(order) => {
+            let order = order as usize;
+            if order > buf.len() {
+                return decode_error("flac: fixed predictor order is greater than the block size");
+            }
+            for sample in buf[..order].iter_mut() {
+                *sample = read_sample(bs)?;
+            }
+
+            decode_residual(bs, order as u32, res)?;
+
+            // Coefficients in order of increasing lag.
+            const COEFFS: [[i64; 4]; 5] =
+                [[0, 0, 0, 0], [1, 0, 0, 0], [2, -1, 0, 0], [3, -3, 1, 0], [4, -6, 4, -1]];
+            let coeffs = &COEFFS[order][..order];
+
+            for i in order..buf.len() {
+                let predicted = coeffs
+                    .iter()
+                    .zip(buf[..i].iter().rev())
+                    .fold(0i64, |acc, (&c, &s)| acc.wrapping_add(c.wrapping_mul(s)));
+                buf[i] = predicted.wrapping_add(i64::from(res[i]));
+            }
+        }
+        SubFrameType::Linear(order) => {
+            let order = order as usize;
+            if order > buf.len() {
+                return decode_error("flac: predictor order is greater than the block size");
+            }
+            for sample in buf[..order].iter_mut() {
+                *sample = read_sample(bs)?;
+            }
+
+            let qlp_precision = bs.read_bits_leq32(4)? + 1;
+            if qlp_precision > 15 {
+                return decode_error("flac: qlp precision set to reserved value");
+            }
+
+            let qlp_coeff_shift = sign_extend_leq32_to_i32(bs.read_bits_leq32(5)?, 5);
+            if qlp_coeff_shift < 0 {
+                return unsupported_error("flac: lpc shifts less than 0 are not supported");
+            }
+
+            // The first coefficient applies to the most recent sample (lag 1).
+            let mut coeffs = [0i64; 32];
+            for c in coeffs.iter_mut().take(order) {
+                *c = i64::from(sign_extend_leq32_to_i32(
+                    bs.read_bits_leq32(qlp_precision)?,
+                    qlp_precision,
+                ));
+            }
+
+            decode_residual(bs, order as u32, res)?;
+
+            // Samples of a valid stream are at most 33 bits and coefficients at most 15 bits, so
+            // the sum of up-to 32 products fits in 53 bits. Wrapping only matters for corrupt
+            // streams.
+            for i in order..buf.len() {
+                let predicted = coeffs[..order]
+                    .iter()
+                    .zip(buf[..i].iter().rev())
+                    .fold(0i64, |acc, (&c, &s)| acc.wrapping_add(c.wrapping_mul(s)));
+                buf[i] = (predicted >> qlp_coeff_shift).wrapping_add(i64::from(res[i]));
+            }
+        }
+    }
+
+    if dropped_bps > 0 {
+        for sample in buf.iter_mut() {
+            *sample = sample.wrapping_shl(dropped_bps);
+        }
+    }
 
     Ok(())
 }
@@ -662,7 +822,7 @@ fn verify_rice_signed_to_i32() {
     assert_eq!(rice_signed_to_i32(9), -5);
     assert_eq!(rice_signed_to_i32(10), 5);
 
-    assert_eq!(rice_signed_to_i32(u32::max_value()), -2_147_483_648);
+    assert_eq!(rice_signed_to_i32(u32::MAX), -2_147_483_648);
 }
 
 fn fixed_predict(order: u32, buf: &mut [i32]) {
@@ -876,6 +1036,36 @@ mod tests {
                 (0..taps).map(|k| i64::from(coeffs[n - 1 - k]) * i64::from(buf[i - 1 - k])).sum();
             buf[i] = buf[i].wrapping_add((predicted >> shift) as i32);
         }
+    }
+
+    #[test]
+    fn verify_33_bit_side_channel_decodes() {
+        use super::{decorrelate_left_side_wide, read_subframe_wide};
+        use symphonia_core::io::BitReaderLtr;
+
+        // A verbatim sub-frame (header 0x02) with the extreme valid side samples -(2^32 - 1) and
+        // 2^32 - 1, which need 33 bits.
+        let mut bits = String::from("00000010");
+        bits.push_str(&format!("1{:032b}", 1));
+        bits.push_str(&format!("0{:032b}", u32::MAX));
+        while bits.len() % 8 != 0 {
+            bits.push('0');
+        }
+        let data: Vec<u8> = bits
+            .as_bytes()
+            .chunks(8)
+            .map(|b| u8::from_str_radix(std::str::from_utf8(b).unwrap_or("0"), 2).unwrap_or(0))
+            .collect();
+
+        let mut bs = BitReaderLtr::new(&data);
+        let mut side = [0i32; 2];
+        let mut wide = [0i64; 2];
+        assert!(read_subframe_wide(&mut bs, 33, &mut side, &mut wide).is_ok());
+        assert_eq!(wide, [-((1i64 << 32) - 1), (1i64 << 32) - 1]);
+
+        let left = [i32::MIN, i32::MAX];
+        decorrelate_left_side_wide(&left, &wide, &mut side);
+        assert_eq!(side, [i32::MAX, i32::MIN]);
     }
 
     fn check_lpc<const N: usize>(rng: &mut XorShift) {

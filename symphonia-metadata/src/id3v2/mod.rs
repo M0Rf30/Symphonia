@@ -34,8 +34,9 @@ pub mod write;
 #[cfg(test)]
 mod content_tests;
 
+use crate::utils::ape::{ApeTagFlags, HEADER_LEN as APE_HEADER_LEN};
 use frames::*;
-use unsync::{decode_unsynchronisation, read_syncsafe_leq32};
+use unsync::{decode_synchsafe, decode_unsynchronisation, read_syncsafe_leq32};
 
 #[derive(Debug)]
 #[allow(clippy::enum_variant_names)]
@@ -107,6 +108,36 @@ struct ExtendedHeader {
     is_update: Option<bool>,
     /// ID3v2.4 only, Tag modification restrictions.
     restrictions: Option<Restrictions>,
+}
+
+/// The fields of a structurally valid 10 byte ID3v2 header.
+struct HeaderBytes {
+    major: u8,
+    flags: u8,
+    /// The size of the tag, excluding the header and footer.
+    size: u32,
+}
+
+impl HeaderBytes {
+    /// ID3v2.2 compression is undefined, so a tag that uses it cannot be read.
+    fn is_supported(&self) -> bool {
+        !(self.major == 2 && self.flags & 0x40 != 0)
+    }
+}
+
+/// Parse a 10 byte ID3v2 header. Returns `None` if `hdr` does not start with the "ID3" marker, a
+/// supported version, and a syncsafe size.
+fn parse_header_bytes(hdr: &[u8]) -> Option<HeaderBytes> {
+    let [b'I', b'D', b'3', major, minor, flags, size @ ..] = hdr.get(..10)?
+    else {
+        return None;
+    };
+
+    if !(2..=4).contains(major) || *minor == 0xff || size.iter().any(|b| b & 0x80 != 0) {
+        return None;
+    }
+
+    Some(HeaderBytes { major: *major, flags: *flags, size: decode_synchsafe(size) })
 }
 
 /// Read the header of an ID3v2 (verions 2.2+) tag.
@@ -512,9 +543,6 @@ const ID3V2_HEADER_LEN: u64 = 10;
 /// The length of an ID3v1 tag in bytes.
 const ID3V1_TAG_LEN: u64 = 128;
 
-/// The length of an APEv2 header or footer in bytes.
-const APE_HEADER_LEN: u64 = 32;
-
 /// The maximum number of bytes at the end of a stream that are searched for the header of an
 /// appended ID3v2 tag that has no footer.
 const TRAILING_SEARCH_LEN: u64 = 256 * 1024;
@@ -536,18 +564,14 @@ fn ape_tag_start(mss: &mut MediaSourceStream<'_>, end: u64) -> Option<u64> {
 
     // The size includes the footer and the items, but not the header.
     let size = u64::from(u32::from_le_bytes(footer[12..16].try_into().ok()?));
-    let flags = u32::from_le_bytes(footer[20..24].try_into().ok()?);
+    let flags = ApeTagFlags::from_bits(u32::from_le_bytes(footer[20..24].try_into().ok()?));
 
-    // Bit 31 indicates the tag contains a header. Bit 29 would indicate this is the header itself,
-    // which is not valid for a footer.
-    let has_header = flags & (1 << 31) != 0;
-    let is_header = flags & (1 << 29) != 0;
-
-    if is_header || size < APE_HEADER_LEN {
+    // The header flag would indicate this is the header itself, which is not valid for a footer.
+    if flags.is_header || size < APE_HEADER_LEN {
         return None;
     }
 
-    end.checked_sub(size + if has_header { APE_HEADER_LEN } else { 0 })
+    end.checked_sub(flags.tag_len(size))
 }
 
 /// Get the positions at which an ID3v2 tag appended to a stream of `len` bytes may end: the end of
@@ -624,22 +648,15 @@ fn id3v2_search_trailing_header(
     for i in (0..=last).rev() {
         let hdr = &buf[i..i + ID3V2_HEADER_LEN as usize];
 
-        if hdr[0..3] != *b"ID3" {
+        let Some(hdr) = parse_header_bytes(hdr)
+        else {
             continue;
-        }
+        };
 
-        let [major, minor, flags] = [hdr[3], hdr[4], hdr[5]];
-
-        // The version and size must be valid. The size is syncsafe encoded.
-        if !(2..=4).contains(&major) || minor == 0xff || hdr[6..10].iter().any(|b| b & 0x80 != 0) {
-            continue;
-        }
-
-        let size = hdr[6..10].iter().fold(0u64, |size, &b| (size << 7) | u64::from(b));
-        let footer_len = if major >= 4 && flags & 0x10 != 0 { ID3V2_HEADER_LEN } else { 0 };
+        let footer_len = if hdr.major >= 4 && hdr.flags & 0x10 != 0 { ID3V2_HEADER_LEN } else { 0 };
 
         let start = buf_start + i as u64;
-        let end = start + ID3V2_HEADER_LEN + size + footer_len;
+        let end = start + ID3V2_HEADER_LEN + u64::from(hdr.size) + footer_len;
 
         if !ends.contains(&end) {
             continue;
@@ -951,17 +968,7 @@ impl Scoreable for Id3v2Reader<'_> {
         let mut hdr = [0u8; 10];
         src.read_buf_exact(&mut hdr)?;
 
-        let [b'I', b'D', b'3', major, minor, flags, size @ ..] = hdr
-        else {
-            return Ok(Score::Unsupported);
-        };
-
-        let valid = (2..=4).contains(&major)
-            && minor != 0xff
-            // ID3v2.2 compression is undefined and therefore unreadable.
-            && !(major == 2 && flags & 0x40 != 0)
-            // The tag size is a syncsafe integer: the high bit of every byte is clear.
-            && size.iter().all(|b| b & 0x80 == 0);
+        let valid = parse_header_bytes(&hdr).is_some_and(|hdr| hdr.is_supported());
 
         Ok(if valid { Score::Supported(255) } else { Score::Unsupported })
     }
@@ -1177,6 +1184,7 @@ pub mod sub_fields {
 
 #[cfg(test)]
 mod tests {
+    use super::unsync::encode_synchsafe;
     use super::*;
 
     use std::sync::Arc;
@@ -1204,12 +1212,7 @@ mod tests {
         }
 
         let mut tag = b"ID3\x03\x00\x00".to_vec();
-        tag.extend_from_slice(&[
-            ((frames.len() >> 21) & 0x7f) as u8,
-            ((frames.len() >> 14) & 0x7f) as u8,
-            ((frames.len() >> 7) & 0x7f) as u8,
-            (frames.len() & 0x7f) as u8,
-        ]);
+        tag.extend_from_slice(&encode_synchsafe(frames.len() as u32));
         tag.extend_from_slice(&frames);
         tag
     }
@@ -1253,15 +1256,6 @@ mod tests {
         assert_eq!(group_depth(&group), 3);
     }
 
-    fn syncsafe(n: usize) -> [u8; 4] {
-        [
-            ((n >> 21) & 0x7f) as u8,
-            ((n >> 14) & 0x7f) as u8,
-            ((n >> 7) & 0x7f) as u8,
-            (n & 0x7f) as u8,
-        ]
-    }
-
     /// An ID3v2.3 frame with a plain 32-bit size.
     fn frame_v23(id: &[u8; 4], flags: u16, body: &[u8]) -> Vec<u8> {
         let mut f = id.to_vec();
@@ -1274,7 +1268,7 @@ mod tests {
     /// An ID3v2.4 frame with a syncsafe size.
     fn frame_v24(id: &[u8; 4], flags: u16, body: &[u8]) -> Vec<u8> {
         let mut f = id.to_vec();
-        f.extend_from_slice(&syncsafe(body.len()));
+        f.extend_from_slice(&encode_synchsafe(body.len() as u32));
         f.extend_from_slice(&flags.to_be_bytes());
         f.extend_from_slice(body);
         f
@@ -1290,12 +1284,12 @@ mod tests {
     fn tag_bytes(major: u8, frames: &[u8], footer: bool) -> Vec<u8> {
         let flags = if footer { 0x10 } else { 0 };
         let mut tag = vec![b'I', b'D', b'3', major, 0, flags];
-        tag.extend_from_slice(&syncsafe(frames.len()));
+        tag.extend_from_slice(&encode_synchsafe(frames.len() as u32));
         tag.extend_from_slice(frames);
 
         if footer {
             tag.extend_from_slice(&[b'3', b'D', b'I', major, 0, flags]);
-            tag.extend_from_slice(&syncsafe(frames.len()));
+            tag.extend_from_slice(&encode_synchsafe(frames.len() as u32));
         }
 
         tag
@@ -1426,7 +1420,7 @@ mod tests {
     /// A zlib-compressed ID3v2.4 frame with a data length indicator is decompressed.
     #[test]
     fn verify_compressed_frame_v24() {
-        let mut body = syncsafe(ZLIB_TITLE_LEN as usize).to_vec();
+        let mut body = encode_synchsafe(ZLIB_TITLE_LEN).to_vec();
         body.extend_from_slice(&ZLIB_TITLE);
 
         let mut frames = frame_v24(b"TIT2", 0x0009, &body);
@@ -1574,7 +1568,7 @@ mod tests {
         });
 
         let mut tag = vec![b'I', b'D', b'3', major, 0, 0x40];
-        tag.extend_from_slice(&syncsafe(body.len()));
+        tag.extend_from_slice(&encode_synchsafe(body.len() as u32));
         tag.extend(body);
         tag
     }
@@ -1587,7 +1581,7 @@ mod tests {
             let mut ext = vec![1, 0x40];
             ext.extend_from_slice(flag_data);
 
-            let mut header = syncsafe(4 + ext.len()).to_vec();
+            let mut header = encode_synchsafe(4 + ext.len() as u32).to_vec();
             header.extend(ext);
 
             let tags = read_tags(tag_with_extended_header(4, &header, "Updated"));
@@ -1601,7 +1595,7 @@ mod tests {
     fn verify_id3v24_extended_header_size_is_used() {
         // CRC32 and restrictions flags, followed by 3 bytes the reader does not know about.
         let mut ext = vec![1, 0x30, 5, 0, 0, 0, 0, 0, 1, 0x00, 0xaa, 0xbb, 0xcc];
-        let mut header = syncsafe(4 + ext.len()).to_vec();
+        let mut header = encode_synchsafe(4 + ext.len() as u32).to_vec();
         header.append(&mut ext);
 
         let tags = read_tags(tag_with_extended_header(4, &header, "Sized"));
@@ -1609,7 +1603,7 @@ mod tests {
 
         // A malformed field does not prevent the frames from being read.
         let mut ext = vec![1, 0x20, 9, 0, 0, 0, 0, 0];
-        let mut header = syncsafe(4 + ext.len()).to_vec();
+        let mut header = encode_synchsafe(4 + ext.len() as u32).to_vec();
         header.append(&mut ext);
 
         let tags = read_tags(tag_with_extended_header(4, &header, "Malformed"));

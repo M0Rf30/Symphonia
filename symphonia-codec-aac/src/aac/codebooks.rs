@@ -9,6 +9,8 @@ use symphonia_core::io::{ReadBitsLtr, vlc::*};
 
 use lazy_static::lazy_static;
 
+use crate::aac::ics::pow43;
+
 #[rustfmt::skip]
 const SPECTRUM_CODEBOOK1_LENS: [u8; 81] = [
     11,  9, 11, 10,  7, 10, 11,  9, 11, 10,  7, 10,  7,  5,  7,  9,
@@ -601,7 +603,7 @@ where
 /// Inverse quantization.
 #[inline(always)]
 fn iquant(val: usize) -> f32 {
-    f32::powf(val as f32, 4.0 / 3.0)
+    pow43(val as f32)
 }
 
 fn signed_pair<const MOD: usize>(cw: usize) -> (f32, f32) {

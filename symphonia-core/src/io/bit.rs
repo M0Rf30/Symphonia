@@ -836,7 +836,20 @@ impl<B: ReadBytes> private::FetchBitsLtr for BitStreamLtr<'_, B> {
 
     #[inline(always)]
     fn fetch_bits_partial(&mut self) -> io::Result<()> {
-        todo!()
+        while self.n_bits_left <= u64::BITS - u8::BITS {
+            match self.reader.read_u8() {
+                Ok(byte) => {
+                    self.bits |= u64::from(byte) << (u64::BITS - u8::BITS - self.n_bits_left);
+                    self.n_bits_left += u8::BITS;
+                }
+                // Report the error only if no bits are available; otherwise the caller decodes
+                // what is cached and the error resurfaces on the next fetch.
+                Err(err) if self.n_bits_left == 0 => return Err(err),
+                Err(_) => break,
+            }
+        }
+
+        Ok(())
     }
 
     #[inline(always)]
@@ -1289,7 +1302,20 @@ impl<B: ReadBytes> private::FetchBitsRtl for BitStreamRtl<'_, B> {
 
     #[inline(always)]
     fn fetch_bits_partial(&mut self) -> io::Result<()> {
-        todo!()
+        while self.n_bits_left <= u64::BITS - u8::BITS {
+            match self.reader.read_u8() {
+                Ok(byte) => {
+                    self.bits |= u64::from(byte) << self.n_bits_left;
+                    self.n_bits_left += u8::BITS;
+                }
+                // Report the error only if no bits are available; otherwise the caller decodes
+                // what is cached and the error resurfaces on the next fetch.
+                Err(err) if self.n_bits_left == 0 => return Err(err),
+                Err(_) => break,
+            }
+        }
+
+        Ok(())
     }
 
     #[inline(always)]
@@ -1777,8 +1803,8 @@ mod tests {
         // Empty codebook.
         let mut builder = CodebookBuilder::new(BitOrder::Verbatim);
         let codebook = builder.make::<Entry8x8>(&[], &[], &[]);
-        assert_eq!(codebook.is_ok(), true);
-        assert_eq!(codebook.unwrap().is_empty(), true);
+        assert!(codebook.is_ok());
+        assert!(codebook.unwrap().is_empty());
     }
 
     fn generate_codebook(bit_order: BitOrder) -> (Codebook<Entry8x8>, Vec<u8>, &'static str) {
@@ -1815,10 +1841,7 @@ mod tests {
         const CODE_LENS: [u8; 25] =
             [3, 3, 3, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 6, 6, 7, 7, 7, 7];
 
-        const VALUES: [u8; 25] = [
-            b'i', b' ', b'e', b't', b's', b'l', b'n', b'o', b'.', b'r', b'g', b'h', b'u', b'p',
-            b'w', b',', b'f', b'y', b'm', b'v', b'a', b'd', b'b', b'c', b'T',
-        ];
+        const VALUES: [u8; 25] = *b"i etslno.rghupw,fymvadbcT";
 
         // Encoded data in MSb bit-order.
         const DATA: [u8; 57] = [
@@ -1858,6 +1881,38 @@ mod tests {
     }
 
     #[test]
+    fn verify_bitstreamltr_stream_read_codebook() {
+        use super::BitStreamLtr;
+        use crate::io::BufReader;
+
+        let (codebook, buf, text) = generate_codebook(BitOrder::Verbatim);
+
+        let mut reader = BufReader::new(&buf);
+        let mut bs = BitStreamLtr::new(&mut reader);
+
+        let decoded: Vec<u8> =
+            (0..text.len()).map(|_| bs.read_codebook(&codebook).unwrap().0).collect();
+
+        assert_eq!(text, std::str::from_utf8(&decoded).unwrap());
+    }
+
+    #[test]
+    fn verify_bitstreamrtl_stream_read_codebook() {
+        use super::BitStreamRtl;
+        use crate::io::BufReader;
+
+        let (codebook, buf, text) = generate_codebook(BitOrder::Reverse);
+
+        let mut reader = BufReader::new(&buf);
+        let mut bs = BitStreamRtl::new(&mut reader);
+
+        let decoded: Vec<u8> =
+            (0..text.len()).map(|_| bs.read_codebook(&codebook).unwrap().0).collect();
+
+        assert_eq!(text, std::str::from_utf8(&decoded).unwrap());
+    }
+
+    #[test]
     fn fuzz_bitstreamltr_read_codebook() {
         // Short fuzzing of codebook decoding.
         use rand::rngs::SmallRng;
@@ -1872,7 +1927,7 @@ mod tests {
 
             let mut bs = BitReaderLtr::new(&buf);
 
-            while let Ok(_) = bs.read_codebook(&codebook) {}
+            while bs.read_codebook(&codebook).is_ok() {}
 
             assert_eq!(bs.buf.len(), 0);
         }
@@ -2189,7 +2244,7 @@ mod tests {
 
             let mut bs = BitReaderRtl::new(&buf);
 
-            while let Ok(_) = bs.read_codebook(&codebook) {}
+            while bs.read_codebook(&codebook).is_ok() {}
 
             assert_eq!(bs.buf.len(), 0);
         }

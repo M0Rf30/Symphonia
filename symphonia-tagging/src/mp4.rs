@@ -31,14 +31,13 @@
 //! offsets or tags) is held in memory.
 
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
-use symphonia_core::errors::Error as CoreError;
 use symphonia_core::meta::{Tag, Visual};
 use symphonia_format_isomp4::writer::{build_ilst, mdir_hdlr_box};
 
-use crate::{Error, Result, WriteOptions, copy_range, read_up_to, replace_file};
+use crate::{Error, Result, WriteOptions, copy_range, read_at, read_up_to, replace_file};
 
 const MOOV: [u8; 4] = *b"moov";
 const TRAK: [u8; 4] = *b"trak";
@@ -61,9 +60,6 @@ const TFHD: [u8; 4] = *b"tfhd";
 const MFRA: [u8; 4] = *b"mfra";
 const TFRA: [u8; 4] = *b"tfra";
 const SIDX: [u8; 4] = *b"sidx";
-
-/// The largest box that is read into memory.
-const MAX_BUFFERED_BOX: u64 = 256 << 20;
 
 pub(crate) fn write(
     path: &Path,
@@ -147,14 +143,6 @@ fn name(kind: &[u8; 4]) -> String {
     kind.iter().map(|&b| char::from(b)).collect()
 }
 
-fn from_core(err: CoreError) -> Error {
-    match err {
-        CoreError::IoError(err) => Error::Io(err),
-        CoreError::Unsupported(what) => Error::Unsupported(what.to_string()),
-        err => Error::Malformed(err.to_string()),
-    }
-}
-
 /// Reads the sizes of the boxes of the file, front to back, without reading their payloads.
 ///
 /// Also returns the offset of the first byte behind the last box: the file may end with fewer than
@@ -202,20 +190,7 @@ fn scan_top_level(src: &mut File, len: u64) -> Result<(Vec<TopBox>, u64)> {
 }
 
 fn read_payload(src: &mut File, top: &TopBox) -> Result<Vec<u8>> {
-    let len = top.payload_len();
-
-    if len > MAX_BUFFERED_BOX {
-        return Err(Error::Unsupported(format!(
-            "'{}' box of {len} bytes is too large",
-            name(&top.kind)
-        )));
-    }
-
-    src.seek(SeekFrom::Start(top.start + top.header_len))?;
-
-    let mut payload = vec![0u8; len as usize];
-    src.read_exact(&mut payload)?;
-    Ok(payload)
+    read_at(src, top.start + top.header_len, top.payload_len())
 }
 
 /// Reads the header of the box at the start of `buf`, which ends where its parent does (so that a
@@ -841,7 +816,7 @@ fn rewrite(
     }
 
     // Build the new tags and put them in.
-    let ilst = build_ilst(&removed.ilst, tags, visuals).map_err(from_core)?;
+    let ilst = build_ilst(&removed.ilst, tags, visuals)?;
 
     if let Some(meta) = build_meta(&mut removed, ilst) {
         match target {
@@ -1231,7 +1206,7 @@ mod tests {
         let mut bad = buf.clone();
         bad[11] = 1;
         assert!(matches!(parse_children(&bad, &MOOV), Err(Error::Malformed(_))));
-        assert!(matches!(parse_children(&[0, 0, 0, 4, b'f', b'r', b'e', b'e'], &MOOV), Err(_)));
+        assert!(parse_children(&[0, 0, 0, 4, b'f', b'r', b'e', b'e'], &MOOV).is_err());
     }
 
     #[test]
@@ -1282,7 +1257,7 @@ mod tests {
     #[test]
     fn tfra_offsets_move_in_both_versions() {
         // Entries of (time, moof offset, traf, trun and sample numbers of 1, 2 and 1 bytes).
-        let lengths: u32 = (0 << 4) | (1 << 2);
+        let lengths: u32 = 1 << 2;
         let entry_v0 = |time: u32, offset: u32| {
             let mut e = time.to_be_bytes().to_vec();
             e.extend_from_slice(&offset.to_be_bytes());

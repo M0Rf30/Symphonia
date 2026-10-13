@@ -5,17 +5,14 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use std::fs::File;
-
 use symphonia_bundle_musepack::{MpcDecoder, MpcReader};
-use symphonia_core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia_core::codecs::CodecParameters;
+use symphonia_core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia_core::formats::{FormatOptions, FormatReader};
 use symphonia_core::io::MediaSourceStream;
 
 fn open(path: &str) -> Box<dyn FormatReader> {
-    let file = File::open(path).expect("open fixture");
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mss = symphonia_testutil::open_mss(std::path::Path::new(path));
     Box::new(MpcReader::try_new(mss, FormatOptions::default()).expect("probe/parse header"))
 }
 
@@ -26,7 +23,8 @@ fn decode_all(path: &str) -> usize {
         CodecParameters::Audio(p) => p.clone(),
         _ => panic!("expected audio"),
     };
-    let mut decoder = MpcDecoder::try_new(&params, &AudioDecoderOptions::default()).unwrap();
+    let mut decoder =
+        MpcDecoder::try_new(&params, &AudioDecoderOptions::default()).expect("unexpected failure");
 
     let mut total = 0usize;
     while let Some(packet) = reader.next_packet().expect("next_packet") {
@@ -71,14 +69,15 @@ fn seek_is_frame_accurate() {
     assert!(seeked.actual_ts.get() <= 40000);
     // Decoding must continue to work post-seek without panicking.
     let track = reader.tracks()[0].clone();
-    let params = match track.codec_params.as_ref().unwrap() {
+    let params = match track.codec_params.as_ref().expect("unexpected failure") {
         CodecParameters::Audio(p) => p.clone(),
         _ => unreachable!(),
     };
-    let mut decoder = MpcDecoder::try_new(&params, &AudioDecoderOptions::default()).unwrap();
+    let mut decoder =
+        MpcDecoder::try_new(&params, &AudioDecoderOptions::default()).expect("unexpected failure");
     decoder.reset();
     let mut decoded_any = false;
-    while let Some(packet) = reader.next_packet().unwrap() {
+    while let Some(packet) = reader.next_packet().expect("unexpected failure") {
         if decoder.decode(&packet).is_ok() {
             decoded_any = true;
             break;
@@ -128,7 +127,7 @@ fn fuzz_mutated_packets_never_panics() {
         else {
             continue;
         };
-        let CodecParameters::Audio(params) = track.codec_params.unwrap()
+        let CodecParameters::Audio(params) = track.codec_params.expect("unexpected failure")
         else {
             continue;
         };

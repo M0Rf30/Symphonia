@@ -17,7 +17,7 @@
 //! build synthetic bitstreams); the decode path never constructs one
 //! except in [`super::element`]'s `sbr_extension()` raw-byte capture.
 
-use symphonia_core::errors::{decode_error, Error, Result};
+use symphonia_core::errors::{Error, Result, decode_error};
 use symphonia_core::io::{BitReaderLtr, FiniteBitStream, ReadBitsLtr};
 
 /// MSB-first bit reader adapter. See the [module docs](self).
@@ -44,17 +44,15 @@ impl<'a> BitReader<'a> {
 
     /// Read a single bit as a bool.
     pub fn read_bit(&mut self) -> Result<bool> {
-        self.inner
-            .read_bool()
-            .map_err(|_| Error::DecodeError("aac (sbr): bitreader: out of bits"))
+        self.inner.read_bool().map_err(|_| Error::DecodeError("aac (sbr): bitreader: out of bits"))
     }
-
 
     /// Bits already consumed from the logical stream.
     pub fn bit_position(&self) -> u64 {
         self.total_bits - self.inner.bits_left()
     }
 
+    #[cfg(test)]
     /// Total remaining bits.
     pub fn bits_left(&self) -> u64 {
         self.inner.bits_left()
@@ -115,3 +113,24 @@ impl BitWriter {
 pub(crate) fn bits_exhausted<T>(what: &'static str) -> Result<T> {
     decode_error(what)
 }
+
+/// Defines the module-local `read` (and optionally `read_flag`) helpers that read from a
+/// [`BitReader`] and map a failed read onto the given module error.
+macro_rules! bit_readers {
+    ($err:expr, read) => {
+        #[inline]
+        fn read(reader: &mut BitReader<'_>, n: u32) -> Result<u32> {
+            reader.read_u32(n).map_err(|_| $err)
+        }
+    };
+    ($err:expr, read, read_flag) => {
+        $crate::aac::sbr::bits::bit_readers!($err, read);
+
+        #[inline]
+        fn read_flag(reader: &mut BitReader<'_>) -> Result<bool> {
+            reader.read_bit().map_err(|_| $err)
+        }
+    };
+}
+
+pub(crate) use bit_readers;

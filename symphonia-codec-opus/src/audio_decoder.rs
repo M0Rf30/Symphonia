@@ -58,10 +58,14 @@
 //!
 //! The constants live in `symphonia_common::xiph::audio::opus`.
 
-use symphonia_core::audio::{AsGenericAudioBufferRef, AudioBuffer, AudioSpec, Channels, GenericAudioBufferRef, Position};
+use symphonia_core::audio::{
+    AsGenericAudioBufferRef, AudioBuffer, AudioSpec, Channels, GenericAudioBufferRef, Position,
+};
 use symphonia_core::codecs::CodecInfo;
 use symphonia_core::codecs::audio::well_known::CODEC_ID_OPUS;
-use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions, FinalizeResult};
+use symphonia_core::codecs::audio::{
+    AudioCodecParameters, AudioDecoder, AudioDecoderOptions, FinalizeResult,
+};
 use symphonia_core::codecs::registry::{RegisterableAudioDecoder, SupportedAudioCodec};
 use symphonia_core::errors::{Result, decode_error, unsupported_error};
 use symphonia_core::packet::PacketRef;
@@ -150,7 +154,11 @@ impl OpusAudioDecoder {
             Err(_) => return decode_error("opus: invalid OpusHead"),
         };
 
-        let mut decoder = match MultistreamDecoder::try_new(SampleRate::Hz48000, head.channel_count, head.mapping.clone()) {
+        let mut decoder = match MultistreamDecoder::try_new(
+            SampleRate::Hz48000,
+            head.channel_count,
+            head.mapping.clone(),
+        ) {
             Ok(d) => d,
             Err(_) => return decode_error("opus: invalid channel mapping"),
         };
@@ -197,7 +205,12 @@ impl OpusAudioDecoder {
     fn decode_inner(&mut self, packet: &PacketRef<'_>) -> Result<()> {
         let ch = self.channels as usize;
 
-        let n = match self.decoder.decode(Some(packet.data), &mut self.scratch, MAX_OPUS_FRAME_SAMPLES, false) {
+        let n = match self.decoder.decode(
+            Some(packet.data),
+            &mut self.scratch,
+            MAX_OPUS_FRAME_SAMPLES,
+            false,
+        ) {
             Ok(n) => n,
             Err(_) => return decode_error("opus: decode failed"),
         };
@@ -258,7 +271,10 @@ impl AudioDecoder for OpusAudioDecoder {
 }
 
 impl RegisterableAudioDecoder for OpusAudioDecoder {
-    fn try_registry_new(params: &AudioCodecParameters, opts: &AudioDecoderOptions) -> Result<Box<dyn AudioDecoder>>
+    fn try_registry_new(
+        params: &AudioCodecParameters,
+        opts: &AudioDecoderOptions,
+    ) -> Result<Box<dyn AudioDecoder>>
     where
         Self: Sized,
     {

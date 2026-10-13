@@ -9,77 +9,10 @@
 
 #![cfg(feature = "id3v2")]
 
-use std::io::Cursor;
+mod common;
 
-use symphonia::core::formats::probe::{Hint, Probe};
-use symphonia::core::formats::{FormatOptions, FormatReader};
-use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::{MetadataOptions, StandardTag};
-
-fn probe(data: Vec<u8>) -> Box<dyn FormatReader> {
-    let mut probe = Probe::new();
-    symphonia::default::register_enabled_formats(&mut probe);
-
-    let mss = MediaSourceStream::new(Box::new(Cursor::new(data)), Default::default());
-
-    probe
-        .probe(&Hint::new(), mss, FormatOptions::default(), MetadataOptions::default())
-        .expect("the stream is probed")
-}
-
-/// All of the track titles in all of the metadata revisions of a format reader.
-fn titles(format: &mut dyn FormatReader) -> Vec<String> {
-    let mut metadata = format.metadata();
-    let mut titles = Vec::new();
-
-    loop {
-        if let Some(revision) = metadata.current() {
-            titles.extend(revision.media.tags.iter().filter_map(|tag| match &tag.std {
-                Some(StandardTag::TrackTitle(title)) => Some(title.to_string()),
-                _ => None,
-            }));
-        }
-
-        if metadata.pop().is_none() {
-            break;
-        }
-    }
-
-    titles
-}
-
-fn syncsafe(n: usize) -> [u8; 4] {
-    [((n >> 21) & 0x7f) as u8, ((n >> 14) & 0x7f) as u8, ((n >> 7) & 0x7f) as u8, (n & 0x7f) as u8]
-}
-
-/// An ID3v2 tag with a single TIT2 (title) frame. The tag has a footer if it is version 4.
-fn id3v2_tag(major: u8, title: &str) -> Vec<u8> {
-    let mut body = vec![3u8];
-    body.extend_from_slice(title.as_bytes());
-
-    let mut frame = b"TIT2".to_vec();
-    if major == 4 {
-        frame.extend_from_slice(&syncsafe(body.len()));
-    }
-    else {
-        frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
-    }
-    frame.extend_from_slice(&[0, 0]);
-    frame.extend_from_slice(&body);
-
-    let flags = if major == 4 { 0x10 } else { 0 };
-
-    let mut tag = vec![b'I', b'D', b'3', major, 0, flags];
-    tag.extend_from_slice(&syncsafe(frame.len()));
-    tag.extend_from_slice(&frame);
-
-    if major == 4 {
-        tag.extend_from_slice(&[b'3', b'D', b'I', major, 0, flags]);
-        tag.extend_from_slice(&syncsafe(frame.len()));
-    }
-
-    tag
-}
+use common::{id3v2_tag, probe, titles};
+use symphonia::core::formats::FormatReader;
 
 #[cfg(feature = "dsd")]
 fn dff(id3_id: &[u8; 4], id3_before_data: bool) -> Vec<u8> {

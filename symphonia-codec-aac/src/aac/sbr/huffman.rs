@@ -59,8 +59,7 @@
 //! its declared bit length), and the prefix-free property (no codeword
 //! is a prefix of another) at extraction time.
 
-use std::sync::LazyLock;
-
+use super::codebook::Codebook;
 use super::error::{SbrError as Error, SbrResult as Result};
 
 /// `t_huffman_env_1_5dB` — ISO/IEC 14496-3 Table 4.A.79 (LAV = 60).
@@ -752,34 +751,43 @@ pub struct SbrHuffContext {
     pub amp_res: bool,
 }
 
-/// One SBR Huffman codebook ready for [`sbr_huff_dec`]: the table
-/// slice and its largest-absolute-value (`lav`) offset.
-pub type SbrHuffCodebook = (&'static [(u8, u32)], i32);
+/// Declares the codebook statics over the tables above, each with its largest-absolute-value
+/// (`lav`) offset.
+mod books {
+    use super::*;
+
+    pub static T_ENV_1_5DB: Codebook = Codebook::new(&T_HUFFMAN_ENV_1_5DB, 60);
+    pub static F_ENV_1_5DB: Codebook = Codebook::new(&F_HUFFMAN_ENV_1_5DB, 60);
+    pub static T_ENV_BAL_1_5DB: Codebook = Codebook::new(&T_HUFFMAN_ENV_BAL_1_5DB, 24);
+    pub static F_ENV_BAL_1_5DB: Codebook = Codebook::new(&F_HUFFMAN_ENV_BAL_1_5DB, 24);
+    pub static T_ENV_3_0DB: Codebook = Codebook::new(&T_HUFFMAN_ENV_3_0DB, 31);
+    pub static F_ENV_3_0DB: Codebook = Codebook::new(&F_HUFFMAN_ENV_3_0DB, 31);
+    pub static T_ENV_BAL_3_0DB: Codebook = Codebook::new(&T_HUFFMAN_ENV_BAL_3_0DB, 12);
+    pub static F_ENV_BAL_3_0DB: Codebook = Codebook::new(&F_HUFFMAN_ENV_BAL_3_0DB, 12);
+    pub static T_NOISE_3_0DB: Codebook = Codebook::new(&T_HUFFMAN_NOISE_3_0DB, 31);
+    pub static T_NOISE_BAL_3_0DB: Codebook = Codebook::new(&T_HUFFMAN_NOISE_BAL_3_0DB, 12);
+}
 
 /// Returns the `(t_huff, f_huff)` envelope codebook pair for a given
 /// `sbr_envelope()` context, per the §4.6.18.3 selection pseudo-code
 /// (Table 4.72 surrounding text). `t_huff` is the time-direction
-/// table, `f_huff` the frequency-direction table; each is returned as
-/// `(slice, lav)`.
-pub fn env_tables(ctx: SbrHuffContext) -> (SbrHuffCodebook, SbrHuffCodebook) {
+/// codebook, `f_huff` the frequency-direction one.
+pub fn env_tables(ctx: SbrHuffContext) -> (&'static Codebook, &'static Codebook) {
     // The balance tables are only ever selected for the *second*
     // channel of a coupled pair; otherwise the level tables apply.
     if ctx.coupling && ctx.ch {
         if ctx.amp_res {
-            (
-                (&T_HUFFMAN_ENV_BAL_3_0DB, 12),
-                (&F_HUFFMAN_ENV_BAL_3_0DB, 12),
-            )
-        } else {
-            (
-                (&T_HUFFMAN_ENV_BAL_1_5DB, 24),
-                (&F_HUFFMAN_ENV_BAL_1_5DB, 24),
-            )
+            (&books::T_ENV_BAL_3_0DB, &books::F_ENV_BAL_3_0DB)
         }
-    } else if ctx.amp_res {
-        ((&T_HUFFMAN_ENV_3_0DB, 31), (&F_HUFFMAN_ENV_3_0DB, 31))
-    } else {
-        ((&T_HUFFMAN_ENV_1_5DB, 60), (&F_HUFFMAN_ENV_1_5DB, 60))
+        else {
+            (&books::T_ENV_BAL_1_5DB, &books::F_ENV_BAL_1_5DB)
+        }
+    }
+    else if ctx.amp_res {
+        (&books::T_ENV_3_0DB, &books::F_ENV_3_0DB)
+    }
+    else {
+        (&books::T_ENV_1_5DB, &books::F_ENV_1_5DB)
     }
 }
 
@@ -789,175 +797,44 @@ pub fn env_tables(ctx: SbrHuffContext) -> (SbrHuffCodebook, SbrHuffCodebook) {
 /// 3.0 dB resolution (`bs_amp_res` is "don't care" for noise). Per
 /// Table 4.A.78 Note 2 the frequency-direction noise codebooks reuse
 /// the 3.0 dB *envelope* frequency codebooks.
-pub fn noise_tables(ctx: SbrHuffContext) -> (SbrHuffCodebook, SbrHuffCodebook) {
+pub fn noise_tables(ctx: SbrHuffContext) -> (&'static Codebook, &'static Codebook) {
     if ctx.coupling && ctx.ch {
-        (
-            (&T_HUFFMAN_NOISE_BAL_3_0DB, 12),
-            // f_huffman_noise_bal_3_0dB == f_huffman_env_bal_3_0dB.
-            (&F_HUFFMAN_ENV_BAL_3_0DB, 12),
-        )
-    } else {
-        (
-            (&T_HUFFMAN_NOISE_3_0DB, 31),
-            // f_huffman_noise_3_0dB == f_huffman_env_3_0dB.
-            (&F_HUFFMAN_ENV_3_0DB, 31),
-        )
+        // f_huffman_noise_bal_3_0dB == f_huffman_env_bal_3_0dB.
+        (&books::T_NOISE_BAL_3_0DB, &books::F_ENV_BAL_3_0DB)
+    }
+    else {
+        // f_huffman_noise_3_0dB == f_huffman_env_3_0dB.
+        (&books::T_NOISE_3_0DB, &books::F_ENV_3_0DB)
     }
 }
-
-/// The longest codeword across every SBR Huffman table is 20 bits
-/// (`f_huffman_env_1_5dB` / `f_huffman_env_3_0dB`). `sbr_huff_dec`
-/// refuses to read past this many bits without a match (a malformed
-/// bitstream would otherwise loop until the reader runs dry).
-pub const SBR_HUFF_MAX_CODE_LEN: u32 = 20;
 
 /// `sbr_huff_dec()` — ISO/IEC 14496-3 Annex 4.A.6.1.
 ///
 /// Reads bits MSB-first from `reader`, accumulating a codeword, until
-/// it matches an entry `(length, codeword)` of `table`. Returns the
-/// matching table index minus `lav`, i.e. the signed DPCM delta the
+/// it matches an entry of `codebook`. Returns the matching table index
+/// minus the codebook's `lav`, i.e. the signed DPCM delta the
 /// envelope / noise reconstruction adds to the running value.
 ///
 /// Returns [`Error::SbrHuffInvalid`] if no codeword of length up to
-/// [`SBR_HUFF_MAX_CODE_LEN`] matches (a corrupt or truncated payload).
-pub fn sbr_huff_dec(
-    reader: &mut super::bits::BitReader<'_>,
-    table: &[(u8, u32)],
-    lav: i32,
-) -> Result<i32> {
-    match decode_tree(table) {
-        Some(tree) => tree.decode(reader, lav),
-        None => sbr_huff_dec_scan(reader, table, lav),
-    }
-}
-
-/// A node of a [`DecodeTree`]: a child is the index of an inner node, or `LEAF | index` of a
-/// codebook entry, or `NONE` for a prefix that is no codeword.
-const LEAF: u16 = 0x8000;
-const NONE: u16 = 0;
-
-/// The binary decoding tree of a codebook: one step per bit instead of a scan of the whole
-/// codebook per bit. Node 0 is the root.
-struct DecodeTree {
-    nodes: Vec<[u16; 2]>,
-}
-
-impl DecodeTree {
-    fn new(table: &[(u8, u32)]) -> Self {
-        let mut nodes = vec![[NONE; 2]];
-
-        for (idx, &(len, code)) in table.iter().enumerate() {
-            let mut node = 0usize;
-            for i in (0..len).rev() {
-                let bit = ((code >> i) & 1) as usize;
-                if i == 0 {
-                    nodes[node][bit] = LEAF | idx as u16;
-                }
-                else {
-                    if nodes[node][bit] == NONE {
-                        nodes.push([NONE; 2]);
-                        nodes[node][bit] = (nodes.len() - 1) as u16;
-                    }
-                    node = usize::from(nodes[node][bit]);
-                }
-            }
-        }
-
-        DecodeTree { nodes }
-    }
-
-    fn decode(&self, reader: &mut super::bits::BitReader<'_>, lav: i32) -> Result<i32> {
-        let mut node = 0usize;
-        let mut len: u32 = 0;
-        loop {
-            let bit = reader.read_u32(1).map_err(|_| Error::SbrHuffInvalid)? as usize;
-            len += 1;
-            let next = self.nodes[node][bit];
-            if next & LEAF != 0 {
-                return Ok(i32::from(next & !LEAF) - lav);
-            }
-            if next == NONE {
-                // No codeword has this prefix: like the scan of the codebook, consume the bits up
-                // to the maximum length of a codeword before the failure.
-                while len < SBR_HUFF_MAX_CODE_LEN {
-                    reader.read_u32(1).map_err(|_| Error::SbrHuffInvalid)?;
-                    len += 1;
-                }
-                return Err(Error::SbrHuffInvalid);
-            }
-            if len >= SBR_HUFF_MAX_CODE_LEN {
-                return Err(Error::SbrHuffInvalid);
-            }
-            node = usize::from(next);
-        }
-    }
-}
-
-/// The decoding tree of one of the codebooks of this module, `None` for any other table.
-fn decode_tree(table: &[(u8, u32)]) -> Option<&'static DecodeTree> {
-    macro_rules! trees {
-        ($($table:ident),*) => {{
-            $(
-                if core::ptr::eq(table.as_ptr(), $table.as_ptr()) && table.len() == $table.len() {
-                    static TREE: LazyLock<DecodeTree> = LazyLock::new(|| DecodeTree::new(&$table));
-                    return Some(&TREE);
-                }
-            )*
-            None
-        }};
-    }
-    trees!(
-        T_HUFFMAN_ENV_1_5DB,
-        F_HUFFMAN_ENV_1_5DB,
-        T_HUFFMAN_ENV_BAL_1_5DB,
-        F_HUFFMAN_ENV_BAL_1_5DB,
-        T_HUFFMAN_ENV_3_0DB,
-        F_HUFFMAN_ENV_3_0DB,
-        T_HUFFMAN_ENV_BAL_3_0DB,
-        F_HUFFMAN_ENV_BAL_3_0DB,
-        T_HUFFMAN_NOISE_3_0DB,
-        T_HUFFMAN_NOISE_BAL_3_0DB
-    )
-}
-
-/// The decoding of any codebook by a scan of it after every bit read.
-fn sbr_huff_dec_scan(
-    reader: &mut super::bits::BitReader<'_>,
-    table: &[(u8, u32)],
-    lav: i32,
-) -> Result<i32> {
-    let mut codeword: u32 = 0;
-    let mut len: u32 = 0;
-    loop {
-        codeword = (codeword << 1) | reader.read_u32(1).map_err(|_| Error::SbrHuffInvalid)?;
-        len += 1;
-        for (idx, &(clen, ccode)) in table.iter().enumerate() {
-            if u32::from(clen) == len && ccode == codeword {
-                return Ok(idx as i32 - lav);
-            }
-        }
-        if len >= SBR_HUFF_MAX_CODE_LEN {
-            return Err(Error::SbrHuffInvalid);
-        }
-    }
+/// [`HUFF_MAX_CODE_LEN`] matches (a corrupt or truncated payload).
+pub fn sbr_huff_dec(reader: &mut super::bits::BitReader<'_>, codebook: &Codebook) -> Result<i32> {
+    codebook.decode(reader, Error::SbrHuffInvalid)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::bits::BitReader;
+    use super::super::codebook::HUFF_MAX_CODE_LEN;
+    use super::*;
 
     /// Every table is complete, codewords fit their declared length,
     /// and the table is prefix-free — the canonical-Huffman invariants
     /// the spec grids must satisfy.
     fn check_table(table: &[(u8, u32)]) {
         for &(len, code) in table {
-            assert!(len >= 1 && len <= SBR_HUFF_MAX_CODE_LEN as u8);
+            assert!(len >= 1 && len <= HUFF_MAX_CODE_LEN as u8);
             // codeword fits in its declared bit length.
-            assert!(
-                code < (1u32 << len),
-                "codeword 0x{code:08X} overflows its {len}-bit length"
-            );
+            assert!(code < (1u32 << len), "codeword 0x{code:08X} overflows its {len}-bit length");
         }
         // Prefix-free: no codeword is a prefix of another. With
         // `lb >= la` (the shorter or equal code is `ca`), truncating
@@ -975,23 +852,39 @@ mod tests {
         }
     }
 
-    /// Every codebook has a decoding tree, and it decodes the same as a scan of the codebook.
+    /// Every codebook decodes the same as a bit-by-bit scan of its table.
     #[test]
     fn trees_decode_like_a_scan() {
-        for (table, lav) in [
-            (&T_HUFFMAN_ENV_1_5DB[..], 60),
-            (&F_HUFFMAN_ENV_1_5DB[..], 60),
-            (&T_HUFFMAN_ENV_BAL_1_5DB[..], 24),
-            (&F_HUFFMAN_ENV_BAL_1_5DB[..], 24),
-            (&T_HUFFMAN_ENV_3_0DB[..], 31),
-            (&F_HUFFMAN_ENV_3_0DB[..], 31),
-            (&T_HUFFMAN_ENV_BAL_3_0DB[..], 12),
-            (&F_HUFFMAN_ENV_BAL_3_0DB[..], 12),
-            (&T_HUFFMAN_NOISE_3_0DB[..], 31),
-            (&T_HUFFMAN_NOISE_BAL_3_0DB[..], 12),
-        ] {
-            assert!(decode_tree(table).is_some());
+        fn scan(reader: &mut BitReader<'_>, table: &[(u8, u32)], lav: i32) -> Result<i32> {
+            let mut codeword: u32 = 0;
+            let mut len: u32 = 0;
+            loop {
+                codeword =
+                    (codeword << 1) | reader.read_u32(1).map_err(|_| Error::SbrHuffInvalid)?;
+                len += 1;
+                for (idx, &(clen, ccode)) in table.iter().enumerate() {
+                    if u32::from(clen) == len && ccode == codeword {
+                        return Ok(idx as i32 - lav);
+                    }
+                }
+                if len >= HUFF_MAX_CODE_LEN {
+                    return Err(Error::SbrHuffInvalid);
+                }
+            }
+        }
 
+        for (book, lav) in [
+            (&books::T_ENV_1_5DB, 60),
+            (&books::F_ENV_1_5DB, 60),
+            (&books::T_ENV_BAL_1_5DB, 24),
+            (&books::F_ENV_BAL_1_5DB, 24),
+            (&books::T_ENV_3_0DB, 31),
+            (&books::F_ENV_3_0DB, 31),
+            (&books::T_ENV_BAL_3_0DB, 12),
+            (&books::F_ENV_BAL_3_0DB, 12),
+            (&books::T_NOISE_3_0DB, 31),
+            (&books::T_NOISE_BAL_3_0DB, 12),
+        ] {
             // A pseudo-random stream decodes identically (value, or failure, and position).
             let mut state = 0x1234_5678u32;
             let bytes: Vec<u8> = (0..512)
@@ -1002,8 +895,8 @@ mod tests {
                 .collect();
             let (mut a, mut b) = (BitReader::new(&bytes), BitReader::new(&bytes));
             while a.bits_left() > 64 {
-                let x = sbr_huff_dec(&mut a, table, lav);
-                let y = sbr_huff_dec_scan(&mut b, table, lav);
+                let x = sbr_huff_dec(&mut a, book);
+                let y = scan(&mut b, book.table(), lav);
                 assert_eq!(x.ok(), y.ok());
                 assert_eq!(a.bit_position(), b.bit_position());
             }
@@ -1040,8 +933,8 @@ mod tests {
 
     /// Encode each codeword MSB-first into a byte buffer and confirm
     /// `sbr_huff_dec` decodes back to `index - lav`.
-    fn roundtrip(table: &[(u8, u32)], lav: i32) {
-        for (idx, &(len, code)) in table.iter().enumerate() {
+    fn roundtrip(book: &Codebook, lav: i32) {
+        for (idx, &(len, code)) in book.table().iter().enumerate() {
             // Pack the codeword MSB-first, then pad to a byte so the
             // reader has whole bytes to consume.
             let mut bits: Vec<u8> = Vec::new();
@@ -1055,65 +948,44 @@ mod tests {
                 }
             }
             let mut reader = BitReader::new(&bytes);
-            let got = sbr_huff_dec(&mut reader, table, lav).unwrap();
+            let got = sbr_huff_dec(&mut reader, book).unwrap();
             assert_eq!(got, idx as i32 - lav, "table index {idx}");
         }
     }
 
     #[test]
     fn roundtrip_all() {
-        roundtrip(&T_HUFFMAN_ENV_1_5DB, 60);
-        roundtrip(&F_HUFFMAN_ENV_1_5DB, 60);
-        roundtrip(&T_HUFFMAN_ENV_BAL_1_5DB, 24);
-        roundtrip(&F_HUFFMAN_ENV_BAL_1_5DB, 24);
-        roundtrip(&T_HUFFMAN_ENV_3_0DB, 31);
-        roundtrip(&F_HUFFMAN_ENV_3_0DB, 31);
-        roundtrip(&T_HUFFMAN_ENV_BAL_3_0DB, 12);
-        roundtrip(&F_HUFFMAN_ENV_BAL_3_0DB, 12);
-        roundtrip(&T_HUFFMAN_NOISE_3_0DB, 31);
-        roundtrip(&T_HUFFMAN_NOISE_BAL_3_0DB, 12);
+        roundtrip(&books::T_ENV_1_5DB, 60);
+        roundtrip(&books::F_ENV_1_5DB, 60);
+        roundtrip(&books::T_ENV_BAL_1_5DB, 24);
+        roundtrip(&books::F_ENV_BAL_1_5DB, 24);
+        roundtrip(&books::T_ENV_3_0DB, 31);
+        roundtrip(&books::F_ENV_3_0DB, 31);
+        roundtrip(&books::T_ENV_BAL_3_0DB, 12);
+        roundtrip(&books::F_ENV_BAL_3_0DB, 12);
+        roundtrip(&books::T_NOISE_3_0DB, 31);
+        roundtrip(&books::T_NOISE_BAL_3_0DB, 12);
     }
 
     #[test]
     fn context_selectors() {
         // Mono / level path picks the level tables.
-        let ((tt, tl), (ft, fl)) = env_tables(SbrHuffContext {
-            coupling: false,
-            ch: false,
-            amp_res: false,
-        });
-        assert_eq!(tl, 60);
-        assert_eq!(fl, 60);
-        assert_eq!(tt.len(), 121);
-        assert_eq!(ft.len(), 121);
+        let (tt, ft) = env_tables(SbrHuffContext { coupling: false, ch: false, amp_res: false });
+        assert_eq!(tt.table().len(), 121);
+        assert_eq!(ft.table().len(), 121);
 
         // Coupled second channel at 3.0 dB picks the balance tables.
-        let ((tt, tl), (_ft, _fl)) = env_tables(SbrHuffContext {
-            coupling: true,
-            ch: true,
-            amp_res: true,
-        });
-        assert_eq!(tl, 12);
-        assert_eq!(tt.len(), 25);
+        let (tt, _ft) = env_tables(SbrHuffContext { coupling: true, ch: true, amp_res: true });
+        assert_eq!(tt.table().len(), 25);
 
         // Noise freq-direction reuses the 3.0 dB envelope freq table
-        // (Table 4.A.78 Note 2): same contents, same LAV.
-        let ((_nt, _nl), (nf, nfl)) = noise_tables(SbrHuffContext {
-            coupling: false,
-            ch: false,
-            amp_res: false,
-        });
-        assert_eq!(nf, &F_HUFFMAN_ENV_3_0DB[..]);
-        assert_eq!(nfl, 31);
+        // (Table 4.A.78 Note 2): same codebook.
+        let (_nt, nf) = noise_tables(SbrHuffContext { coupling: false, ch: false, amp_res: false });
+        assert!(core::ptr::eq(nf, &books::F_ENV_3_0DB));
         // Coupled noise balance freq-direction reuses the 3.0 dB
         // envelope balance freq table.
-        let ((_nt, _nl), (nf, nfl)) = noise_tables(SbrHuffContext {
-            coupling: true,
-            ch: true,
-            amp_res: false,
-        });
-        assert_eq!(nf, &F_HUFFMAN_ENV_BAL_3_0DB[..]);
-        assert_eq!(nfl, 12);
+        let (_nt, nf) = noise_tables(SbrHuffContext { coupling: true, ch: true, amp_res: false });
+        assert!(core::ptr::eq(nf, &books::F_ENV_BAL_3_0DB));
     }
 
     #[test]
@@ -1124,7 +996,7 @@ mod tests {
         let bytes: [u8; 0] = [];
         let mut reader = BitReader::new(&bytes);
         assert!(matches!(
-            sbr_huff_dec(&mut reader, &T_HUFFMAN_ENV_1_5DB, 60),
+            sbr_huff_dec(&mut reader, &books::T_ENV_1_5DB),
             Err(Error::SbrHuffInvalid)
         ));
     }
@@ -1150,13 +1022,7 @@ mod tests {
             }
         }
         let mut reader = BitReader::new(&bytes);
-        assert_eq!(
-            sbr_huff_dec(&mut reader, &F_HUFFMAN_ENV_1_5DB, 60).unwrap(),
-            -60
-        );
-        assert_eq!(
-            sbr_huff_dec(&mut reader, &F_HUFFMAN_ENV_1_5DB, 60).unwrap(),
-            0
-        );
+        assert_eq!(sbr_huff_dec(&mut reader, &books::F_ENV_1_5DB).unwrap(), -60);
+        assert_eq!(sbr_huff_dec(&mut reader, &books::F_ENV_1_5DB).unwrap(), 0);
     }
 }

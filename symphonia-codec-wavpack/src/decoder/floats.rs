@@ -15,7 +15,8 @@
 // (the WavPack reference calls this the `f32` type: a plain `int32_t` used
 // purely as an IEEE-754 bit pattern).
 
-use super::v4v5::Bits;
+use super::bits::Bits;
+use super::crc_accumulate;
 
 // flags for float_flags (wavpack_local.h)
 const FLOAT_SHIFT_ONES: u8 = 1; // bits left-shifted into float = '1'
@@ -173,11 +174,10 @@ fn float_values_wvx(values: &mut [i32], info: &FloatInfo, bs: &mut Bits<'_>) -> 
             }
         }
 
-        crc = crc
-            .wrapping_mul(27)
-            .wrapping_add((outval & 0x007f_ffff).wrapping_mul(9))
-            .wrapping_add(((outval >> 23) & 0xff).wrapping_mul(3))
-            .wrapping_add(outval >> 31);
+        crc = crc_accumulate(
+            crc_accumulate(crc_accumulate(crc, outval & 0x007f_ffff), (outval >> 23) & 0xff),
+            outval >> 31,
+        );
 
         *v = outval as i32;
     }

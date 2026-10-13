@@ -68,8 +68,8 @@ mod tests {
     //! `ec_laplace_encode` (a test-only port, mirroring the C unit test's own local
     //! `ec_laplace_get_start_freq` helper) and decodes them back with [`ec_laplace_decode`].
     use super::*;
-    use crate::range::test_encoder::RangeEncoder;
     use crate::range::RangeDecoder;
+    use crate::range::test_encoder::RangeEncoder;
 
     /// C: `ec_laplace_get_start_freq` (`celt/tests/test_unit_laplace.c`), the "fs" a real
     /// encoder would pick for `p0=0.5` at the given decay (the value `ec_laplace_decode`'s
@@ -162,7 +162,8 @@ mod tests {
         // an independent re-implementation of the same C formula (`ft*(16384-decay)>>15`).
         for decay in [1, 100, 5000, 11456] {
             for fs0 in [1u32, 100, 10000, 32000] {
-                let ft = 32768u32.saturating_sub(LAPLACE_MINP * (2 * LAPLACE_NMIN)).saturating_sub(fs0);
+                let ft =
+                    32768u32.saturating_sub(LAPLACE_MINP * (2 * LAPLACE_NMIN)).saturating_sub(fs0);
                 let expected = ((ft as i64 * (16384 - decay) as i64) >> 15) as u32;
                 assert_eq!(ec_laplace_get_freq1(fs0, decay), expected);
             }

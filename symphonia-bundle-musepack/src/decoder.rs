@@ -112,7 +112,9 @@ impl MpcDecoder {
             }
             PACKET_TAG_NOISE if self.stream_version >= 8 => {
                 let state = data.get(..8).ok_or(Error::DecodeError("musepack: truncated state"))?;
-                let word = |i: usize| u32::from_le_bytes(state[i..i + 4].try_into().unwrap());
+                let word = |i: usize| {
+                    u32::from_le_bytes([state[i], state[i + 1], state[i + 2], state[i + 3]])
+                };
                 self.core.set_noise_state([word(0), word(4)]);
                 data = &data[8..];
             }

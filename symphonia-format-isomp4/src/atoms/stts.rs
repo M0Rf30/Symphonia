@@ -5,13 +5,30 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use crate::atoms::limits::*;
 use crate::atoms::{Atom, AtomHeader, AtomIterator, ReadAtom, Result, decode_error};
 
 #[derive(Debug)]
 pub struct SampleDurationEntry {
     pub sample_count: u32,
     pub sample_delta: u32,
+    /// The number of the first sample of the entry, relative to the `SttsAtom`.
+    first_sample: u32,
+    /// The timestamp of the first sample of the entry.
+    first_ts: u64,
+}
+
+impl SampleDurationEntry {
+    /// The exclusive end sample number of the entry. Cannot overflow because the sample counts of
+    /// the table are validated when the atom is read.
+    fn end_sample(&self) -> u32 {
+        self.first_sample + self.sample_count
+    }
+
+    /// The exclusive end timestamp of the entry. Cannot overflow because the total duration of the
+    /// table is validated when the atom is read.
+    fn end_ts(&self) -> u64 {
+        self.first_ts + u64::from(self.sample_count) * u64::from(self.sample_delta)
+    }
 }
 
 /// Time-to-sample atom.
@@ -24,51 +41,31 @@ pub struct SttsAtom {
 
 impl SttsAtom {
     /// Get the timestamp and duration for the sample indicated by `sample_num`. Note, `sample_num`
-    /// is indexed relative to the `SttsAtom`. Complexity of this function in O(N).
+    /// is indexed relative to the `SttsAtom`. Complexity of this function in O(log2 N).
     pub fn find_timing_for_sample(&self, sample_num: u32) -> Option<(u64, u32)> {
-        let mut ts = 0;
-        let mut next_entry_first_sample = 0;
-
         // The Stts atom compactly encodes a mapping between number of samples and sample duration.
-        // Iterate through each entry until the entry containing the next sample is found. The next
-        // packet timestamp is then the sum of the product of sample count and sample duration for
-        // the n-1 iterated entries, plus the product of the number of consumed samples in the n-th
-        // iterated entry and sample duration.
-        for entry in &self.entries {
-            next_entry_first_sample += entry.sample_count;
+        // Find the entry containing the sample. The timestamp is then the first timestamp of the
+        // entry plus the product of the number of preceding samples in the entry and the sample
+        // duration.
+        let idx = self.entries.partition_point(|entry| entry.end_sample() <= sample_num);
+        let entry = self.entries.get(idx)?;
 
-            if sample_num < next_entry_first_sample {
-                let entry_sample_offset = sample_num + entry.sample_count - next_entry_first_sample;
-                ts += u64::from(entry.sample_delta) * u64::from(entry_sample_offset);
+        let entry_sample_offset = sample_num - entry.first_sample;
+        let ts = entry.first_ts + u64::from(entry.sample_delta) * u64::from(entry_sample_offset);
 
-                return Some((ts, entry.sample_delta));
-            }
-
-            ts += u64::from(entry.sample_count) * u64::from(entry.sample_delta);
-        }
-
-        None
+        Some((ts, entry.sample_delta))
     }
 
     /// Get the sample that contains the timestamp indicated by `ts`. Note, the returned `sample_num`
-    /// is indexed relative to the `SttsAtom`. Complexity of this function in O(N).
+    /// is indexed relative to the `SttsAtom`. Complexity of this function in O(log2 N).
     pub fn find_sample_for_timestamp(&self, ts: u64) -> Option<u32> {
-        let mut ts_accum = 0;
-        let mut sample_num = 0;
+        let idx = self.entries.partition_point(|entry| entry.end_ts() <= ts);
+        let entry = self.entries.get(idx)?;
 
-        for entry in &self.entries {
-            let delta = u64::from(entry.sample_delta) * u64::from(entry.sample_count);
+        // The entry ends after `ts`, and starts at or before `ts`, thus the delta is non-zero.
+        let entry_sample_offset = (ts - entry.first_ts) / u64::from(entry.sample_delta);
 
-            if ts_accum + delta > ts {
-                sample_num += ((ts - ts_accum) / u64::from(entry.sample_delta)) as u32;
-                return Some(sample_num);
-            }
-
-            ts_accum += delta;
-            sample_num += entry.sample_count;
-        }
-
-        None
+        Some(entry.first_sample + entry_sample_offset as u32)
     }
 }
 
@@ -76,17 +73,21 @@ impl Atom for SttsAtom {
     fn read<R: ReadAtom>(it: &mut AtomIterator<R>, _header: &AtomHeader) -> Result<Self> {
         let (_, _) = it.read_extended_header()?;
 
-        let entry_count = it.read_u32()?;
-
-        // Limit the maximum initial capacity to prevent malicious files from using all the
-        // available memory.
-        let mut entries = Vec::with_capacity(MAX_TABLE_INITIAL_CAPACITY.min(entry_count as usize));
-
+        let mut total_sample_count: u32 = 0;
         let mut total_duration: u64 = 0;
 
-        for _ in 0..entry_count {
+        let entries = it.read_table(|it| {
             let sample_count = it.read_u32()?;
             let sample_delta = it.read_u32()?;
+
+            let first_sample = total_sample_count;
+            let first_ts = total_duration;
+
+            let Some(next_sample_count) = total_sample_count.checked_add(sample_count)
+            else {
+                return decode_error("isomp4 (stts): total sample count overflow");
+            };
+            total_sample_count = next_sample_count;
 
             let Some(next_duration) =
                 total_duration.checked_add(u64::from(sample_count) * u64::from(sample_delta))
@@ -95,9 +96,64 @@ impl Atom for SttsAtom {
             };
             total_duration = next_duration;
 
-            entries.push(SampleDurationEntry { sample_count, sample_delta });
-        }
+            Ok(SampleDurationEntry { sample_count, sample_delta, first_sample, first_ts })
+        })?;
 
         Ok(SttsAtom { entries, total_duration })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+    use symphonia_core::io::{MediaSourceStream, MediaSourceStreamOptions};
+
+    fn read_stts(entries: &[(u32, u32)]) -> Result<SttsAtom> {
+        let mut body = vec![0, 0, 0, 0]; // Version and flags.
+        body.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+        for (count, delta) in entries {
+            body.extend_from_slice(&count.to_be_bytes());
+            body.extend_from_slice(&delta.to_be_bytes());
+        }
+
+        let mut data = Vec::with_capacity(8 + body.len());
+        data.extend_from_slice(&(body.len() as u32 + 8).to_be_bytes());
+        data.extend_from_slice(b"stts");
+        data.extend_from_slice(&body);
+
+        let len = data.len() as u64;
+        let mss = MediaSourceStream::new(
+            Box::new(Cursor::new(data)),
+            MediaSourceStreamOptions::default(),
+        );
+        let mut it = AtomIterator::new(mss, Some(len));
+        assert!(it.next_header().map(|h| h.is_some()).unwrap_or(false));
+        it.read_atom::<SttsAtom>()
+    }
+
+    #[test]
+    fn stts_total_sample_count_overflow_is_an_error() {
+        assert!(read_stts(&[(u32::MAX, 0), (2, 0)]).is_err());
+    }
+
+    #[test]
+    fn stts_lookups_across_entries() {
+        let Ok(stts) = read_stts(&[(2, 10), (0, 99), (3, 5)])
+        else {
+            panic!("valid stts");
+        };
+
+        assert_eq!(stts.find_timing_for_sample(0), Some((0, 10)));
+        assert_eq!(stts.find_timing_for_sample(1), Some((10, 10)));
+        assert_eq!(stts.find_timing_for_sample(2), Some((20, 5)));
+        assert_eq!(stts.find_timing_for_sample(4), Some((30, 5)));
+        assert_eq!(stts.find_timing_for_sample(5), None);
+
+        assert_eq!(stts.find_sample_for_timestamp(0), Some(0));
+        assert_eq!(stts.find_sample_for_timestamp(19), Some(1));
+        assert_eq!(stts.find_sample_for_timestamp(20), Some(2));
+        assert_eq!(stts.find_sample_for_timestamp(34), Some(4));
+        assert_eq!(stts.find_sample_for_timestamp(35), None);
     }
 }

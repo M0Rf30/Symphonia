@@ -81,7 +81,7 @@ static DI_T: [[f32; 32]; 16] = {
 ///
 /// Fills the 64-element window `p_v` from the 32 subband samples `p_sample` using the
 /// fast-MDCT-based butterfly network (ISO 11172-3 p.39 / Byeong Gi Lee's algorithm).
-#[allow(clippy::many_single_char_names)]
+#[allow(clippy::many_single_char_names, clippy::excessive_precision)]
 fn compute_new_v(p_sample: &[f32; 32], p_v: &mut [f32]) {
     debug_assert!(p_v.len() >= 64);
     let p = p_sample;

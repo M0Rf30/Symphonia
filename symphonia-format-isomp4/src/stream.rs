@@ -88,8 +88,15 @@ pub struct MoofSegment {
 
 impl MoofSegment {
     /// Instantiate a new segment from a `MoofAtom`.
-    pub fn new(moof: MoofAtom, moov: Arc<MoovAtom>, prev: &dyn StreamSegment) -> MoofSegment {
-        let mvex = moov.mvex.as_ref().expect("mvex atom present");
+    pub fn new(
+        moof: MoofAtom,
+        moov: Arc<MoovAtom>,
+        prev: &dyn StreamSegment,
+    ) -> Result<MoofSegment> {
+        let mvex = match moov.mvex.as_ref() {
+            Some(v) => v,
+            None => return decode_error("isomp4: fragmented stream missing mvex atom"),
+        };
 
         let mut seq = Vec::with_capacity(mvex.trexs.len());
 
@@ -112,17 +119,27 @@ impl MoofSegment {
                     traf.tfhd.default_sample_duration.unwrap_or(trex.default_sample_duration);
 
                 for trun in traf.truns.iter() {
-                    info.total_sample_duration += trun.total_duration(default_dur);
+                    info.total_sample_duration = info
+                        .total_sample_duration
+                        .checked_add(trun.total_duration(default_dur))
+                        .ok_or(Error::DecodeError("isomp4: fragment duration overflow"))?;
                 }
 
                 info.total_sample_count = traf.total_sample_count;
                 info.traf_idx = Some(traf_idx);
             }
 
+            // Ensure the end of the track's sample and timestamp ranges are representable.
+            if info.first_sample.checked_add(info.total_sample_count).is_none()
+                || info.first_ts.checked_add(info.total_sample_duration).is_none()
+            {
+                return decode_error("isomp4: fragment sample range overflow");
+            }
+
             seq.push(info);
         }
 
-        MoofSegment { moof, moov, seq }
+        Ok(MoofSegment { moof, moov, seq })
     }
 
     /// Try to get the Track Fragment atom associated with the track identified by `track_num`.
@@ -251,12 +268,18 @@ impl StreamSegment for MoofSegment {
             if let Some(offset) = trun.data_offset {
                 // The offset for the run is relative to the anchor-point defined in the track
                 // fragment header.
-                trun_offset = if offset.is_negative() {
-                    traf_base_pos - u64::from(offset.wrapping_abs() as u32)
+                let run_offset = if offset.is_negative() {
+                    traf_base_pos.checked_sub(u64::from(offset.unsigned_abs()))
                 }
                 else {
-                    traf_base_pos + offset as u64
+                    traf_base_pos.checked_add(u64::from(offset.unsigned_abs()))
                 };
+
+                let Some(run_offset) = run_offset
+                else {
+                    return decode_error("isomp4: track fragment run data offset out of range");
+                };
+                trun_offset = run_offset;
             }
 
             if sample_num_rel < trun.sample_count {
@@ -278,7 +301,11 @@ impl StreamSegment for MoofSegment {
             let trun_size = trun.total_size(default_size);
 
             sample_num_rel -= trun.sample_count;
-            trun_offset += trun_size;
+            let Some(next_offset) = trun_offset.checked_add(trun_size)
+            else {
+                return decode_error("isomp4: track fragment run offset overflow");
+            };
+            trun_offset = next_offset;
         }
 
         decode_error("isomp4: invalid sample index")
@@ -479,5 +506,155 @@ impl StreamSegment for MoovSegment {
         debug_assert!(track_num < self.moov.traks.len());
 
         0..self.moov.traks[track_num].mdia.minf.stbl.stts.total_duration
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::io::Cursor;
+    use std::num::NonZero;
+
+    use symphonia_core::io::{MediaSourceStream, MediaSourceStreamOptions};
+
+    use crate::atoms::{AtomIterator, MvhdAtom, mvex::MvexAtom, trex::TrexAtom};
+    use crate::fp::FpU8;
+
+    /// The end of the track ranges of a preceding segment.
+    struct PrevSegment {
+        sample_end: u32,
+        ts_end: u64,
+    }
+
+    impl StreamSegment for PrevSegment {
+        fn sequence_num(&self) -> u32 {
+            0
+        }
+
+        fn all_tracks_ended(&self) -> bool {
+            false
+        }
+
+        fn track_sample_range(&self, _: usize) -> Range<u32> {
+            0..self.sample_end
+        }
+
+        fn track_ts_range(&self, _: usize) -> Range<u64> {
+            0..self.ts_end
+        }
+
+        fn sample_timing(&self, _: usize, _: u32) -> Result<Option<SampleTiming>> {
+            Ok(None)
+        }
+
+        fn ts_sample(&self, _: usize, _: u64) -> Result<Option<u32>> {
+            Ok(None)
+        }
+
+        fn sample_data(&self, _: usize, _: u32, _: bool) -> Result<SampleDataDesc> {
+            decode_error("unsupported")
+        }
+    }
+
+    fn atom(tag: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut data = Vec::with_capacity(8 + body.len());
+        data.extend_from_slice(&(body.len() as u32 + 8).to_be_bytes());
+        data.extend_from_slice(tag);
+        data.extend_from_slice(body);
+        data
+    }
+
+    /// A track fragment for track 1 with a single run. `tfhd_flags`/`tfhd_fields` and
+    /// `trun_flags`/`trun_fields` are the extended header flags and the atom bodies following the
+    /// track ID and sample count respectively.
+    fn traf(
+        tfhd_flags: u32,
+        tfhd_fields: &[u8],
+        trun_flags: u32,
+        count: u32,
+        trun_fields: &[u8],
+    ) -> Vec<u8> {
+        let mut tfhd = tfhd_flags.to_be_bytes().to_vec();
+        tfhd.extend_from_slice(&1u32.to_be_bytes());
+        tfhd.extend_from_slice(tfhd_fields);
+
+        let mut trun = trun_flags.to_be_bytes().to_vec();
+        trun.extend_from_slice(&count.to_be_bytes());
+        trun.extend_from_slice(trun_fields);
+
+        let mut body = atom(b"tfhd", &tfhd);
+        body.extend_from_slice(&atom(b"trun", &trun));
+        atom(b"traf", &body)
+    }
+
+    fn moof_segment(trafs: &[Vec<u8>], prev: &PrevSegment) -> Result<MoofSegment> {
+        let mut body = atom(b"mfhd", &[0; 8]);
+        for traf in trafs {
+            body.extend_from_slice(traf);
+        }
+        let data = atom(b"moof", &body);
+
+        let len = data.len() as u64;
+        let mss = MediaSourceStream::new(
+            Box::new(Cursor::new(data)),
+            MediaSourceStreamOptions::default(),
+        );
+        let mut it = AtomIterator::new(mss, Some(len));
+        assert!(it.next_header().map(|h| h.is_some()).unwrap_or(false));
+        let moof = it.read_atom::<MoofAtom>().ok().expect("read moof atom");
+
+        let moov = MoovAtom {
+            mvhd: MvhdAtom {
+                ctime: 0,
+                mtime: 0,
+                timescale: NonZero::new(1).expect("non-zero"),
+                duration: 0,
+                volume: FpU8::parse_raw(0x100),
+            },
+            traks: Vec::new(),
+            mvex: Some(MvexAtom {
+                mehd: None,
+                trexs: vec![TrexAtom {
+                    track_id: 1,
+                    default_sample_desc_idx: 1,
+                    default_sample_duration: 0,
+                    default_sample_size: 0,
+                    default_sample_flags: 0,
+                }],
+            }),
+            udta: None,
+        };
+
+        MoofSegment::new(moof, Arc::new(moov), prev)
+    }
+
+    #[test]
+    fn moof_segment_rejects_total_duration_overflow() {
+        // Two track fragments for the same track, each with a run whose default-duration product
+        // approaches 2^64.
+        let default_dur = u32::MAX.to_be_bytes();
+        let trafs =
+            [traf(0x8, &default_dur, 0, u32::MAX, &[]), traf(0x8, &default_dur, 0, u32::MAX, &[])];
+
+        assert!(moof_segment(&trafs, &PrevSegment { sample_end: 0, ts_end: 0 }).is_err());
+    }
+
+    #[test]
+    fn moof_segment_rejects_sample_range_overflow() {
+        let trafs = [traf(0, &[], 0, u32::MAX, &[])];
+
+        assert!(moof_segment(&trafs, &PrevSegment { sample_end: 1, ts_end: 0 }).is_err());
+    }
+
+    #[test]
+    fn moof_segment_rejects_negative_data_offset_before_start() {
+        // The run data offset (-8) is before the start of the file (the moof is at position 0).
+        let trafs = [traf(0, &[], 0x1, 1, &(-8i32).to_be_bytes())];
+
+        let seg =
+            moof_segment(&trafs, &PrevSegment { sample_end: 0, ts_end: 0 }).expect("valid segment");
+
+        assert!(seg.sample_data(0, 0, false).is_err());
     }
 }

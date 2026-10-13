@@ -12,7 +12,7 @@
 //! mirror the C names (`read_bitstream_sv7`/`read_bitstream_sv8`/`requantize`/`decode_frame`) so
 //! this file can be diffed against the reference frame-by-frame.
 
-use crate::bits::{can_dec, huff_dec, BitReader};
+use crate::bits::{BitReader, can_dec, huff_dec};
 use crate::cnk::{enum_dec, log_dec};
 use crate::huffman::{sv7_tables, sv8_tables};
 use crate::requant;
@@ -112,12 +112,10 @@ impl Decoder {
             -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1,
             1,
         ];
-        const IDX50: [i32; 25] = [
-            -2, -1, 0, 1, 2, -2, -1, 0, 1, 2, -2, -1, 0, 1, 2, -2, -1, 0, 1, 2, -2, -1, 0, 1, 2,
-        ];
-        const IDX51: [i32; 25] = [
-            -2, -2, -2, -2, -2, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2,
-        ];
+        const IDX50: [i32; 25] =
+            [-2, -1, 0, 1, 2, -2, -1, 0, 1, 2, -2, -1, 0, 1, 2, -2, -1, 0, 1, 2, -2, -1, 0, 1, 2];
+        const IDX51: [i32; 25] =
+            [-2, -2, -2, -2, -2, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2];
 
         let max_band = self.max_band.max(0) as usize;
         let mut max_used_band: i32 = 0;
@@ -249,8 +247,8 @@ impl Decoder {
 
             if self.ms {
                 let mub = max_used_band as usize;
-                let tot = (0..mub).filter(|&n| self.res_l[n] != 0 || self.res_r[n] != 0).count()
-                    as u32;
+                let tot =
+                    (0..mub).filter(|&n| self.res_l[n] != 0 || self.res_r[n] != 0).count() as u32;
                 let cnt = log_dec(r, tot);
                 let mut tmp: u32 = 0;
                 if cnt != 0 && cnt != tot {
@@ -366,10 +364,10 @@ impl Decoder {
                 if res_l != 0 {
                     if res_r != 0 {
                         for third in 0..3 {
-                            let fac_l =
-                                requant::cc(res_l) * self.scf[requant::scf_index(self.scf_index_l[band][third])];
-                            let fac_r =
-                                requant::cc(res_r) * self.scf[requant::scf_index(self.scf_index_r[band][third])];
+                            let fac_l = requant::cc(res_l)
+                                * self.scf[requant::scf_index(self.scf_index_l[band][third])];
+                            let fac_r = requant::cc(res_r)
+                                * self.scf[requant::scf_index(self.scf_index_r[band][third])];
                             for j in 0..12 {
                                 let n = third * 12 + j;
                                 let templ = fac_l * f32::from(self.q_l[band][n]);
@@ -381,8 +379,8 @@ impl Decoder {
                     }
                     else {
                         for third in 0..3 {
-                            let fac_l =
-                                requant::cc(res_l) * self.scf[requant::scf_index(self.scf_index_l[band][third])];
+                            let fac_l = requant::cc(res_l)
+                                * self.scf[requant::scf_index(self.scf_index_l[band][third])];
                             for j in 0..12 {
                                 let n = third * 12 + j;
                                 let v = fac_l * f32::from(self.q_l[band][n]);
@@ -394,8 +392,8 @@ impl Decoder {
                 }
                 else if res_r != 0 {
                     for third in 0..3 {
-                        let fac_r =
-                            requant::cc(res_r) * self.scf[requant::scf_index(self.scf_index_r[band][third])];
+                        let fac_r = requant::cc(res_r)
+                            * self.scf[requant::scf_index(self.scf_index_r[band][third])];
                         for j in 0..12 {
                             let n = third * 12 + j;
                             let v = fac_r * f32::from(self.q_r[band][n]);
@@ -414,10 +412,10 @@ impl Decoder {
             else if res_l != 0 {
                 if res_r != 0 {
                     for third in 0..3 {
-                        let fac_l =
-                            requant::cc(res_l) * self.scf[requant::scf_index(self.scf_index_l[band][third])];
-                        let fac_r =
-                            requant::cc(res_r) * self.scf[requant::scf_index(self.scf_index_r[band][third])];
+                        let fac_l = requant::cc(res_l)
+                            * self.scf[requant::scf_index(self.scf_index_l[band][third])];
+                        let fac_r = requant::cc(res_r)
+                            * self.scf[requant::scf_index(self.scf_index_r[band][third])];
                         for j in 0..12 {
                             let n = third * 12 + j;
                             self.y_l[n][band] = fac_l * f32::from(self.q_l[band][n]);
@@ -427,8 +425,8 @@ impl Decoder {
                 }
                 else {
                     for third in 0..3 {
-                        let fac_l =
-                            requant::cc(res_l) * self.scf[requant::scf_index(self.scf_index_l[band][third])];
+                        let fac_l = requant::cc(res_l)
+                            * self.scf[requant::scf_index(self.scf_index_l[band][third])];
                         for j in 0..12 {
                             let n = third * 12 + j;
                             self.y_l[n][band] = fac_l * f32::from(self.q_l[band][n]);
@@ -439,8 +437,8 @@ impl Decoder {
             }
             else if res_r != 0 {
                 for third in 0..3 {
-                    let fac_r =
-                        requant::cc(res_r) * self.scf[requant::scf_index(self.scf_index_r[band][third])];
+                    let fac_r = requant::cc(res_r)
+                        * self.scf[requant::scf_index(self.scf_index_r[band][third])];
                     for j in 0..12 {
                         let n = third * 12 + j;
                         self.y_l[n][band] = 0.0;
@@ -605,29 +603,6 @@ impl Sv7Sync {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sv7_sync_round_trips() {
-        let mut core = Decoder::new(7, 20, true, 2);
-        // Garbage frame data exercises the scale-factor and noise-generator state.
-        let data: Vec<u8> = (0..400u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
-        for _ in 0..5 {
-            core.skip_frame_sv7(&mut BitReader::new(&data));
-        }
-        let sync = core.sv7_sync();
-        assert_ne!(sync, Decoder::new(7, 20, true, 2).sv7_sync());
-
-        let mut bytes = Vec::new();
-        sync.write_to(&mut bytes);
-        assert_eq!(bytes.len(), Sv7Sync::ENCODED_LEN);
-        assert_eq!(Sv7Sync::read_from(&bytes), Some(sync));
-        assert_eq!(Sv7Sync::read_from(&bytes[..bytes.len() - 1]), None);
-    }
-}
-
 /// Ported from libmpcdec `mpc_decoder.c` (SV7 SCF/DSCF decode within `read_bitstream_sv7`).
 fn decode_dscf_sv7(r: &mut BitReader<'_>, res: i32, scfi: i32, scf: &mut [i32; 3]) {
     if res == 0 {
@@ -725,7 +700,10 @@ fn decode_quant_sv7(
         -1 => {
             for v in q.iter_mut() {
                 let tmp = synth::random_int(r1, r2);
-                let sum = ((tmp >> 24) & 0xFF) + ((tmp >> 16) & 0xFF) + ((tmp >> 8) & 0xFF) + (tmp & 0xFF);
+                let sum = ((tmp >> 24) & 0xFF)
+                    + ((tmp >> 16) & 0xFF)
+                    + ((tmp >> 8) & 0xFF)
+                    + (tmp & 0xFF);
                 *v = (sum as i32 - 510) as i16;
             }
         }
@@ -848,7 +826,10 @@ fn decode_quant_sv8(
         -1 => {
             for v in q.iter_mut() {
                 let tmp = synth::random_int(r1, r2);
-                let sum = ((tmp >> 24) & 0xFF) + ((tmp >> 16) & 0xFF) + ((tmp >> 8) & 0xFF) + (tmp & 0xFF);
+                let sum = ((tmp >> 24) & 0xFF)
+                    + ((tmp >> 16) & 0xFF)
+                    + ((tmp >> 8) & 0xFF)
+                    + (tmp & 0xFF);
                 *v = (sum as i32 - 510) as i16;
             }
         }
@@ -885,7 +866,7 @@ fn decode_quant_sv8(
                 return;
             }
             for v in q.iter_mut() {
-                let mut val = can_dec(r, &sv8_tables::CAN_Q9UP) as i32 as u8 as i32;
+                let mut val = can_dec(r, &sv8_tables::CAN_Q9UP) as u8 as i32;
                 if res != 9 {
                     let extra_bits = (res - 9).clamp(0, 16) as u32;
                     val = (val << extra_bits) | r.read_bits(extra_bits) as i32;
@@ -894,5 +875,28 @@ fn decode_quant_sv8(
                 *v = val as i16;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sv7_sync_round_trips() {
+        let mut core = Decoder::new(7, 20, true, 2);
+        // Garbage frame data exercises the scale-factor and noise-generator state.
+        let data: Vec<u8> = (0..400u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        for _ in 0..5 {
+            core.skip_frame_sv7(&mut BitReader::new(&data));
+        }
+        let sync = core.sv7_sync();
+        assert_ne!(sync, Decoder::new(7, 20, true, 2).sv7_sync());
+
+        let mut bytes = Vec::new();
+        sync.write_to(&mut bytes);
+        assert_eq!(bytes.len(), Sv7Sync::ENCODED_LEN);
+        assert_eq!(Sv7Sync::read_from(&bytes), Some(sync));
+        assert_eq!(Sv7Sync::read_from(&bytes[..bytes.len() - 1]), None);
     }
 }

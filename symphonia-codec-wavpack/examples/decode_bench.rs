@@ -33,12 +33,16 @@ fn open(path: &str) -> WavPackReader<'static> {
 }
 
 fn decoder(reader: &WavPackReader<'_>) -> (WavPackDecoder, u32) {
-    let params = match reader.tracks()[0].codec_params.as_ref().unwrap() {
+    let params = match reader.tracks()[0].codec_params.as_ref().expect("unexpected failure") {
         CodecParameters::Audio(p) => p.clone(),
         _ => panic!("not audio"),
     };
     let rate = params.sample_rate.unwrap_or(44100);
-    (WavPackDecoder::try_new(&params, &AudioDecoderOptions::default()).unwrap(), rate)
+    (
+        WavPackDecoder::try_new(&params, &AudioDecoderOptions::default())
+            .expect("unexpected failure"),
+        rate,
+    )
 }
 
 fn decode(path: &str) -> (u64, u32, f64) {

@@ -9,6 +9,35 @@
 
 use std::fmt;
 
+/// Implements the FourCC constructor, `From<FourCc>`, and `Display` for an ID newtype wrapping a
+/// `u32`.
+macro_rules! impl_fourcc_id {
+    ($t:ident) => {
+        impl $t {
+            /// Create a new ID from a FourCC.
+            pub const fn new(cc: $crate::common::FourCc) -> $t {
+                // A FourCc always only contains ASCII characters. Therefore, the upper bits are
+                // always 0.
+                Self(0x8000_0000 | u32::from_be_bytes(cc.get()))
+            }
+        }
+
+        impl From<$crate::common::FourCc> for $t {
+            fn from(value: $crate::common::FourCc) -> Self {
+                $t::new(value)
+            }
+        }
+
+        impl ::std::fmt::Display for $t {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+                write!(f, "{:#x}", self.0)
+            }
+        }
+    };
+}
+
+pub(crate) use impl_fourcc_id;
+
 /// A four character code.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]

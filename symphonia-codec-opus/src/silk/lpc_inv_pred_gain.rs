@@ -11,8 +11,8 @@
 #![allow(dead_code)]
 
 use crate::silk::macros::{
-    silk_abs, silk_clz32, silk_fix_const, silk_inverse32_varq, silk_lshift, silk_rshift_round64, silk_smmul,
-    silk_smull, silk_sub32, silk_sub_sat32,
+    silk_abs, silk_clz32, silk_fix_const, silk_inverse32_varq, silk_lshift, silk_rshift_round64,
+    silk_smmul, silk_smull, silk_sub_sat32, silk_sub32,
 };
 use crate::silk::structs::MAX_LPC_ORDER;
 

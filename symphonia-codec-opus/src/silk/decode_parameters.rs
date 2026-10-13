@@ -15,13 +15,20 @@ use crate::silk::bwexpander::silk_bwexpander;
 use crate::silk::decode_pitch::silk_decode_pitch;
 use crate::silk::gain_quant::silk_gains_dequant;
 use crate::silk::macros::silk_lshift;
-use crate::silk::nlsf2a::silk_nlsf2a;
 use crate::silk::nlsf_decode::silk_nlsf_decode;
-use crate::silk::structs::{SilkDecoderControl, SilkDecoderState, BWE_AFTER_LOSS_Q16, CODE_CONDITIONALLY, LTP_ORDER, MAX_LPC_ORDER, TYPE_VOICED};
-use crate::silk::tables::{LTPSCALES_TABLE_Q14, LTP_VQ_PTRS_Q7};
+use crate::silk::nlsf2a::silk_nlsf2a;
+use crate::silk::structs::{
+    BWE_AFTER_LOSS_Q16, CODE_CONDITIONALLY, LTP_ORDER, MAX_LPC_ORDER, SilkDecoderControl,
+    SilkDecoderState, TYPE_VOICED,
+};
+use crate::silk::tables::{LTP_VQ_PTRS_Q7, LTPSCALES_TABLE_Q14};
 
 /// C: `silk_decode_parameters`.
-pub(crate) fn silk_decode_parameters(dec: &mut SilkDecoderState, ctrl: &mut SilkDecoderControl, cond_coding: i32) {
+pub(crate) fn silk_decode_parameters(
+    dec: &mut SilkDecoderState,
+    ctrl: &mut SilkDecoderControl,
+    cond_coding: i32,
+) {
     let nb_subfr = dec.nb_subfr as usize;
 
     // Dequant gains.
@@ -53,13 +60,15 @@ pub(crate) fn silk_decode_parameters(dec: &mut SilkDecoderState, ctrl: &mut Silk
         let mut p_nlsf0_q15 = [0i16; MAX_LPC_ORDER];
         for i in 0..order {
             p_nlsf0_q15[i] = (dec.prev_nlsf_q15[i] as i32
-                + ((dec.indices.nlsf_interp_coef_q2 as i32 * (p_nlsf_q15[i] as i32 - dec.prev_nlsf_q15[i] as i32)) >> 2))
-                as i16;
+                + ((dec.indices.nlsf_interp_coef_q2 as i32
+                    * (p_nlsf_q15[i] as i32 - dec.prev_nlsf_q15[i] as i32))
+                    >> 2)) as i16;
         }
 
         // Convert NLSF parameters to AR prediction filter coefficients.
         silk_nlsf2a(&mut ctrl.pred_coef_q12[0], &p_nlsf0_q15, order);
-    } else {
+    }
+    else {
         // Copy LPC coefficients for first half from second half.
         let second = ctrl.pred_coef_q12[1];
         ctrl.pred_coef_q12[0][..order].copy_from_slice(&second[..order]);
@@ -76,7 +85,13 @@ pub(crate) fn silk_decode_parameters(dec: &mut SilkDecoderState, ctrl: &mut Silk
     if dec.indices.signal_type == TYPE_VOICED as i8 {
         // Decode pitch lags.
         // Decode pitch values.
-        silk_decode_pitch(dec.indices.lag_index, dec.indices.contour_index, &mut ctrl.pitch_l, dec.fs_khz, nb_subfr);
+        silk_decode_pitch(
+            dec.indices.lag_index,
+            dec.indices.contour_index,
+            &mut ctrl.pitch_l,
+            dec.fs_khz,
+            nb_subfr,
+        );
 
         // Decode codebook index: set pointer to start of codebook.
         let cbk_ptr_q7 = LTP_VQ_PTRS_Q7[dec.indices.per_index as usize];
@@ -84,14 +99,16 @@ pub(crate) fn silk_decode_parameters(dec: &mut SilkDecoderState, ctrl: &mut Silk
         for k in 0..nb_subfr {
             let ix = dec.indices.ltp_index[k] as usize;
             for i in 0..LTP_ORDER {
-                ctrl.ltp_coef_q14[k * LTP_ORDER + i] = silk_lshift(cbk_ptr_q7[ix * LTP_ORDER + i] as i32, 7) as i16;
+                ctrl.ltp_coef_q14[k * LTP_ORDER + i] =
+                    silk_lshift(cbk_ptr_q7[ix * LTP_ORDER + i] as i32, 7) as i16;
             }
         }
 
         // Decode LTP scaling.
         let ix = dec.indices.ltp_scale_index as usize;
         ctrl.ltp_scale_q14 = LTPSCALES_TABLE_Q14[ix] as i32;
-    } else {
+    }
+    else {
         for k in 0..nb_subfr {
             ctrl.pitch_l[k] = 0;
         }

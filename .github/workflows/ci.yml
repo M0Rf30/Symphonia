@@ -34,6 +34,20 @@ jobs:
       - name: Check fuzzers
         run: cargo check --manifest-path symphonia/fuzz/Cargo.toml --verbose
 
+  msrv:
+    name: MSRV (1.85)
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Toolchain
+        run: rustup install 1.85 --profile minimal && rustup default 1.85
+
+      - name: Check workspace
+        run: cargo check --workspace
+
   clippy:
     name: Clippy ${{ matrix.os }}
 

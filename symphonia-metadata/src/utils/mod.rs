@@ -7,6 +7,8 @@
 
 //! Common metadata utilities.
 
+#[cfg(any(feature = "ape", feature = "id3v2"))]
+pub mod ape;
 pub mod id3v1;
 pub mod id3v2;
 pub mod images;

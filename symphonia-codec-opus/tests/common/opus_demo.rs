@@ -5,6 +5,8 @@
 //   u32 BE encoder's final range (`OPUS_GET_FINAL_RANGE`) at the time this packet was encoded
 //   `length` bytes of Opus payload (absent when length == 0)
 
+#![allow(clippy::unwrap_used)] // test/example code: a panic is the failure signal
+#![allow(dead_code)] // shared by several test crates, each using a subset
 pub struct BitFilePacket {
     pub payload: Vec<u8>,
     pub enc_final_range: u32,

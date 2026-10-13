@@ -11,25 +11,37 @@
 
 #![allow(dead_code)]
 
-use crate::silk::macros::{silk_add16, silk_div32_16, silk_fix_const, silk_limit, silk_lshift, silk_smlawb, silk_smulbb, silk_sub16};
+use crate::silk::macros::{
+    silk_add16, silk_div32_16, silk_fix_const, silk_limit, silk_lshift, silk_smlawb, silk_smulbb,
+    silk_sub16,
+};
 use crate::silk::nlsf_stabilize::silk_nlsf_stabilize;
 use crate::silk::nlsf_unpack::silk_nlsf_unpack;
-use crate::silk::structs::{NlsfCbStruct, MAX_LPC_ORDER};
+use crate::silk::structs::{MAX_LPC_ORDER, NlsfCbStruct};
 
 /// C: `NLSF_QUANT_LEVEL_ADJ` (`silk/define.h`).
 const NLSF_QUANT_LEVEL_ADJ: f64 = 0.1;
 
 /// C: `silk_NLSF_residual_dequant`. Predictive dequantizer for NLSF residuals. `indices` and
 /// `pred_coef_q8` each have `order` entries; `x_q10` (output) has `order` entries.
-fn nlsf_residual_dequant(x_q10: &mut [i16], indices: &[i8], pred_coef_q8: &[u8], quant_step_size_q16: i32, order: usize) {
+fn nlsf_residual_dequant(
+    x_q10: &mut [i16],
+    indices: &[i8],
+    pred_coef_q8: &[u8],
+    quant_step_size_q16: i32,
+    order: usize,
+) {
     let mut out_q10: i32 = 0;
     for i in (0..order).rev() {
         let pred_q10 = (silk_smulbb(out_q10, pred_coef_q8[i] as i16 as i32)) >> 8;
         out_q10 = silk_lshift(indices[i] as i32, 10);
         if out_q10 > 0 {
-            out_q10 = silk_sub16(out_q10 as i16, silk_fix_const(NLSF_QUANT_LEVEL_ADJ, 10) as i16) as i32;
-        } else if out_q10 < 0 {
-            out_q10 = silk_add16(out_q10 as i16, silk_fix_const(NLSF_QUANT_LEVEL_ADJ, 10) as i16) as i32;
+            out_q10 =
+                silk_sub16(out_q10 as i16, silk_fix_const(NLSF_QUANT_LEVEL_ADJ, 10) as i16) as i32;
+        }
+        else if out_q10 < 0 {
+            out_q10 =
+                silk_add16(out_q10 as i16, silk_fix_const(NLSF_QUANT_LEVEL_ADJ, 10) as i16) as i32;
         }
         out_q10 = silk_smlawb(pred_q10, out_q10, quant_step_size_q16);
         x_q10[i] = out_q10 as i16;
@@ -38,7 +50,11 @@ fn nlsf_residual_dequant(x_q10: &mut [i16], indices: &[i8], pred_coef_q8: &[u8],
 
 /// C: `silk_NLSF_decode`. `nlsf_indices` has `order + 1` entries (`NLSFIndices[0]` is the CB1
 /// index, the rest are per-coefficient residual indices).
-pub(crate) fn silk_nlsf_decode(p_nlsf_q15: &mut [i16], nlsf_indices: &[i8], ps_nlsf_cb: &NlsfCbStruct) {
+pub(crate) fn silk_nlsf_decode(
+    p_nlsf_q15: &mut [i16],
+    nlsf_indices: &[i8],
+    ps_nlsf_cb: &NlsfCbStruct,
+) {
     let order = ps_nlsf_cb.order as usize;
     let mut pred_q8 = [0u8; MAX_LPC_ORDER];
     let mut ec_ix = [0i16; MAX_LPC_ORDER];
@@ -61,8 +77,8 @@ pub(crate) fn silk_nlsf_decode(p_nlsf_q15: &mut [i16], nlsf_indices: &[i8], ps_n
     let cb_element = &ps_nlsf_cb.cb1_nlsf_q8[cb1_index * order..cb1_index * order + order];
     let cb_wght = &ps_nlsf_cb.cb1_wght_q9[cb1_index * order..cb1_index * order + order];
     for i in 0..order {
-        let nlsf_q15_tmp =
-            silk_div32_16(silk_lshift(res_q10[i] as i32, 14), cb_wght[i] as i32) + silk_lshift(cb_element[i] as i32, 7);
+        let nlsf_q15_tmp = silk_div32_16(silk_lshift(res_q10[i] as i32, 14), cb_wght[i] as i32)
+            + silk_lshift(cb_element[i] as i32, 7);
         p_nlsf_q15[i] = silk_limit(nlsf_q15_tmp, 0, 32767) as i16;
     }
 

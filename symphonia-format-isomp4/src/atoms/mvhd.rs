@@ -7,8 +7,6 @@
 
 use std::num::NonZero;
 
-use symphonia_core::errors::Error;
-
 use crate::atoms::{Atom, AtomHeader, AtomIterator, ReadAtom, Result, decode_error};
 use crate::fp::FpU8;
 
@@ -44,27 +42,14 @@ impl Atom for MvhdAtom {
         };
 
         // Version 0 uses 32-bit time values, verion 1 used 64-bit values.
-        match version {
-            0 => {
-                mvhd.ctime = u64::from(it.read_u32()?);
-                mvhd.mtime = u64::from(it.read_u32()?);
-                mvhd.timescale = NonZero::new(it.read_u32()?)
-                    .ok_or(Error::DecodeError("isomp4 (mvhd): timescale is zero"))?;
-                // 0xffff_ffff is a special case.
-                mvhd.duration = match it.read_u32()? {
-                    u32::MAX => u64::MAX,
-                    duration => u64::from(duration),
-                };
-            }
-            1 => {
-                mvhd.ctime = it.read_u64()?;
-                mvhd.mtime = it.read_u64()?;
-                mvhd.timescale = NonZero::new(it.read_u32()?)
-                    .ok_or(Error::DecodeError("isomp4 (mvhd): timescale is zero"))?;
-                mvhd.duration = it.read_u64()?;
-            }
-            _ => return decode_error("isomp4 (mvhd): invalid version"),
+        if version > 1 {
+            return decode_error("isomp4 (mvhd): invalid version");
         }
+
+        mvhd.ctime = it.read_versioned_u64(version)?;
+        mvhd.mtime = it.read_versioned_u64(version)?;
+        mvhd.timescale = it.read_nonzero_timescale("isomp4 (mvhd): timescale is zero")?;
+        mvhd.duration = it.read_versioned_duration(version)?;
 
         // Ignore the preferred playback rate.
         let _ = it.read_u32()?;

@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+// Test code: a panic is a test failure.
 // Symphonia
 // Copyright (c) 2019-2026 The Project Symphonia Developers.
 //

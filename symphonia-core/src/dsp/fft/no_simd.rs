@@ -66,6 +66,23 @@ fn fft_twiddle_factors(n: usize) -> &'static [Complex<f32>] {
     }
 }
 
+/// Calculate the bit reversal permutation table for a power-of-two FFT size `n <= MAX_SIZE`.
+fn bit_reversal_table(n: usize) -> Box<[u16]> {
+    debug_assert!(n.is_power_of_two() && n <= MAX_SIZE);
+
+    // A size of 1 has no bits to reverse (and a shift of the full integer width is invalid).
+    if n == 1 {
+        return Box::new([0]);
+    }
+
+    // Computed in u32 so that n = 2^16 does not truncate. Every index is < 2^16 so it fits a u16.
+    let shift = u32::BITS - n.trailing_zeros();
+    let perm: Box<[u16]> = (0..n as u32).map(|i| (i.reverse_bits() >> shift) as u16).collect();
+
+    assert_eq!(perm.len(), n);
+    perm
+}
+
 /// The complex Fast Fourier Transform (FFT).
 pub struct Fft {
     perm: Box<[u16]>,
@@ -79,10 +96,7 @@ impl Fft {
         // limited to 2^16.
         assert!(n <= MAX_SIZE);
 
-        // Calculate the bit reversal table.
-        let n = n as u16;
-        let shift = n.leading_zeros() + 1;
-        let perm = (0..n).map(|i| i.reverse_bits() >> shift).collect();
+        let perm = bit_reversal_table(n);
 
         Self { perm }
     }
@@ -95,7 +109,6 @@ impl Fft {
     /// Calculate the FFT in-place.
     pub fn fft_inplace(&mut self, x: &mut [Complex<f32>]) {
         let n = x.len();
-        assert_eq!(n, x.len());
         assert_eq!(n, self.perm.len());
 
         for (i, &j) in self.perm.iter().enumerate() {
@@ -109,10 +122,10 @@ impl Fft {
         // Start FFT recursion.
         match n {
             1 => (),
-            2 => fft2(x.try_into().unwrap()),
-            4 => fft4(x.try_into().unwrap()),
-            8 => fft8(x.try_into().unwrap()),
-            16 => fft16(x.try_into().unwrap()),
+            2 => fft2(x.try_into().expect("length equals n")),
+            4 => fft4(x.try_into().expect("length equals n")),
+            8 => fft8(x.try_into().expect("length equals n")),
+            16 => fft16(x.try_into().expect("length equals n")),
             _ => transform(x, n),
         }
     }
@@ -131,10 +144,10 @@ impl Fft {
         // Start FFT recursion.
         match n {
             1 => (),
-            2 => fft2(y.try_into().unwrap()),
-            4 => fft4(y.try_into().unwrap()),
-            8 => fft8(y.try_into().unwrap()),
-            16 => fft16(y.try_into().unwrap()),
+            2 => fft2(y.try_into().expect("length equals n")),
+            4 => fft4(y.try_into().expect("length equals n")),
+            8 => fft8(y.try_into().expect("length equals n")),
+            16 => fft16(y.try_into().expect("length equals n")),
             _ => transform(y, n),
         }
     }
@@ -153,10 +166,7 @@ impl Ifft {
         // limited to 2^16.
         assert!(n <= MAX_SIZE);
 
-        // Calculate the bit reversal table.
-        let n = n as u16;
-        let shift = n.leading_zeros() + 1;
-        let perm = (0..n).map(|i| i.reverse_bits() >> shift).collect();
+        let perm = bit_reversal_table(n);
 
         Self { perm }
     }
@@ -256,8 +266,8 @@ fn transform(x: &mut [Complex<f32>], n: usize) {
             for pair in x.chunks_exact_mut(step << 1) {
                 // Split the chunk into two adjacent halves and compute the FFT of each.
                 let (even, odd) = pair.split_at_mut(step);
-                fft32(even.try_into().unwrap());
-                fft32(odd.try_into().unwrap());
+                fft32(even.try_into().expect("half is 32 elements"));
+                fft32(odd.try_into().expect("half is 32 elements"));
 
                 // Merge the two adjacent halves back into one chunk.
                 merge(even, odd, twiddles);

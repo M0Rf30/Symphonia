@@ -4,23 +4,11 @@ set -e
 # Default duration: 10 seconds per target
 DURATION=${1:-10}
 
-TARGETS=(
-    "decode_any"
-    "decode_mpa"
-    "decode_flac"
-    "decode_aac"
-    "decode_vorbis"
-    "decode_pcm"
-    "decode_adpcm"
-    "decode_alac"
-    "demux_mkv"
-    "demux_isomp4"
-    "demux_ogg"
-    "demux_flac"
-    "demux_wav"
-    "demux_aiff"
-    "demux_caf"
-)
+# Derive the target list from the fuzz_targets directory so it cannot drift.
+TARGETS=()
+for f in "$(dirname "$0")"/fuzz_targets/*.rs; do
+    TARGETS+=("$(basename "$f" .rs)")
+done
 
 echo "Running each fuzzer for $DURATION seconds..."
 

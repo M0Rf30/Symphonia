@@ -34,7 +34,7 @@ pub fn celt_lpc(lpc_out: &mut [f32], ac: &[f32], p: i32) {
             rr += ac[i + 1];
             let r = -rr / error;
             lpc[i] = r;
-            for j in 0..(i + 1) / 2 {
+            for j in 0..i.div_ceil(2) {
                 let tmp1 = lpc[j];
                 let tmp2 = lpc[i - 1 - j];
                 lpc[j] = tmp1 + r * tmp2;
@@ -96,7 +96,14 @@ pub fn celt_iir(x: &[f32], den: &[f32], y: &mut [f32], n: i32, ord: i32, mem: &m
 /// windowed over the first/last `overlap` samples) into `ac`. The C fixed-point-only `shift`
 /// return value is always `0` in the float build and is dropped here to match the wave-0
 /// signature.
-pub fn celt_autocorr(x: &[f32], ac: &mut [f32], window: Option<&[f32]>, overlap: i32, lag: i32, n: i32) {
+pub fn celt_autocorr(
+    x: &[f32],
+    ac: &mut [f32],
+    window: Option<&[f32]>,
+    overlap: i32,
+    lag: i32,
+    n: i32,
+) {
     let n = n as usize;
     let lag = lag as usize;
     let overlap = overlap as usize;

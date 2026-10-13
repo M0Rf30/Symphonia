@@ -12,7 +12,9 @@
 
 #![allow(dead_code)]
 
-use crate::silk::macros::{silk_limit, silk_max, silk_min, silk_rshift, silk_rshift_round, silk_sat16};
+use crate::silk::macros::{
+    silk_limit, silk_max, silk_min, silk_rshift, silk_rshift_round, silk_sat16,
+};
 use crate::silk::sort::silk_insertion_sort_increasing_all_values_int16;
 
 const MAX_LOOPS: i32 = 20;
@@ -32,7 +34,8 @@ pub(crate) fn silk_nlsf_stabilize(nlsf_q15: &mut [i16], n_delta_min_q15: &[i16],
         i_idx = 0;
         // Middle elements.
         for i in 1..l {
-            let diff_q15 = nlsf_q15[i] as i32 - (nlsf_q15[i - 1] as i32 + n_delta_min_q15[i] as i32);
+            let diff_q15 =
+                nlsf_q15[i] as i32 - (nlsf_q15[i - 1] as i32 + n_delta_min_q15[i] as i32);
             if diff_q15 < min_diff_q15 {
                 min_diff_q15 = diff_q15;
                 i_idx = i;
@@ -54,14 +57,16 @@ pub(crate) fn silk_nlsf_stabilize(nlsf_q15: &mut [i16], n_delta_min_q15: &[i16],
         if i_idx == 0 {
             // Move away from lower limit.
             nlsf_q15[0] = n_delta_min_q15[0];
-        } else if i_idx == l {
+        }
+        else if i_idx == l {
             // Move away from higher limit.
             nlsf_q15[l - 1] = ((1i32 << 15) - n_delta_min_q15[l] as i32) as i16;
-        } else {
+        }
+        else {
             // Find the lower extreme for the location of the current center frequency.
             let mut min_center_q15: i32 = 0;
-            for k in 0..i_idx {
-                min_center_q15 += n_delta_min_q15[k] as i32;
+            for &delta in n_delta_min_q15[..i_idx].iter() {
+                min_center_q15 += delta as i32;
             }
             min_center_q15 += silk_rshift(n_delta_min_q15[i_idx] as i32, 1);
 
@@ -78,7 +83,8 @@ pub(crate) fn silk_nlsf_stabilize(nlsf_q15: &mut [i16], n_delta_min_q15: &[i16],
                 min_center_q15,
                 max_center_q15,
             ) as i16;
-            nlsf_q15[i_idx - 1] = (center_freq_q15 as i32 - silk_rshift(n_delta_min_q15[i_idx] as i32, 1)) as i16;
+            nlsf_q15[i_idx - 1] =
+                (center_freq_q15 as i32 - silk_rshift(n_delta_min_q15[i_idx] as i32, 1)) as i16;
             nlsf_q15[i_idx] = (nlsf_q15[i_idx - 1] as i32 + n_delta_min_q15[i_idx] as i32) as i16;
         }
     }
@@ -93,15 +99,22 @@ pub(crate) fn silk_nlsf_stabilize(nlsf_q15: &mut [i16], n_delta_min_q15: &[i16],
 
         // Keep delta_min distance between the NLSFs.
         for i in 1..l {
-            nlsf_q15[i] = silk_max(nlsf_q15[i], silk_sat16(nlsf_q15[i - 1] as i32 + n_delta_min_q15[i] as i32) as i16);
+            nlsf_q15[i] = silk_max(
+                nlsf_q15[i],
+                silk_sat16(nlsf_q15[i - 1] as i32 + n_delta_min_q15[i] as i32) as i16,
+            );
         }
 
         // Last NLSF should be no higher than 1 - NDeltaMin[L].
-        nlsf_q15[l - 1] = silk_min(nlsf_q15[l - 1], ((1i32 << 15) - n_delta_min_q15[l] as i32) as i16);
+        nlsf_q15[l - 1] =
+            silk_min(nlsf_q15[l - 1], ((1i32 << 15) - n_delta_min_q15[l] as i32) as i16);
 
         // Keep NDeltaMin distance between the NLSFs.
         for i in (0..l - 1).rev() {
-            nlsf_q15[i] = silk_min(nlsf_q15[i], (nlsf_q15[i + 1] as i32 - n_delta_min_q15[i + 1] as i32) as i16);
+            nlsf_q15[i] = silk_min(
+                nlsf_q15[i],
+                (nlsf_q15[i + 1] as i32 - n_delta_min_q15[i + 1] as i32) as i16,
+            );
         }
     }
 }

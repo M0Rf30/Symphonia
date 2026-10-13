@@ -129,7 +129,7 @@ pub enum MapSrc {
 }
 
 /// Table 8.45 — mapping from 20 to 34 parameters.
-pub const MAP_20_TO_34: [MapSrc; 34] = [
+pub static MAP_20_TO_34: [MapSrc; 34] = [
     MapSrc::Single(0),
     MapSrc::Avg(0, 1),
     MapSrc::Single(1),
@@ -167,7 +167,7 @@ pub const MAP_20_TO_34: [MapSrc; 34] = [
 ];
 
 /// Table 8.46 — mapping from 34 down to 20 parameters.
-pub const MAP_34_TO_20: [MapSrc; 20] = [
+pub static MAP_34_TO_20: [MapSrc; 20] = [
     MapSrc::W21(0, 1),
     MapSrc::W12(1, 2),
     MapSrc::W21(3, 4),
@@ -266,10 +266,7 @@ mod tests {
     fn index_mapping_round_trips_shape() {
         let v10: Vec<i32> = (0..10).collect();
         let v20 = map_indices(&v10, 20);
-        assert_eq!(
-            v20,
-            vec![0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9]
-        );
+        assert_eq!(v20, vec![0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9]);
         let v34 = map_indices(&v20, 34);
         assert_eq!(v34.len(), 34);
         // Table 8.45 first rows: idx0, (idx0+idx1)/2, idx1, idx2, ...

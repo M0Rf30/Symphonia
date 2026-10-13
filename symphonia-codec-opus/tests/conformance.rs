@@ -9,9 +9,10 @@
 //     via `.5*(L+R)` per `opus_compare.c`'s `main()`, matching `tests/silk_vectors.rs`).
 //
 // Run with:
-//   OPUS_TESTVECTORS=/home/gianluca/M0Rf30/wt/ref/opus_newvectors \
+//   OPUS_TESTVECTORS=/path/to/opus_newvectors \
 //     cargo test -p symphonia-codec-opus --release --test conformance -- --ignored --nocapture
 
+#![allow(clippy::unwrap_used)] // test/example code: a panic is the failure signal
 mod common;
 
 use common::opus_demo::BitFile;
@@ -25,10 +26,8 @@ fn testvectors_dir() -> Option<std::path::PathBuf> {
 fn read_dec_as_f32(path: &std::path::Path, channels: usize) -> Vec<f32> {
     let raw = std::fs::read(path).unwrap_or_else(|e| panic!("reading {path:?}: {e}"));
     assert_eq!(raw.len() % 2, 0);
-    let samples: Vec<f32> = raw
-        .chunks_exact(2)
-        .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32)
-        .collect();
+    let samples: Vec<f32> =
+        raw.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32).collect();
     assert_eq!(samples.len() % channels, 0);
     samples
 }
@@ -170,7 +169,10 @@ fn decode_vector(bit_path: &std::path::Path, channels: u8) -> VectorResult {
                 if debug {
                     eprintln!(
                         "MISMATCH idx={pkt_idx} mode={:?} bw={:?} stereo={} fsz={} prev={prev_mode_dbg}",
-                        toc.mode(), toc.bandwidth(), toc.stereo(), toc.samples_per_frame(48000)
+                        toc.mode(),
+                        toc.bandwidth(),
+                        toc.stereo(),
+                        toc.samples_per_frame(48000)
                     );
                 }
             }
@@ -205,7 +207,8 @@ macro_rules! conformance_test {
                 mono.range_mismatches, mono.range_checked
             );
             let reference = read_dec_as_f32(&dir.join(format!("testvector{:02}.dec", $index)), 2);
-            let reference_m = read_dec_as_f32(&dir.join(format!("testvector{:02}m.dec", $index)), 2);
+            let reference_m =
+                read_dec_as_f32(&dir.join(format!("testvector{:02}m.dec", $index)), 2);
             let ref_mono = downmix_to_mono(&reference);
             let ref_mono_m = downmix_to_mono(&reference_m);
             let r1 = common::opus_compare::compare(&ref_mono, &mono.pcm, 1);
@@ -221,7 +224,10 @@ macro_rules! conformance_test {
             );
             let r1 = common::opus_compare::compare(&reference, &stereo.pcm, 2);
             let r2 = common::opus_compare::compare(&reference_m, &stereo.pcm, 2);
-            assert!(r1.pass || r2.pass, "opus_compare FAILS (stereo) vs both refs: {r1:?} / {r2:?}");
+            assert!(
+                r1.pass || r2.pass,
+                "opus_compare FAILS (stereo) vs both refs: {r1:?} / {r2:?}"
+            );
         }
     };
 }

@@ -47,26 +47,26 @@
 pub(crate) mod bits;
 mod cldfb;
 mod cldfb_tables;
-mod crc;
+mod codebook;
+pub(crate) mod decoder;
 mod dequant;
 mod element;
 mod env_adjust;
 mod envelope;
 mod error;
+pub(crate) mod extension;
 mod freq_bands;
 mod grid;
 pub(crate) mod header;
-mod huffman;
 mod hf_gen;
+mod huffman;
 mod limiter;
-mod qmf;
-mod noise_table;
 mod lp;
+mod noise_table;
+mod ps;
+mod qmf;
 mod reconstruct;
 mod time_grid;
-pub(crate) mod decoder;
-pub(crate) mod extension;
-mod ps;
 
 /// Minimal local mirror of `oxideav_aac::raw_data_block::IdSynEle` — the
 /// AAC core `id_syn_ele` kind an SBR payload attaches to
@@ -74,22 +74,14 @@ mod ps;
 /// Sce`] / [`IdSynEle::Cpe`] are ever valid for
 /// [`extension::SbrExtensionData::parse`] (a `sbr_extension_data()`
 /// payload only attaches to a single-channel or channel-pair element);
-/// the other `id_syn_ele` values are included for parity with the
-/// integration call site in `aac::mod`.
+/// `Lfe` exists only so tests can exercise the rejection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IdSynEle {
     /// `ID_SCE` — single channel element.
     Sce,
     /// `ID_CPE` — channel pair element.
     Cpe,
-    /// `ID_CCE` — coupling channel element.
-    Cce,
     /// `ID_LFE` — low frequency effects element.
+    #[cfg_attr(not(test), allow(dead_code))]
     Lfe,
-    /// `ID_DSE` — data stream element.
-    Dse,
-    /// `ID_PCE` — program config element.
-    Pce,
-    /// `ID_FIL` — fill element.
-    Fil,
 }

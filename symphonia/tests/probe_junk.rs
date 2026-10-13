@@ -12,6 +12,9 @@
 
 use std::io::Cursor;
 
+mod common;
+
+use common::mp3_frames;
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::formats::probe::{Hint, Probe, ProbeOptions};
 use symphonia::core::io::MediaSourceStream;
@@ -31,17 +34,6 @@ fn probe_bytes(probe: &Probe, data: Vec<u8>) -> Result<&'static str, String> {
         .probe(&Hint::new(), mss, FormatOptions::default(), MetadataOptions::default())
         .map(|r| r.format_info().short_name)
         .map_err(|e| e.to_string())
-}
-
-/// MPEG-1 layer 3, 128 kbps, 44.1 kHz frames (417 bytes, no padding).
-fn mp3_frames() -> Vec<u8> {
-    (0..32)
-        .flat_map(|_| {
-            let mut f = vec![0u8; 417];
-            f[..4].copy_from_slice(&[0xff, 0xfb, 0x90, 0x64]);
-            f
-        })
-        .collect()
 }
 
 fn after(prefix: Vec<u8>, stream: Vec<u8>) -> Vec<u8> {

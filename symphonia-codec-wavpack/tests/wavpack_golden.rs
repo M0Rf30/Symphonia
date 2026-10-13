@@ -12,7 +12,6 @@
 //! Run with `GOLDEN_PRINT=1 cargo test -p symphonia-codec-wavpack --test wavpack_golden -- --nocapture`
 //! to print the table for the checked-in `GOLDEN` constant.
 
-use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use symphonia_codec_wavpack::{WavPackDecoder, WavPackReader, with_sibling_correction};
@@ -20,26 +19,8 @@ use symphonia_core::audio::{Audio, GenericAudioBufferRef};
 use symphonia_core::codecs::CodecParameters;
 use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
 use symphonia_core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
-use symphonia_core::io::MediaSourceStream;
 use symphonia_core::units::Timestamp;
-
-fn mss(path: &Path) -> MediaSourceStream<'static> {
-    let file = File::open(path).unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
-    MediaSourceStream::new(Box::new(file), Default::default())
-}
-
-struct Fnv(u64);
-
-impl Fnv {
-    fn new() -> Self {
-        Fnv(0xcbf2_9ce4_8422_2325)
-    }
-    fn write(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.0 = (self.0 ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
-}
+use symphonia_testutil::{Fnv, open_mss as mss};
 
 fn feed(h: &mut Fnv, buf: &GenericAudioBufferRef<'_>) {
     let n = buf.frames();
@@ -48,7 +29,7 @@ fn feed(h: &mut Fnv, buf: &GenericAudioBufferRef<'_>) {
         ($b:expr, $conv:expr) => {
             for i in 0..n {
                 for ch in 0..nch {
-                    h.write(&$conv($b.plane(ch).unwrap()[i]));
+                    h.write(&$conv($b.plane(ch).expect("unexpected failure")[i]));
                 }
             }
         };
@@ -119,7 +100,8 @@ fn all_hashes() -> Vec<(String, u64, u64)> {
     let mut out = Vec::new();
     for (set, dir) in corpus_dirs() {
         for wv in wv_files(&dir) {
-            let name = format!("{set}/{}", wv.file_name().unwrap().to_string_lossy());
+            let name =
+                format!("{set}/{}", wv.file_name().expect("unexpected failure").to_string_lossy());
             let opts = with_sibling_correction(&wv, FormatOptions::default());
             let has_wvc = opts.external_data.sidecar.is_some();
             let Ok(mut reader) = WavPackReader::try_new(mss(&wv), opts)
@@ -129,8 +111,8 @@ fn all_hashes() -> Vec<(String, u64, u64)> {
             let (h, n) = hash_decode(&mut reader);
             out.push((name.clone(), h, n));
             if has_wvc {
-                let mut reader =
-                    WavPackReader::try_new(mss(&wv), FormatOptions::default()).unwrap();
+                let mut reader = WavPackReader::try_new(mss(&wv), FormatOptions::default())
+                    .expect("unexpected failure");
                 let (h, n) = hash_decode(&mut reader);
                 out.push((format!("{name}[lossy]"), h, n));
             }

@@ -40,8 +40,8 @@
 //! variable-length content, so it is fully recoverable from the spec
 //! syntax table alone.
 
-use super::error::{SbrError as Error, SbrResult as Result};
 use super::bits::BitReader;
+use super::error::{SbrError as Error, SbrResult as Result};
 
 /// Default `bs_freq_scale` when `bs_header_extra_1 == 0` (Table 4.105:
 /// 10 bands/octave).
@@ -130,18 +130,15 @@ impl SbrHeader {
 
         let (freq_scale, alter_scale, noise_bands) = if header_extra_1 {
             (read_u8(reader, 2)?, read_bit(reader)?, read_u8(reader, 2)?)
-        } else {
+        }
+        else {
             (DEFAULT_FREQ_SCALE, DEFAULT_ALTER_SCALE, DEFAULT_NOISE_BANDS)
         };
 
         let (limiter_bands, limiter_gains, interpol_freq, smoothing_mode) = if header_extra_2 {
-            (
-                read_u8(reader, 2)?,
-                read_u8(reader, 2)?,
-                read_bit(reader)?,
-                read_bit(reader)?,
-            )
-        } else {
+            (read_u8(reader, 2)?, read_u8(reader, 2)?, read_bit(reader)?, read_bit(reader)?)
+        }
+        else {
             (
                 DEFAULT_LIMITER_BANDS,
                 DEFAULT_LIMITER_GAINS,
@@ -222,8 +219,7 @@ impl SbrHeader {
     pub fn derive_bands(&self, fs_sbr: u32) -> Result<super::freq_bands::HiLoTables> {
         let k0 = super::freq_bands::k0(fs_sbr, self.start_freq)?;
         let k2 = super::freq_bands::k2(fs_sbr, self.stop_freq, k0)?;
-        let f_master =
-            super::freq_bands::master_table(k0, k2, self.freq_scale, self.alter_scale)?;
+        let f_master = super::freq_bands::master_table(k0, k2, self.freq_scale, self.alter_scale)?;
         super::freq_bands::HiLoTables::derive(&f_master, self.xover_band, self.noise_bands)
     }
 }
@@ -235,16 +231,13 @@ fn read_bit(reader: &mut BitReader<'_>) -> Result<bool> {
 
 #[inline]
 fn read_u8(reader: &mut BitReader<'_>, n: u32) -> Result<u8> {
-    reader
-        .read_u32(n)
-        .map(|v| v as u8)
-        .map_err(|_| Error::SbrHuffInvalid)
+    reader.read_u32(n).map(|v| v as u8).map_err(|_| Error::SbrHuffInvalid)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::bits::BitWriter;
+    use super::*;
 
     /// Build a minimal header bitstream with both extra flags clear.
     fn pack_minimal(amp_res: bool, start: u8, stop: u8, xover: u8, reserved: u8) -> Vec<u8> {
@@ -321,10 +314,7 @@ mod tests {
     fn truncated_header_errors() {
         let bytes = [0x00u8]; // 8 bits, not enough for the 16-bit fixed prefix
         let mut r = BitReader::new(&bytes);
-        assert!(matches!(
-            SbrHeader::parse(&mut r),
-            Err(Error::SbrHuffInvalid)
-        ));
+        assert!(matches!(SbrHeader::parse(&mut r), Err(Error::SbrHuffInvalid)));
     }
 
     #[test]
@@ -373,7 +363,8 @@ mod tests {
 
         let k0 = super::super::freq_bands::k0(fs_sbr, h.start_freq).unwrap();
         let k2 = super::super::freq_bands::k2(fs_sbr, h.stop_freq, k0).unwrap();
-        let fm = super::super::freq_bands::master_table(k0, k2, h.freq_scale, h.alter_scale).unwrap();
+        let fm =
+            super::super::freq_bands::master_table(k0, k2, h.freq_scale, h.alter_scale).unwrap();
         let direct =
             super::super::freq_bands::HiLoTables::derive(&fm, h.xover_band, h.noise_bands).unwrap();
         assert_eq!(bands.f_table_high, direct.f_table_high);

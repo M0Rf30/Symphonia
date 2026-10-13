@@ -28,6 +28,7 @@
 //! are only active in debug, so a full 200k there would be needlessly slow); override with
 //! `OPUS_FUZZ_COUNT=<n>`.
 
+#![allow(clippy::unwrap_used)] // test/example code: a panic is the failure signal
 mod common;
 
 use std::panic::{self, AssertUnwindSafe};
@@ -179,8 +180,13 @@ fn load_corpus() -> Vec<Vec<u8>> {
     corpus
 }
 
-const SAMPLE_RATES: [SampleRate; 5] =
-    [SampleRate::Hz8000, SampleRate::Hz12000, SampleRate::Hz16000, SampleRate::Hz24000, SampleRate::Hz48000];
+const SAMPLE_RATES: [SampleRate; 5] = [
+    SampleRate::Hz8000,
+    SampleRate::Hz12000,
+    SampleRate::Hz16000,
+    SampleRate::Hz24000,
+    SampleRate::Hz48000,
+];
 
 /// Frame sizes to request from the decoder: every valid multiple of 2.5ms up to 120ms at 48kHz,
 /// plus a few intentionally-invalid values (0, 1, a huge value) to exercise the `BadArgument`/
@@ -238,18 +244,35 @@ struct RandHead {
 fn random_mapping(rng: &mut Rng) -> RandHead {
     if rng.chance(1, 2) {
         let channel_count = if rng.chance(1, 2) { 1 } else { 2 };
-        return RandHead { channel_count, mapping: family0(channel_count), output_gain: rng.next_u32() as i16 };
+        return RandHead {
+            channel_count,
+            mapping: family0(channel_count),
+            output_gain: rng.next_u32() as i16,
+        };
     }
     let stream_count = rng.gen_range(1, 8) as u8;
     let coupled_count = rng.gen_range(0, stream_count as usize) as u8;
     let channel_count = rng.gen_range(1, 8).max((stream_count + coupled_count) as usize) as u8;
     let max_index = stream_count as u16 + coupled_count as u16;
     let table: Vec<u8> = (0..channel_count)
-        .map(|_| if rng.chance(1, 10) { 255 } else { rng.gen_range(0, max_index.saturating_sub(1) as usize) as u8 })
+        .map(|_| {
+            if rng.chance(1, 10) {
+                255
+            }
+            else {
+                rng.gen_range(0, max_index.saturating_sub(1) as usize) as u8
+            }
+        })
         .collect();
     RandHead {
         channel_count,
-        mapping: ChannelMapping { family: 1, stream_count, coupled_count, table, demixing_matrix: Vec::new() },
+        mapping: ChannelMapping {
+            family: 1,
+            stream_count,
+            coupled_count,
+            table,
+            demixing_matrix: Vec::new(),
+        },
         output_gain: rng.next_u32() as i16,
     }
 }
@@ -270,7 +293,9 @@ fn fuzz_multistream(rng: &mut Rng, pkt: &[u8], seed: u64) {
     let frame_size = random_frame_size(rng, sr.as_hz());
     let decode_fec = rng.chance(1, 3);
     run_catch("MultistreamDecoder::try_new+decode", seed, || {
-        if let Ok(mut dec) = MultistreamDecoder::try_new(sr, head.channel_count, head.mapping.clone()) {
+        if let Ok(mut dec) =
+            MultistreamDecoder::try_new(sr, head.channel_count, head.mapping.clone())
+        {
             dec.set_gain(head.output_gain);
             let mut out = vec![0f32; frame_size * head.channel_count.max(1) as usize + 64];
             let _ = dec.decode(Some(pkt), &mut out, frame_size, decode_fec);
@@ -278,7 +303,6 @@ fn fuzz_multistream(rng: &mut Rng, pkt: &[u8], seed: u64) {
         }
     });
 }
-
 
 /// Builds random `OpusHead` extra-data bytes: sometimes a well-formed header (correct magic,
 /// random-but-internally-consistent mapping), sometimes pure garbage, sometimes a truncated
@@ -338,12 +362,7 @@ fn fuzz_count() -> usize {
             return n;
         }
     }
-    if cfg!(debug_assertions) {
-        3_000
-    }
-    else {
-        200_000
-    }
+    if cfg!(debug_assertions) { 3_000 } else { 200_000 }
 }
 
 /// The main property/fuzz test: never panic, across all three public decode surfaces, on a mix
@@ -359,7 +378,9 @@ fn never_panics_on_malformed_input() {
     // PLC history), not just fresh-decoder-per-packet.
     let mut persistent: Vec<OpusDecoder> = SAMPLE_RATES
         .iter()
-        .flat_map(|&sr| [OpusDecoder::try_new(sr, 1).unwrap(), OpusDecoder::try_new(sr, 2).unwrap()])
+        .flat_map(|&sr| {
+            [OpusDecoder::try_new(sr, 1).unwrap(), OpusDecoder::try_new(sr, 2).unwrap()]
+        })
         .collect();
 
     for i in 0..count {

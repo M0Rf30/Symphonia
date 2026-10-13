@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+// Test code: a panic is a test failure.
 // Symphonia
 // Copyright (c) 2019-2026 The Project Symphonia Developers.
 //
@@ -11,8 +13,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::probe::Hint;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{MetadataOptions, RawTag, StandardTag, Tag};
 use symphonia_tagging::{VorbisRatingScale, WriteOptions, write_file};
@@ -133,12 +135,11 @@ fn fraction_with_email() {
 
 #[test]
 fn ratings_of_other_users_keep_their_key() {
-    let other = Tag::new_std(
-        RawTag::new("RATING:other@example.org", "50"),
-        StandardTag::Rating(500_000),
-    );
+    let other =
+        Tag::new_std(RawTag::new("RATING:other@example.org", "50"), StandardTag::Rating(500_000));
 
-    for (scale, text) in [(VorbisRatingScale::Percent, "50"), (VorbisRatingScale::Fraction, "0.5")] {
+    for (scale, text) in [(VorbisRatingScale::Percent, "50"), (VorbisRatingScale::Fraction, "0.5")]
+    {
         let opts = opts(Some("me@example.com"), scale);
 
         for_each_file("rating_other", &[other.clone(), rating(900_000)], &opts, |path| {
@@ -169,10 +170,8 @@ fn the_reader_accepts_fractions_percentages_and_keyed_ratings() {
     ];
 
     for_each_file("rating_reader", &tags, &WriteOptions::default(), |path| {
-        let mut ratings: Vec<(String, u32)> = read_ratings(path)
-            .into_iter()
-            .map(|(key, ppm)| (key.to_uppercase(), ppm))
-            .collect();
+        let mut ratings: Vec<(String, u32)> =
+            read_ratings(path).into_iter().map(|(key, ppm)| (key.to_uppercase(), ppm)).collect();
         ratings.sort();
 
         assert_eq!(

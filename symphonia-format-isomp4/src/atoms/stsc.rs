@@ -5,7 +5,6 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use crate::atoms::limits::*;
 use crate::atoms::{Atom, AtomHeader, AtomIterator, ReadAtom, Result, decode_error};
 
 #[derive(Debug)]
@@ -57,30 +56,26 @@ impl Atom for StscAtom {
     fn read<R: ReadAtom>(it: &mut AtomIterator<R>, _header: &AtomHeader) -> Result<Self> {
         let (_, _) = it.read_extended_header()?;
 
-        let entry_count = it.read_u32()?;
-
-        // Limit the maximum initial capacity to prevent malicious files from using all the
-        // available memory.
-        let mut entries = Vec::with_capacity(MAX_TABLE_INITIAL_CAPACITY.min(entry_count as usize));
-
-        for _ in 0..entry_count {
+        let mut entries = it.read_table(|it| {
             let first_chunk_raw = it.read_u32()?;
 
             if first_chunk_raw == 0 {
                 return decode_error("isomp4 (stsc): first_chunk must be >= 1");
             }
 
-            entries.push(StscEntry {
+            Ok(StscEntry {
                 first_chunk: first_chunk_raw - 1,
                 first_sample: 0,
                 samples_per_chunk: it.read_u32()?,
                 sample_desc_index: it.read_u32()?,
-            });
-        }
+            })
+        })?;
+
+        let entry_count = entries.len();
 
         // Post-process entries to check for errors and calculate the file sample.
         if entry_count > 0 {
-            for i in 0..entry_count as usize - 1 {
+            for i in 0..entry_count - 1 {
                 // Validate that first_chunk is monotonic across all entries.
                 if entries[i + 1].first_chunk < entries[i].first_chunk {
                     return decode_error("isomp4 (stsc): entry first chunk not monotonic");
@@ -104,7 +99,7 @@ impl Atom for StscAtom {
             }
 
             // Validate that samples per chunk is > 0. Could the entry be ignored?
-            if entries[entry_count as usize - 1].samples_per_chunk == 0 {
+            if entries[entry_count - 1].samples_per_chunk == 0 {
                 return decode_error("isomp4 (stsc): entry has 0 samples per chunk");
             }
         }

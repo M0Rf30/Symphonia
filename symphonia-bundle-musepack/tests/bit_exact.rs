@@ -14,9 +14,8 @@
 //! `examples/decode_bench.rs`.
 //!
 //! The fixture tests always run; the real-world sample tests run only if `RMPD_SAMPLES` points at
-//! the sample directory (e.g. `RMPD_SAMPLES=/home/gianluca/rmpd-samples/samples`).
+//! the sample directory (e.g. `RMPD_SAMPLES=/path/to/samples`).
 
-use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use symphonia_bundle_musepack::{MpcDecoder, MpcReader};
@@ -24,21 +23,21 @@ use symphonia_core::audio::{Audio, GenericAudioBufferRef};
 use symphonia_core::codecs::CodecParameters;
 use symphonia_core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia_core::formats::{FormatOptions, FormatReader};
-use symphonia_core::io::MediaSourceStream;
+use symphonia_testutil::{Fnv, open_mss, sample_dir};
 
 /// Fully decodes `path` (gapless on); returns `(hash, frames)`.
 fn decode_hash(path: &Path) -> (u64, u64) {
-    let file = File::open(path).expect("open");
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mss = open_mss(path);
     let mut reader = MpcReader::try_new(mss, FormatOptions::default()).expect("probe");
     let track = reader.tracks()[0].clone();
-    let params = match track.codec_params.as_ref().unwrap() {
+    let params = match track.codec_params.as_ref().expect("unexpected failure") {
         CodecParameters::Audio(p) => p.clone(),
         _ => panic!("not audio"),
     };
-    let mut decoder = MpcDecoder::try_new(&params, &AudioDecoderOptions::default()).unwrap();
+    let mut decoder =
+        MpcDecoder::try_new(&params, &AudioDecoderOptions::default()).expect("unexpected failure");
 
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    let mut hash = Fnv::new();
     let mut frames = 0u64;
     while let Some(packet) = reader.next_packet().expect("next_packet") {
         let Ok(GenericAudioBufferRef::F32(b)) = decoder.decode(&packet)
@@ -47,12 +46,12 @@ fn decode_hash(path: &Path) -> (u64, u64) {
         };
         frames += b.frames() as u64;
         for ch in 0..b.spec().channels().count() {
-            for s in b.plane(ch).unwrap() {
-                hash = (hash ^ u64::from(s.to_bits())).wrapping_mul(0x100_0000_01b3);
+            for s in b.plane(ch).expect("unexpected failure") {
+                hash.put(s.to_bits());
             }
         }
     }
-    (hash, frames)
+    (hash.finish(), frames)
 }
 
 fn fixture(name: &str) -> PathBuf {
@@ -67,12 +66,11 @@ fn sv8_fixtures_decode_bit_exactly() {
 
 #[test]
 fn real_samples_decode_bit_exactly() {
-    let Ok(dir) = std::env::var("RMPD_SAMPLES")
+    let Some(dir) = sample_dir()
     else {
         eprintln!("RMPD_SAMPLES not set; skipping");
         return;
     };
-    let dir = Path::new(&dir);
     let cases: &[(&str, u64, u64)] = &[
         // SV8.
         ("musepack/mpc8_thumb.mpc", 0xdea4bd8c6ac93d94, 1_323_000),

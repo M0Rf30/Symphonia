@@ -10,7 +10,7 @@
 //! for the 64 band bank. The coefficients are the normative filter data of the standard.
 
 #[rustfmt::skip]
-pub(super) const CLDFB_320: [f64; 320] = [
+pub(super) static CLDFB_320: [f64; 320] = [
     5.34506e-07, -1.135471e-05, -0.001222743, 0.009318335,
     0.5214033, 7.604792e-07, 6.003839e-06, -0.001125398,
     0.01070043, 0.5556087, 5.563536e-07, 1.050792e-05,
@@ -94,7 +94,7 @@ pub(super) const CLDFB_320: [f64; 320] = [
 ];
 
 #[rustfmt::skip]
-pub(super) const CLDFB_640: [f64; 640] = [
+pub(super) static CLDFB_640: [f64; 640] = [
     6.57176e-07, -8.010079e-06, -0.001250743, 0.008996371,
     0.5128557, 4.11836e-07, -1.469933e-05, -0.001194743,
     0.009640299, 0.529951, 8.109952e-07, 4.840578e-06,

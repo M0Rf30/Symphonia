@@ -19,12 +19,10 @@ use std::path::Path;
 use symphonia_core::meta::{Tag, Visual};
 
 use crate::riff::serialize_id3;
-use crate::{Error, Result, WriteOptions, copy_range, read_up_to, replace_file};
+use crate::{Error, Result, WriteOptions, copy_range, read_at, read_up_to, replace_file};
 
 /// The size of the `DSD ` header and the `fmt ` chunk.
 const HEADERS_LEN: u64 = 28 + 52;
-/// The largest existing tag that is read into memory.
-const MAX_TAG_LEN: u64 = 256 * 1024 * 1024;
 
 fn le_u64(b: &[u8]) -> u64 {
     u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
@@ -60,7 +58,9 @@ pub(crate) fn write(
         let data_end = le_u64(&head[84..92])
             .checked_add(HEADERS_LEN)
             .filter(|&end| end <= file_len)
-            .ok_or_else(|| Error::Malformed("DSF data chunk extends past the end of the file".into()))?;
+            .ok_or_else(|| {
+                Error::Malformed("DSF data chunk extends past the end of the file".into())
+            })?;
 
         // The tag runs from the metadata pointer to the end of the file. Without a pointer, no tag
         // exists, and a new one goes at the end of the file.
@@ -72,13 +72,7 @@ pub(crate) fn write(
         }
 
         let old_tag = if tag_start < file_len {
-            if file_len - tag_start > MAX_TAG_LEN {
-                return Err(Error::Unsupported("existing ID3v2 tag is too large to rewrite".into()));
-            }
-            let mut buf = vec![0u8; (file_len - tag_start) as usize];
-            src.seek(SeekFrom::Start(tag_start))?;
-            std::io::Read::read_exact(src, &mut buf)?;
-            vec![buf]
+            vec![read_at(src, tag_start, file_len - tag_start)?]
         }
         else {
             Vec::new()

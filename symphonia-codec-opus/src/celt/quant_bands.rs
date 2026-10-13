@@ -9,8 +9,11 @@
 //! (`unquant_coarse_energy`, `unquant_fine_energy`, `unquant_energy_finalise`, `amp2Log2`).
 //! Ported from libopus (BSD-3-Clause), see NOTICE. Owner (wave 1): "CeltBitstream".
 
+// Tables and constants transcribed from libopus keep the reference decimal text.
+#![allow(clippy::excessive_precision)]
+
 use crate::celt::laplace::ec_laplace_decode;
-use crate::celt::modes::{celt_log2, CeltMode};
+use crate::celt::modes::{CeltMode, celt_log2};
 use crate::range::RangeDecoder;
 
 /// C: `eMeans` (`celt/quant_bands.c`, float build). Mean energy in each band, `pub(crate)` so
@@ -27,10 +30,12 @@ pub(crate) static E_MEANS: [f32; 25] = [
 
 /// C: `pred_coef` (`celt/quant_bands.c`, float build). Prediction coefficients: 0.9, 0.8, 0.65,
 /// 0.5.
-pub(crate) static PRED_COEF: [f32; 4] = [29440.0 / 32768.0, 26112.0 / 32768.0, 21248.0 / 32768.0, 16384.0 / 32768.0];
+pub(crate) static PRED_COEF: [f32; 4] =
+    [29440.0 / 32768.0, 26112.0 / 32768.0, 21248.0 / 32768.0, 16384.0 / 32768.0];
 
 /// C: `beta_coef` (`celt/quant_bands.c`, float build).
-pub(crate) static BETA_COEF: [f32; 4] = [30147.0 / 32768.0, 22282.0 / 32768.0, 12124.0 / 32768.0, 6554.0 / 32768.0];
+pub(crate) static BETA_COEF: [f32; 4] =
+    [30147.0 / 32768.0, 22282.0 / 32768.0, 12124.0 / 32768.0, 6554.0 / 32768.0];
 
 /// C: `beta_intra` (`celt/quant_bands.c`, float build).
 pub(crate) const BETA_INTRA: f32 = 4915.0 / 32768.0;
@@ -129,28 +134,32 @@ pub fn unquant_coarse_energy(
     budget: i32,
 ) {
     let prob_model = &E_PROB_MODEL[lm as usize][intra as usize];
-    let (coef, beta) = if intra { (0.0, BETA_INTRA) } else { (PRED_COEF[lm as usize], BETA_COEF[lm as usize]) };
+    let (coef, beta) =
+        if intra { (0.0, BETA_INTRA) } else { (PRED_COEF[lm as usize], BETA_COEF[lm as usize]) };
     let nb_ebands = mode.nb_ebands;
     let mut prev = [0.0f32; 2];
 
     for i in start..end {
         for c in 0..channels {
             let tell = rd.tell();
-            let qi: i32;
-            if budget - tell >= 15 {
+            let qi: i32 = if budget - tell >= 15 {
                 let pi = (2 * i.min(20)) as usize;
-                qi = ec_laplace_decode(rd, (prob_model[pi] as u32) << 7, (prob_model[pi + 1] as u32) << 6);
+                ec_laplace_decode(
+                    rd,
+                    (prob_model[pi] as u32) << 7,
+                    (prob_model[pi + 1] as u32) << 6,
+                )
             }
             else if budget - tell >= 2 {
                 let q = rd.dec_icdf(&SMALL_ENERGY_ICDF, 2);
-                qi = (q >> 1) ^ -(q & 1);
+                (q >> 1) ^ -(q & 1)
             }
             else if budget - tell >= 1 {
-                qi = -(rd.dec_bit_logp(1) as i32);
+                -(rd.dec_bit_logp(1) as i32)
             }
             else {
-                qi = -1;
-            }
+                -1
+            };
             let q = qi as f32;
 
             let idx = (i + c * nb_ebands) as usize;
@@ -210,8 +219,9 @@ pub fn unquant_energy_finalise(
             }
             for c in 0..channels {
                 let q2 = rd.dec_bits(1) as i32;
-                let offset =
-                    (q2 as f32 - 0.5) * ((1i32 << (14 - fine_quant[i as usize] - 1)) as f32) * (1.0 / 16384.0);
+                let offset = (q2 as f32 - 0.5)
+                    * ((1i32 << (14 - fine_quant[i as usize] - 1)) as f32)
+                    * (1.0 / 16384.0);
                 old_e_bands[(i + c * nb_ebands) as usize] += offset;
                 bits_left -= 1;
             }
@@ -221,7 +231,14 @@ pub fn unquant_energy_finalise(
 }
 
 /// C: `amp2Log2` (used indirectly by anti-collapse and denormalisation on the decode side).
-pub fn amp2_log2(mode: &CeltMode, effective_end: i32, end: i32, band_e: &[f32], band_log_e: &mut [f32], channels: i32) {
+pub fn amp2_log2(
+    mode: &CeltMode,
+    effective_end: i32,
+    end: i32,
+    band_e: &[f32],
+    band_log_e: &mut [f32],
+    channels: i32,
+) {
     let nb_ebands = mode.nb_ebands;
     for c in 0..channels {
         for i in 0..effective_end {

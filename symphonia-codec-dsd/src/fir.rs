@@ -102,6 +102,10 @@ impl FirDecimator {
 
     /// Bessel function I0 (zeroth order, first kind)
     /// Used for Kaiser window calculation
+    ///
+    /// This deliberately keeps its own converging series rather than the shared fixed-length one
+    /// in `symphonia_core::dsp::window::bessel_i0`: the pinned PCM output hashes depend on its
+    /// exact rounding.
     fn bessel_i0(x: f64) -> f64 {
         let mut sum = 1.0;
         let mut term = 1.0;

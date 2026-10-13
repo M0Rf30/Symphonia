@@ -4,26 +4,22 @@ use symphonia::core::codecs::audio::{AudioCodecParameters, well_known::CODEC_ID_
 use symphonia::default::codecs::VorbisDecoder;
 use symphonia_fuzz::fuzz_audio_decoder;
 
-fuzz_target!(|data: Vec<u8>| {
+fuzz_target!(|data: &[u8]| {
+    // The Vorbis decoder requires valid identification, comment, and setup headers in
+    // extra_data. The first byte selects how much of the remaining input is the headers; the
+    // remainder is fed as an audio packet, so the packet decode path is reachable when the
+    // fuzzer produces valid headers.
+    let Some((&len_sel, rest)) = data.split_first()
+    else {
+        return;
+    };
+
+    let header_len = (usize::from(len_sel) * rest.len() / 255).min(rest.len());
+    let (header, packet_data) = rest.split_at(header_len);
+
     let mut codec_params = AudioCodecParameters::new();
     codec_params.for_codec(CODEC_ID_VORBIS);
+    codec_params.extra_data = Some(header.into());
 
-    // Vorbis decoder requires valid setup headers in extra_data.
-    // Since these are complex, we feed the fuzz data into extra_data.
-    // If the fuzzer manages to generate valid headers, the decoder is created,
-    // and we call decode with an empty packet (or remaining data if we implemented splitting).
-    // For now, we focus on fuzzing the header parser (try_new).
-
-    // Check if we have enough data to potentially be a header.
-    if data.is_empty() {
-        return;
-    }
-
-    codec_params.extra_data = Some(data.clone().into_boxed_slice());
-
-    // If we successfully created a decoder (fuzzer guessed valid headers!),
-    // we try to decode an empty packet or we could try to split the data.
-    // Given the complexity, reaching this point is a success for the fuzzer.
-    // We pass an empty packet just to exercise the decode path slightly.
-    fuzz_audio_decoder::<VorbisDecoder>(&codec_params, vec![]);
+    fuzz_audio_decoder::<VorbisDecoder>(&codec_params, packet_data.to_vec());
 });

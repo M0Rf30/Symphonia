@@ -226,6 +226,30 @@ pub mod write {
     /// The length of the ID3v1 "enhanced" tag ("TAG+") that may immediately precede an ID3v1 tag.
     pub const ID3V1_ENHANCED_TAG_LEN: usize = super::ID3V1_ENHANCED_LEN;
 
+    /// Returns the start of an enhanced ID3v1 tag ("TAG+") that ends at `tag_start`, if there is
+    /// one beginning at or after `floor`.
+    ///
+    /// # Errors
+    ///
+    /// Any I/O error of `src`.
+    pub fn find_enhanced_start<R: std::io::Read + std::io::Seek>(
+        src: &mut R,
+        tag_start: u64,
+        floor: u64,
+    ) -> std::io::Result<Option<u64>> {
+        let Some(start) =
+            tag_start.checked_sub(ID3V1_ENHANCED_TAG_LEN as u64).filter(|&s| s >= floor)
+        else {
+            return Ok(None);
+        };
+
+        let mut marker = [0u8; 4];
+        src.seek(std::io::SeekFrom::Start(start))?;
+        src.read_exact(&mut marker)?;
+
+        Ok((&marker == b"TAG+").then_some(start))
+    }
+
     /// Write `text` into `field`: encoded as Windows-1252 (characters that cannot be represented
     /// become `?`), truncated to the size of the field and padded with NULs.
     fn put_text(field: &mut [u8], text: &str) {

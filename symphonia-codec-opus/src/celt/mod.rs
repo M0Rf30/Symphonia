@@ -24,6 +24,7 @@
 //! filtering, and PLC (which needs pitch search/LPC extrapolation, not entropy decoding).
 
 pub mod bands;
+#[allow(clippy::module_inception)]
 pub mod celt;
 pub mod cwrs;
 pub mod decoder;

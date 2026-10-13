@@ -5,6 +5,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+use symphonia_common::mpeg::audio::apev2::{APEV2_FOOTER_LEN, Apev2Footer};
 use symphonia_common::xiph::audio::flac::StreamInfo;
 use symphonia_core::checksum::Crc16Ansi;
 use symphonia_core::errors::{Error, Result};
@@ -330,17 +331,16 @@ fn len_without_trailing_tag(buf: &[u8]) -> usize {
         return len - 128;
     }
 
-    // APEv2: a 32-byte footer ending the stream with the magic "APETAGEX". The footer's size field
-    // covers the tag items plus the footer; a matching header (a further 32 bytes) precedes them
-    // when the "has header" flag is set.
-    if len >= 32 && &buf[len - 32..len - 24] == b"APETAGEX" {
-        let size = u32::from_le_bytes([buf[len - 20], buf[len - 19], buf[len - 18], buf[len - 17]])
-            as usize;
-        let flags = u32::from_le_bytes([buf[len - 12], buf[len - 11], buf[len - 10], buf[len - 9]]);
-        let has_header = flags & 0x8000_0000 != 0;
-        let total = size + if has_header { 32 } else { 0 };
-        if total >= 32 && total <= len {
-            return len - total;
+    // APEv2: a 32-byte footer ending the stream. The footer's size field covers the tag items plus
+    // the footer; a matching header (a further 32 bytes) precedes them when the "has header" flag
+    // is set.
+    if let Some(footer) =
+        len.checked_sub(APEV2_FOOTER_LEN).and_then(|p| Apev2Footer::parse(&buf[p..]))
+    {
+        if let Ok(total) = usize::try_from(footer.total_len()) {
+            if total <= len {
+                return len - total;
+            }
         }
     }
 
@@ -371,6 +371,8 @@ pub struct PacketParser {
     fsma: MovingAverage<4>,
     /// Packet builder.
     builder: PacketBuilder,
+    /// Scratch buffer for fragment reads.
+    scratch: Vec<u8>,
 }
 
 impl PacketParser {
@@ -384,7 +386,7 @@ impl PacketParser {
     /// it. If a fragment cannot be read, then the reader has lost synchronization and must be
     /// resynchronized.
     fn try_read_fragment<B>(
-        &self,
+        &mut self,
         reader: &mut B,
         avg_frame_size: usize,
     ) -> Result<Option<Fragment>>
@@ -398,8 +400,12 @@ impl PacketParser {
         // read to synchronize to the next frame header.
         let init_read_size = avg_frame_size.clamp(1024, 32768) + FLAC_MAX_FRAME_HEADER_SIZE;
 
-        // Buffer in which the fragment will be read.
-        let mut buf: Vec<u8> = vec![0; init_read_size];
+        // Scratch buffer in which the fragment will be read. Only the newly grown portion is
+        // zeroed.
+        let mut buf = std::mem::take(&mut self.scratch);
+        if buf.len() < init_read_size {
+            buf.resize(init_read_size, 0);
+        }
 
         // Do the initial read.
         //
@@ -483,10 +489,12 @@ impl PacketParser {
         //     end - size
         // );
 
-        // Truncate the buffer at the start of the new frame header.
-        buf.truncate(size);
+        // The fragment ends at the start of the new frame header.
+        let fragment = Fragment::new(Box::from(&buf[..size]));
 
-        Ok(Some(Fragment::new(buf.into_boxed_slice())))
+        self.scratch = buf;
+
+        Ok(Some(fragment))
     }
 
     /// Reads a fragment using the reader and performs resynchronization when necessary.
@@ -802,6 +810,25 @@ mod tests {
         footer.extend_from_slice(&[0u8; 8]); // reserved
         let buf = [audio.clone(), items, footer].concat();
         assert_eq!(len_without_trailing_tag(&buf), audio.len());
+    }
+
+    #[test]
+    fn rejects_invalid_apev2_footer() {
+        let mut footer = Vec::new();
+        footer.extend_from_slice(b"APETAGEX");
+        footer.extend_from_slice(&2000u32.to_le_bytes());
+        footer.extend_from_slice(&0u32.to_le_bytes()); // size smaller than the footer
+        footer.extend_from_slice(&0u32.to_le_bytes());
+        footer.extend_from_slice(&0u32.to_le_bytes());
+        footer.extend_from_slice(&[0u8; 8]);
+        let buf = [vec![9u8; 40], footer.clone()].concat();
+        assert_eq!(len_without_trailing_tag(&buf), buf.len());
+
+        // A footer flagged as a header is not a footer.
+        footer[12..16].copy_from_slice(&32u32.to_le_bytes());
+        footer[20..24].copy_from_slice(&(1u32 << 29).to_le_bytes());
+        let buf = [vec![9u8; 40], footer].concat();
+        assert_eq!(len_without_trailing_tag(&buf), buf.len());
     }
 
     #[test]

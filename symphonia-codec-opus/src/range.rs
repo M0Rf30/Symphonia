@@ -15,29 +15,30 @@
 //! diffed function-by-function against the reference implementation.
 
 /// Number of bits output/consumed at a time. C: `EC_SYM_BITS`.
-const EC_SYM_BITS: u32 = 8;
+pub(crate) const EC_SYM_BITS: u32 = 8;
 /// Total number of bits in each state register. C: `EC_CODE_BITS`.
-const EC_CODE_BITS: u32 = 32;
+pub(crate) const EC_CODE_BITS: u32 = 32;
 /// Maximum symbol value. C: `EC_SYM_MAX`.
-const EC_SYM_MAX: u32 = (1 << EC_SYM_BITS) - 1;
+pub(crate) const EC_SYM_MAX: u32 = (1 << EC_SYM_BITS) - 1;
 /// Bits to shift a symbol into the high-order position. C: `EC_CODE_SHIFT`.
-const EC_CODE_SHIFT: u32 = EC_CODE_BITS - EC_SYM_BITS - 1;
+#[cfg(any(test, feature = "encoder"))]
+pub(crate) const EC_CODE_SHIFT: u32 = EC_CODE_BITS - EC_SYM_BITS - 1;
 /// Carry bit of the high-order range symbol. C: `EC_CODE_TOP`.
-const EC_CODE_TOP: u32 = 1u32 << (EC_CODE_BITS - 1);
+pub(crate) const EC_CODE_TOP: u32 = 1u32 << (EC_CODE_BITS - 1);
 /// Low-order bit of the high-order range symbol. C: `EC_CODE_BOT`.
-const EC_CODE_BOT: u32 = EC_CODE_TOP >> EC_SYM_BITS;
+pub(crate) const EC_CODE_BOT: u32 = EC_CODE_TOP >> EC_SYM_BITS;
 /// Number of bits available for the last, partial symbol in the code field. C: `EC_CODE_EXTRA`.
 const EC_CODE_EXTRA: u32 = (EC_CODE_BITS - 2) % EC_SYM_BITS + 1;
 /// Number of bits used for the range-coded part of unsigned integers. C: `EC_UINT_BITS`.
-const EC_UINT_BITS: u32 = 8;
+pub(crate) const EC_UINT_BITS: u32 = 8;
 /// Fractional-bit resolution, i.e. `1 << BITRES` == 8 => 1/8th bit. C: `BITRES`.
 pub const BITRES: u32 = 3;
 /// Size in bits of the raw-bit window register. C: `EC_WINDOW_SIZE`.
 const EC_WINDOW_SIZE: u32 = 32;
 
+/// C: `EC_ILOG` (`celt/ecintrin.h`), i.e. `1 + floor(log2(v))`, `0` for `v == 0`.
 #[inline]
-fn ilog(v: u32) -> i32 {
-    // C: `EC_ILOG`, i.e. `1 + floor(log2(v))`, undefined (here: 0) for `v == 0`.
+pub(crate) fn ec_ilog(v: u32) -> i32 {
     32 - v.leading_zeros() as i32
 }
 
@@ -201,7 +202,7 @@ impl<'a> RangeDecoder<'a> {
     pub fn dec_uint(&mut self, ft: u32) -> u32 {
         assert!(ft > 1);
         let ft = ft - 1;
-        let ftb = ilog(ft);
+        let ftb = ec_ilog(ft);
         if ftb > EC_UINT_BITS as i32 {
             let ftb = ftb - EC_UINT_BITS as i32;
             let ft_s = (ft >> ftb) + 1;
@@ -248,14 +249,14 @@ impl<'a> RangeDecoder<'a> {
 
     /// C: `ec_tell`. Number of bits "used" so far (always a slight over-estimate).
     pub fn tell(&self) -> i32 {
-        self.nbits_total - ilog(self.rng)
+        self.nbits_total - ec_ilog(self.rng)
     }
 
     /// C: `ec_tell_frac`. As [`Self::tell`] but scaled by `2**BITRES`.
     pub fn tell_frac(&self) -> u32 {
         const CORRECTION: [u32; 8] = [35733, 38967, 42495, 46340, 50535, 55109, 60097, 65535];
         let nbits = (self.nbits_total as u32) << BITRES;
-        let l = ilog(self.rng);
+        let l = ec_ilog(self.rng);
         let r = self.rng >> (l - 16);
         let mut b = (r >> 12).wrapping_sub(8);
         b += (r > CORRECTION[b as usize]) as u32;
@@ -296,7 +297,9 @@ impl<'a> RangeDecoder<'a> {
 /// A test-only range ENCODER, ported from libopus `celt/entenc.c`. Used exclusively by unit
 /// tests to build inputs for [`RangeDecoder`] and to cross-check `tell`/`tell_frac`.
 pub(crate) mod test_encoder {
-    use super::{EC_CODE_BOT, EC_CODE_SHIFT, EC_CODE_TOP, EC_SYM_BITS, EC_SYM_MAX, EC_UINT_BITS, ilog};
+    use super::{
+        EC_CODE_BOT, EC_CODE_SHIFT, EC_CODE_TOP, EC_SYM_BITS, EC_SYM_MAX, EC_UINT_BITS, ec_ilog,
+    };
 
     pub struct RangeEncoder {
         buf: Vec<u8>,
@@ -308,7 +311,6 @@ pub(crate) mod test_encoder {
         val: u32,
         ext: u32,
         rem: i32,
-        error: bool,
     }
 
     impl RangeEncoder {
@@ -323,7 +325,6 @@ pub(crate) mod test_encoder {
                 val: 0,
                 ext: 0,
                 rem: -1,
-                error: false,
             }
         }
 
@@ -404,9 +405,8 @@ pub(crate) mod test_encoder {
         pub fn enc_icdf(&mut self, s: i32, icdf: &[u8], ftb: u32) {
             let r = self.rng >> ftb;
             if s > 0 {
-                self.val = self
-                    .val
-                    .wrapping_add(self.rng - r.wrapping_mul(icdf[(s - 1) as usize] as u32));
+                self.val =
+                    self.val.wrapping_add(self.rng - r.wrapping_mul(icdf[(s - 1) as usize] as u32));
                 self.rng = r.wrapping_mul(icdf[(s - 1) as usize] as u32 - icdf[s as usize] as u32);
             }
             else {
@@ -418,7 +418,7 @@ pub(crate) mod test_encoder {
         pub fn enc_uint(&mut self, fl: u32, ft: u32) {
             assert!(ft > 1);
             let ft = ft - 1;
-            let ftb = ilog(ft);
+            let ftb = ec_ilog(ft);
             if ftb > EC_UINT_BITS as i32 {
                 let ftb = ftb - EC_UINT_BITS as i32;
                 let ft_s = (ft >> ftb) + 1;
@@ -453,13 +453,13 @@ pub(crate) mod test_encoder {
         }
 
         pub fn tell(&self) -> i32 {
-            self.nbits_total - ilog(self.rng)
+            self.nbits_total - ec_ilog(self.rng)
         }
 
         pub fn tell_frac(&self) -> u32 {
             const CORRECTION: [u32; 8] = [35733, 38967, 42495, 46340, 50535, 55109, 60097, 65535];
             let nbits = (self.nbits_total as u32) << super::BITRES;
-            let l = ilog(self.rng);
+            let l = ec_ilog(self.rng);
             let r = self.rng >> (l - 16);
             let mut b = (r >> 12).wrapping_sub(8);
             b += (r > CORRECTION[b as usize]) as u32;
@@ -469,7 +469,7 @@ pub(crate) mod test_encoder {
 
         /// C: `ec_enc_done`. Finalizes the stream and returns the packed bytes.
         pub fn done(mut self) -> Vec<u8> {
-            let mut l = super::EC_CODE_BITS as i32 - ilog(self.rng);
+            let mut l = super::EC_CODE_BITS as i32 - ec_ilog(self.rng);
             let mut msk = (EC_CODE_TOP - 1) >> l;
             let mut end = (self.val.wrapping_add(msk)) & !msk;
             if (end | msk) >= self.val.wrapping_add(self.rng) {
@@ -508,9 +508,9 @@ pub(crate) mod test_encoder {
 
 #[cfg(test)]
 mod tests {
-    use super::test_encoder::RangeEncoder;
     use super::RangeDecoder;
-    use rand::Rng;
+    use super::test_encoder::RangeEncoder;
+    use rand::RngExt;
     use rand::SeedableRng;
 
     #[test]

@@ -9,7 +9,9 @@ use crate::common::SideData;
 
 use super::{MapResult, Mapper, PacketParser};
 
-use symphonia_common::xiph::audio::flac::{MetadataBlockHeader, MetadataBlockType, StreamInfo};
+use symphonia_common::xiph::audio::flac::{
+    MetadataBlockHeader, MetadataBlockType, StreamInfo, read_utf8_be_u64,
+};
 use symphonia_core::checksum::Crc8Ccitt;
 use symphonia_core::codecs::CodecParameters;
 use symphonia_core::codecs::audio::well_known::CODEC_ID_FLAC;
@@ -124,31 +126,6 @@ pub fn detect(serial: u32, buf: &[u8]) -> Result<Option<Box<dyn Mapper>>> {
     Ok(Some(mapper))
 }
 
-/// Decodes a big-endian unsigned integer encoded via extended UTF8.
-fn utf8_decode_be_u64<B: ReadBytes>(src: &mut B) -> Result<Option<u64>> {
-    // NOTE: See the symphonia-bundle-flac crate for a detailed description of this function.
-    let mut state = u64::from(src.read_u8()?);
-
-    let mask: u8 = match state {
-        0x00..=0x7f => return Ok(Some(state)),
-        0xc0..=0xdf => 0x1f,
-        0xe0..=0xef => 0x0f,
-        0xf0..=0xf7 => 0x07,
-        0xf8..=0xfb => 0x03,
-        0xfc..=0xfd => 0x01,
-        0xfe => 0x00,
-        _ => return Ok(None),
-    };
-
-    state &= u64::from(mask);
-
-    for _ in 2..mask.leading_zeros() {
-        state = (state << 6) | u64::from(src.read_u8()? & 0x3f);
-    }
-
-    Ok(Some(state))
-}
-
 #[allow(dead_code)]
 struct FrameHeader {
     ts: u64,
@@ -181,7 +158,7 @@ fn decode_frame_header(buf: &[u8]) -> Result<FrameHeader> {
 
     let block_sequence = if is_fixed_block_size {
         // Fixed block size stream sequence blocks by a frame number.
-        let frame = match utf8_decode_be_u64(&mut reader_crc8)? {
+        let frame = match read_utf8_be_u64(&mut reader_crc8)? {
             Some(frame) => frame,
             None => return decode_error("ogg (flac): frame sequence number is not valid"),
         };
@@ -195,7 +172,7 @@ fn decode_frame_header(buf: &[u8]) -> Result<FrameHeader> {
     }
     else {
         // Variable block size streams sequence blocks by a sample number.
-        let sample = match utf8_decode_be_u64(&mut reader_crc8)? {
+        let sample = match read_utf8_be_u64(&mut reader_crc8)? {
             Some(sample) => sample,
             None => return decode_error("ogg: sample sequence number is not valid"),
         };

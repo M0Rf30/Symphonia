@@ -15,6 +15,7 @@ use symphonia_common::mpeg::video::{
     AVCDecoderConfigurationRecord, HEVCDecoderConfigurationRecord,
 };
 use symphonia_common::xiph::audio::flac::{MetadataBlockHeader, MetadataBlockType, StreamInfo};
+use symphonia_common::xiph::audio::vorbis::unpack_xiph_laced_extradata;
 use symphonia_core::audio::Channels;
 use symphonia_core::audio::sample::SampleFormat;
 use symphonia_core::codecs::audio::AudioCodecParameters;
@@ -28,7 +29,6 @@ use symphonia_core::codecs::{CodecId, CodecParameters, CodecProfile};
 use symphonia_core::errors::{Error, Result, decode_error};
 use symphonia_core::io::{BufReader, ReadBytes};
 
-use crate::lacing::read_xiph_sizes;
 use crate::segment::TrackElement;
 
 pub(crate) fn make_track_codec_params(track: TrackElement) -> Result<Option<CodecParameters>> {
@@ -66,8 +66,16 @@ fn make_audio_codec_params(
         codec_params.with_profile(profile);
     }
 
+    let channels = u16::try_from(audio.channels.get())
+        .map_err(|_| Error::Unsupported("mkv: channel count too large"))?;
+
+    // The sampling frequency is validated to be positive, but may be infinite.
+    if !audio.sampling_frequency.is_finite() {
+        return Err(Error::Unsupported("mkv: sampling frequency is not finite"));
+    }
+
     codec_params.with_sample_rate(audio.sampling_frequency.round() as u32);
-    codec_params.with_channels(Channels::Discrete(audio.channels.get() as u16));
+    codec_params.with_channels(Channels::Discrete(channels));
 
     let format = audio.bit_depth.and_then(|bits| match bits.get() {
         8 => Some(SampleFormat::S8),
@@ -181,53 +189,12 @@ fn make_subtitle_codec_params(
 
 // Extra data parsing
 fn vorbis_extra_data_from_codec_private(extra: &[u8]) -> Result<Box<[u8]>> {
-    const VORBIS_PACKET_TYPE_IDENTIFICATION: u8 = 1;
-    const VORBIS_PACKET_TYPE_SETUP: u8 = 5;
+    // Private Data for this codec is Xiph laced: the identification, comment, and setup headers.
+    // The layout expected by the Vorbis codec is the identification header followed by the setup
+    // header.
+    let (ident_header, setup_header) = unpack_xiph_laced_extradata(extra)?;
 
-    // Private Data for this codec has the following layout:
-    // - 1 byte that represents number of packets minus one;
-    // - Xiph coded lengths of packets, length of the last packet must be deduced (as in Xiph lacing)
-    // - packets in order:
-    //    - The Vorbis identification header
-    //    - Vorbis comment header
-    //    - codec setup header
-
-    let mut reader = BufReader::new(extra);
-    let packet_count = reader.read_byte()? as usize;
-    let packet_lengths = read_xiph_sizes(&mut reader, packet_count)?;
-
-    let mut packets = Vec::new();
-    for length in packet_lengths {
-        packets.push(reader.read_boxed_slice_exact(length as usize)?);
-    }
-
-    let last_packet_length = extra.len() - reader.pos() as usize;
-    packets.push(reader.read_boxed_slice_exact(last_packet_length)?);
-
-    let mut ident_header = None;
-    let mut setup_header = None;
-
-    for packet in packets {
-        match packet.first().copied() {
-            Some(VORBIS_PACKET_TYPE_IDENTIFICATION) => {
-                ident_header = Some(packet);
-            }
-            Some(VORBIS_PACKET_TYPE_SETUP) => {
-                setup_header = Some(packet);
-            }
-            _ => {
-                log::debug!("unsupported vorbis packet type");
-            }
-        }
-    }
-
-    // This is layout expected currently by Vorbis codec.
-    Ok([
-        ident_header.ok_or(Error::DecodeError("mkv: missing vorbis identification packet"))?,
-        setup_header.ok_or(Error::DecodeError("mkv: missing vorbis setup packet"))?,
-    ]
-    .concat()
-    .into_boxed_slice())
+    Ok([ident_header, setup_header].concat().into_boxed_slice())
 }
 
 fn flac_extra_data_from_codec_private(codec_private: &[u8]) -> Result<Box<[u8]>> {
@@ -398,5 +365,57 @@ fn get_codec_profile_and_level(track: &TrackElement) -> (Option<CodecProfile>, O
 
         // Other Codecs
         _ => (None, None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU64;
+
+    use symphonia_core::errors::Error;
+
+    use super::make_track_codec_params;
+    use crate::segment::{AudioElement, MatroskaTicks, TrackElement};
+
+    fn audio_track(channels: u64, sampling_frequency: f64) -> TrackElement {
+        TrackElement {
+            number: NonZeroU64::MIN,
+            uid: NonZeroU64::MIN,
+            lang: "eng".into(),
+            lang_bcp47: None,
+            codec_id: "A_AC3".into(),
+            codec_private: None,
+            codec_delay: MatroskaTicks::default(),
+            block_addition_mappings: Vec::new(),
+            audio: Some(AudioElement {
+                sampling_frequency,
+                output_sampling_frequency: None,
+                channels: NonZeroU64::new(channels).expect("non-zero channel count"),
+                bit_depth: None,
+            }),
+            video: None,
+            default_duration: None,
+            default_decoded_field_duration: None,
+            track_timestamp_scale: 1.0,
+            seek_pre_roll: MatroskaTicks::default(),
+            flags: Default::default(),
+        }
+    }
+
+    #[test]
+    fn verify_channel_count_overflow_is_rejected() {
+        assert!(matches!(
+            make_track_codec_params(audio_track(65537, 48000.0)),
+            Err(Error::Unsupported(_))
+        ));
+        assert!(matches!(make_track_codec_params(audio_track(2, 48000.0)), Ok(Some(_))));
+    }
+
+    #[test]
+    fn verify_infinite_sampling_frequency_is_rejected() {
+        assert!(matches!(
+            make_track_codec_params(audio_track(2, f64::INFINITY)),
+            Err(Error::Unsupported(_))
+        ));
     }
 }

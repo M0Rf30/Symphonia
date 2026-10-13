@@ -23,14 +23,15 @@ use symphonia_core::io::{MediaSourceStream, ReadBytes, ScopedStream, SeekBuffere
 use symphonia_core::meta::well_known::{METADATA_ID_APEV1, METADATA_ID_APEV2};
 use symphonia_core::meta::{
     MetadataBuffer, MetadataBuilder, MetadataInfo, MetadataOptions, MetadataReader, RawTag,
-    RawValue, StandardTag, StandardVisualKey, Tag, Visual,
+    RawValue, StandardTag, StandardVisualKey, Tag,
 };
 use symphonia_core::support_metadata;
 
 use lazy_static::lazy_static;
 use symphonia_core::util::text;
 
-use crate::utils::images::{ImageInfo, try_get_image_info};
+use crate::utils::ape::ApeTagFlags;
+use crate::utils::images::{ImageInfo, try_get_image_info, visual_from_image_data};
 use crate::utils::std_tag::*;
 
 lazy_static! {
@@ -131,33 +132,35 @@ lazy_static! {
     };
 }
 
-lazy_static! {
-    static ref APE_VISUAL_TAG_MAP: HashMap<&'static str, StandardVisualKey> = {
-        let mut m = HashMap::new();
-        m.insert("cover art (other)", StandardVisualKey::Other);
-        m.insert("cover art (png icon)", StandardVisualKey::FileIcon);
-        m.insert("cover art (icon)", StandardVisualKey::OtherIcon);
-        m.insert("cover art (front)", StandardVisualKey::FrontCover);
-        m.insert("cover art (back)", StandardVisualKey::BackCover);
-        m.insert("cover art (leaflet)", StandardVisualKey::Leaflet);
-        m.insert("cover art (media)", StandardVisualKey::Media);
-        m.insert("cover art (lead artist)", StandardVisualKey::LeadArtistPerformerSoloist);
-        m.insert("cover art (artist)", StandardVisualKey::ArtistPerformer);
-        m.insert("cover art (conductor)", StandardVisualKey::Conductor);
-        m.insert("cover art (band)", StandardVisualKey::BandOrchestra);
-        m.insert("cover art (composer)", StandardVisualKey::Composer);
-        m.insert("cover art (lyricist)", StandardVisualKey::Lyricist);
-        m.insert("cover art (recording location)", StandardVisualKey::RecordingLocation);
-        m.insert("cover art (during recording)", StandardVisualKey::RecordingSession);
-        m.insert("cover art (during performance)", StandardVisualKey::Performance);
-        m.insert("cover art (video capture)", StandardVisualKey::ScreenCapture);
-        m.insert("cover art (fish)", StandardVisualKey::Other);
-        m.insert("cover art (illustration)", StandardVisualKey::Illustration);
-        m.insert("cover art (band logotype)", StandardVisualKey::BandArtistLogo);
-        m.insert("cover art (publisher logotype)", StandardVisualKey::PublisherStudioLogo);
+/// The item keys of cover art items and the usage of the visual of each. The first key of a usage
+/// is the key that is written for it.
+const COVER_ART_KEYS: &[(&str, StandardVisualKey)] = &[
+    ("Cover Art (Other)", StandardVisualKey::Other),
+    ("Cover Art (PNG Icon)", StandardVisualKey::FileIcon),
+    ("Cover Art (Icon)", StandardVisualKey::OtherIcon),
+    ("Cover Art (Front)", StandardVisualKey::FrontCover),
+    ("Cover Art (Back)", StandardVisualKey::BackCover),
+    ("Cover Art (Leaflet)", StandardVisualKey::Leaflet),
+    ("Cover Art (Media)", StandardVisualKey::Media),
+    ("Cover Art (Lead Artist)", StandardVisualKey::LeadArtistPerformerSoloist),
+    ("Cover Art (Artist)", StandardVisualKey::ArtistPerformer),
+    ("Cover Art (Conductor)", StandardVisualKey::Conductor),
+    ("Cover Art (Band)", StandardVisualKey::BandOrchestra),
+    ("Cover Art (Composer)", StandardVisualKey::Composer),
+    ("Cover Art (Lyricist)", StandardVisualKey::Lyricist),
+    ("Cover Art (Recording Location)", StandardVisualKey::RecordingLocation),
+    ("Cover Art (During Recording)", StandardVisualKey::RecordingSession),
+    ("Cover Art (During Performance)", StandardVisualKey::Performance),
+    ("Cover Art (Video Capture)", StandardVisualKey::ScreenCapture),
+    ("Cover Art (Fish)", StandardVisualKey::Other),
+    ("Cover Art (Illustration)", StandardVisualKey::Illustration),
+    ("Cover Art (Band Logotype)", StandardVisualKey::BandArtistLogo),
+    ("Cover Art (Publisher Logotype)", StandardVisualKey::PublisherStudioLogo),
+];
 
-        m
-    };
+lazy_static! {
+    static ref APE_VISUAL_TAG_MAP: HashMap<String, StandardVisualKey> =
+        COVER_ART_KEYS.iter().map(|&(key, usage)| (key.to_ascii_lowercase(), usage)).collect();
 }
 
 const APEV1_METADATA_INFO: MetadataInfo =
@@ -221,14 +224,12 @@ impl ApeHeader {
                 (size, true, false, false)
             }
             ApeVersion::V2 => {
-                let has_header = flags & 0x8000_0000 != 0;
-                let has_footer = flags & 0x4000_0000 != 0;
-                let is_header = flags & 0x2000_0000 != 0;
+                let flags = ApeTagFlags::from_bits(flags);
 
                 // The header size is not included in the size written to the tag.
-                let real_size = size + if has_header { 32 } else { 0 };
+                let real_size = flags.tag_len(size);
 
-                (real_size, has_footer, has_header, is_header)
+                (real_size, flags.has_footer, flags.has_header, flags.is_header)
             }
         };
 
@@ -401,14 +402,14 @@ impl MetadataReader for ApeReader<'_> {
                     // alter the image buffer if extra information was attached to it.
                     let (data, image_info) = try_parse_image_data(data, &mut tags);
 
-                    builder.add_visual(Visual {
-                        media_type: image_info.as_ref().map(|info| info.media_type.clone()),
-                        dimensions: image_info.as_ref().map(|info| info.dimensions),
-                        color_mode: image_info.as_ref().map(|info| info.color_mode),
-                        usage: Some(std_key),
-                        tags,
+                    builder.add_visual(visual_from_image_data(
                         data,
-                    });
+                        image_info,
+                        None,
+                        None,
+                        Some(std_key),
+                        tags,
+                    ));
 
                     continue;
                 }
@@ -473,9 +474,13 @@ impl MetadataReader for ApeReader<'_> {
     }
 }
 
+/// The maximum length of an item key in bytes.
+const MAX_KEY_LEN: usize = 255;
+
 fn read_key<B: ReadBytes>(reader: &mut B) -> Result<String> {
     // A key is recommended to be between 2-16 characters.
     let mut key = String::with_capacity(16);
+    let mut len = 0;
 
     loop {
         let c = char::from(reader.read_u8()?);
@@ -485,7 +490,11 @@ fn read_key<B: ReadBytes>(reader: &mut B) -> Result<String> {
             break;
         }
 
-        // TODO: The maximum allowed key length is 255 characters. Drop characters or error out?
+        len += 1;
+
+        if len > MAX_KEY_LEN {
+            return decode_error("ape: item key is too long");
+        }
 
         // A key may only contain ASCII characters from 0x20 ' ' up to 0x7e '~'.
         if text::filter::ascii_text(&c) {
@@ -548,4 +557,44 @@ fn try_parse_image_data(buf: Box<[u8]>, tags: &mut Vec<Tag>) -> (Box<[u8]>, Opti
     // An image could not be detected. The image format may be unsupported, or the buffer contains
     // something else. Return the original buffer.
     (buf, None)
+}
+
+#[cfg(test)]
+mod tests {
+    use symphonia_core::errors::Error;
+    use symphonia_core::io::{BufReader, FiniteStream};
+
+    use super::{MAX_KEY_LEN, read_key};
+
+    #[test]
+    fn verify_read_key_max_length() {
+        let mut buf = vec![b'a'; MAX_KEY_LEN];
+        buf.push(0);
+
+        let key = read_key(&mut BufReader::new(&buf)).unwrap();
+        assert_eq!(key.len(), MAX_KEY_LEN);
+    }
+
+    #[test]
+    fn verify_read_key_too_long_is_an_error() {
+        let mut buf = vec![b'a'; MAX_KEY_LEN + 1];
+        buf.push(0);
+
+        assert!(matches!(read_key(&mut BufReader::new(&buf)), Err(Error::DecodeError(_))));
+
+        // A key without a null-terminator must stop at the limit rather than read to the end.
+        let buf = vec![b'a'; 1024];
+        let mut reader = BufReader::new(&buf);
+
+        assert!(matches!(read_key(&mut reader), Err(Error::DecodeError(_))));
+        assert_eq!(reader.bytes_available(), (1024 - MAX_KEY_LEN - 1) as u64);
+    }
+
+    #[test]
+    fn verify_read_key_counts_dropped_characters() {
+        let mut buf = vec![0xff; MAX_KEY_LEN + 1];
+        buf.push(0);
+
+        assert!(matches!(read_key(&mut BufReader::new(&buf)), Err(Error::DecodeError(_))));
+    }
 }

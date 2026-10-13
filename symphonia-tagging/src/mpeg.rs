@@ -31,12 +31,12 @@ use std::path::Path;
 
 use symphonia_core::io::MediaSourceStream;
 use symphonia_core::meta::{Tag, Visual};
-use symphonia_metadata::id3v1::write::{ID3V1_ENHANCED_TAG_LEN, ID3V1_TAG_LEN};
+use symphonia_metadata::id3v1::write::{ID3V1_TAG_LEN, find_enhanced_start};
 use symphonia_metadata::id3v2::write::{Existing, Version};
 use symphonia_metadata::{id3v1, id3v2};
 
 use crate::{
-    Error, Id3v1Policy, Id3v2Version, Result, WriteOptions, ape, copy_range, read_up_to,
+    Error, Id3v1Policy, Id3v2Version, Result, WriteOptions, ape, copy_range, read_at, read_up_to,
     replace_file,
 };
 
@@ -75,9 +75,7 @@ pub(crate) fn write(
             )));
         }
 
-        let mut tag = vec![0u8; tag_len as usize];
-        file.seek(SeekFrom::Start(audio_start))?;
-        file.read_exact(&mut tag)?;
+        let tag = read_at(&mut file, audio_start, tag_len)?;
 
         existing.parse_tag(&tag);
         audio_start += tag_len;
@@ -89,24 +87,17 @@ pub(crate) fn write(
 
     if len >= audio_start + ID3V1_TAG_LEN as u64 {
         let tag_start = len - ID3V1_TAG_LEN as u64;
-        let mut marker = [0u8; 4];
+        let mut marker = [0u8; 3];
 
         file.seek(SeekFrom::Start(tag_start))?;
-        file.read_exact(&mut marker[..3])?;
+        file.read_exact(&mut marker)?;
 
-        if &marker[..3] == b"TAG" {
+        if &marker == b"TAG" {
             has_id3v1 = true;
             tail_start = tag_start;
 
-            if let Some(enhanced_start) =
-                tag_start.checked_sub(ID3V1_ENHANCED_TAG_LEN as u64).filter(|&s| s >= audio_start)
-            {
-                file.seek(SeekFrom::Start(enhanced_start))?;
-                file.read_exact(&mut marker)?;
-
-                if &marker == b"TAG+" {
-                    tail_start = enhanced_start;
-                }
+            if let Some(enhanced_start) = find_enhanced_start(&mut file, tag_start, audio_start)? {
+                tail_start = enhanced_start;
             }
         }
     }
@@ -121,9 +112,7 @@ pub(crate) fn write(
     };
 
     if let Some(range) = &appended {
-        let mut tag = vec![0u8; (range.end - range.start) as usize];
-        file.seek(SeekFrom::Start(range.start))?;
-        file.read_exact(&mut tag)?;
+        let tag = read_at(&mut file, range.start, range.end - range.start)?;
         existing.parse_tag(&tag);
     }
 
@@ -135,8 +124,11 @@ pub(crate) fn write(
         Id3v2Version::Preserve => Version::V4,
     };
 
-    let id3v2_opts =
-        opts.id3v2_options(version, opts.padding, (audio_start > 0).then_some(audio_start as usize));
+    let id3v2_opts = opts.id3v2_options(
+        version,
+        opts.padding,
+        (audio_start > 0).then_some(audio_start as usize),
+    );
 
     let new_id3v2 = id3v2::write::serialize(tags, visuals, &existing, &id3v2_opts);
 
@@ -176,9 +168,8 @@ pub(crate) fn write(
         // appended tag precedes the APEv2 tag, which ends at `tail_start`.
         let mut pos = audio_start;
 
-        for range in [appended.as_ref(), ape_range.map(|r| r.start..r.end).as_ref()]
-            .into_iter()
-            .flatten()
+        for range in
+            [appended.as_ref(), ape_range.map(|r| r.start..r.end).as_ref()].into_iter().flatten()
         {
             if range.start > pos {
                 copy_range(src, out, pos, range.start - pos)?;

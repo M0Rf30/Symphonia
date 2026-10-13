@@ -14,7 +14,9 @@
 use crate::range::RangeDecoder;
 use crate::silk::code_signs::silk_decode_signs;
 use crate::silk::shell_coder::silk_shell_decoder;
-use crate::silk::structs::{MAX_NB_SHELL_BLOCKS, N_RATE_LEVELS, SHELL_CODEC_FRAME_LENGTH, SILK_MAX_PULSES};
+use crate::silk::structs::{
+    MAX_NB_SHELL_BLOCKS, N_RATE_LEVELS, SHELL_CODEC_FRAME_LENGTH, SILK_MAX_PULSES,
+};
 use crate::silk::tables::{LSB_ICDF, PULSES_PER_BLOCK_ICDF, RATE_LEVELS_ICDF};
 
 /// C: `silk_decode_pulses`. Decodes `pulses[0..frame_length]` (signed excitation pulses).
@@ -55,11 +57,17 @@ pub(crate) fn silk_decode_pulses(
     }
 
     // Shell decoding.
+    #[allow(clippy::needless_range_loop)] // index shared across several buffers, mirrors the C loop
     for i in 0..iter {
         let base = i * SHELL_CODEC_FRAME_LENGTH;
         if sum_pulses[i] > 0 {
-            silk_shell_decoder(&mut pulses[base..base + SHELL_CODEC_FRAME_LENGTH], rd, sum_pulses[i]);
-        } else {
+            silk_shell_decoder(
+                &mut pulses[base..base + SHELL_CODEC_FRAME_LENGTH],
+                rd,
+                sum_pulses[i],
+            );
+        }
+        else {
             for p in &mut pulses[base..base + SHELL_CODEC_FRAME_LENGTH] {
                 *p = 0;
             }

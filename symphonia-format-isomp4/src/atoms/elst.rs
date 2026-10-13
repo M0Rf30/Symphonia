@@ -7,8 +7,7 @@
 
 use symphonia_core::util::bits;
 
-use crate::atoms::{Atom, AtomHeader, AtomIterator, ReadAtom, Result};
-use crate::atoms::{decode_error, limits::*};
+use crate::atoms::{Atom, AtomHeader, AtomIterator, ReadAtom, Result, decode_error};
 
 /// Edit list entry.
 #[derive(Debug)]
@@ -35,13 +34,7 @@ impl Atom for ElstAtom {
             return decode_error("isomp4 (elst): invalid tkhd version");
         }
 
-        let entry_count = it.read_u32()?;
-
-        // Limit the maximum initial capacity to prevent malicious files from using all the
-        // available memory.
-        let mut entries = Vec::with_capacity(MAX_TABLE_INITIAL_CAPACITY.min(entry_count as usize));
-
-        for _ in 0..entry_count {
+        let entries = it.read_table(|it| {
             let (segment_duration, media_time) = match version {
                 0 => (
                     u64::from(it.read_u32()?),
@@ -54,13 +47,8 @@ impl Atom for ElstAtom {
             let media_rate_int = bits::sign_extend_leq16_to_i16(it.read_u16()?, 16);
             let media_rate_frac = bits::sign_extend_leq16_to_i16(it.read_u16()?, 16);
 
-            entries.push(ElstEntry {
-                segment_duration,
-                media_time,
-                media_rate_int,
-                media_rate_frac,
-            });
-        }
+            Ok(ElstEntry { segment_duration, media_time, media_rate_int, media_rate_frac })
+        })?;
 
         Ok(ElstAtom { entries })
     }

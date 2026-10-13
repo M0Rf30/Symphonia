@@ -24,7 +24,7 @@ use symphonia_core::units::{TimeBase, Timestamp};
 
 use crate::embedded::vorbis;
 use crate::utils::id3v2::get_visual_key_from_picture_type;
-use crate::utils::images::try_get_image_info;
+use crate::utils::images::{try_get_image_info, visual_from_image_data};
 
 #[cfg(feature = "write")]
 pub mod write;
@@ -65,8 +65,8 @@ pub fn read_flac_comment_block<B: ReadBytes>(
 pub fn read_flac_picture_block<B: ReadBytes>(reader: &mut B) -> Result<Visual> {
     let type_enc = reader.read_be_u32()?;
 
-    // Read the Media Type length in bytes.
-    // TODO: Apply a limit.
+    // Read the Media Type length in bytes. The read below allocates incrementally and fails at the
+    // end of the stream, so the allocation is bounded by the data actually present in the block.
     let media_type_len = reader.read_be_u32()? as usize;
 
     // Read the Media Type bytes
@@ -83,8 +83,7 @@ pub fn read_flac_picture_block<B: ReadBytes>(reader: &mut B) -> Result<Visual> {
 
     let mut tags = vec![];
 
-    // Read the description length in bytes.
-    // TODO: Apply a limit.
+    // Read the description length in bytes. Bounded by the data present, as with the media type.
     let desc_len = reader.read_be_u32()? as usize;
 
     // Read the description bytes.
@@ -115,8 +114,8 @@ pub fn read_flac_picture_block<B: ReadBytes>(reader: &mut B) -> Result<Visual> {
     // 0, the image does not used indexed colours.
     let _color_mode = reader.read_be_u32()?;
 
-    // Read the image data length in bytes.
-    // TODO: Apply a limit.
+    // Read the image data length in bytes. The read below allocates incrementally and fails at the
+    // end of the stream, so the allocation is bounded by the data actually present in the block.
     let data_len = reader.read_be_u32()? as usize;
 
     // Read the image data.
@@ -126,14 +125,14 @@ pub fn read_flac_picture_block<B: ReadBytes>(reader: &mut B) -> Result<Visual> {
     // will be preferred over what's been stated in the picture block.
     let image_info = try_get_image_info(&data);
 
-    Ok(Visual {
-        media_type: image_info.as_ref().map(|info| info.media_type.clone()).or(media_type),
-        dimensions: image_info.as_ref().map(|info| info.dimensions).or(dimensions),
-        color_mode: image_info.as_ref().map(|info| info.color_mode),
-        usage: get_visual_key_from_picture_type(type_enc),
-        tags,
+    Ok(visual_from_image_data(
         data,
-    })
+        image_info,
+        media_type,
+        dimensions,
+        get_visual_key_from_picture_type(type_enc),
+        tags,
+    ))
 }
 
 /// Read a seek table metadata block as a seek index.

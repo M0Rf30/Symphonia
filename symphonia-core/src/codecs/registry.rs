@@ -198,12 +198,6 @@ impl CodecRegistry {
         }
     }
 
-    /// Get the registration information of the most preferred audio decoder for the specified
-    /// audio codec.
-    pub fn get_audio_decoder(&self, id: AudioCodecId) -> Option<&RegisteredAudioDecoder> {
-        self.audio.get(&id)
-    }
-
     /// Returns an allocation-free iterator over every audio decoder registered with this
     /// `CodecRegistry`, across all registration tiers.
     ///
@@ -211,186 +205,144 @@ impl CodecRegistry {
     pub fn audio_decoders(&self) -> impl Iterator<Item = &RegisteredAudioDecoder> {
         self.audio.iter()
     }
+}
 
-    /// Get the registration information of the audio decoder at the specified tier for the
-    /// specified audio codec.
-    pub fn get_audio_decoder_at_tier(
-        &self,
-        tier: Tier,
-        id: AudioCodecId,
-    ) -> Option<&RegisteredAudioDecoder> {
-        self.audio.get_at_tier(tier, &id)
-    }
-
-    /// Get the registration information of the most preferred video decoder for the specified
-    /// video codec.
-    #[cfg(feature = "exp-video-codecs")]
-    pub fn get_video_decoder(&self, id: VideoCodecId) -> Option<&RegisteredVideoDecoder> {
-        self.video.get(&id)
-    }
-
-    /// Get the registration information of the video decoder at the specified tier for the
-    /// specified video codec.
-    #[cfg(feature = "exp-video-codecs")]
-    pub fn get_video_decoder_at_tier(
-        &self,
-        tier: Tier,
-        id: VideoCodecId,
-    ) -> Option<&RegisteredVideoDecoder> {
-        self.video.get_at_tier(tier, &id)
-    }
-
-    /// Get the registration information of the most preferred subtitle decoder for the specified
-    /// subtitle codec.
-    #[cfg(feature = "exp-subtitle-codecs")]
-    pub fn get_subtitle_decoder(&self, id: SubtitleCodecId) -> Option<&RegisteredSubtitleDecoder> {
-        self.subtitle.get(&id)
-    }
-
-    /// Get the registration information of the subtitle decoder at the specified tier for the
-    /// specified subtitle codec.
-    #[cfg(feature = "exp-subtitle-codecs")]
-    pub fn get_subtitle_decoder_at_tier(
-        &self,
-        tier: Tier,
-        id: SubtitleCodecId,
-    ) -> Option<&RegisteredSubtitleDecoder> {
-        self.subtitle.get_at_tier(tier, &id)
-    }
-
-    /// Registers all audio codecs supported by the audio decoder at the standard tier.
-    ///
-    /// If a supported audio codec was previously registered by another audio decoder at the same
-    /// tier, it will be replaced within the registry.
-    pub fn register_audio_decoder<C: RegisterableAudioDecoder>(&mut self) {
-        self.register_audio_decoder_at_tier::<C>(Tier::Standard);
-    }
-
-    /// Registers all audio codecs supported by the audio decoder at a specific tier.
-    ///
-    /// If a supported codec was previously registered by another audio decoder at the same tier, it
-    /// will be replaced within the registry.
-    pub fn register_audio_decoder_at_tier<C: RegisterableAudioDecoder>(&mut self, tier: Tier) {
-        for codec in C::supported_codecs() {
-            let reg = RegisteredAudioDecoder {
-                codec: *codec,
-                factory: |params, opts| C::try_registry_new(params, opts),
-            };
-
-            self.audio.register_at_tier(tier, codec.id, reg);
+/// Generates the lookup, registration, and instantiation methods of a `CodecRegistry` for one kind
+/// of codec.
+macro_rules! codec_registry_methods {
+    (
+        kind: $kind:literal,
+        field: $field:ident,
+        id_field: $id_field:ident,
+        codec_id: $codec_id:ty,
+        params: $params:ty,
+        opts: $opts:ty,
+        decoder: $decoder:path,
+        registered: $registered:ident,
+        registerable: $registerable:ident,
+        get: $get:ident,
+        get_at_tier: $get_at_tier:ident,
+        register: $register:ident,
+        register_at_tier: $register_at_tier:ident,
+        make: $make:ident,
+    ) => {
+        #[doc = concat!(
+            "Get the registration information of the most preferred ", $kind, " decoder for the \
+             specified ", $kind, " codec."
+        )]
+        pub fn $get(&self, id: $codec_id) -> Option<&$registered> {
+            self.$field.get(&id)
         }
+
+        #[doc = concat!(
+            "Get the registration information of the ", $kind, " decoder at the specified tier \
+             for the specified ", $kind, " codec."
+        )]
+        pub fn $get_at_tier(&self, tier: Tier, id: $codec_id) -> Option<&$registered> {
+            self.$field.get_at_tier(tier, &id)
+        }
+
+        #[doc = concat!(
+            "Registers all ", $kind, " codecs supported by the ", $kind, " decoder at the \
+             standard tier.\n\nIf a supported ", $kind, " codec was previously registered by \
+             another ", $kind, " decoder at the same tier, it will be replaced within the \
+             registry."
+        )]
+        pub fn $register<C: $registerable>(&mut self) {
+            self.$register_at_tier::<C>(Tier::Standard);
+        }
+
+        #[doc = concat!(
+            "Registers all ", $kind, " codecs supported by the ", $kind, " decoder at a \
+             specific tier.\n\nIf a supported codec was previously registered by another ", $kind,
+            " decoder at the same tier, it will be replaced within the registry."
+        )]
+        pub fn $register_at_tier<C: $registerable>(&mut self, tier: Tier) {
+            for codec in C::supported_codecs() {
+                let reg = $registered {
+                    codec: *codec,
+                    factory: |params, opts| C::try_registry_new(params, opts),
+                };
+
+                self.$field.register_at_tier(tier, codec.$id_field, reg);
+            }
+        }
+
+        #[doc = concat!(
+            "Instantiate a ", $kind, " decoder for the specified ", $kind, " codec \
+             parameters.\n\nThis function searches the registry for a ", $kind, " decoder that \
+             supports the codec. If one is found, it will be instantiated with the provided ",
+            $kind, " codec parameters and ", $kind, " decoder options. If a suitable decoder \
+             could not be found, or the decoder could not be instantiated, an error will be \
+             returned."
+        )]
+        pub fn $make(&self, params: &$params, opts: &$opts) -> Result<Box<dyn $decoder>> {
+            if let Some(codec) = self.$get(params.codec) {
+                Ok((codec.factory)(params, opts)?)
+            }
+            else {
+                unsupported_error(concat!("core (codec): unsupported ", $kind, " codec"))
+            }
+        }
+    };
+}
+
+impl CodecRegistry {
+    codec_registry_methods! {
+        kind: "audio",
+        field: audio,
+        id_field: id,
+        codec_id: AudioCodecId,
+        params: AudioCodecParameters,
+        opts: AudioDecoderOptions,
+        decoder: AudioDecoder,
+        registered: RegisteredAudioDecoder,
+        registerable: RegisterableAudioDecoder,
+        get: get_audio_decoder,
+        get_at_tier: get_audio_decoder_at_tier,
+        register: register_audio_decoder,
+        register_at_tier: register_audio_decoder_at_tier,
+        make: make_audio_decoder,
     }
+}
 
-    /// Registers all video codecs supported by the video decoder at the standard tier.
-    ///
-    /// If a supported video codec was previously registered by another video decoder at the same
-    /// tier, it will be replaced within the registry.
-    #[cfg(feature = "exp-video-codecs")]
-    pub fn register_video_decoder<C: RegisterableVideoDecoder>(&mut self) {
-        self.register_video_decoder_at_tier::<C>(Tier::Standard);
+#[cfg(feature = "exp-video-codecs")]
+impl CodecRegistry {
+    codec_registry_methods! {
+        kind: "video",
+        field: video,
+        id_field: codec,
+        codec_id: VideoCodecId,
+        params: VideoCodecParameters,
+        opts: VideoDecoderOptions,
+        decoder: VideoDecoder,
+        registered: RegisteredVideoDecoder,
+        registerable: RegisterableVideoDecoder,
+        get: get_video_decoder,
+        get_at_tier: get_video_decoder_at_tier,
+        register: register_video_decoder,
+        register_at_tier: register_video_decoder_at_tier,
+        make: make_video_decoder,
     }
+}
 
-    /// Registers all video codecs supported by the video decoder at a specific tier.
-    ///
-    /// If a supported codec was previously registered by another video decoder at the same tier, it
-    /// will be replaced within the registry.
-    #[cfg(feature = "exp-video-codecs")]
-    pub fn register_video_decoder_at_tier<C: RegisterableVideoDecoder>(&mut self, tier: Tier) {
-        for codec in C::supported_codecs() {
-            let reg = RegisteredVideoDecoder {
-                codec: *codec,
-                factory: |params, opts| C::try_registry_new(params, opts),
-            };
-
-            self.video.register_at_tier(tier, codec.codec, reg);
-        }
-    }
-
-    /// Registers all subtitle codecs supported by the subtitle decoder at the standard tier.
-    ///
-    /// If a supported subtitle codec was previously registered by another subtitle decoder at the
-    /// same tier, it will be replaced within the registry.
-    #[cfg(feature = "exp-subtitle-codecs")]
-    pub fn register_subtitle_decoder<C: RegisterableSubtitleDecoded>(&mut self) {
-        self.register_subtitle_decoder_at_tier::<C>(Tier::Standard);
-    }
-
-    /// Registers all subtitle codecs supported by the subtitle decoder at a specific tier.
-    ///
-    /// If a supported codec was previously registered by another subtitle decoder at the same tier,
-    /// it will be replaced within the registry.
-    #[cfg(feature = "exp-subtitle-codecs")]
-    pub fn register_subtitle_decoder_at_tier<C: RegisterableSubtitleDecoded>(
-        &mut self,
-        tier: Tier,
-    ) {
-        for codec in C::supported_codecs() {
-            let reg = RegisteredSubtitleDecoder {
-                codec: *codec,
-                factory: |params, opts| C::try_registry_new(params, opts),
-            };
-
-            self.subtitle.register_at_tier(tier, codec.codec, reg);
-        }
-    }
-
-    /// Instantiate an audio decoder for the specified audio codec parameters.
-    ///
-    /// This function searches the registry for an audio decoder that supports the codec. If one is
-    /// found, it will be instantiated with the provided audio codec parameters and audio decoder
-    /// options. If a suitable decoder could not be found, or the decoder could not be instantiated,
-    /// an error will be returned.
-    pub fn make_audio_decoder(
-        &self,
-        params: &AudioCodecParameters,
-        opts: &AudioDecoderOptions,
-    ) -> Result<Box<dyn AudioDecoder>> {
-        if let Some(codec) = self.get_audio_decoder(params.codec) {
-            Ok((codec.factory)(params, opts)?)
-        }
-        else {
-            unsupported_error("core (codec): unsupported audio codec")
-        }
-    }
-
-    /// Instantiate a video decoder for the specified audio codec parameters.
-    ///
-    /// This function searches the registry for a video decoder that supports the codec. If one is
-    /// found, it will be instantiated with the provided video codec parameters and video decoder
-    /// options. If a suitable decoder could not be found, or the decoder could not be instantiated,
-    /// an error will be returned.
-    #[cfg(feature = "exp-video-codecs")]
-    pub fn make_video_decoder(
-        &self,
-        params: &VideoCodecParameters,
-        opts: &VideoDecoderOptions,
-    ) -> Result<Box<dyn VideoDecoder>> {
-        if let Some(codec) = self.get_video_decoder(params.codec) {
-            Ok((codec.factory)(params, opts)?)
-        }
-        else {
-            unsupported_error("core (codec): unsupported video codec")
-        }
-    }
-
-    /// Instantiate a subtitle decoder for the specified audio codec parameters.
-    ///
-    /// This function searches the registry for a subtitle decoder that supports the codec. If one
-    /// is found, it will be instantiated with the provided subtitle codec parameters and subtitle
-    /// decoder options. If a suitable decoder could not be found, or the decoder could not be
-    /// instantiated, an error will be returned.
-    #[cfg(feature = "exp-subtitle-codecs")]
-    pub fn make_subtitle_decoder(
-        &self,
-        params: &SubtitleCodecParameters,
-        opts: &SubtitleDecoderOptions,
-    ) -> Result<Box<dyn SubtitleDecoder>> {
-        if let Some(codec) = self.get_subtitle_decoder(params.codec) {
-            Ok((codec.factory)(params, opts)?)
-        }
-        else {
-            unsupported_error("core (codec): unsupported subtitle codec")
-        }
+#[cfg(feature = "exp-subtitle-codecs")]
+impl CodecRegistry {
+    codec_registry_methods! {
+        kind: "subtitle",
+        field: subtitle,
+        id_field: codec,
+        codec_id: SubtitleCodecId,
+        params: SubtitleCodecParameters,
+        opts: SubtitleDecoderOptions,
+        decoder: SubtitleDecoder,
+        registered: RegisteredSubtitleDecoder,
+        registerable: RegisterableSubtitleDecoded,
+        get: get_subtitle_decoder,
+        get_at_tier: get_subtitle_decoder_at_tier,
+        register: register_subtitle_decoder,
+        register_at_tier: register_subtitle_decoder_at_tier,
+        make: make_subtitle_decoder,
     }
 }
 

@@ -47,69 +47,15 @@ use symphonia_core::errors::{Result, decode_error, unsupported_error};
 use symphonia_core::io::ReadBytes;
 use symphonia_core::packet::PacketRef;
 
-macro_rules! read_pcm_signed {
-    ($buf:expr, $fmt:tt, $read:expr, $width:expr, $shift:expr) => {
-        // Get buffer of the correct sample format.
-        match $buf {
-            GenericAudioBuffer::$fmt(ref mut buf) => {
-                // Read samples.
-                buf.render_with(None, |idx, audio_planes| -> Result<()> {
-                    for plane in audio_planes.iter_mut() {
-                        plane[idx] = ($read << $shift).into_sample();
-                    }
-                    Ok(())
-                })
-            }
-            _ => unreachable!(),
-        }
-    };
-}
-
-macro_rules! read_pcm_unsigned {
-    ($buf:expr, $fmt:tt, $read:expr, $width:expr, $shift:expr) => {
-        // Get buffer of the correct sample format.
-        match $buf {
-            GenericAudioBuffer::$fmt(ref mut buf) => {
-                // Read samples.
-                buf.render_with(None, |idx, audio_planes| -> Result<()> {
-                    for plane in audio_planes.iter_mut() {
-                        plane[idx] = ($read << $shift).into_sample();
-                    }
-                    Ok(())
-                })
-            }
-            _ => unreachable!(),
-        }
-    };
-}
-
-macro_rules! read_pcm_floating {
+macro_rules! read_pcm {
     ($buf:expr, $fmt:tt, $read:expr) => {
         // Get buffer of the correct sample format.
-        match $buf {
-            GenericAudioBuffer::$fmt(ref mut buf) => {
+        match &mut $buf {
+            GenericAudioBuffer::$fmt(buf) => {
                 // Read samples.
                 buf.render_with(None, |idx, audio_planes| -> Result<()> {
                     for plane in audio_planes.iter_mut() {
                         plane[idx] = $read;
-                    }
-                    Ok(())
-                })
-            }
-            _ => unreachable!(),
-        }
-    };
-}
-
-macro_rules! read_pcm_transfer_func {
-    ($buf:expr, $fmt:tt, $func:expr) => {
-        // Get buffer of the correct sample format.
-        match $buf {
-            GenericAudioBuffer::$fmt(ref mut buf) => {
-                // Read samples.
-                buf.render_with(None, |idx, audio_planes| -> Result<()> {
-                    for plane in audio_planes.iter_mut() {
-                        plane[idx] = $func;
                     }
                     Ok(())
                 })
@@ -327,64 +273,64 @@ impl PcmDecoder {
 
         let _ = match self.params.codec {
             CODEC_ID_PCM_S32LE => {
-                read_pcm_signed!(self.buf, S32, reader.read_i32()?, 32, self.shift)
+                read_pcm!(self.buf, S32, (reader.read_i32()? << self.shift).into_sample())
             }
             CODEC_ID_PCM_S32BE => {
-                read_pcm_signed!(self.buf, S32, reader.read_be_i32()?, 32, self.shift)
+                read_pcm!(self.buf, S32, (reader.read_be_i32()? << self.shift).into_sample())
             }
             CODEC_ID_PCM_S24LE => {
-                read_pcm_signed!(self.buf, S24, reader.read_i24()? << 8, 24, self.shift)
+                read_pcm!(self.buf, S24, ((reader.read_i24()? << 8) << self.shift).into_sample())
             }
             CODEC_ID_PCM_S24BE => {
-                read_pcm_signed!(self.buf, S24, reader.read_be_i24()? << 8, 24, self.shift)
+                read_pcm!(self.buf, S24, ((reader.read_be_i24()? << 8) << self.shift).into_sample())
             }
             CODEC_ID_PCM_S16LE => {
-                read_pcm_signed!(self.buf, S16, reader.read_i16()?, 16, self.shift)
+                read_pcm!(self.buf, S16, (reader.read_i16()? << self.shift).into_sample())
             }
             CODEC_ID_PCM_S16BE => {
-                read_pcm_signed!(self.buf, S16, reader.read_be_i16()?, 16, self.shift)
+                read_pcm!(self.buf, S16, (reader.read_be_i16()? << self.shift).into_sample())
             }
             CODEC_ID_PCM_S8 => {
-                read_pcm_signed!(self.buf, S8, reader.read_i8()?, 8, self.shift)
+                read_pcm!(self.buf, S8, (reader.read_i8()? << self.shift).into_sample())
             }
             CODEC_ID_PCM_U32LE => {
-                read_pcm_unsigned!(self.buf, U32, reader.read_u32()?, 32, self.shift)
+                read_pcm!(self.buf, U32, (reader.read_u32()? << self.shift).into_sample())
             }
             CODEC_ID_PCM_U32BE => {
-                read_pcm_unsigned!(self.buf, U32, reader.read_be_u32()?, 32, self.shift)
+                read_pcm!(self.buf, U32, (reader.read_be_u32()? << self.shift).into_sample())
             }
             CODEC_ID_PCM_U24LE => {
-                read_pcm_unsigned!(self.buf, U24, reader.read_u24()? << 8, 24, self.shift)
+                read_pcm!(self.buf, U24, ((reader.read_u24()? << 8) << self.shift).into_sample())
             }
             CODEC_ID_PCM_U24BE => {
-                read_pcm_unsigned!(self.buf, U24, reader.read_be_u24()? << 8, 24, self.shift)
+                read_pcm!(self.buf, U24, ((reader.read_be_u24()? << 8) << self.shift).into_sample())
             }
             CODEC_ID_PCM_U16LE => {
-                read_pcm_unsigned!(self.buf, U16, reader.read_u16()?, 16, self.shift)
+                read_pcm!(self.buf, U16, (reader.read_u16()? << self.shift).into_sample())
             }
             CODEC_ID_PCM_U16BE => {
-                read_pcm_unsigned!(self.buf, U16, reader.read_be_u16()?, 16, self.shift)
+                read_pcm!(self.buf, U16, (reader.read_be_u16()? << self.shift).into_sample())
             }
             CODEC_ID_PCM_U8 => {
-                read_pcm_unsigned!(self.buf, U8, reader.read_u8()?, 8, self.shift)
+                read_pcm!(self.buf, U8, (reader.read_u8()? << self.shift).into_sample())
             }
             CODEC_ID_PCM_F32LE => {
-                read_pcm_floating!(self.buf, F32, reader.read_f32()?)
+                read_pcm!(self.buf, F32, reader.read_f32()?)
             }
             CODEC_ID_PCM_F32BE => {
-                read_pcm_floating!(self.buf, F32, reader.read_be_f32()?)
+                read_pcm!(self.buf, F32, reader.read_be_f32()?)
             }
             CODEC_ID_PCM_F64LE => {
-                read_pcm_floating!(self.buf, F64, reader.read_f64()?)
+                read_pcm!(self.buf, F64, reader.read_f64()?)
             }
             CODEC_ID_PCM_F64BE => {
-                read_pcm_floating!(self.buf, F64, reader.read_be_f64()?)
+                read_pcm!(self.buf, F64, reader.read_be_f64()?)
             }
             CODEC_ID_PCM_ALAW => {
-                read_pcm_transfer_func!(self.buf, S16, alaw_to_linear(reader.read_u8()?))
+                read_pcm!(self.buf, S16, alaw_to_linear(reader.read_u8()?))
             }
             CODEC_ID_PCM_MULAW => {
-                read_pcm_transfer_func!(self.buf, S16, mulaw_to_linear(reader.read_u8()?))
+                read_pcm!(self.buf, S16, mulaw_to_linear(reader.read_u8()?))
             }
             // CODEC_ID_PCM_S32LE_PLANAR =>
             // CODEC_ID_PCM_S32BE_PLANAR =>

@@ -95,12 +95,7 @@ impl Toc {
             }
         }
         else if b & 0x60 == 0x60 {
-            if b & 0x10 != 0 {
-                Bandwidth::Fullband
-            }
-            else {
-                Bandwidth::Superwideband
-            }
+            if b & 0x10 != 0 { Bandwidth::Fullband } else { Bandwidth::Superwideband }
         }
         else {
             match (b >> 5) & 0x3 {
@@ -130,21 +125,11 @@ impl Toc {
             (fs << audiosize) / 400
         }
         else if b & 0x60 == 0x60 {
-            if b & 0x08 != 0 {
-                fs / 50
-            }
-            else {
-                fs / 100
-            }
+            if b & 0x08 != 0 { fs / 50 } else { fs / 100 }
         }
         else {
             let audiosize = (b >> 3) & 0x3;
-            if audiosize == 3 {
-                fs * 60 / 1000
-            }
-            else {
-                (fs << audiosize) / 100
-            }
+            if audiosize == 3 { fs * 60 / 1000 } else { (fs << audiosize) / 100 }
         }
     }
 }
@@ -259,7 +244,7 @@ pub fn parse_impl(data: &[u8], self_delimited: bool) -> Result<ParsedPacket> {
     // frame_code 3 push can exceed it) -- avoids a heap allocation on every single packet parse.
     let mut sizes_buf = [0i32; MAX_FRAMES];
     let mut sizes_len = 0usize;
-    let mut count: usize;
+    let count: usize;
     let mut pad: i64 = 0;
 
     match toc.frame_code() {
@@ -387,7 +372,6 @@ pub fn parse_impl(data: &[u8], self_delimited: bool) -> Result<ParsedPacket> {
     if sizes_len != count {
         return Err(PacketError::InvalidPacket);
     }
-    count = sizes_len;
 
     let payload_offset = pos;
     let mut frames = FrameList::new();

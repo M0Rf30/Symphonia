@@ -113,3 +113,105 @@ name = "demux_caf"
 path = "fuzz_targets/demux_caf.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "decode_ape"
+path = "fuzz_targets/decode_ape.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_musepack"
+path = "fuzz_targets/decode_musepack.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_opus"
+path = "fuzz_targets/decode_opus.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_wavpack"
+path = "fuzz_targets/decode_wavpack.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_dsd"
+path = "fuzz_targets/decode_dsd.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_mpegts"
+path = "fuzz_targets/demux_mpegts.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_mpegps"
+path = "fuzz_targets/demux_mpegps.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_flv"
+path = "fuzz_targets/demux_flv.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_dsf"
+path = "fuzz_targets/demux_dsf.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_dff"
+path = "fuzz_targets/demux_dff.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_mp3"
+path = "fuzz_targets/demux_mp3.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_ape"
+path = "fuzz_targets/demux_ape.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_musepack"
+path = "fuzz_targets/demux_musepack.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_wavpack"
+path = "fuzz_targets/demux_wavpack.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_adts"
+path = "fuzz_targets/demux_adts.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_adif"
+path = "fuzz_targets/demux_adif.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_loas"
+path = "fuzz_targets/demux_loas.rs"
+test = false
+doc = false

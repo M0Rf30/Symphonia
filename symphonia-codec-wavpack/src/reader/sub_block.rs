@@ -61,7 +61,8 @@ pub(super) fn decode_sub_block<R: ReadBytes>(source: &mut R) -> Result<SubBlock>
     let size_in_words = if id & 0x80 == 0x80 {
         let b = source.read_triple_bytes()?;
         (b[0] as u32) | ((b[1] as u32) << 8) | ((b[2] as u32) << 16)
-    } else {
+    }
+    else {
         source.read_byte()? as u32
     };
     let datasize = size_in_words as usize * 2;

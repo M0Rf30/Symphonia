@@ -51,14 +51,17 @@ impl Atom for SidxAtom {
         // The anchor point for segment offsets is the first byte after this atom.
         let anchor = header
             .size()
-            .map(|atom_len| header.pos() + atom_len.get())
-            .ok_or(Error::DecodeError("isomp4 (sidx): expected atom size to be known"))?;
+            .and_then(|atom_len| header.pos().checked_add(atom_len.get()))
+            .ok_or(Error::DecodeError("isomp4 (sidx): expected valid atom position and size"))?;
 
         let (earliest_pts, first_offset) = match version {
-            0 => (u64::from(it.read_u32()?), anchor + u64::from(it.read_u32()?)),
-            1 => (it.read_u64()?, anchor + it.read_u64()?),
+            0 => (u64::from(it.read_u32()?), anchor.checked_add(u64::from(it.read_u32()?))),
+            1 => (it.read_u64()?, anchor.checked_add(it.read_u64()?)),
             _ => return decode_error("isomp4 (sidx): invalid version"),
         };
+
+        let first_offset =
+            first_offset.ok_or(Error::DecodeError("isomp4 (sidx): first offset overflow"))?;
 
         let _reserved = it.read_u16()?;
         let reference_count = it.read_u16()?;
@@ -95,5 +98,50 @@ impl Atom for SidxAtom {
             references,
             total_duration,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+    use symphonia_core::io::{MediaSourceStream, MediaSourceStreamOptions};
+
+    fn read_sidx_v1(first_offset: u64) -> Result<SidxAtom> {
+        let mut body = vec![1, 0, 0, 0]; // Version and flags.
+        body.extend_from_slice(&1u32.to_be_bytes()); // Reference ID.
+        body.extend_from_slice(&1000u32.to_be_bytes()); // Timescale.
+        body.extend_from_slice(&0u64.to_be_bytes()); // Earliest presentation time.
+        body.extend_from_slice(&first_offset.to_be_bytes());
+        body.extend_from_slice(&0u16.to_be_bytes()); // Reserved.
+        body.extend_from_slice(&0u16.to_be_bytes()); // Reference count.
+
+        let mut data = Vec::with_capacity(8 + body.len());
+        data.extend_from_slice(&(body.len() as u32 + 8).to_be_bytes());
+        data.extend_from_slice(b"sidx");
+        data.extend_from_slice(&body);
+
+        let len = data.len() as u64;
+        let mss = MediaSourceStream::new(
+            Box::new(Cursor::new(data)),
+            MediaSourceStreamOptions::default(),
+        );
+        let mut it = AtomIterator::new(mss, Some(len));
+        assert!(it.next_header().map(|h| h.is_some()).unwrap_or(false));
+        it.read_atom::<SidxAtom>()
+    }
+
+    #[test]
+    fn sidx_first_offset_overflow_is_an_error() {
+        assert!(read_sidx_v1(u64::MAX).is_err());
+    }
+
+    #[test]
+    fn sidx_first_offset_is_relative_to_the_end_of_the_atom() {
+        let Ok(sidx) = read_sidx_v1(16)
+        else {
+            panic!("valid sidx");
+        };
+        assert_eq!(sidx.first_offset, 40 + 16);
     }
 }

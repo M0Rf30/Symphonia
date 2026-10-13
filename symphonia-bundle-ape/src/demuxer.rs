@@ -150,7 +150,7 @@ impl<'s> ApeReader<'s> {
     fn seek_remainder(&self, frame_idx: u32) -> u32 {
         let seek_byte = self.file_info.seek_byte(frame_idx);
         let seek_byte_0 = self.file_info.seek_byte(0);
-        ((seek_byte - seek_byte_0) % 4) as u32
+        (seek_byte.saturating_sub(seek_byte_0) % 4) as u32
     }
 }
 
@@ -248,8 +248,7 @@ impl FormatReader for ApeReader<'_> {
         let ts = match to {
             SeekTo::Timestamp { ts, .. } => ts,
             SeekTo::Time { time, .. } => {
-                let tb =
-                    track.time_base.ok_or(Error::SeekError(SeekErrorKind::Unseekable))?;
+                let tb = track.time_base.ok_or(Error::SeekError(SeekErrorKind::Unseekable))?;
                 tb.calc_timestamp(time).ok_or(Error::SeekError(SeekErrorKind::OutOfRange))?
             }
         };
@@ -270,11 +269,7 @@ impl FormatReader for ApeReader<'_> {
 
         self.current_frame = frame_idx;
 
-        Ok(SeekedTo {
-            track_id: 0,
-            required_ts: ts,
-            actual_ts: Timestamp::new(actual_ts as i64),
-        })
+        Ok(SeekedTo { track_id: 0, required_ts: ts, actual_ts: Timestamp::new(actual_ts as i64) })
     }
 
     fn into_inner<'a>(self: Box<Self>) -> MediaSourceStream<'a>

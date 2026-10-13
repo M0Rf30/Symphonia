@@ -18,15 +18,17 @@ use symphonia_core::codecs::audio::well_known::{CODEC_ID_AAC, CODEC_ID_OPUS};
 use symphonia_core::packet::Packet;
 use symphonia_core::units::{Duration, Timestamp};
 
+use super::audio::adts;
 use super::audio::latm::{StreamMuxConfig, read_audio_mux_element};
 use super::audio::mpa::{self, MpaFramer};
 use super::audio::{
-    AAC_SEEK_MAX_PREROLL_FRAMES, AudioSpecificConfig,
-    MAX_IMPLICIT_SBR_PROBE_BLOCKS, Mpeg4AudioChannels, Mpeg4AudioSampleRate, aac_overlap_frames,
-    aac_sbr_phase_period, aac_seek_start_frame, aac_seek_start_frame_with_period,
-    get_audio_codec_profile, get_mpeg4_audio_channels_by_config_index,
-    get_mpeg4_audio_sample_rate_by_index, may_have_implicit_sbr,
+    AAC_SEEK_MAX_PREROLL_FRAMES, AudioSpecificConfig, MAX_IMPLICIT_SBR_PROBE_BLOCKS,
+    Mpeg4AudioChannels, Mpeg4AudioSampleRate, aac_overlap_frames, aac_sbr_phase_period,
+    aac_seek_start_frame, aac_seek_start_frame_with_period, get_audio_codec_profile,
+    get_mpeg4_audio_channels_by_config_index, get_mpeg4_audio_sample_rate_by_index,
+    may_have_implicit_sbr,
 };
+use super::sync_buf::SyncBuffer;
 use super::timeline::Timeline;
 
 /// The number of samples in an AAC frame.
@@ -264,7 +266,7 @@ impl AdtsHeader {
     const SIZE_NO_CRC: usize = 7;
 
     fn parse(b: &[u8]) -> Option<AdtsHeader> {
-        if b.len() < Self::SIZE_NO_CRC || b[0] != 0xff || b[1] & 0xf6 != 0xf0 {
+        if b.len() < Self::SIZE_NO_CRC || !adts::is_sync_word(u16::from_be_bytes([b[0], b[1]])) {
             return None;
         }
 
@@ -286,8 +288,7 @@ impl AdtsHeader {
             return None;
         }
 
-        let frame_len =
-            (usize::from(b[3] & 3) << 11) | (usize::from(b[4]) << 3) | usize::from(b[5] >> 5);
+        let frame_len = adts::frame_len(b)?;
 
         // Only one raw data block per frame is supported.
         if b[6] & 3 != 0 || frame_len <= header_len {
@@ -305,8 +306,7 @@ impl AdtsHeader {
 /// An AAC in ADTS elementary stream parser.
 #[derive(Default)]
 pub struct AdtsEs {
-    buf: Vec<u8>,
-    base: u64,
+    buf: SyncBuffer,
     locked: Option<AdtsHeader>,
     info: Option<EsInfo>,
     timeline: AacTimeline,
@@ -359,7 +359,7 @@ impl AdtsEs {
 
 impl EsParser for AdtsEs {
     fn push(&mut self, data: &[u8]) {
-        self.buf.extend_from_slice(data);
+        self.buf.push(data);
     }
 
     fn next_frame(&mut self, flush: bool) -> Option<EsFrame> {
@@ -437,9 +437,8 @@ impl EsParser for AdtsEs {
                 }
 
                 let data = self.buf[i + hdr.header_len..end].to_vec().into_boxed_slice();
-                let start = self.base + i as u64;
-                self.buf.drain(..end);
-                self.base += end as u64;
+                let start = self.buf.base() + i as u64;
+                self.buf.consume(end);
                 self.locked = Some(hdr);
 
                 if self.info.is_none() {
@@ -480,15 +479,13 @@ impl EsParser for AdtsEs {
                 })
             }
             None => {
-                self.buf.drain(..i);
-                self.base += i as u64;
+                self.buf.consume(i);
                 None
             }
         }
     }
 
     fn clear(&mut self) {
-        self.base += self.buf.len() as u64;
         self.buf.clear();
         self.locked = None;
     }
@@ -503,11 +500,7 @@ impl EsParser for AdtsEs {
 
     fn fresh(&self) -> Box<dyn EsParser> {
         // The stream has been probed: the parser does not look for SBR again.
-        Box::new(AdtsEs {
-            info: self.info.clone(),
-            timeline: self.timeline,
-            ..Default::default()
-        })
+        Box::new(AdtsEs { info: self.info.clone(), timeline: self.timeline, ..Default::default() })
     }
 
     fn frame_grid(&self) -> u64 {
@@ -537,8 +530,7 @@ const LOAS_HEADER_LEN: usize = 3;
 /// An AAC in LATM elementary stream (with LOAS `AudioSyncStream()` framing) parser.
 #[derive(Default)]
 pub struct LatmEs {
-    buf: Vec<u8>,
-    base: u64,
+    buf: SyncBuffer,
     config: Option<StreamMuxConfig>,
     pending: VecDeque<EsFrame>,
     info: Option<EsInfo>,
@@ -614,7 +606,7 @@ impl LatmEs {
 
 impl EsParser for LatmEs {
     fn push(&mut self, data: &[u8]) {
-        self.buf.extend_from_slice(data);
+        self.buf.push(data);
     }
 
     fn next_frame(&mut self, flush: bool) -> Option<EsFrame> {
@@ -671,10 +663,9 @@ impl EsParser for LatmEs {
 
             match found {
                 Some((i, end)) => {
-                    let start = self.base + i as u64;
+                    let start = self.buf.base() + i as u64;
                     let frame = self.buf[i + LOAS_HEADER_LEN..end].to_vec();
-                    self.buf.drain(..end);
-                    self.base += end as u64;
+                    self.buf.consume(end);
 
                     let payloads = match read_audio_mux_element(&frame, &mut self.config) {
                         Ok(payloads) => payloads,
@@ -716,8 +707,7 @@ impl EsParser for LatmEs {
                     }
                 }
                 None => {
-                    self.buf.drain(..i);
-                    self.base += i as u64;
+                    self.buf.consume(i);
 
                     // The end of the stream: the stream info is determined from the frames there
                     // are.
@@ -732,7 +722,6 @@ impl EsParser for LatmEs {
     }
 
     fn clear(&mut self) {
-        self.base += self.buf.len() as u64;
         self.buf.clear();
         self.pending.clear();
         self.early.clear();
@@ -872,8 +861,7 @@ pub fn opus_packet_samples(packet: &[u8]) -> Option<u64> {
 /// An Opus in MPEG-TS elementary stream parser (the "Opus access unit" framing with control
 /// headers of ETSI TS 102 366 Annex of the "Opus in MPEG-2 Transport Stream" specification).
 pub struct OpusEs {
-    buf: Vec<u8>,
-    base: u64,
+    buf: SyncBuffer,
     info: EsInfo,
 }
 
@@ -890,7 +878,7 @@ impl OpusEs {
             .with_channels(opus_channels(channels)?)
             .with_extra_data(head);
 
-        Some(OpusEs { buf: Vec::new(), base: 0, info: EsInfo { params, rate: 48_000 } })
+        Some(OpusEs { buf: SyncBuffer::default(), info: EsInfo { params, rate: 48_000 } })
     }
 
     /// Parse the access unit control header at the start of `b`. Returns the length of the
@@ -940,7 +928,7 @@ impl OpusEs {
 
 impl EsParser for OpusEs {
     fn push(&mut self, data: &[u8]) {
-        self.buf.extend_from_slice(data);
+        self.buf.push(data);
     }
 
     fn next_frame(&mut self, flush: bool) -> Option<EsFrame> {
@@ -974,10 +962,9 @@ impl EsParser for OpusEs {
             }
 
             let packet = self.buf[i + hdr_len..end].to_vec();
-            let start = self.base + i as u64;
+            let start = self.buf.base() + i as u64;
 
-            self.buf.drain(..end);
-            self.base += end as u64;
+            self.buf.consume(end);
 
             // Skip malformed access units.
             let Some(total) = opus_packet_samples(&packet)
@@ -998,13 +985,11 @@ impl EsParser for OpusEs {
             });
         }
 
-        self.buf.drain(..i);
-        self.base += i as u64;
+        self.buf.consume(i);
         None
     }
 
     fn clear(&mut self) {
-        self.base += self.buf.len() as u64;
         self.buf.clear();
     }
 
@@ -1177,13 +1162,16 @@ impl EsTrack {
     /// Returns the duration, in ticks, from the start of the first frame in the PES `payloads` to
     /// the end of the samples of the last that are not trimmed from the end, as parsed by a fresh
     /// parser.
-    pub fn payload_duration(&self, payloads: &[Vec<u8>]) -> u64 {
+    pub fn payload_duration<I>(&self, payloads: I) -> u64
+    where
+        I: IntoIterator,
+        I::Item: AsRef<[u8]>,
+    {
         let mut parser = self.parser.fresh();
         let mut dur = 0;
 
         for payload in payloads {
-            parser.push(payload);
-
+            parser.push(payload.as_ref());
             while let Some(frame) = parser.next_frame(false) {
                 dur += frame.dur + frame.trim_start;
             }

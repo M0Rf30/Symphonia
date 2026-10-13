@@ -23,8 +23,8 @@ use std::fs::File;
 
 use symphonia_codec_wavpack::{WavPackDecoder, WavPackReader};
 use symphonia_core::audio::{Audio, GenericAudioBufferRef};
-use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
 use symphonia_core::codecs::CodecParameters;
+use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
 use symphonia_core::formats::{FormatOptions, FormatReader};
 use symphonia_core::io::MediaSourceStream;
 
@@ -57,21 +57,27 @@ fn append_buf(out: &mut Vec<u8>, buf: &GenericAudioBufferRef<'_>) {
         GenericAudioBufferRef::S16(b) => {
             for i in 0..n {
                 for ch in 0..nch {
-                    out.extend_from_slice(&b.plane(ch).unwrap()[i].to_le_bytes());
+                    out.extend_from_slice(
+                        &b.plane(ch).expect("unexpected failure")[i].to_le_bytes(),
+                    );
                 }
             }
         }
         GenericAudioBufferRef::S32(b) => {
             for i in 0..n {
                 for ch in 0..nch {
-                    out.extend_from_slice(&b.plane(ch).unwrap()[i].to_le_bytes());
+                    out.extend_from_slice(
+                        &b.plane(ch).expect("unexpected failure")[i].to_le_bytes(),
+                    );
                 }
             }
         }
         GenericAudioBufferRef::F32(b) => {
             for i in 0..n {
                 for ch in 0..nch {
-                    out.extend_from_slice(&b.plane(ch).unwrap()[i].to_le_bytes());
+                    out.extend_from_slice(
+                        &b.plane(ch).expect("unexpected failure")[i].to_le_bytes(),
+                    );
                 }
             }
         }

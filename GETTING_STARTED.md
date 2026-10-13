@@ -1,6 +1,6 @@
 # Getting Started
 
-Last updated for `v0.6.0`.
+Last updated for `v0.6.1`.
 
 ## Multimedia Basics
 
@@ -26,7 +26,7 @@ The following basic usage guide will describe how to implement basic audio decod
 
 ### Enable crate features
 
-By default, Symphonia only enables support for royalty-free or open-standard media formats (OGG, Matroska/WebM, Wave) and codecs (ADPCM, FLAC, Vorbis, PCM).
+By default, Symphonia only enables support for royalty-free or open-standard media formats (OGG, Matroska/WebM, Wave) and codecs (ADPCM, FLAC, Opus, Vorbis, PCM).
 
 Notably, if you want MP3 support, the `mp3` feature (or `mpa` for MP1, MP2, & MP3) must be enabled. For AAC or ALAC support, enable `isomp4` (to enable the MP4/M4A container), and either `aac` or `alac` for each codec respectively.
 
@@ -81,7 +81,7 @@ Automatic detection is the preferred option for most cases.
 > [!WARNING]
 > Please be aware that misdetection can occur! If you know for certain what format and codec to use, consider instantiating them manually. Enabling more format support can reduce the chances of misdetection. See [enable crate features](#enable-crate-features).
 
-To automatically detect the media format, a `symphonia::core::probe::Probe` is used. A `Probe` takes a `MediaSourceStream` and examines it to determine what the media format is, and if the format is supported, returns the appropriate reader for the format. If metadata was encountered while probing, it will be read and made available on the format reader.
+To automatically detect the media format, a `symphonia::core::formats::probe::Probe` is used. A `Probe` takes a `MediaSourceStream` and examines it to determine what the media format is, and if the format is supported, returns the appropriate reader for the format. If metadata was encountered while probing, it will be read and made available on the format reader.
 
 > [!TIP]
 > The format probe also accepts a hint. If you know the file extension or MIME-type of the media, this may improve detection. However, it is not mandatory.
@@ -92,7 +92,7 @@ By default, a `Probe` with all enabled media formats pre-registered is provided 
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::io::MediaSourceStream;
-use symphonia::core::probe::Hint;
+use symphonia::core::formats::probe::Hint;
 
 fn main() {
     // Get the first command line argument.
@@ -381,12 +381,12 @@ This comprehensive functionality means it may also be possible to use Symphonia'
 To iterate over all samples in the left channel (plane) position of the audio buffer:
 
 ```rust
-use symphonia::core::audio::{Audio, GenericAudioBufferRef};
+use symphonia::core::audio::{Audio, GenericAudioBufferRef, Position};
 
 let decoded = decoder.decode(&packet).expect("successfully decoded");
 
 match decoded {
-    AudioBufferRef::F32(buf) => {
+    GenericAudioBufferRef::F32(buf) => {
         for &sample in buf.plane_by_position(Position::FRONT_LEFT).expect("a left channel") {
             // Do something with each audio `sample`.
         }
@@ -409,7 +409,7 @@ Another useful access pattern is viewing the audio buffer as a slice-of-slices w
 use symphonia::core::audio::{Audio, GenericAudioBufferRef};
 
 match decoded {
-    AudioBufferRef::F32(buf) => {
+    GenericAudioBufferRef::F32(buf) => {
         for plane in buf.iter_planes() {
             for &sample in plane {
                 // Do something with each audio `sample`.

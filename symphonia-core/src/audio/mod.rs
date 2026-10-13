@@ -126,20 +126,16 @@ impl<'a, S: Sample> Iterator for AudioPlanesMut<'a, S> {
 /// Iterator over interleaved samples.
 pub struct Interleaved<'a, S: Sample> {
     planes: &'a [Vec<S>],
-    num_planes: usize,
-    index: usize,
-    end: usize,
+    frame: usize,
+    plane: usize,
+    remaining: usize,
 }
 
 impl<S: Sample> Interleaved<'_, S> {
     fn new(planes: &[Vec<S>], bound: Range<usize>) -> Interleaved<'_, S> {
-        let num_planes = planes.len();
-        let len = bound.len();
+        let remaining = bound.len() * planes.len();
 
-        let index = bound.start * num_planes;
-        let end = index + len * num_planes;
-
-        Interleaved { planes, num_planes, index, end }
+        Interleaved { planes, frame: bound.start, plane: 0, remaining }
     }
 }
 
@@ -147,13 +143,18 @@ impl<S: Sample> Iterator for Interleaved<'_, S> {
     type Item = S;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.index < self.end {
-            let frame = self.index / self.num_planes;
-            let plane = self.index % self.num_planes;
+        if self.remaining > 0 {
+            let sample = self.planes[self.plane][self.frame];
 
-            self.index += 1;
+            self.remaining -= 1;
+            self.plane += 1;
 
-            return Some(self.planes[plane][frame]);
+            if self.plane == self.planes.len() {
+                self.plane = 0;
+                self.frame += 1;
+            }
+
+            return Some(sample);
         }
         None
     }

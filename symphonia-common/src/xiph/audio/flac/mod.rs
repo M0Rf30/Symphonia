@@ -226,3 +226,74 @@ impl MetadataBlockHeader {
         Ok(MetadataBlockHeader { is_last, block_type, block_len })
     }
 }
+
+/// Reads a big-endian unsigned integer encoded via extended UTF8, as used for FLAC frame and
+/// sample sequence numbers. The encoded value may be up to 7 bytes long for a maximum integer bit
+/// width of 36-bits.
+///
+/// Returns `None` if the first byte is not a valid start of a sequence, or if any continuation
+/// byte is not of the form `0b10xx_xxxx`.
+pub fn read_utf8_be_u64<B: ReadBytes>(src: &mut B) -> Result<Option<u64>> {
+    let first = src.read_u8()?;
+    let mut state = u64::from(first);
+
+    // UTF8 prefixes 1s followed by a 0 to indicate the total number of bytes in the sequence.
+    // Determine the mask of the data bits within the first byte. Values 0-127 are returned
+    // immediately. Anything else is not the start of a sequence.
+    let mask: u8 = match first {
+        0x00..=0x7f => return Ok(Some(state)),
+        0xc0..=0xdf => 0x1f,
+        0xe0..=0xef => 0x0f,
+        0xf0..=0xf7 => 0x07,
+        0xf8..=0xfb => 0x03,
+        0xfc..=0xfd => 0x01,
+        0xfe => 0x00,
+        _ => return Ok(None),
+    };
+
+    state &= u64::from(mask);
+
+    // The number of continuation bytes is the number of leading zeros of the mask minus 2.
+    for _ in 2..mask.leading_zeros() {
+        let byte = src.read_u8()?;
+
+        // Each continuation byte is prefixed with 0b10, leaving 6 data bits.
+        if byte & 0xc0 != 0x80 {
+            return Ok(None);
+        }
+
+        state = (state << 6) | u64::from(byte & 0x3f);
+    }
+
+    Ok(Some(state))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_utf8_be_u64;
+    use symphonia_core::io::BufReader;
+
+    #[test]
+    fn verify_read_utf8_be_u64() {
+        let mut stream = BufReader::new(&[
+            0x24, 0xc2, 0xa2, 0xe0, 0xa4, 0xb9, 0xe2, 0x82, //
+            0xac, 0xf0, 0x90, 0x8d, 0x88, 0xff, 0x80, 0xbf, //
+        ]);
+
+        assert_eq!(read_utf8_be_u64(&mut stream).unwrap(), Some(36));
+        assert_eq!(read_utf8_be_u64(&mut stream).unwrap(), Some(162));
+        assert_eq!(read_utf8_be_u64(&mut stream).unwrap(), Some(2361));
+        assert_eq!(read_utf8_be_u64(&mut stream).unwrap(), Some(8364));
+        assert_eq!(read_utf8_be_u64(&mut stream).unwrap(), Some(66376));
+        assert_eq!(read_utf8_be_u64(&mut stream).unwrap(), None);
+        assert_eq!(read_utf8_be_u64(&mut stream).unwrap(), None);
+        assert_eq!(read_utf8_be_u64(&mut stream).unwrap(), None);
+    }
+
+    #[test]
+    fn invalid_continuation_byte_is_rejected() {
+        // 0xc2 requires one continuation byte; 0x41 is not 0b10xx_xxxx.
+        let mut stream = BufReader::new(&[0xc2, 0x41]);
+        assert_eq!(read_utf8_be_u64(&mut stream).unwrap(), None);
+    }
+}

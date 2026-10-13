@@ -11,7 +11,6 @@
 use std::fmt;
 
 use crate::codecs::{CodecParameters, audio, subtitle, video};
-use crate::common::FourCc;
 use crate::errors::Result;
 use crate::io::MediaSourceStream;
 use crate::meta::{ChapterGroup, Metadata, MetadataLog};
@@ -40,25 +39,7 @@ pub mod util;
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FormatId(u32);
 
-impl FormatId {
-    /// Create a new format ID from a FourCC.
-    pub const fn new(cc: FourCc) -> FormatId {
-        // A FourCc always only contains ASCII characters. Therefore, the upper bits are always 0.
-        Self(0x8000_0000 | u32::from_be_bytes(cc.get()))
-    }
-}
-
-impl From<FourCc> for FormatId {
-    fn from(value: FourCc) -> Self {
-        FormatId::new(value)
-    }
-}
-
-impl fmt::Display for FormatId {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:#x}", self.0)
-    }
-}
+crate::common::impl_fourcc_id!(FormatId);
 
 /// Null container format
 pub const FORMAT_ID_NULL: FormatId = FormatId(0x0);

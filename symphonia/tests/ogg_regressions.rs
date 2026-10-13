@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+// Test code: a panic is a test failure.
 // Regression tests for multichannel Vorbis decoding, multichannel Opus channel order, and the Ogg
 // Opus timeline (pre-skip excluded from the timeline, exact seeks, start trim after seeking to 0).
 //
@@ -7,8 +9,12 @@
 // Run with:
 //   cargo test -p symphonia --release --test ogg_regressions -- --nocapture
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use common::run_ffmpeg;
 
 use symphonia::core::audio::Channels;
 use symphonia::core::codecs::audio::AudioDecoder;
@@ -26,15 +32,8 @@ fn have_encoder(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn run_ffmpeg(args: &[&str]) {
-    let status = Command::new("ffmpeg").args(args).status().expect("failed to spawn ffmpeg");
-    assert!(status.success(), "ffmpeg {args:?} failed");
-}
-
 fn fixtures_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join("symphonia-ogg-regression-fixtures");
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    common::fixtures_dir("symphonia-ogg-regression-fixtures")
 }
 
 /// Builds `lavfi` input arguments for `n` channels of noise. Channels 0/1 share a seed so they
@@ -689,7 +688,7 @@ fn check_chain(name: &str, ext: &str, codec_args: &[&str], rates: [&str; 2], exa
     let mut format = open(&chain);
 
     // The media information describes the whole chain.
-    let info = format.media_info().clone();
+    let info = *format.media_info();
     let tb = info.time_base.expect("chain time base");
     let total = tb.calc_duration(info.duration.expect("chain duration")).unwrap().as_secs_f64();
     assert!((total - 5.0).abs() < 1e-3, "chain duration {total}");
@@ -810,7 +809,7 @@ fn external_chained_samples() {
         }
 
         let mut format = open(&path);
-        let info = format.media_info().clone();
+        let info = *format.media_info();
         let secs = info.time_base.unwrap().calc_duration(info.duration.unwrap()).unwrap();
         println!("{file}: chain duration {:.3}s", secs.as_secs_f64());
         assert!((secs.as_secs_f64() - expected_secs).abs() < 6.0, "{file}: {secs:?}");

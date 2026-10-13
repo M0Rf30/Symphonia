@@ -56,8 +56,8 @@
 //! reconstruction, envelope dequantization, and QMF synthesis are
 //! downstream of this parse.
 
+use super::bits::{BitReader, bit_readers};
 use super::error::{SbrError as Error, SbrResult as Result};
-use super::bits::BitReader;
 
 /// SBR frame class (`bs_frame_class`, Table 4.69 switch).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +82,7 @@ impl FrameClass {
         }
     }
 
+    #[cfg(test)]
     /// The 2-bit `bs_frame_class` wire value.
     pub fn to_bits(self) -> u32 {
         match self {
@@ -161,13 +162,10 @@ fn ptr_bits(num_env: usize) -> u32 {
     // is not itself a power of two.
     if n <= 1 {
         0
-    } else {
+    }
+    else {
         let floor_log2 = 31 - n.leading_zeros();
-        if n.is_power_of_two() {
-            floor_log2
-        } else {
-            floor_log2 + 1
-        }
+        if n.is_power_of_two() { floor_log2 } else { floor_log2 + 1 }
     }
 }
 
@@ -381,9 +379,11 @@ fn ld_envelope_borders(tran: i32, num_time_slots: i32) -> Result<(Vec<i32>, usiz
     }
     Ok(if tran < 2 {
         (vec![0, tran + 4, num_time_slots], 0)
-    } else if tran + 4 <= num_time_slots - 2 {
+    }
+    else if tran + 4 <= num_time_slots - 2 {
         (vec![0, tran, tran + 4, num_time_slots], 1)
-    } else {
+    }
+    else {
         (vec![0, tran, num_time_slots], 1)
     })
 }
@@ -436,29 +436,17 @@ impl SbrInvf {
     }
 }
 
-#[inline]
-fn read(reader: &mut BitReader<'_>, n: u32) -> Result<u32> {
-    reader.read_u32(n).map_err(|_| Error::SbrGridInvalid)
-}
-
-#[inline]
-fn read_flag(reader: &mut BitReader<'_>) -> Result<bool> {
-    reader.read_bit().map_err(|_| Error::SbrGridInvalid)
-}
+bit_readers!(Error::SbrGridInvalid, read, read_flag);
 
 #[inline]
 fn check_num_env(num_env: usize) -> Result<()> {
-    if num_env == 0 || num_env > SBR_MAX_NUM_ENV {
-        Err(Error::SbrGridInvalid)
-    } else {
-        Ok(())
-    }
+    if num_env == 0 || num_env > SBR_MAX_NUM_ENV { Err(Error::SbrGridInvalid) } else { Ok(()) }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::bits::BitWriter;
+    use super::*;
 
     #[test]
     fn ptr_bits_matches_ceil_log2() {
@@ -511,9 +499,9 @@ mod tests {
         w.write_u32(2, 2); // num_rel_1 = 2 → num_env = 3
         w.write_u32(0, 2); // rel_bord_1[0]
         w.write_u32(3, 2); // rel_bord_1[1]
-                           // ptr_bits(3) = 2.
+        // ptr_bits(3) = 2.
         w.write_u32(1, 2); // pointer
-                           // freq_res transmitted reversed: index 2, then 1, then 0.
+        // freq_res transmitted reversed: index 2, then 1, then 0.
         w.write_bit(true); // -> freq_res[2]
         w.write_bit(false); // -> freq_res[1]
         w.write_bit(true); // -> freq_res[0]
@@ -535,7 +523,7 @@ mod tests {
         w.write_u32(2, 2); // var_bord_0
         w.write_u32(1, 2); // num_rel_0 = 1 → num_env = 2
         w.write_u32(3, 2); // rel_bord_0[0]
-                           // ptr_bits(2) = 2.
+        // ptr_bits(2) = 2.
         w.write_u32(0, 2); // pointer
         w.write_bit(false); // freq_res[0]
         w.write_bit(true); // freq_res[1]
@@ -559,7 +547,7 @@ mod tests {
         w.write_u32(1, 2); // num_rel_1 = 1 → num_env = 3
         w.write_u32(0, 2); // rel_bord_0[0]
         w.write_u32(3, 2); // rel_bord_1[0]
-                           // ptr_bits(3) = 2.
+        // ptr_bits(3) = 2.
         w.write_u32(2, 2); // pointer
         w.write_bit(true);
         w.write_bit(false);
@@ -613,7 +601,12 @@ mod tests {
     }
 
     /// The `sbr_grid()` of low delay SBR with a `FIXFIX` frame class.
-    fn eld_fixfix(raw_num_env: u32, amp_res: Option<bool>, freq_res: bool, slots: usize) -> SbrGrid {
+    fn eld_fixfix(
+        raw_num_env: u32,
+        amp_res: Option<bool>,
+        freq_res: bool,
+        slots: usize,
+    ) -> SbrGrid {
         let mut w = BitWriter::new();
         w.write_bit(false); // bs_frame_class
         w.write_u32(raw_num_env, 2);

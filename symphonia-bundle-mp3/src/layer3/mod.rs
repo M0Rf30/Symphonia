@@ -8,8 +8,9 @@
 use std::fmt;
 
 use symphonia_core::audio::{AudioBuffer, AudioMut};
+use symphonia_core::checksum::Crc16Ansi;
 use symphonia_core::errors::{Error, Result, decode_error};
-use symphonia_core::io::{BitReaderLtr, BufReader, ReadBitsLtr, ReadBytes};
+use symphonia_core::io::{BitReaderLtr, BufReader, Monitor, ReadBitsLtr, ReadBytes};
 
 mod bitstream;
 mod codebooks;
@@ -259,6 +260,38 @@ pub struct Layer3 {
 }
 
 impl Layer3 {
+    /// Verify the CRC-16 of a protected frame. `data` is the whole frame including the 4-byte
+    /// header. The CRC covers the last 2 bytes of the header and the side information. On a
+    /// mismatch, the bit reservoir is cleared since the frame is dropped.
+    ///
+    /// Layers 1 and 2 are not verified: their CRC covers the bit allocation and scale factor
+    /// selection information, whose length is only known after parsing it with the layer-specific
+    /// allocation tables.
+    pub(crate) fn verify_crc(&mut self, data: &[u8], header: &FrameHeader) -> Result<()> {
+        if !header.has_crc {
+            return Ok(());
+        }
+
+        let side_info_end = 6 + header.side_info_len();
+
+        let (Some(crc_bytes), Some(protected), Some(side_info)) =
+            (data.get(4..6), data.get(2..4), data.get(6..side_info_end))
+        else {
+            return decode_error("mpa: frame too small for crc");
+        };
+
+        let mut crc = Crc16Ansi::new(0xffff);
+        crc.process_buf_bytes(protected);
+        crc.process_buf_bytes(side_info);
+
+        if crc.crc() != u16::from_be_bytes([crc_bytes[0], crc_bytes[1]]) {
+            self.resevoir.clear();
+            return decode_error("mpa: crc mismatch");
+        }
+
+        Ok(())
+    }
+
     pub fn new() -> Self {
         Self {
             samples: [[[0f32; 576]; 2]; 2],
@@ -381,14 +414,16 @@ impl Layer for Layer3 {
         // frame.
         let mut frame_data: FrameData = Default::default();
 
-        let _crc = if header.has_crc { Some(reader.read_be_u16()?) } else { None };
+        // The CRC is verified before decoding, see `verify_crc`.
+        if header.has_crc {
+            reader.read_be_u16()?;
+        }
 
         let buf = reader.read_buf_bytes_available_ref();
 
         let mut bs = BitReaderLtr::new(buf);
 
-        // Read side_info into the frame data.
-        // TODO: Use a MonitorStream to compute the CRC.
+        // Read side_info into the frame data. The CRC over it is verified before decoding.
         let side_info_len = match bitstream::read_side_info(&mut bs, header, &mut frame_data) {
             Ok(len) => len,
             Err(e) => {
@@ -477,5 +512,71 @@ impl Layer for Layer3 {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Layer3;
+    use crate::common::{ChannelMode, Emphasis, FrameHeader, MpegLayer, MpegVersion};
+
+    /// Bitwise MPEG audio CRC-16 (polynomial 0x8005, initial value 0xffff, MSB first).
+    fn mpeg_crc(bytes: &[u8]) -> u16 {
+        let mut crc = 0xffffu16;
+        for byte in bytes {
+            for i in (0..8).rev() {
+                let bit = (*byte >> i) & 1 != 0;
+                let top = crc & 0x8000 != 0;
+                crc <<= 1;
+                if bit != top {
+                    crc ^= 0x8005;
+                }
+            }
+        }
+        crc
+    }
+
+    fn header() -> FrameHeader {
+        FrameHeader {
+            version: MpegVersion::Mpeg1,
+            layer: MpegLayer::Layer3,
+            bitrate: 128000,
+            sample_rate: 44100,
+            sample_rate_idx: 0,
+            channel_mode: ChannelMode::Stereo,
+            emphasis: Emphasis::None,
+            is_copyrighted: false,
+            is_original: false,
+            has_padding: false,
+            has_crc: true,
+            frame_size: 417,
+        }
+    }
+
+    fn frame() -> Vec<u8> {
+        let mut data = vec![0u8; 4 + 417];
+        data[..4].copy_from_slice(&[0xff, 0xfa, 0x90, 0x44]);
+        for (i, b) in data[6..38].iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(37).wrapping_add(11);
+        }
+        let mut protected = data[2..4].to_vec();
+        protected.extend_from_slice(&data[6..38]);
+        let crc = mpeg_crc(&protected);
+        data[4..6].copy_from_slice(&crc.to_be_bytes());
+        data
+    }
+
+    #[test]
+    fn verify_crc_accepts_valid_and_rejects_corrupt_frame() {
+        let mut layer = Layer3::new();
+        let header = header();
+
+        let mut data = frame();
+        assert!(layer.verify_crc(&data, &header).is_ok());
+
+        data[20] ^= 0x04;
+        assert!(layer.verify_crc(&data, &header).is_err());
+
+        assert!(layer.verify_crc(&data[..20], &header).is_err());
     }
 }

@@ -16,7 +16,10 @@ use symphonia_core::formats::prelude::*;
 use symphonia_core::formats::probe::{ProbeFormatData, ProbeableFormat, Score, Scoreable};
 use symphonia_core::formats::well_known::{FORMAT_ID_MP1, FORMAT_ID_MP2, FORMAT_ID_MP3};
 use symphonia_core::io::*;
-use symphonia_core::meta::{Metadata, MetadataLog};
+use symphonia_core::meta::{
+    METADATA_ID_NULL, Metadata, MetadataBuilder, MetadataInfo, MetadataLog, RawValue, StandardTag,
+    Tag,
+};
 
 use crate::common::{FrameHeader, MpegLayer};
 use crate::header::{self, MAX_MPEG_FRAME_SIZE, MPEG_HEADER_LEN};
@@ -25,6 +28,7 @@ use symphonia_metadata::id3v2;
 
 use std::collections::VecDeque;
 use std::io::{Seek, SeekFrom};
+use std::sync::Arc;
 
 use log::{debug, info, warn};
 
@@ -724,11 +728,19 @@ impl<'s> MpaReader<'s> {
         // Whether the duration is exact (from a tag or scanning), or estimated.
         let mut is_duration_exact = false;
 
+        // ReplayGain tags found in the LAME tag.
+        let mut lame_meta = MetadataBuilder::new(MetadataInfo {
+            metadata: METADATA_ID_NULL,
+            short_name: "lame",
+            long_name: "LAME Tag",
+        });
+
         // Check if there is a Xing/Info tag contained in the first frame.
         if let Some(info_tag) = try_read_info_tag(&packet, &header) {
             // The LAME tag contains ReplayGain and padding information.
             if let Some(lame_tag) = info_tag.lame {
                 track.with_delay(lame_tag.enc_delay).with_padding(lame_tag.enc_padding);
+                push_lame_replaygain_tags(&mut lame_meta, &lame_tag);
             }
 
             // The base Xing/Info tag may contain the number of MPEG frames.
@@ -772,7 +784,12 @@ impl<'s> MpaReader<'s> {
             _ => None,
         };
 
-        let metadata = opts.external_data.metadata.unwrap_or_default();
+        let mut metadata = opts.external_data.metadata.unwrap_or_default();
+
+        let lame_revision = lame_meta.build();
+        if !lame_revision.media.tags.is_empty() {
+            metadata.push(lame_revision);
+        }
         let chapters = opts.external_data.chapters;
 
         // An ID3v2 tag may be appended to the audio data. The metadata of the tag is read by the
@@ -1314,8 +1331,11 @@ const INFO_TAG_ID: [u8; 4] = *b"Info";
 #[allow(dead_code)]
 struct LameTag {
     encoder: String,
+    /// Peak sample amplitude, where 1.0 is full scale.
     replaygain_peak: Option<f32>,
+    /// Radio (track) gain in dB.
     replaygain_radio: Option<f32>,
+    /// Audiophile (album) gain in dB.
     replaygain_audiophile: Option<f32>,
     enc_delay: u32,
     enc_padding: u32,
@@ -1405,7 +1425,7 @@ fn try_read_info_tag_inner(buf: &[u8], header: &FrameHeader) -> Result<Option<Xi
         // Replay gain peak in 9.23 (bit) fixed-point format.
         let replaygain_peak = match reader.read_be_u32()? {
             0 => None,
-            peak => Some(32767.0 * (peak as f32 / 2.0f32.powi(23))),
+            peak => Some(peak as f32 / 2.0f32.powi(23)),
         };
 
         // Radio replay gain.
@@ -1497,6 +1517,26 @@ fn try_read_info_tag_inner(buf: &[u8], header: &FrameHeader) -> Result<Option<Xi
     };
 
     Ok(Some(XingInfoTag { num_frames, num_bytes, toc, quality, is_cbr, lame }))
+}
+
+fn push_lame_replaygain_tags(builder: &mut MetadataBuilder, lame: &LameTag) {
+    let mut push = |key: &str, value: String, std: fn(Arc<String>) -> StandardTag| {
+        builder.add_tag(Tag::new_from_parts(
+            key,
+            RawValue::from(value.clone()),
+            Some(std(Arc::new(value))),
+        ));
+    };
+
+    if let Some(gain) = lame.replaygain_radio {
+        push("REPLAYGAIN_TRACK_GAIN", format!("{gain:.2} dB"), StandardTag::ReplayGainTrackGain);
+    }
+    if let Some(gain) = lame.replaygain_audiophile {
+        push("REPLAYGAIN_ALBUM_GAIN", format!("{gain:.2} dB"), StandardTag::ReplayGainAlbumGain);
+    }
+    if let Some(peak) = lame.replaygain_peak {
+        push("REPLAYGAIN_TRACK_PEAK", format!("{peak:.6}"), StandardTag::ReplayGainTrackPeak);
+    }
 }
 
 fn parse_lame_tag_replaygain(value: u16, expected_name: u8) -> Option<f32> {

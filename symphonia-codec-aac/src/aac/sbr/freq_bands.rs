@@ -65,11 +65,7 @@ use super::error::{SbrError as Error, SbrResult as Result};
 fn nint(x: f64) -> i32 {
     // Halves away from zero: for x >= 0 this is floor(x + 0.5); the sign
     // branch keeps the helper correct for any finite input.
-    if x >= 0.0 {
-        (x + 0.5).floor() as i32
-    } else {
-        (x - 0.5).ceil() as i32
-    }
+    if x >= 0.0 { (x + 0.5).floor() as i32 } else { (x - 0.5).ceil() as i32 }
 }
 
 /// §4 `INT` operator: truncation toward zero. The arguments in this
@@ -112,9 +108,11 @@ fn start_min(fs_sbr: u32) -> i32 {
     let fs = fs_sbr as f64;
     let c = if fs_sbr < 32000 {
         3000.0
-    } else if fs_sbr < 64000 {
+    }
+    else if fs_sbr < 64000 {
         4000.0
-    } else {
+    }
+    else {
         5000.0
     };
     nint(c * 128.0 / fs)
@@ -126,9 +124,11 @@ fn stop_min(fs_sbr: u32) -> i32 {
     let fs = fs_sbr as f64;
     let c = if fs_sbr < 32000 {
         6000.0
-    } else if fs_sbr < 64000 {
+    }
+    else if fs_sbr < 64000 {
         8000.0
-    } else {
+    }
+    else {
         10000.0
     };
     nint(c * 128.0 / fs)
@@ -211,7 +211,8 @@ pub fn master_table(
 
     if bs_freq_scale == 0 {
         master_linear(k0_val, k2_val, bs_alter_scale)
-    } else {
+    }
+    else {
         master_warped(k0_val, k2_val, bs_freq_scale, bs_alter_scale)
     }
 }
@@ -221,11 +222,9 @@ fn master_linear(k0_val: i32, k2_val: i32, bs_alter_scale: bool) -> Result<Vec<i
     let (dk, num_bands) = if !bs_alter_scale {
         let dk = 1;
         // numBands = 2 * INT( (k2 - k0) / (dk * 2) )
-        (
-            dk,
-            2 * int_trunc((k2_val - k0_val) as f64 / (dk as f64 * 2.0)),
-        )
-    } else {
+        (dk, 2 * int_trunc((k2_val - k0_val) as f64 / (dk as f64 * 2.0)))
+    }
+    else {
         let dk = 2;
         // numBands = 2 * NINT( (k2 - k0) / (dk * 2) )
         (dk, 2 * nint((k2_val - k0_val) as f64 / (dk as f64 * 2.0)))
@@ -241,11 +240,8 @@ fn master_linear(k0_val: i32, k2_val: i32, bs_alter_scale: bool) -> Result<Vec<i
 
     if k2_diff != 0 {
         // incr / k start, then walk while k2Diff != 0.
-        let (incr, mut k): (i32, isize) = if k2_diff < 0 {
-            (1, 0)
-        } else {
-            (-1, num_bands as isize - 1)
-        };
+        let (incr, mut k): (i32, isize) =
+            if k2_diff < 0 { (1, 0) } else { (-1, num_bands as isize - 1) };
         while k2_diff != 0 {
             v_dk[k as usize] -= incr;
             k += incr as isize;
@@ -262,7 +258,7 @@ fn master_linear(k0_val: i32, k2_val: i32, bs_alter_scale: bool) -> Result<Vec<i
         if d <= 0 {
             return Err(Error::SbrFreqBandInvalid);
         }
-        let next = *f_master.last().unwrap() + d;
+        let next = *f_master.last().ok_or(Error::SbrFreqBandInvalid)? + d;
         f_master.push(next);
     }
     Ok(f_master)
@@ -282,7 +278,8 @@ fn master_warped(
 
     let (two_regions, k1) = if (k2_val as f64) / (k0_val as f64) > 2.2449 {
         (true, 2 * k0_val)
-    } else {
+    }
+    else {
         (false, k2_val)
     };
 
@@ -343,7 +340,7 @@ fn warped_region(k_lo: i32, k_hi: i32, bands: f64, warp: f64) -> Result<Vec<i32>
         if d <= 0 {
             return Err(Error::SbrFreqBandInvalid);
         }
-        let next = *v_k.last().unwrap() + d;
+        let next = *v_k.last().ok_or(Error::SbrFreqBandInvalid)? + d;
         v_k.push(next);
     }
     Ok(v_k)
@@ -394,7 +391,7 @@ fn warped_region_upper(
         if d <= 0 {
             return Err(Error::SbrFreqBandInvalid);
         }
-        let next = *v_k1.last().unwrap() + d;
+        let next = *v_k1.last().ok_or(Error::SbrFreqBandInvalid)? + d;
         v_k1.push(next);
     }
     Ok(v_k1)
@@ -474,11 +471,7 @@ impl HiLoTables {
         let parity = (1 - if n_high % 2 == 0 { 1 } else { -1 }) / 2; // 0 if NHigh even, 1 if odd
         let mut f_table_low = Vec::with_capacity(n_low + 1);
         for k in 0..=n_low {
-            let i_k = if k == 0 {
-                0
-            } else {
-                (2 * k as isize - parity as isize) as usize
-            };
+            let i_k = if k == 0 { 0 } else { (2 * k as isize - parity as isize) as usize };
             f_table_low.push(*f_table_high.get(i_k).ok_or(Error::SbrFreqBandInvalid)?);
         }
 
@@ -487,7 +480,8 @@ impl HiLoTables {
         let k2_range = f_table_low[n_low];
         let n_q = if bs_noise_bands == 0 {
             1usize
-        } else {
+        }
+        else {
             let val = nint(bs_noise_bands as f64 * ((k2_range as f64 / k_x as f64).log2()));
             val.max(1) as usize
         };
@@ -504,13 +498,7 @@ impl HiLoTables {
             f_table_noise.push(*f_table_low.get(i_prev).ok_or(Error::SbrFreqBandInvalid)?);
         }
 
-        Ok(HiLoTables {
-            f_table_high,
-            f_table_low,
-            f_table_noise,
-            m,
-            k_x,
-        })
+        Ok(HiLoTables { f_table_high, f_table_low, f_table_noise, m, k_x })
     }
 }
 
@@ -574,7 +562,7 @@ mod tests {
         // bs_stop_freq == 14 -> min(64, 2*k0).
         assert_eq!(k2(88200, 14, 10).unwrap(), 20);
         assert_eq!(k2(88200, 14, 40).unwrap(), 64); // capped
-                                                    // bs_stop_freq == 15 -> min(64, 3*k0).
+        // bs_stop_freq == 15 -> min(64, 3*k0).
         assert_eq!(k2(88200, 15, 10).unwrap(), 30);
         assert_eq!(k2(88200, 15, 30).unwrap(), 64); // capped
     }
@@ -617,7 +605,7 @@ mod tests {
         assert_eq!(*fm.first().unwrap(), 5);
         assert_eq!(*fm.last().unwrap(), 12);
         assert_eq!(fm.len(), 7); // numBands + 1
-                                 // Strictly increasing (all vDk > 0).
+        // Strictly increasing (all vDk > 0).
         assert!(fm.windows(2).all(|w| w[1] > w[0]));
     }
 
@@ -632,14 +620,8 @@ mod tests {
 
     #[test]
     fn master_rejects_k2_le_k0() {
-        assert_eq!(
-            master_table(20, 20, 0, false),
-            Err(Error::SbrFreqBandInvalid)
-        );
-        assert_eq!(
-            master_table(20, 10, 1, false),
-            Err(Error::SbrFreqBandInvalid)
-        );
+        assert_eq!(master_table(20, 20, 0, false), Err(Error::SbrFreqBandInvalid));
+        assert_eq!(master_table(20, 10, 1, false), Err(Error::SbrFreqBandInvalid));
     }
 
     #[test]
@@ -716,23 +698,14 @@ mod tests {
         assert_eq!(t.n_q(), 1);
         assert_eq!(t.f_table_noise.len(), 2);
         assert_eq!(t.f_table_noise[0], t.f_table_low[0]);
-        assert_eq!(
-            *t.f_table_noise.last().unwrap(),
-            *t.f_table_low.last().unwrap()
-        );
+        assert_eq!(*t.f_table_noise.last().unwrap(), *t.f_table_low.last().unwrap());
     }
 
     #[test]
     fn derive_rejects_xover_ge_nmaster() {
         let fm = master_table(5, 13, 0, false).unwrap(); // NMaster = 8
-        assert_eq!(
-            HiLoTables::derive(&fm, 8, 1),
-            Err(Error::SbrFreqBandInvalid)
-        );
-        assert_eq!(
-            HiLoTables::derive(&fm, 9, 1),
-            Err(Error::SbrFreqBandInvalid)
-        );
+        assert_eq!(HiLoTables::derive(&fm, 8, 1), Err(Error::SbrFreqBandInvalid));
+        assert_eq!(HiLoTables::derive(&fm, 9, 1), Err(Error::SbrFreqBandInvalid));
     }
 
     #[test]

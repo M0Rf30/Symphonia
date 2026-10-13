@@ -36,13 +36,13 @@
 //! in memory once, byte-swapped, and serves frames from it; see the crate-level docs for the
 //! resulting memory-use caveat for very large SV7 files.
 
-use symphonia_core::errors::{decode_error, seek_error, Error, Result, SeekErrorKind};
+use symphonia_core::errors::{Error, Result, SeekErrorKind, decode_error, seek_error};
 use symphonia_core::io::{MediaSource, MediaSourceStream, ReadBytes};
 
 use crate::bits::BitReader;
-use crate::decoder_core::{Decoder as Core, Sv7Sync, FRAME_LENGTH, SYNTH_DELAY};
+use crate::decoder_core::{Decoder as Core, FRAME_LENGTH, SYNTH_DELAY, Sv7Sync};
 
-use super::{StreamInfo, PACKET_TAG_PLAIN, PACKET_TAG_SYNC};
+use super::{PACKET_TAG_PLAIN, PACKET_TAG_SYNC, StreamInfo};
 
 const SAMPLE_FREQS: [u32; 4] = [44100, 48000, 37800, 32000];
 /// Maximum amount of audio-region data this demuxer will buffer for one SV7 stream.
@@ -128,9 +128,9 @@ pub(crate) fn read_header(
     let mut samples = frames * FRAME_LENGTH as u64;
     if is_true_gapless {
         let padding = FRAME_LENGTH as u64 - u64::from(last_frame_samples);
-        samples = samples.checked_sub(padding).ok_or(Error::DecodeError(
-            "musepack: SV7 gapless padding exceeds total samples",
-        ))?;
+        samples = samples
+            .checked_sub(padding)
+            .ok_or(Error::DecodeError("musepack: SV7 gapless padding exceeds total samples"))?;
     }
     else {
         samples = samples.checked_sub(u64::from(SYNTH_DELAY)).ok_or(Error::DecodeError(
@@ -176,10 +176,8 @@ pub(crate) fn read_header(
         encoder: None,
     };
 
-    let remaining = mss
-        .byte_len()
-        .map(|len| len.saturating_sub(mss.pos()))
-        .unwrap_or(MAX_BUFFERED_BYTES);
+    let remaining =
+        mss.byte_len().map(|len| len.saturating_sub(mss.pos())).unwrap_or(MAX_BUFFERED_BYTES);
     let to_read = remaining.min(MAX_BUFFERED_BYTES) as usize;
     // The header's last 3 bytes (bits 168..192) are the start of the continuous audio
     // bitstream, not unused padding -- see the comment above `debug_assert_eq!(r.bit_pos(), 168)`.
@@ -334,7 +332,7 @@ impl Sv7State {
             return decode_error("musepack: implausible SV7 frame length");
         }
 
-        let mut packet = Vec::with_capacity(1 + ((bit_len + 7) / 8) as usize);
+        let mut packet = Vec::with_capacity(1 + bit_len.div_ceil(8) as usize);
         match self.pending_sync.take() {
             Some(sync) => {
                 packet.push(PACKET_TAG_SYNC);
@@ -359,7 +357,8 @@ impl Sv7State {
             self.index = Some(self.build_index());
         }
         let index = self.index.as_ref().expect("index was just built");
-        let Some(&pos) = index.frame_pos.get(frame as usize) else {
+        let Some(&pos) = index.frame_pos.get(frame as usize)
+        else {
             return seek_error(SeekErrorKind::OutOfRange);
         };
         self.pending_sync = Some(sync_at(&self.data, self.max_band, self.ms, index, frame));

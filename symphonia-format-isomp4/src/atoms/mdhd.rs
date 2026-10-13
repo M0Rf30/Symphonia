@@ -7,8 +7,6 @@
 
 use std::num::NonZero;
 
-use symphonia_core::errors::Error;
-
 use crate::atoms::{Atom, AtomHeader, AtomIterator, ReadAtom, Result, decode_error};
 
 fn parse_language(code: u16) -> String {
@@ -55,29 +53,14 @@ impl Atom for MdhdAtom {
             language: String::new(),
         };
 
-        match version {
-            0 => {
-                mdhd.ctime = u64::from(it.read_u32()?);
-                mdhd.mtime = u64::from(it.read_u32()?);
-                mdhd.timescale = NonZero::new(it.read_u32()?)
-                    .ok_or(Error::DecodeError("isomp4 (mdhd): timescale is zero"))?;
-                // 0xffff_ffff is a special case.
-                mdhd.duration = match it.read_u32()? {
-                    u32::MAX => u64::MAX,
-                    duration => u64::from(duration),
-                };
-            }
-            1 => {
-                mdhd.ctime = it.read_u64()?;
-                mdhd.mtime = it.read_u64()?;
-                mdhd.timescale = NonZero::new(it.read_u32()?)
-                    .ok_or(Error::DecodeError("isomp4 (mdhd): timescale is zero"))?;
-                mdhd.duration = it.read_u64()?;
-            }
-            _ => {
-                return decode_error("isomp4 (mdhd): invalid mdhd version");
-            }
+        if version > 1 {
+            return decode_error("isomp4 (mdhd): invalid mdhd version");
         }
+
+        mdhd.ctime = it.read_versioned_u64(version)?;
+        mdhd.mtime = it.read_versioned_u64(version)?;
+        mdhd.timescale = it.read_nonzero_timescale("isomp4 (mdhd): timescale is zero")?;
+        mdhd.duration = it.read_versioned_duration(version)?;
 
         mdhd.language = parse_language(it.read_u16()?);
 

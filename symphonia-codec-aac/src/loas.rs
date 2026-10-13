@@ -11,9 +11,7 @@ use std::io::{Seek, SeekFrom};
 use symphonia_core::codecs::CodecParameters;
 use symphonia_core::codecs::audio::AudioCodecParameters;
 use symphonia_core::codecs::audio::well_known::CODEC_ID_AAC;
-use symphonia_core::errors::{
-    Error, Result, SeekErrorKind, decode_error, seek_error, unsupported_error,
-};
+use symphonia_core::errors::{Error, Result, SeekErrorKind, decode_error, seek_error};
 use symphonia_core::formats::prelude::*;
 use symphonia_core::formats::probe::{ProbeFormatData, ProbeableFormat, Score, Scoreable};
 use symphonia_core::formats::well_known::FORMAT_ID_LOAS;

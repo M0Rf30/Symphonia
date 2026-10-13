@@ -27,12 +27,16 @@ mod buf_reader;
 mod media_source_stream;
 mod monitor_stream;
 mod scoped_stream;
+mod sync;
+mod varint;
 
 pub use bit::*;
 pub use buf_reader::BufReader;
 pub use media_source_stream::{MediaSourceStream, MediaSourceStreamOptions};
 pub use monitor_stream::{Monitor, MonitorStream};
 pub use scoped_stream::ScopedStream;
+pub use sync::read_until_sync;
+pub use varint::read_base128_be_u64;
 
 /// `MediaSource` is a composite trait of [`std::io::Read`] and [`std::io::Seek`]. A source *must*
 /// implement this trait to be used by [`MediaSourceStream`].

@@ -30,9 +30,9 @@ use std::sync::Arc;
 use symphonia_core::audio::layouts;
 use symphonia_core::audio::sample::SampleFormat;
 use symphonia_core::codecs::CodecParameters;
-use symphonia_core::codecs::audio::well_known::CODEC_ID_MUSEPACK;
 use symphonia_core::codecs::audio::AudioCodecParameters;
-use symphonia_core::errors::{decode_error, seek_error, Error, Result, SeekErrorKind};
+use symphonia_core::codecs::audio::well_known::CODEC_ID_MUSEPACK;
+use symphonia_core::errors::{Error, Result, SeekErrorKind, decode_error, seek_error};
 use symphonia_core::formats::prelude::*;
 use symphonia_core::formats::probe::{ProbeFormatData, ProbeableFormat, Score, Scoreable};
 use symphonia_core::formats::well_known::FORMAT_ID_MUSEPACK;
@@ -159,41 +159,25 @@ fn raw_peak_db(raw: u16) -> f64 {
 }
 
 fn push_replaygain_tags(builder: &mut MetadataBuilder, info: &StreamInfo) {
-    if info.gain_title != 0 {
-        let db = raw_gain_db(info.gain_title);
-        let value = format!("{:.2} dB", db);
-        builder.add_tag(Tag::new_from_parts(
-            "REPLAYGAIN_TRACK_GAIN",
-            RawValue::from(value.clone()),
-            Some(StandardTag::ReplayGainTrackGain(Arc::new(value))),
-        ));
-    }
-    if info.peak_title != 0 {
-        let db = raw_peak_db(info.peak_title);
-        let value = format!("{:.2} dB", db);
-        builder.add_tag(Tag::new_from_parts(
-            "REPLAYGAIN_TRACK_PEAK",
-            RawValue::from(value.clone()),
-            Some(StandardTag::ReplayGainTrackPeak(Arc::new(value))),
-        ));
-    }
-    if info.gain_album != 0 {
-        let db = raw_gain_db(info.gain_album);
-        let value = format!("{:.2} dB", db);
-        builder.add_tag(Tag::new_from_parts(
-            "REPLAYGAIN_ALBUM_GAIN",
-            RawValue::from(value.clone()),
-            Some(StandardTag::ReplayGainAlbumGain(Arc::new(value))),
-        ));
-    }
-    if info.peak_album != 0 {
-        let db = raw_peak_db(info.peak_album);
-        let value = format!("{:.2} dB", db);
-        builder.add_tag(Tag::new_from_parts(
-            "REPLAYGAIN_ALBUM_PEAK",
-            RawValue::from(value.clone()),
-            Some(StandardTag::ReplayGainAlbumPeak(Arc::new(value))),
-        ));
+    // (raw value, is gain (signed), key, standard tag constructor)
+    type Ctor = fn(Arc<String>) -> StandardTag;
+    let entries: [(u16, bool, &str, Ctor); 4] = [
+        (info.gain_title, true, "REPLAYGAIN_TRACK_GAIN", StandardTag::ReplayGainTrackGain),
+        (info.peak_title, false, "REPLAYGAIN_TRACK_PEAK", StandardTag::ReplayGainTrackPeak),
+        (info.gain_album, true, "REPLAYGAIN_ALBUM_GAIN", StandardTag::ReplayGainAlbumGain),
+        (info.peak_album, false, "REPLAYGAIN_ALBUM_PEAK", StandardTag::ReplayGainAlbumPeak),
+    ];
+
+    for (raw, is_gain, key, ctor) in entries {
+        if raw != 0 {
+            let db = if is_gain { raw_gain_db(raw) } else { raw_peak_db(raw) };
+            let value = format!("{db:.2} dB");
+            builder.add_tag(Tag::new_from_parts(
+                key,
+                RawValue::from(value.clone()),
+                Some(ctor(Arc::new(value))),
+            ));
+        }
     }
     if let Some(enc) = &info.encoder {
         builder.add_tag(Tag::new_from_parts(
@@ -205,7 +189,7 @@ fn push_replaygain_tags(builder: &mut MetadataBuilder, info: &StreamInfo) {
 }
 
 enum Inner {
-    Sv7(sv7::Sv7State),
+    Sv7(Box<sv7::Sv7State>),
     Sv8(sv8::Sv8State),
 }
 
@@ -232,7 +216,7 @@ impl<'s> MpcReader<'s> {
 
         let (info, inner) = if &magic[..3] == b"MP+" {
             let (info, state) = sv7::read_header(&mut mss, magic[3])?;
-            (info, Inner::Sv7(state))
+            (info, Inner::Sv7(Box::new(state)))
         }
         else if &magic == b"MPCK" {
             let (info, state) = sv8::read_header(&mut mss)?;
@@ -366,7 +350,8 @@ impl FormatReader for MpcReader<'_> {
             return Ok(None);
         };
 
-        let Some(packet) = self.info.packet(self.next_block, self.trim_until, data) else {
+        let Some(packet) = self.info.packet(self.next_block, self.trim_until, data)
+        else {
             // Past the stream's declared length: trailing data is not audio.
             return Ok(None);
         };
@@ -460,9 +445,8 @@ mod tests {
     }
 
     fn trims(info: &StreamInfo, block: u64, trim_until: u64) -> Option<(i64, u64, u64, u64)> {
-        info.packet(block, trim_until, vec![]).map(|p| {
-            (p.pts.get(), p.dur.get(), p.trim_start.get(), p.trim_end.get())
-        })
+        info.packet(block, trim_until, vec![])
+            .map(|p| (p.pts.get(), p.dur.get(), p.trim_start.get(), p.trim_end.get()))
     }
 
     #[test]
@@ -489,7 +473,10 @@ mod tests {
         let i = info(2, 5000, 20000);
         let block = 4 * FRAME_LENGTH as u64;
         assert_eq!(trims(&i, 0, 0).map(|t| (t.1, t.2)), Some((0, block)));
-        assert_eq!(trims(&i, 1, 0).map(|t| (t.1, t.2)), Some((block - (5481 - block), 5481 - block)));
+        assert_eq!(
+            trims(&i, 1, 0).map(|t| (t.1, t.2)),
+            Some((block - (5481 - block), 5481 - block))
+        );
         // The last block holds only the frames that exist.
         let (_, dur, ts, te) = trims(&i, 4, 0).unwrap();
         assert_eq!(dur + ts + te, (i.total_frames.unwrap() - 16) * FRAME_LENGTH as u64);

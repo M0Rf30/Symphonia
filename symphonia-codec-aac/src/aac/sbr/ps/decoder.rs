@@ -39,12 +39,12 @@
 
 use super::super::bits::BitReader;
 
+use super::super::error::SbrResult as Result;
+use super::super::qmf::Complex;
 use super::data::{PsConfig, PsData, PsIndexState};
 use super::decorr::PsDecorr;
-use super::hybrid::{synthesize, HybridConfig, PsHybrid};
+use super::hybrid::{HybridConfig, PsHybrid, synthesize};
 use super::stereo::PsStereo;
-use super::super::qmf::Complex;
-use super::super::error::SbrResult as Result;
 
 /// A stereo pair of 64-band QMF matrices (`NUM_QMF_SLOTS` slots).
 pub type QmfPair = (Vec<[Complex; 64]>, Vec<[Complex; 64]>);
@@ -88,13 +88,6 @@ impl PsDecoder {
         }
     }
 
-    /// Whether a decodable `ps_data()` has been received — before
-    /// this, the caller outputs the mono signal on both channels.
-    #[must_use]
-    pub fn active(&self) -> bool {
-        self.active
-    }
-
     /// Process one stereo frame.
     ///
     /// * `payload` — the raw `sbr_extension()` body bytes carrying
@@ -129,7 +122,8 @@ impl PsDecoder {
             self.config = Some(ps.config);
             self.active = true;
         }
-        let Some(config) = self.config else {
+        let Some(config) = self.config
+        else {
             // Not yet decodable: mono until a header arrives.
             self.prev_frame_had_ps = payload.is_some();
             return Ok(None);
@@ -143,11 +137,7 @@ impl PsDecoder {
         // on the 34-band grid; disabled kinds count as 20.
         let bands34 = (config.enable_iid && config.iid_mode % 3 == 2)
             || (config.enable_icc && config.icc_mode % 3 == 2);
-        let hcfg = if bands34 {
-            HybridConfig::Bands34
-        } else {
-            HybridConfig::Bands1020
-        };
+        let hcfg = if bands34 { HybridConfig::Bands34 } else { HybridConfig::Bands1020 };
         if hcfg != self.hybrid.config() {
             // Table 8.47: instantaneous filterbank switch, coefficient
             // re-map, de-correlator reset.
@@ -160,7 +150,8 @@ impl PsDecoder {
         // ps_data(); otherwise partial above the SBR spectrum.
         if !self.prev_frame_had_ps {
             self.decorr.reset_bands(0);
-        } else {
+        }
+        else {
             let off = if bands34 { 27 } else { 7 };
             let kmax = (kx_plus_m + off).min(hcfg.nr_bands());
             self.decorr.reset_bands(kmax);
@@ -206,9 +197,9 @@ fn hold_element(config: PsConfig) -> PsData {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::super::hybrid::{LOOKAHEAD, NUM_QMF_SLOTS};
     use super::super::super::bits::BitWriter;
+    use super::super::hybrid::{LOOKAHEAD, NUM_QMF_SLOTS};
+    use super::*;
 
     /// Build a header'd one-envelope ps_data payload: coarse IID with
     /// a uniform index, ICC index 0 everywhere (freq differential).
@@ -238,9 +229,7 @@ mod tests {
     }
 
     fn x_input_ones() -> Vec<[Complex; 64]> {
-        (0..NUM_QMF_SLOTS + LOOKAHEAD)
-            .map(|_| [Complex::new(1.0, 0.0); 64])
-            .collect()
+        (0..NUM_QMF_SLOTS + LOOKAHEAD).map(|_| [Complex::new(1.0, 0.0); 64]).collect()
     }
 
     /// Inactive until a header'd element arrives; then the stereo

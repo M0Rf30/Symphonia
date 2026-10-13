@@ -52,10 +52,10 @@
 //! All truth from ISO/IEC 14496-3:2009 §8.6.4.5 / Annex 8.A staged
 //! under `docs/audio/aac/`.
 
+use super::super::error::{SbrError as Error, SbrResult as Result};
+use super::super::qmf::Complex;
 use super::hybrid::HybridConfig;
 use super::map::parameter_map;
-use super::super::qmf::Complex;
-use super::super::error::{SbrError as Error, SbrResult as Result};
 
 /// `DECAY_SLOPE` (§8.6.4.5.1).
 const DECAY_SLOPE: f64 = 0.05;
@@ -170,14 +170,16 @@ fn f_center(config: HybridConfig, k: usize) -> f64 {
         HybridConfig::Bands1020 => {
             if k < F_CENTER_20.len() {
                 F_CENTER_20[k]
-            } else {
+            }
+            else {
                 k as f64 + 0.5 - 7.0
             }
         }
         HybridConfig::Bands34 => {
             if k < F_CENTER_34.len() {
                 F_CENTER_34[k]
-            } else {
+            }
+            else {
                 k as f64 + 0.5 - 27.0
             }
         }
@@ -270,18 +272,15 @@ impl PsDecorr {
             q_fract.push(qs);
             let g = if k > c.decay_cutoff {
                 (1.0 - DECAY_SLOPE * (k as f64 - c.decay_cutoff as f64)).max(0.0)
-            } else {
+            }
+            else {
                 1.0
             };
             g_decay.push(g);
         }
         let mut delay = Vec::with_capacity(c.nr_bands - c.nr_allpass_bands);
         for k in c.nr_allpass_bands..c.nr_bands {
-            let d = if k < c.short_delay_band {
-                LONG_DELAY
-            } else {
-                1
-            };
+            let d = if k < c.short_delay_band { LONG_DELAY } else { 1 };
             delay.push(vec![Complex::default(); d]);
         }
         PsDecorr {
@@ -311,9 +310,7 @@ impl PsDecorr {
         }
         for k in kmax.max(c.nr_allpass_bands)..c.nr_bands {
             let i = k - c.nr_allpass_bands;
-            self.delay[i]
-                .iter_mut()
-                .for_each(|v| *v = Complex::default());
+            self.delay[i].iter_mut().for_each(|v| *v = Complex::default());
             self.delay_pos[i] = 0;
         }
     }
@@ -341,14 +338,16 @@ impl PsDecorr {
                 let p_i = self.scratch_p[i];
                 let peak = if PEAK_DECAY * self.peak_decay_nrg[i] < p_i {
                     p_i
-                } else {
+                }
+                else {
                     PEAK_DECAY * self.peak_decay_nrg[i]
                 };
                 self.peak_decay_nrg[i] = peak;
                 self.smooth_nrg[i] += A_SMOOTH * (p_i - self.smooth_nrg[i]);
                 self.smooth_peak_diff[i] += A_SMOOTH * (peak - p_i - self.smooth_peak_diff[i]);
                 if GAMMA * self.smooth_peak_diff[i] > self.smooth_nrg[i] {
-                    self.scratch_g_ratio[i] = self.smooth_nrg[i] / (GAMMA * self.smooth_peak_diff[i]);
+                    self.scratch_g_ratio[i] =
+                        self.smooth_nrg[i] / (GAMMA * self.smooth_peak_diff[i]);
                 }
             }
 
@@ -393,15 +392,14 @@ impl PsDecorr {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::hybrid::HybridConfig;
+    use super::*;
 
     fn noise_slot(seed: u64, n: usize, nb: usize) -> Vec<Complex> {
         (0..nb)
             .map(|k| {
-                let mut h = seed
-                    .wrapping_mul(6364136223846793005)
-                    .wrapping_add((n * 128 + k) as u64);
+                let mut h =
+                    seed.wrapping_mul(6364136223846793005).wrapping_add((n * 128 + k) as u64);
                 h ^= h >> 33;
                 h = h.wrapping_mul(0xff51afd7ed558ccd);
                 h ^= h >> 33;
@@ -437,10 +435,7 @@ mod tests {
         }
         for k in 0..nb {
             let ratio = out_e[k] / in_e[k];
-            assert!(
-                (0.85..1.15).contains(&ratio),
-                "band {k}: energy ratio {ratio}"
-            );
+            assert!((0.85..1.15).contains(&ratio), "band {k}: energy ratio {ratio}");
         }
     }
 
@@ -482,10 +477,7 @@ mod tests {
         for (k, delay) in [(35usize, 14usize), (50, 1)] {
             for n in 40..96 {
                 let d = all_out[n][k] - all_in[n - delay][k];
-                assert!(
-                    d.norm_sqr() < 1e-20,
-                    "band {k} slot {n}: not a {delay}-delay"
-                );
+                assert!(d.norm_sqr() < 1e-20, "band {k} slot {n}: not a {delay}-delay");
             }
         }
     }

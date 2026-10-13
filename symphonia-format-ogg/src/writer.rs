@@ -22,11 +22,14 @@ use std::io::{self, Write};
 use symphonia_core::checksum::Crc32;
 use symphonia_core::io::Monitor;
 
-const OGG_PAGE_MARKER: [u8; 4] = *b"OggS";
-const OGG_PAGE_HEADER_SIZE: usize = 27;
-const FLAG_CONTINUED: u8 = 0x01;
-const FLAG_BOS: u8 = 0x02;
-const FLAG_EOS: u8 = 0x04;
+pub use crate::page::{OGG_PAGE_HEADER_SIZE, OGG_PAGE_MARKER};
+
+/// Header type flag: the first packet on the page continues a packet from the previous page.
+pub const FLAG_CONTINUED: u8 = 0x01;
+/// Header type flag: first page of a logical stream.
+pub const FLAG_BOS: u8 = 0x02;
+/// Header type flag: last page of a logical stream.
+pub const FLAG_EOS: u8 = 0x04;
 /// Granule position of a page on which no packet ends (RFC 3533 section 6).
 pub const NO_GRANULE: i64 = -1;
 
@@ -36,6 +39,14 @@ pub fn page_crc(data: &[u8]) -> u32 {
     let mut crc = Crc32::new(0);
     crc.process_buf_bytes(data);
     crc.crc()
+}
+
+/// Builds the segment (lacing) table of a single packet of `len` bytes: segments of 255 bytes
+/// terminated by a segment < 255 (of length 0 when `len` is a multiple of 255).
+pub fn packet_lacing(len: usize) -> Vec<u8> {
+    let mut lacing = vec![255; len / 255];
+    lacing.push((len % 255) as u8);
+    lacing
 }
 
 /// Serialises one complete Ogg page, including its CRC.
@@ -258,7 +269,9 @@ mod tests {
         assert_eq!(w.into_inner(), REFERENCE.to_vec());
     }
 
-    fn parse_pages(mut data: &[u8]) -> Vec<(u8, i64, u32, u32, Vec<u8>, Vec<u8>)> {
+    type ParsedPage = (u8, i64, u32, u32, Vec<u8>, Vec<u8>);
+
+    fn parse_pages(mut data: &[u8]) -> Vec<ParsedPage> {
         let mut pages = Vec::new();
         while !data.is_empty() {
             assert_eq!(&data[..4], b"OggS");

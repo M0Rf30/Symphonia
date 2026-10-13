@@ -1,8 +1,10 @@
 // Integration tests for DSD codec decoder
 
-use symphonia_codec_dsd::{DsdDecoder, CODEC_ID_DSD};
+use symphonia_codec_dsd::{CODEC_ID_DSD, DsdDecoder};
 use symphonia_core::audio::{Audio, Channels, GenericAudioBufferRef};
-use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions, ChannelDataLayout};
+use symphonia_core::codecs::audio::{
+    AudioCodecParameters, AudioDecoder, AudioDecoderOptions, ChannelDataLayout,
+};
 use symphonia_core::packet::PacketRef;
 use symphonia_core::units::{Duration, Timestamp};
 
@@ -318,7 +320,11 @@ fn test_passthrough_frame_count_not_capacity() {
     match result.unwrap() {
         GenericAudioBufferRef::U8(buf) => {
             // Pre-fix, this would have been 4096 (the buffer capacity).
-            assert_eq!(buf.frames(), 2, "frames() must reflect real packet size, not buffer capacity");
+            assert_eq!(
+                buf.frames(),
+                2,
+                "frames() must reflect real packet size, not buffer capacity"
+            );
         }
         _ => panic!("Expected U8 buffer for pass-through mode"),
     }
@@ -366,11 +372,7 @@ fn test_pcm_produces_decimated_signal() {
             // The step signal (all-ones then all-zeros) must produce a non-silent output
             let min = samples.iter().cloned().fold(f32::INFINITY, f32::min);
             let max = samples.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            assert!(
-                (max - min) > 0.1,
-                "decimated output appears silent: min={}, max={}",
-                min, max
-            );
+            assert!((max - min) > 0.1, "decimated output appears silent: min={}, max={}", min, max);
         }
         _ => panic!("Expected F32 buffer for PCM mode"),
     }
@@ -410,4 +412,3 @@ fn test_passthrough_frames_are_bytes_at_dsd_rate_div_8() {
         _ => panic!("Expected U8 buffer for pass-through mode"),
     }
 }
-

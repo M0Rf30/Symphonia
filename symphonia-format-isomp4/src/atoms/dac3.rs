@@ -8,7 +8,7 @@
 use symphonia_core::codecs::audio::well_known::CODEC_ID_AC3;
 
 use crate::atoms::stsd::AudioSampleEntry;
-use crate::atoms::{Atom, AtomHeader, AtomIterator, ReadAtom, Result, decode_error};
+use crate::atoms::{Atom, AtomHeader, AtomIterator, ReadAtom, Result, read_config_extra_data};
 
 #[derive(Debug)]
 pub struct Dac3Atom {
@@ -18,17 +18,12 @@ pub struct Dac3Atom {
 
 impl Atom for Dac3Atom {
     fn read<R: ReadAtom>(it: &mut AtomIterator<R>, header: &AtomHeader) -> Result<Self> {
-        // TODO: Validate.
+        // AC3SpecificBox is 3 bytes long.
+        const MIN_DAC3_ATOM_SIZE: u64 = 3;
         const MAX_DAC3_ATOM_SIZE: u64 = 4 * 1024;
 
-        // AC3SpecificBox should have length
-        let len = match header.data_size() {
-            Some(len) if len <= MAX_DAC3_ATOM_SIZE => len as usize,
-            Some(_) => return decode_error("isomp4 (dac3): atom size is greater than 4 kb"),
-            None => return decode_error("isomp4 (dac3): expected atom size to be known"),
-        };
-
-        let extra_data = it.read_boxed_slice_exact(len)?;
+        let extra_data =
+            read_config_extra_data(it, header, MIN_DAC3_ATOM_SIZE, MAX_DAC3_ATOM_SIZE)?;
 
         Ok(Dac3Atom { extra_data })
     }

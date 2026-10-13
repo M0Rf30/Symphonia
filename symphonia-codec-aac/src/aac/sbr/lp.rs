@@ -42,8 +42,8 @@
 //! of this implementation is derived from any external decoder.
 
 use super::env_adjust::EPS0;
-use super::hf_gen::Patches;
 use super::error::{SbrError as Error, SbrResult as Result};
+use super::hf_gen::Patches;
 
 /// §4.6.18.8.3 / Figure 4.53 — the aliasing degree `deg(k)` of every
 /// low-band subband, from the reflection coefficients `ref(k)`
@@ -64,9 +64,11 @@ pub fn aliasing_degree(refl: &[f64]) -> Vec<f64> {
         // on a positive one; other orientations are alias-free.
         let sign = if k % 2 == 0 && refl[k] < 0.0 {
             1.0
-        } else if k % 2 == 1 && refl[k] > 0.0 {
+        }
+        else if k % 2 == 1 && refl[k] > 0.0 {
             -1.0
-        } else {
+        }
+        else {
             k += 1;
             continue;
         };
@@ -75,7 +77,8 @@ pub fn aliasing_degree(refl: &[f64]) -> Vec<f64> {
             if sign * refl[k - 2] > 0.0 {
                 deg[k - 1] = 1.0 - refl[k - 1] * refl[k - 1];
             }
-        } else if sign * refl[k - 2] > 0.0 {
+        }
+        else if sign * refl[k - 2] > 0.0 {
             deg[k] = 1.0 - refl[k - 1] * refl[k - 1];
         }
         k += 1;
@@ -101,11 +104,8 @@ pub fn deg_patched(deg: &[f64], patches: &Patches, k_x: i32, m: i32) -> Result<V
                 break;
             }
             let p = start + x;
-            dp[rel] = if x == 0 {
-                0.0
-            } else {
-                deg.get(p).copied().ok_or(Error::SbrFreqBandInvalid)?
-            };
+            dp[rel] =
+                if x == 0 { 0.0 } else { deg.get(p).copied().ok_or(Error::SbrFreqBandInvalid)? };
         }
         k_off += num;
     }
@@ -132,7 +132,8 @@ pub fn gain_groups(dp: &[f64], s_mapped: &[bool], k_x: i32) -> Vec<(usize, usize
             if open.is_none() {
                 open = Some(k);
             }
-        } else if let Some(start) = open.take() {
+        }
+        else if let Some(start) = open.take() {
             // Close the group: past the current subband when it is
             // sinusoid-free, before it otherwise.
             let stop = if s_mapped[rel] { k } else { k + 1 };
@@ -182,11 +183,7 @@ pub fn aliasing_reduction(
         // α(m)-weighted blend into G²ARtemp.
         let mut g_ar2 = vec![0.0f64; hi - lo];
         for i in lo..hi {
-            let alpha = if i + 1 < m_cnt {
-                dp[i].max(dp[i + 1])
-            } else {
-                dp[i]
-            };
+            let alpha = if i + 1 < m_cnt { dp[i].max(dp[i + 1]) } else { dp[i] };
             g_ar2[i - lo] = alpha * g_target2 + (1.0 - alpha) * g[i] * g[i];
         }
         // Restore the exact group output energy.
@@ -255,10 +252,7 @@ mod tests {
     /// starts and uncovered tail are zero.
     #[test]
     fn deg_patched_rides_patches() {
-        let patches = Patches {
-            start: vec![2, 4],
-            num: vec![3, 2],
-        };
+        let patches = Patches { start: vec![2, 4], num: vec![3, 2] };
         // deg over the low band 0..k0.
         let deg = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7];
         // M = 7: patches cover 5 subbands, tail of 2 stays zero.
@@ -304,17 +298,9 @@ mod tests {
         let mut g = [3.0, 0.5, 1.0, 2.0];
         let dp = [0.0, 1.0, 1.0, 1.0];
         let groups = vec![(8usize, 12usize)];
-        let e_before: f64 = g
-            .iter()
-            .zip(e_curr.iter())
-            .map(|(gi, ei)| gi * gi * ei)
-            .sum();
+        let e_before: f64 = g.iter().zip(e_curr.iter()).map(|(gi, ei)| gi * gi * ei).sum();
         aliasing_reduction(&mut g, &e_curr, &dp, &groups, kx).unwrap();
-        let e_after: f64 = g
-            .iter()
-            .zip(e_curr.iter())
-            .map(|(gi, ei)| gi * gi * ei)
-            .sum();
+        let e_after: f64 = g.iter().zip(e_curr.iter()).map(|(gi, ei)| gi * gi * ei).sum();
         assert!(
             (e_after - e_before).abs() < 1e-6 * e_before,
             "group energy {e_after} vs {e_before}"

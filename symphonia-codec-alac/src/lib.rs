@@ -225,7 +225,7 @@ impl ElementChannel {
                 .iter()
                 .rev()
                 .zip(&out[i - order..i])
-                .map(|(&coeff, &s)| coeff.wrapping_mul(s - past0))
+                .map(|(&coeff, &s)| coeff.wrapping_mul(s.wrapping_sub(past0)))
                 .fold(0i32, |sum, s| sum.wrapping_add(s));
 
             // Rewrite `1 << (self.shift - 1)` as `(1 << self.shift) >> 1` to prevent overflowing
@@ -242,12 +242,14 @@ impl ElementChannel {
                 if res > 0 {
                     // Positive residual case.
                     for (j, (coeff, &sample)) in iter {
-                        let val = past0 - sample;
+                        let val = past0.wrapping_sub(sample);
                         let sign = val.signum();
 
-                        *coeff -= sign;
+                        *coeff = coeff.wrapping_sub(sign);
 
-                        res -= (1 + j as i32) * ((sign * val) >> self.shift);
+                        res = res.wrapping_sub(
+                            (1 + j as i32).wrapping_mul(sign.wrapping_mul(val) >> self.shift),
+                        );
 
                         if res <= 0 {
                             break;
@@ -257,12 +259,14 @@ impl ElementChannel {
                 else {
                     // Negative residual case.
                     for (j, (coeff, &sample)) in iter {
-                        let val = past0 - sample;
+                        let val = past0.wrapping_sub(sample);
                         let sign = val.signum();
 
-                        *coeff += sign;
+                        *coeff = coeff.wrapping_add(sign);
 
-                        res -= (1 + j as i32) * ((-sign * val) >> self.shift);
+                        res = res.wrapping_sub(
+                            (1 + j as i32).wrapping_mul((-sign).wrapping_mul(val) >> self.shift),
+                        );
 
                         if res >= 0 {
                             break;
@@ -690,8 +694,9 @@ fn decorrelate_mid_side(out0: &mut [i32], out1: &mut [i32], weight: i32, shift: 
     assert!(out0.len() == out1.len());
 
     for (s0, s1) in out0.iter_mut().zip(out1.iter_mut()) {
-        *s0 = *s0 + *s1 - ((*s1 * weight) >> shift);
-        *s1 = *s0 - *s1;
+        let m = s0.wrapping_add(*s1).wrapping_sub(s1.wrapping_mul(weight) >> shift);
+        *s1 = m.wrapping_sub(*s1);
+        *s0 = m;
     }
 }
 
@@ -764,5 +769,31 @@ mod tests {
             ],
         );
         assert_eq!(map_channels(&layouts::CHANNEL_LAYOUT_AAC_6P1)[..7], [2, 0, 1, 4, 5, 6, 3]);
+    }
+
+    #[test]
+    fn verify_predict_wraps_on_extreme_residuals() {
+        let mut lpc_coeffs = [0; 32];
+        lpc_coeffs[0] = 1;
+        lpc_coeffs[1] = 1;
+        let mut ch = ElementChannel {
+            bps: 32,
+            kb: 0,
+            mb: 0,
+            mode: 0,
+            shift: 0,
+            pb_factor: 0,
+            lpc_order: 2,
+            lpc_coeffs,
+        };
+        let mut out = [i32::MIN, -1, 0, 5, -5];
+        ch.predict(&mut out).unwrap();
+    }
+
+    #[test]
+    fn verify_mid_side_wraps_on_extreme_values() {
+        let mut a = [i32::MAX, i32::MIN];
+        let mut b = [i32::MAX, i32::MAX];
+        decorrelate_mid_side(&mut a, &mut b, i32::MAX, 0);
     }
 }

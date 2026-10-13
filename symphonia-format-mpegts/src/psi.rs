@@ -8,6 +8,9 @@
 //! Program specific information (PSI): the program association table (PAT) and the program map
 //! table (PMT) (ISO/IEC 13818-1 §2.4.4).
 
+use symphonia_core::checksum::Crc32;
+use symphonia_core::io::Monitor;
+
 /// The PID of the program association table.
 pub const PAT_PID: u16 = 0;
 
@@ -15,31 +18,10 @@ const TABLE_ID_PAT: u8 = 0x00;
 const TABLE_ID_PMT: u8 = 0x02;
 
 /// The CRC-32/MPEG-2 of `data`.
-pub fn crc32_mpeg2(data: &[u8]) -> u32 {
-    const fn table() -> [u32; 256] {
-        let mut t = [0u32; 256];
-        let mut i = 0;
-
-        while i < 256 {
-            let mut crc = (i as u32) << 24;
-            let mut j = 0;
-
-            while j < 8 {
-                crc = if crc & 0x8000_0000 != 0 { (crc << 1) ^ 0x04c1_1db7 } else { crc << 1 };
-                j += 1;
-            }
-
-            t[i] = crc;
-            i += 1;
-        }
-
-        t
-    }
-
-    static TABLE: [u32; 256] = table();
-
-    data.iter()
-        .fold(0xffff_ffffu32, |crc, &b| (crc << 8) ^ TABLE[usize::from((crc >> 24) as u8 ^ b)])
+fn crc32_mpeg2(data: &[u8]) -> u32 {
+    let mut crc = Crc32::new(0xffff_ffff);
+    crc.process_buf_bytes(data);
+    crc.crc()
 }
 
 /// Reassembles a PSI section carried in the payloads of transport stream packets.
@@ -229,22 +211,21 @@ pub fn parse_pmt(section: &[u8]) -> Option<Pmt> {
     Some(Pmt { program_number, pcr_pid, streams })
 }
 
-/// Build a PSI section (long form) with the CRC. Used to generate test streams.
-#[doc(hidden)]
-pub fn build_section(table_id: u8, table_id_ext: u16, body: &[u8]) -> Vec<u8> {
-    let len = 5 + body.len() + 4;
-    let mut s = vec![table_id, 0xb0 | (len >> 8) as u8, len as u8];
-    s.extend_from_slice(&table_id_ext.to_be_bytes());
-    s.extend_from_slice(&[0xc1, 0, 0]);
-    s.extend_from_slice(body);
-    let crc = crc32_mpeg2(&s);
-    s.extend_from_slice(&crc.to_be_bytes());
-    s
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a PSI section (long form) with the CRC.
+    fn build_section(table_id: u8, table_id_ext: u16, body: &[u8]) -> Vec<u8> {
+        let len = 5 + body.len() + 4;
+        let mut s = vec![table_id, 0xb0 | (len >> 8) as u8, len as u8];
+        s.extend_from_slice(&table_id_ext.to_be_bytes());
+        s.extend_from_slice(&[0xc1, 0, 0]);
+        s.extend_from_slice(body);
+        let crc = crc32_mpeg2(&s);
+        s.extend_from_slice(&crc.to_be_bytes());
+        s
+    }
 
     #[test]
     fn verify_crc() {

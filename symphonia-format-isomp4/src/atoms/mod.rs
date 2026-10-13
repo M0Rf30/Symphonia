@@ -23,7 +23,6 @@ pub(crate) mod alac;
 pub(crate) mod avcc;
 pub(crate) mod chpl;
 pub(crate) mod co64;
-pub(crate) mod ctts;
 pub(crate) mod dac3;
 pub(crate) mod dec3;
 pub(crate) mod dovi;
@@ -55,7 +54,6 @@ pub(crate) mod stbl;
 pub(crate) mod stco;
 pub(crate) mod stsc;
 pub(crate) mod stsd;
-pub(crate) mod stss;
 pub(crate) mod stsz;
 pub(crate) mod stts;
 pub(crate) mod tfhd;
@@ -74,8 +72,6 @@ pub use alac::AlacAtom;
 pub use avcc::AvcCAtom;
 pub use chpl::ChplAtom;
 pub use co64::Co64Atom;
-#[allow(unused_imports)]
-pub use ctts::CttsAtom;
 pub use dac3::Dac3Atom;
 pub use dec3::Dec3Atom;
 pub use dovi::DoviAtom;
@@ -106,8 +102,6 @@ pub use stbl::StblAtom;
 pub use stco::StcoAtom;
 pub use stsc::StscAtom;
 pub use stsd::StsdAtom;
-#[allow(unused_imports)]
-pub use stss::StssAtom;
 pub use stsz::StszAtom;
 pub use stts::SttsAtom;
 pub use tfhd::TfhdAtom;
@@ -504,6 +498,28 @@ pub(crate) fn decode_error<T>(desc: &'static str) -> Result<T> {
 /// Convenience function to create an unsupport feature error within an `AtomError`.
 pub(crate) fn unsupported_error<T>(feature: &'static str) -> Result<T> {
     Err(AtomError::Other(symphonia_core::errors::Error::Unsupported(feature)))
+}
+
+/// Reads the entire payload of a codec specific configuration atom (e.g., AC3SpecificBox) as
+/// codec extra data. The payload must be at least `min_len` and at most `max_len` bytes long.
+pub(crate) fn read_config_extra_data<R: ReadAtom>(
+    it: &mut AtomIterator<R>,
+    header: &AtomHeader,
+    min_len: u64,
+    max_len: u64,
+) -> Result<Box<[u8]>> {
+    let len = match header.data_size() {
+        Some(len) if len > max_len => {
+            return decode_error("isomp4: codec configuration atom size is too large");
+        }
+        Some(len) if len < min_len => {
+            return decode_error("isomp4: codec configuration atom size is too small");
+        }
+        Some(len) => len as usize,
+        None => return decode_error("isomp4: expected codec configuration atom size to be known"),
+    };
+
+    it.read_boxed_slice_exact(len)
 }
 
 /// A super-trait of `ReadBytes` and `SeekBuffered` that all readers of `AtomIterator` must
@@ -913,6 +929,38 @@ impl<R: ReadAtom> AtomIterator<R> {
         Ok((self.reader.read_u8()?, self.reader.read_be_u24()?))
     }
 
+    /// Reads a time or duration field of a version 0 (32-bit) or version 1 (64-bit) header. The
+    /// caller must have already validated that `version` is 0 or 1.
+    pub(crate) fn read_versioned_u64(&mut self, version: u8) -> Result<u64> {
+        match version {
+            0 => Ok(u64::from(self.read_u32()?)),
+            _ => self.read_u64(),
+        }
+    }
+
+    /// Reads a version 0 or version 1 header duration field. In version 0, `0xffff_ffff` is a
+    /// special case denoting an unknown duration.
+    pub(crate) fn read_versioned_duration(&mut self, version: u8) -> Result<u64> {
+        match version {
+            0 => match self.read_u32()? {
+                u32::MAX => Ok(u64::MAX),
+                duration => Ok(u64::from(duration)),
+            },
+            _ => self.read_u64(),
+        }
+    }
+
+    /// Reads a non-zero timescale field, or returns the provided decode error if it is zero.
+    pub(crate) fn read_nonzero_timescale(
+        &mut self,
+        zero_err: &'static str,
+    ) -> Result<std::num::NonZero<u32>> {
+        match std::num::NonZero::new(self.read_u32()?) {
+            Some(timescale) => Ok(timescale),
+            None => decode_error(zero_err),
+        }
+    }
+
     /// Reads exactly the number of bytes required to fill be provided buffer or returns an error.
     #[inline]
     pub(crate) fn read_buf_exact(&mut self, buf: &mut [u8]) -> Result<()> {
@@ -933,6 +981,25 @@ impl<R: ReadAtom> AtomIterator<R> {
     pub(crate) fn ignore_bytes(&mut self, count: u64) -> Result<()> {
         self.ensure_parent_atom_data(count)?;
         Ok(self.reader.ignore_bytes(count)?)
+    }
+
+    /// Reads a table preceded by a big-endian u32 entry count, calling `read_entry` once per
+    /// entry. The initial capacity is capped to prevent malicious files from using all the
+    /// available memory.
+    pub(crate) fn read_table<T>(
+        &mut self,
+        mut read_entry: impl FnMut(&mut Self) -> Result<T>,
+    ) -> Result<Vec<T>> {
+        let entry_count = self.read_u32()?;
+
+        let mut entries =
+            Vec::with_capacity(limits::MAX_TABLE_INITIAL_CAPACITY.min(entry_count as usize));
+
+        for _ in 0..entry_count {
+            entries.push(read_entry(self)?);
+        }
+
+        Ok(entries)
     }
 
     /// Read a null-terminated UTF-8 string.
@@ -982,14 +1049,6 @@ impl<R: ReadAtom> AtomIterator<R> {
         Ok(self.reader.read_double_bytes()?)
     }
 
-    /// Reads three bytes from the stream and returns them in read-order or an error.
-    #[allow(dead_code)]
-    #[inline]
-    pub(crate) fn read_triple_bytes(&mut self) -> Result<[u8; 3]> {
-        self.ensure_parent_atom_data(std::mem::size_of::<[u8; 3]>() as u64)?;
-        Ok(self.reader.read_triple_bytes()?)
-    }
-
     /// Reads four bytes from the stream and returns them in read-order or an error.
     #[inline]
     pub(crate) fn read_quad_bytes(&mut self) -> Result<[u8; 4]> {
@@ -1003,44 +1062,11 @@ impl<R: ReadAtom> AtomIterator<R> {
         self.read_byte()
     }
 
-    /// Reads a single signed byte from the stream and returns it or an error.
-    #[allow(dead_code)]
-    #[inline]
-    pub(crate) fn read_i8(&mut self) -> Result<i8> {
-        Ok(self.read_byte()? as i8)
-    }
-
     /// Reads two bytes from the stream and interprets them as an unsigned 16-bit big-endian
     /// integer or returns an error.
     #[inline]
     pub(crate) fn read_u16(&mut self) -> Result<u16> {
         Ok(u16::from_be_bytes(self.read_double_bytes()?))
-    }
-
-    /// Reads two bytes from the stream and interprets them as an signed 16-bit big-endian
-    /// integer or returns an error.
-    #[allow(dead_code)]
-    #[inline]
-    pub(crate) fn read_i16(&mut self) -> Result<i16> {
-        Ok(i16::from_be_bytes(self.read_double_bytes()?))
-    }
-
-    /// Reads three bytes from the stream and interprets them as an unsigned 24-bit big-endian
-    /// integer or returns an error.
-    #[allow(dead_code)]
-    #[inline]
-    pub(crate) fn read_u24(&mut self) -> Result<u32> {
-        let mut buf = [0u8; std::mem::size_of::<u32>()];
-        buf[0..3].clone_from_slice(&self.read_triple_bytes()?);
-        Ok(u32::from_be_bytes(buf) >> 8)
-    }
-
-    /// Reads three bytes from the stream and interprets them as an signed 24-bit big-endian
-    /// integer or returns an error.
-    #[allow(dead_code)]
-    #[inline]
-    pub(crate) fn read_i24(&mut self) -> Result<i32> {
-        Ok(((self.read_u24()? << 8) as i32) >> 8)
     }
 
     /// Reads four bytes from the stream and interprets them as an unsigned 32-bit big-endian
@@ -1050,14 +1076,6 @@ impl<R: ReadAtom> AtomIterator<R> {
         Ok(u32::from_be_bytes(self.read_quad_bytes()?))
     }
 
-    /// Reads four bytes from the stream and interprets them as a signed 32-bit big-endian
-    /// integer or returns an error.
-    #[allow(dead_code)]
-    #[inline]
-    pub(crate) fn read_i32(&mut self) -> Result<i32> {
-        Ok(i32::from_be_bytes(self.read_quad_bytes()?))
-    }
-
     /// Reads eight bytes from the stream and interprets them as an unsigned 64-bit big-endian
     /// integer or returns an error.
     #[inline]
@@ -1065,24 +1083,6 @@ impl<R: ReadAtom> AtomIterator<R> {
         let mut buf = [0u8; std::mem::size_of::<u64>()];
         self.read_buf_exact(&mut buf)?;
         Ok(u64::from_be_bytes(buf))
-    }
-
-    /// Reads eight bytes from the stream and interprets them as an signed 64-bit big-endian
-    /// integer or returns an error.
-    #[allow(dead_code)]
-    #[inline]
-    pub(crate) fn read_i64(&mut self) -> Result<i64> {
-        let mut buf = [0u8; std::mem::size_of::<i64>()];
-        self.read_buf_exact(&mut buf)?;
-        Ok(i64::from_be_bytes(buf))
-    }
-
-    /// Reads four bytes from the stream and interprets them as a 32-bit big-endian IEEE-754
-    /// floating-point value.
-    #[allow(dead_code)]
-    #[inline]
-    pub(crate) fn read_f32(&mut self) -> Result<f32> {
-        Ok(f32::from_be_bytes(self.read_quad_bytes()?))
     }
 
     /// Reads eight bytes from the stream and interprets them as a 64-bit big-endian IEEE-754

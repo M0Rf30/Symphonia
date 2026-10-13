@@ -56,7 +56,7 @@ fn read_ebml_sizes<R: ReadBytes>(mut reader: R, num_frames: usize) -> Result<Vec
     Ok(sizes)
 }
 
-pub(crate) fn read_xiph_sizes<R: ReadBytes>(mut reader: R, num_frames: usize) -> Result<Vec<u64>> {
+fn read_xiph_sizes<R: ReadBytes>(mut reader: R, num_frames: usize) -> Result<Vec<u64>> {
     let mut sizes = Vec::with_capacity(num_frames);
     let mut prefixes = 0;
     while sizes.len() < num_frames {
@@ -168,14 +168,14 @@ impl FrameDurationIter {
 }
 
 pub(crate) fn extract_frames(
-    block: &[u8],
+    mut block: Box<[u8]>,
     block_duration: Option<TrackTicks>,
     discard_padding: Option<SignedMatroskaTicks>,
     cluster_ts: SegmentTicks,
     tracks: &HashMap<u32, TrackState>,
     frames: &mut VecDeque<Frame>,
 ) -> Result<bool> {
-    let mut reader = BufReader::new(block);
+    let mut reader = BufReader::new(&block);
     let track_num = read_unsigned_vint(&mut reader)? as u32;
     let block_rel_ts = SignedTrackTicks::from((reader.read_be_u16()? as i16) as i64);
     let flags = reader.read_byte()?;
@@ -203,9 +203,16 @@ pub(crate) fn extract_frames(
         _ => (0, 0),
     };
 
-    match lacing {
+    // Determine the size of every frame in the block following the block header.
+    let sizes: Vec<usize> = match lacing {
         Lacing::None => {
-            let data = reader.read_boxed_slice_exact(block.len() - reader.pos() as usize)?;
+            // The sole frame is the remainder of the block. Reuse the block's allocation instead of
+            // copying the payload into a new one.
+            let header_len = reader.pos() as usize;
+            let mut data = std::mem::take(&mut block).into_vec();
+            data.drain(..header_len);
+            let data = data.into_boxed_slice();
+
             let mut dur = FrameDurationIter::new(block_duration, track, 1).next();
 
             // PCM blocks have a duration that can be calculated exactly from their size if it is
@@ -216,52 +223,32 @@ pub(crate) fn extract_frames(
                 }
             }
             frames.push_back(Frame { track_num, pts, data, dur, trim_start: 0, trim_end: 0 });
+            Vec::new()
         }
         Lacing::Xiph | Lacing::Ebml => {
             // Read number of stored sizes which is actually `number of frames` - 1
             // since size of the last frame is deduced from block size.
             let num_frames = reader.read_byte()? as usize;
-            let sizes = match lacing {
+            let mut sizes = match lacing {
                 Lacing::Xiph => read_xiph_sizes(&mut reader, num_frames)?,
-                Lacing::Ebml => read_ebml_sizes(&mut reader, num_frames)?,
-                _ => unreachable!(),
+                _ => read_ebml_sizes(&mut reader, num_frames)?,
             };
 
             // The total of all decoded frame sizes should not exceed the block they will be read
             // from.
+            let remaining = (block.len() - reader.pos() as usize) as u64;
             let total_laced_size = sizes.iter().try_fold(0u64, |acc, &size| acc.checked_add(size));
 
             match total_laced_size {
-                Some(size) if size <= block.len() as u64 => (),
+                Some(size) if size <= remaining => {
+                    // Size of last frame is not provided so it extends to the end of the block.
+                    sizes.push(remaining - size);
+                }
                 _ => return decode_error("mkv: total of laced frame sizes exceeds block"),
             }
 
-            let mut dur_it = FrameDurationIter::new(block_duration, track, num_frames as u64 + 1);
-
-            for frame_size in sizes {
-                let data = reader.read_boxed_slice_exact(frame_size as usize)?;
-                let dur = dur_it.next();
-
-                frames.push_back(Frame { track_num, pts, data, dur, trim_start: 0, trim_end: 0 });
-
-                // If PTS overflows, end the stream.
-                pts = match pts.checked_add_unsigned(dur) {
-                    Some(pts) => pts,
-                    None => return Ok(false),
-                };
-            }
-
-            // Size of last frame is not provided so we read to the end of the block.
-            let size = block.len() - reader.pos() as usize;
-            let data = reader.read_boxed_slice_exact(size)?;
-            frames.push_back(Frame {
-                track_num,
-                pts,
-                data,
-                dur: dur_it.next(),
-                trim_start: 0,
-                trim_end: 0,
-            });
+            // All sizes are bounded by the block length.
+            sizes.into_iter().map(|size| size as usize).collect()
         }
         Lacing::FixedSize => {
             let num_frames = reader.read_byte()? as usize + 1;
@@ -270,16 +257,24 @@ pub(crate) fn extract_frames(
                 return decode_error("mkv: invalid block size");
             }
 
-            let mut dur_it = FrameDurationIter::new(block_duration, track, num_frames as u64);
+            vec![total_size / num_frames; num_frames]
+        }
+    };
 
-            let frame_size = total_size / num_frames;
-            for _ in 0..num_frames {
-                let data = reader.read_boxed_slice_exact(frame_size)?;
-                let dur = dur_it.next();
+    if !sizes.is_empty() {
+        let mut offset = block.len() - sizes.iter().sum::<usize>();
+        let mut dur_it = FrameDurationIter::new(block_duration, track, sizes.len() as u64);
+        let last = sizes.len() - 1;
 
-                frames.push_back(Frame { track_num, pts, data, dur, trim_start: 0, trim_end: 0 });
+        for (i, size) in sizes.into_iter().enumerate() {
+            let data = Box::from(&block[offset..offset + size]);
+            offset += size;
+            let dur = dur_it.next();
 
-                // If PTS overflows, end the stream.
+            frames.push_back(Frame { track_num, pts, data, dur, trim_start: 0, trim_end: 0 });
+
+            // If PTS overflows, end the stream.
+            if i != last {
                 pts = match pts.checked_add_unsigned(dur) {
                     Some(pts) => pts,
                     None => return Ok(false),

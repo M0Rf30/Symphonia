@@ -85,7 +85,7 @@ mod tests {
     }
 
     #[rustfmt::skip]
-    const TEST_VECTOR: [Complex<f32>; 64] = [
+    static TEST_VECTOR: [Complex<f32>; 64] = [
         Complex { re: -1.82036, im: -0.72591 },
         Complex { re: 1.21002, im: 0.75897 },
         Complex { re: 1.31084, im: -0.51285 },
@@ -246,5 +246,18 @@ mod tests {
         for (&a, &e) in out.iter().zip(TEST_VECTOR.iter()) {
             assert!(check_complex(a, e, 0.000001));
         }
+    }
+
+    #[test]
+    fn verify_fft_extreme_sizes() {
+        for n in [1, 2, super::MAX_SIZE] {
+            assert_eq!(Fft::new(n).size(), n);
+            assert_eq!(Ifft::new(n).size(), n);
+        }
+
+        // A size-1 FFT is the identity.
+        let mut x = [Complex { re: 3.0f32, im: -2.0 }];
+        Fft::new(1).fft_inplace(&mut x);
+        assert!(check_complex(x[0], Complex { re: 3.0, im: -2.0 }, 0.000001));
     }
 }

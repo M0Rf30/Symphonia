@@ -78,6 +78,18 @@ impl<'a> BufReader<'a> {
         Ok(&self.buf[start..self.pos])
     }
 
+    /// Reads exactly `N` bytes into an array and advances the stream.
+    #[inline(always)]
+    fn read_array<const N: usize>(&mut self) -> io::Result<[u8; N]> {
+        let Some(bytes) = self.buf[self.pos..].first_chunk::<N>()
+        else {
+            return underrun_error();
+        };
+
+        self.pos += N;
+        Ok(*bytes)
+    }
+
     /// Returns a reference to the next `len` bytes in the buffer and advances the stream.
     pub fn read_buf_bytes_ref(&mut self, len: usize) -> io::Result<&'a [u8]> {
         if self.pos + len > self.buf.len() {
@@ -108,41 +120,17 @@ impl ReadBytes for BufReader<'_> {
 
     #[inline(always)]
     fn read_double_bytes(&mut self) -> io::Result<[u8; 2]> {
-        if self.buf.len() - self.pos < 2 {
-            return underrun_error();
-        }
-
-        let mut bytes: [u8; 2] = [0u8; 2];
-        bytes.copy_from_slice(&self.buf[self.pos..self.pos + 2]);
-        self.pos += 2;
-
-        Ok(bytes)
+        self.read_array()
     }
 
     #[inline(always)]
     fn read_triple_bytes(&mut self) -> io::Result<[u8; 3]> {
-        if self.buf.len() - self.pos < 3 {
-            return underrun_error();
-        }
-
-        let mut bytes: [u8; 3] = [0u8; 3];
-        bytes.copy_from_slice(&self.buf[self.pos..self.pos + 3]);
-        self.pos += 3;
-
-        Ok(bytes)
+        self.read_array()
     }
 
     #[inline(always)]
     fn read_quad_bytes(&mut self) -> io::Result<[u8; 4]> {
-        if self.buf.len() - self.pos < 4 {
-            return underrun_error();
-        }
-
-        let mut bytes: [u8; 4] = [0u8; 4];
-        bytes.copy_from_slice(&self.buf[self.pos..self.pos + 4]);
-        self.pos += 4;
-
-        Ok(bytes)
+        self.read_array()
     }
 
     fn read_buf(&mut self, buf: &mut [u8]) -> io::Result<usize> {
@@ -207,12 +195,13 @@ impl ReadBytes for BufReader<'_> {
     }
 
     fn ignore_bytes(&mut self, count: u64) -> io::Result<()> {
-        if self.buf.len() - self.pos < count as usize {
-            return underrun_error();
+        match usize::try_from(count) {
+            Ok(count) if self.buf.len() - self.pos >= count => {
+                self.pos += count;
+                Ok(())
+            }
+            _ => underrun_error(),
         }
-
-        self.pos += count as usize;
-        Ok(())
     }
 
     #[inline(always)]
@@ -277,5 +266,15 @@ mod tests {
         let scanned = reader.scan_bytes_aligned(&[0x00, 0x00], 2, &mut buf).unwrap();
         assert_eq!(scanned, b"ABC");
         assert_eq!(reader.pos(), 3);
+    }
+
+    #[test]
+    fn verify_ignore_bytes_oversize_count_errors() {
+        let mut reader = BufReader::new(b"ABCDEF");
+        assert!(reader.ignore_bytes((1 << 32) + 1).is_err());
+        assert!(reader.ignore_bytes(u64::MAX).is_err());
+        assert_eq!(reader.pos(), 0);
+        reader.ignore_bytes(6).unwrap();
+        assert_eq!(reader.pos(), 6);
     }
 }

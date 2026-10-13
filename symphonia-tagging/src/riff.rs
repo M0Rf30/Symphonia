@@ -17,16 +17,17 @@
 //! `cue `, other `LIST` types, ...) is copied byte for byte, in order.
 
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+use symphonia_core::io::{BufReader, ReadBytes};
 use symphonia_core::meta::{Tag, Visual};
 use symphonia_metadata::embedded::riff::{InfoEncoding, is_managed_info_id, serialize_info};
 use symphonia_metadata::id3v2::write::{self as id3w, Existing};
 
 use crate::{
     Error, Id3v2Version, Result, RiffInfoEncoding, RiffInfoPolicy, WriteOptions, copy_range,
-    read_up_to, replace_file,
+    read_at, read_up_to, replace_file,
 };
 
 /// Maps the INFO text encoding option to the serializer's.
@@ -36,9 +37,6 @@ fn info_encoding(encoding: RiffInfoEncoding) -> InfoEncoding {
         RiffInfoEncoding::Windows1252 => InfoEncoding::Windows1252,
     }
 }
-
-/// The largest `id3 `/`INFO` payload that is read into memory.
-const MAX_METADATA_PAYLOAD: u32 = 256 * 1024 * 1024;
 
 /// A chunk of a RIFF-like container (a 4-byte id, a 4-byte size, the payload, and a pad byte if the
 /// size is odd).
@@ -76,9 +74,10 @@ pub(crate) struct Scan {
     pub end: u64,
 }
 
-fn read_u32(b: &[u8], big_endian: bool) -> u32 {
-    let b = [b[0], b[1], b[2], b[3]];
-    if big_endian { u32::from_be_bytes(b) } else { u32::from_le_bytes(b) }
+/// Reads a chunk size from the 4 bytes at the start of `b`.
+fn read_size(b: &[u8], big_endian: bool) -> io::Result<u32> {
+    let mut reader = BufReader::new(b);
+    if big_endian { reader.read_be_u32() } else { reader.read_u32() }
 }
 
 /// Walks the chunks of `src`, a file with a 12-byte (`magic`, size, form) header. Chunks are
@@ -111,7 +110,7 @@ pub(crate) fn scan(src: &mut File, big_endian: bool) -> Result<([u8; 4], [u8; 4]
             break;
         }
 
-        let chunk = Chunk { id, offset: pos, size: read_u32(&hdr[4..8], big_endian) };
+        let chunk = Chunk { id, offset: pos, size: read_size(&hdr[4..8], big_endian)? };
 
         if chunk.payload_offset() + u64::from(chunk.size) > file_len {
             return Err(Error::Malformed(format!(
@@ -145,18 +144,7 @@ pub(crate) fn make_chunk(id: [u8; 4], payload: &[u8], big_endian: bool) -> Resul
 
 /// Reads a chunk's payload into memory.
 pub(crate) fn read_payload(src: &mut File, chunk: &Chunk) -> Result<Vec<u8>> {
-    if chunk.size > MAX_METADATA_PAYLOAD {
-        return Err(Error::Unsupported(format!(
-            "'{}' chunk of {} bytes is too large to rewrite",
-            String::from_utf8_lossy(&chunk.id),
-            chunk.size
-        )));
-    }
-
-    src.seek(SeekFrom::Start(chunk.payload_offset()))?;
-    let mut buf = vec![0u8; chunk.size as usize];
-    src.read_exact(&mut buf)?;
-    Ok(buf)
+    read_at(src, chunk.payload_offset(), u64::from(chunk.size))
 }
 
 /// Builds the ID3v2 tag for `tags` and `visuals`, keeping the unmanaged frames of the tags in the
@@ -266,7 +254,11 @@ pub(crate) fn emit(
 fn for_each_info_chunk(mut buf: &[u8], mut f: impl FnMut([u8; 4], Vec<u8>)) {
     while buf.len() >= 8 {
         let id = [buf[0], buf[1], buf[2], buf[3]];
-        let len = read_u32(&buf[4..8], false) as usize;
+        let Ok(len) = read_size(&buf[4..8], false)
+        else {
+            break;
+        };
+        let len = len as usize;
 
         if len > buf.len() - 8 {
             break;
@@ -351,7 +343,8 @@ pub(crate) fn write(
         };
 
         let id3 = build_id3(src, &scan, tags, visuals, opts)?;
-        let id3_chunk = if id3.is_empty() { None } else { Some(make_chunk(*b"id3 ", &id3, false)?) };
+        let id3_chunk =
+            if id3.is_empty() { None } else { Some(make_chunk(*b"id3 ", &id3, false)?) };
 
         // Replace the first INFO list and the first ID3 chunk in place, drop the others, and add
         // the new chunks after the last chunk if the file had none.

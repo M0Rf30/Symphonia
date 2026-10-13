@@ -13,6 +13,7 @@
 //! --release --test golden_hashes` (it is skipped when the variable is unset). The same hashes
 //! are printed by `cargo run -p symphonia-codec-opus --features ogg --release --example perf`.
 
+#![allow(clippy::unwrap_used)] // test/example code: a panic is the failure signal
 use std::io::Cursor;
 use std::path::PathBuf;
 
@@ -22,34 +23,10 @@ use symphonia_core::codecs::CodecParameters;
 use symphonia_core::formats::{FormatOptions, FormatReader};
 use symphonia_core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia_format_ogg::OggReader;
-
-struct Fnv(u64);
-
-impl Fnv {
-    fn new() -> Self {
-        Fnv(0xcbf29ce484222325)
-    }
-    fn bytes(&mut self, b: &[u8]) {
-        for &x in b {
-            self.0 = (self.0 ^ x as u64).wrapping_mul(0x100000001b3);
-        }
-    }
-    fn word(&mut self, w: u32) {
-        self.0 = (self.0 ^ w as u64).wrapping_mul(0x100000001b3).rotate_left(23);
-    }
-}
-
-struct Lcg(u32);
-
-impl Lcg {
-    fn next(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(1664525).wrapping_add(1013904223);
-        ((self.0 >> 8) as f32 / (1u32 << 23) as f32) - 1.0
-    }
-}
+use symphonia_testutil::{Fnv, Lcg32};
 
 fn synth(frames: usize, ch: usize, seed: u32) -> Vec<f32> {
-    let mut rng = Lcg(seed);
+    let mut rng = Lcg32(seed);
     let mut out = Vec::with_capacity(frames * ch);
     for i in 0..frames {
         let t = i as f64 / 48000.0;
@@ -60,10 +37,10 @@ fn synth(frames: usize, ch: usize, seed: u32) -> Vec<f32> {
             * ((tau * 440.0 * t).sin()
                 + 0.5 * (tau * 3300.0 * t).sin()
                 + 0.25 * (tau * 9100.0 * t).sin())) as f32
-            + 0.05 * rng.next();
+            + 0.05 * rng.next_f32();
         out.push(s);
         if ch == 2 {
-            out.push(0.8 * s + 0.05 * rng.next());
+            out.push(0.8 * s + 0.05 * rng.next_f32());
         }
     }
     out
@@ -75,8 +52,8 @@ fn encode_hash(cfg: EncoderConfig, pcm: &[f32]) -> u64 {
     packets.extend(enc.finish());
     let mut h = Fnv::new();
     for p in &packets {
-        h.bytes(&(p.len() as u32).to_le_bytes());
-        h.bytes(p);
+        h.write(&(p.len() as u32).to_le_bytes());
+        h.write(p);
     }
     h.0
 }
@@ -147,14 +124,14 @@ fn decode_hash(ch: u8, packets: &[Vec<u8>], loss: bool) -> u64 {
                     h.word(v.to_bits());
                 }
             }
-            Err(_) => h.bytes(b"err"),
+            Err(_) => h.write(b"err"),
         }
     }
     h.0
 }
 
 /// `(file, decode hash, decode-with-loss hash)`; the latter is `None` where not pinned.
-const DECODER_GOLDEN: [(&str, u64, Option<u64>); 10] = [
+static DECODER_GOLDEN: [(&str, u64, Option<u64>); 10] = [
     ("opus_cbr_96.opus", 0xacc86b5318996c09, None),
     ("opus_ffm_celt_fb.opus", 0x64966c2807266272, Some(0xcbd50a701ef3a2d1)),
     ("opus_ffm_fd120.opus", 0x95b12e412a40741f, None),

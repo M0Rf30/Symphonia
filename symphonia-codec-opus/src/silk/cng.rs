@@ -12,13 +12,14 @@
 #![allow(dead_code)]
 
 use crate::silk::macros::{
-    silk_add_sat16, silk_add_sat32, silk_lshift, silk_lshift_sat32, silk_rand, silk_rshift, silk_rshift_round,
-    silk_sat16, silk_smlawb, silk_smultt, silk_smulwb, silk_smulww, silk_sqrt_approx, silk_sub_lshift32,
+    silk_add_sat16, silk_add_sat32, silk_lshift, silk_lshift_sat32, silk_rand, silk_rshift,
+    silk_rshift_round, silk_sat16, silk_smlawb, silk_smultt, silk_smulwb, silk_smulww,
+    silk_sqrt_approx, silk_sub_lshift32,
 };
 use crate::silk::nlsf2a::silk_nlsf2a;
 use crate::silk::structs::{
-    SilkDecoderControl, SilkDecoderState, CNG_BUF_MASK_MAX, CNG_GAIN_SMTH_Q16, CNG_GAIN_SMTH_THRESHOLD_Q16,
-    CNG_NLSF_SMTH_Q16, MAX_LPC_ORDER, TYPE_NO_VOICE_ACTIVITY,
+    CNG_BUF_MASK_MAX, CNG_GAIN_SMTH_Q16, CNG_GAIN_SMTH_THRESHOLD_Q16, CNG_NLSF_SMTH_Q16,
+    MAX_LPC_ORDER, SilkDecoderControl, SilkDecoderState, TYPE_NO_VOICE_ACTIVITY,
 };
 
 /// C: `silk_CNG_Reset`.
@@ -52,7 +53,12 @@ fn cng_exc(exc_q14: &mut [i32], exc_buf_q14: &[i32], length: usize, rand_seed: i
 
 /// C: `silk_CNG`. Updates CNG estimate, and applies CNG when the packet was lost / during DTX.
 /// `frame[0..length]` is the signal to update in place.
-pub(crate) fn silk_cng(dec: &mut SilkDecoderState, ctrl: &SilkDecoderControl, frame: &mut [i16], length: usize) {
+pub(crate) fn silk_cng(
+    dec: &mut SilkDecoderState,
+    ctrl: &SilkDecoderControl,
+    frame: &mut [i16],
+    length: usize,
+) {
     if dec.fs_khz != dec.s_cng.fs_khz {
         reset(dec);
         dec.s_cng.fs_khz = dec.fs_khz;
@@ -65,8 +71,9 @@ pub(crate) fn silk_cng(dec: &mut SilkDecoderState, ctrl: &SilkDecoderControl, fr
         // Smoothing of LSFs.
         for i in 0..order {
             let delta = dec.prev_nlsf_q15[i] as i32 - dec.s_cng.cng_smth_nlsf_q15[i] as i32;
-            dec.s_cng.cng_smth_nlsf_q15[i] =
-                (dec.s_cng.cng_smth_nlsf_q15[i] as i32 + silk_smulwb(delta, CNG_NLSF_SMTH_Q16)) as i16;
+            dec.s_cng.cng_smth_nlsf_q15[i] = (dec.s_cng.cng_smth_nlsf_q15[i] as i32
+                + silk_smulwb(delta, CNG_NLSF_SMTH_Q16))
+                as i16;
         }
         // Find the subframe with the highest gain.
         let mut max_gain_q16: i32 = 0;
@@ -80,9 +87,7 @@ pub(crate) fn silk_cng(dec: &mut SilkDecoderState, ctrl: &SilkDecoderControl, fr
         // Update CNG excitation buffer with excitation from this subframe.
         let subfr_length = dec.subfr_length as usize;
         let nb_subfr = dec.nb_subfr as usize;
-        dec.s_cng
-            .cng_exc_buf_q14
-            .copy_within(0..(nb_subfr - 1) * subfr_length, subfr_length);
+        dec.s_cng.cng_exc_buf_q14.copy_within(0..(nb_subfr - 1) * subfr_length, subfr_length);
         let src_start = subfr * subfr_length;
         let src: [i32; crate::silk::structs::MAX_SUB_FRAME_LENGTH] = {
             let mut tmp = [0i32; crate::silk::structs::MAX_SUB_FRAME_LENGTH];
@@ -93,11 +98,16 @@ pub(crate) fn silk_cng(dec: &mut SilkDecoderState, ctrl: &SilkDecoderControl, fr
 
         // Smooth gains.
         for i in 0..nb_subfr {
-            dec.s_cng.cng_smth_gain_q16 =
-                silk_smlawb(dec.s_cng.cng_smth_gain_q16, ctrl.gains_q16[i] - dec.s_cng.cng_smth_gain_q16, CNG_GAIN_SMTH_Q16);
+            dec.s_cng.cng_smth_gain_q16 = silk_smlawb(
+                dec.s_cng.cng_smth_gain_q16,
+                ctrl.gains_q16[i] - dec.s_cng.cng_smth_gain_q16,
+                CNG_GAIN_SMTH_Q16,
+            );
             // If the smoothed gain is 3 dB greater than this subframe's gain, use this
             // subframe's gain to adapt faster.
-            if silk_smulww(dec.s_cng.cng_smth_gain_q16, CNG_GAIN_SMTH_THRESHOLD_Q16) > ctrl.gains_q16[i] {
+            if silk_smulww(dec.s_cng.cng_smth_gain_q16, CNG_GAIN_SMTH_THRESHOLD_Q16)
+                > ctrl.gains_q16[i]
+            {
                 dec.s_cng.cng_smth_gain_q16 = ctrl.gains_q16[i];
             }
         }
@@ -111,16 +121,30 @@ pub(crate) fn silk_cng(dec: &mut SilkDecoderState, ctrl: &SilkDecoderControl, fr
         let mut gain_q16 = silk_smulww(dec.s_plc.rand_scale_q14 as i32, dec.s_plc.prev_gain_q16[1]);
         if gain_q16 >= (1 << 21) || dec.s_cng.cng_smth_gain_q16 > (1 << 23) {
             gain_q16 = silk_smultt(gain_q16, gain_q16);
-            gain_q16 = silk_sub_lshift32(silk_smultt(dec.s_cng.cng_smth_gain_q16, dec.s_cng.cng_smth_gain_q16), gain_q16, 5);
+            gain_q16 = silk_sub_lshift32(
+                silk_smultt(dec.s_cng.cng_smth_gain_q16, dec.s_cng.cng_smth_gain_q16),
+                gain_q16,
+                5,
+            );
             gain_q16 = silk_lshift(silk_sqrt_approx(gain_q16), 16);
-        } else {
+        }
+        else {
             gain_q16 = silk_smulww(gain_q16, gain_q16);
-            gain_q16 = silk_sub_lshift32(silk_smulww(dec.s_cng.cng_smth_gain_q16, dec.s_cng.cng_smth_gain_q16), gain_q16, 5);
+            gain_q16 = silk_sub_lshift32(
+                silk_smulww(dec.s_cng.cng_smth_gain_q16, dec.s_cng.cng_smth_gain_q16),
+                gain_q16,
+                5,
+            );
             gain_q16 = silk_lshift(silk_sqrt_approx(gain_q16), 8);
         }
         let gain_q10 = silk_rshift(gain_q16, 6);
 
-        dec.s_cng.rand_seed = cng_exc(&mut cng_sig_q14[MAX_LPC_ORDER..MAX_LPC_ORDER + length], &dec.s_cng.cng_exc_buf_q14, length, dec.s_cng.rand_seed);
+        dec.s_cng.rand_seed = cng_exc(
+            &mut cng_sig_q14[MAX_LPC_ORDER..MAX_LPC_ORDER + length],
+            &dec.s_cng.cng_exc_buf_q14,
+            length,
+            dec.s_cng.rand_seed,
+        );
 
         // Convert CNG NLSF to filter representation.
         let order = dec.lpc_order as usize;
@@ -130,6 +154,8 @@ pub(crate) fn silk_cng(dec: &mut SilkDecoderState, ctrl: &SilkDecoderControl, fr
         // Generate CNG signal, by synthesis filtering.
         cng_sig_q14[..MAX_LPC_ORDER].copy_from_slice(&dec.s_cng.cng_synth_state);
         debug_assert!(order == 10 || order == 16);
+        #[allow(clippy::needless_range_loop)]
+        // index shared across several buffers, mirrors the C loop
         for i in 0..length {
             // Avoids introducing a bias because silk_SMLAWB() always rounds to -inf.
             let mut lpc_pred_q10: i32 = (order as i32) >> 1;
@@ -154,13 +180,18 @@ pub(crate) fn silk_cng(dec: &mut SilkDecoderState, ctrl: &SilkDecoderControl, fr
             }
 
             // Update states.
-            cng_sig_q14[base] = silk_add_sat32(cng_sig_q14[base], silk_lshift_sat32(lpc_pred_q10, 4));
+            cng_sig_q14[base] =
+                silk_add_sat32(cng_sig_q14[base], silk_lshift_sat32(lpc_pred_q10, 4));
 
             // Scale with Gain and add to input signal.
-            frame[i] = silk_add_sat16(frame[i], silk_sat16(silk_rshift_round(silk_smulww(cng_sig_q14[base], gain_q10), 8)) as i16);
+            frame[i] = silk_add_sat16(
+                frame[i],
+                silk_sat16(silk_rshift_round(silk_smulww(cng_sig_q14[base], gain_q10), 8)) as i16,
+            );
         }
         dec.s_cng.cng_synth_state.copy_from_slice(&cng_sig_q14[length..length + MAX_LPC_ORDER]);
-    } else {
+    }
+    else {
         for v in dec.s_cng.cng_synth_state[..dec.lpc_order as usize].iter_mut() {
             *v = 0;
         }

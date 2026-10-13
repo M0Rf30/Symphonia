@@ -15,21 +15,12 @@
 //! (VBR). That is required to emit CBR packets of an exact size and to share the buffer layout
 //! the decoder expects.
 
-use crate::range::BITRES;
+use crate::range::{
+    BITRES, EC_CODE_BITS, EC_CODE_BOT, EC_CODE_SHIFT, EC_CODE_TOP, EC_SYM_BITS, EC_SYM_MAX,
+    EC_UINT_BITS, ec_ilog,
+};
 
-const EC_SYM_BITS: u32 = 8;
-const EC_CODE_BITS: u32 = 32;
-const EC_SYM_MAX: u32 = (1 << EC_SYM_BITS) - 1;
-const EC_CODE_SHIFT: u32 = EC_CODE_BITS - EC_SYM_BITS - 1;
-const EC_CODE_TOP: u32 = 1u32 << (EC_CODE_BITS - 1);
-const EC_CODE_BOT: u32 = EC_CODE_TOP >> EC_SYM_BITS;
-const EC_UINT_BITS: u32 = 8;
 const EC_WINDOW_SIZE: i32 = 32;
-
-#[inline]
-fn ilog(v: u32) -> i32 {
-    32 - v.leading_zeros() as i32
-}
 
 /// A range encoder writing into a fixed-size buffer. C: `ec_enc`.
 #[derive(Clone)]
@@ -173,7 +164,7 @@ impl RangeEncoder {
     pub fn enc_uint(&mut self, fl: u32, ft: u32) {
         assert!(ft > 1);
         let ft = ft - 1;
-        let ftb = ilog(ft);
+        let ftb = ec_ilog(ft);
         if ftb > EC_UINT_BITS as i32 {
             let ftb = (ftb - EC_UINT_BITS as i32) as u32;
             let ft_s = (ft >> ftb) + 1;
@@ -226,14 +217,14 @@ impl RangeEncoder {
 
     /// C: `ec_tell`. Whole bits used so far (a slight over-estimate).
     pub fn tell(&self) -> i32 {
-        self.nbits_total - ilog(self.rng)
+        self.nbits_total - ec_ilog(self.rng)
     }
 
     /// C: `ec_tell_frac`. As [`Self::tell`] but in `1/(1<<BITRES)` bit units.
     pub fn tell_frac(&self) -> i32 {
         const CORRECTION: [u32; 8] = [35733, 38967, 42495, 46340, 50535, 55109, 60097, 65535];
         let nbits = (self.nbits_total as u32) << BITRES;
-        let l = ilog(self.rng);
+        let l = ec_ilog(self.rng);
         let r = self.rng >> (l - 16);
         let mut b = (r >> 12).wrapping_sub(8);
         b += (r > CORRECTION[b as usize]) as u32;
@@ -263,7 +254,7 @@ impl RangeEncoder {
     pub fn done(mut self) -> (Vec<u8>, bool) {
         // Output the minimum number of bits that ensures the symbols encoded so far decode
         // correctly regardless of the bits that follow.
-        let mut l = EC_CODE_BITS as i32 - ilog(self.rng);
+        let mut l = EC_CODE_BITS as i32 - ec_ilog(self.rng);
         let mut msk = (EC_CODE_TOP - 1) >> l;
         let mut end = self.val.wrapping_add(msk) & !msk;
         if (end | msk) >= self.val.wrapping_add(self.rng) {

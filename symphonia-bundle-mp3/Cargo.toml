@@ -22,8 +22,12 @@ mp3 = []
 [dependencies]
 log = { workspace = true }
 lazy_static = { workspace = true }
-symphonia-core = { version = "0.6.1", path = "../symphonia-core" }
-symphonia-metadata = { version = "0.6.1", path = "../symphonia-metadata", default-features = false, features = ["id3v2"] }
+symphonia-core = { workspace = true }
+symphonia-common = { workspace = true }
+symphonia-metadata = { workspace = true, features = ["id3v2"] }
+
+[dev-dependencies]
+symphonia-testutil = { workspace = true }
 
 [lints]
 workspace = true

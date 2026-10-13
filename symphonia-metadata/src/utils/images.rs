@@ -11,7 +11,9 @@ use std::num::NonZeroU8;
 
 use symphonia_core::errors::{Result, decode_error, unsupported_error};
 use symphonia_core::io::{BufReader, ReadBytes};
-use symphonia_core::meta::{ColorMode, ColorModel, ColorPaletteInfo, Size};
+use symphonia_core::meta::{
+    ColorMode, ColorModel, ColorPaletteInfo, Size, StandardVisualKey, Tag, Visual,
+};
 
 use log::debug;
 
@@ -58,6 +60,26 @@ pub fn try_get_image_info(buf: &[u8]) -> Option<ImageInfo> {
         .iter()
         .filter(|parser| buf.starts_with(parser.marker))
         .find_map(|parser| (parser.parse)(BufReader::new(&buf[parser.marker.len()..])).ok())
+}
+
+/// Create a visual from image data and the image information detected from it, if any.
+///
+/// The detected image information is preferred over the declared media type and dimensions, which
+/// are used only if the image information is unavailable.
+pub fn visual_from_image_data(
+    data: Box<[u8]>,
+    info: Option<ImageInfo>,
+    declared_media_type: Option<String>,
+    declared_dimensions: Option<Size>,
+    usage: Option<StandardVisualKey>,
+    tags: Vec<Tag>,
+) -> Visual {
+    let (media_type, dimensions, color_mode) = match info {
+        Some(info) => (Some(info.media_type), Some(info.dimensions), Some(info.color_mode)),
+        None => (declared_media_type, declared_dimensions, None),
+    };
+
+    Visual { media_type, dimensions, color_mode, usage, tags, data }
 }
 
 /// Parse a JPEG for image information.
@@ -153,7 +175,7 @@ fn parse_png(mut reader: BufReader<'_>) -> Result<ImageInfo> {
                 }
 
                 // Skip chunk data and CRC.
-                reader.ignore_bytes(u64::from(chunk_len + 4))?;
+                reader.ignore_bytes(u64::from(chunk_len) + 4)?;
             };
 
             ColorMode::Indexed(ColorPaletteInfo {
@@ -292,4 +314,42 @@ fn parse_gif(mut reader: BufReader<'_>) -> Result<ImageInfo> {
     };
 
     Ok(info)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn indexed_png_with_chunk_len(chunk_len: u32) -> Vec<u8> {
+        let mut png = vec![0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&1u32.to_be_bytes());
+        png.extend_from_slice(&1u32.to_be_bytes());
+        png.extend_from_slice(&[8, 3, 0, 0, 0]);
+        png.extend_from_slice(&[0; 4]);
+        png.extend_from_slice(&chunk_len.to_be_bytes());
+        png.extend_from_slice(b"PLTE");
+        png.extend_from_slice(&[0; 16]);
+        png
+    }
+
+    #[test]
+    fn verify_png_palette_chunk_length_does_not_overflow() {
+        for chunk_len in [u32::MAX - 4, u32::MAX - 3, u32::MAX - 1, u32::MAX] {
+            assert!(try_get_image_info(&indexed_png_with_chunk_len(chunk_len)).is_none());
+        }
+    }
+
+    #[test]
+    fn verify_png_palette_chunk_is_skipped() {
+        let mut png = indexed_png_with_chunk_len(3);
+        png.truncate(png.len() - 16);
+        png.extend_from_slice(&[0; 3 + 4]);
+        png.extend_from_slice(&0u32.to_be_bytes());
+        png.extend_from_slice(b"IDAT");
+
+        let info = try_get_image_info(&png).unwrap();
+        assert_eq!(info.media_type, "image/png");
+    }
 }

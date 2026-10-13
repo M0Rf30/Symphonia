@@ -7,12 +7,9 @@
 
 //! Audio decoder specific support.
 
-use std::fmt;
-
 use crate::audio::sample::SampleFormat;
 use crate::audio::{Channels, GenericAudioBufferRef};
 use crate::codecs::{CodecInfo, CodecProfile};
-use crate::common::FourCc;
 use crate::errors::Result;
 use crate::packet::{Packet, PacketRef};
 
@@ -22,7 +19,8 @@ use crate::packet::{Packet, PacketRef};
 ///
 /// Using a [well-known](well_known) codec ID is *highly* recommended to maximize compatibility
 /// between components, libraries, and applications. However, if a codec requires custom codec ID,
-/// or there is no well-known ID, then the [`FourCc`] for the codec may be converted into a codec
+/// or there is no well-known ID, then the [`FourCc`](crate::common::FourCc) for the codec may be
+/// converted into a codec
 /// ID.
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -37,25 +35,7 @@ impl Default for AudioCodecId {
     }
 }
 
-impl AudioCodecId {
-    /// Create a new audio codec ID from a FourCC.
-    pub const fn new(cc: FourCc) -> AudioCodecId {
-        // A FourCc always only contains ASCII characters. Therefore, the upper bits are always 0.
-        Self(0x8000_0000 | u32::from_be_bytes(cc.get()))
-    }
-}
-
-impl From<FourCc> for AudioCodecId {
-    fn from(value: FourCc) -> Self {
-        AudioCodecId::new(value)
-    }
-}
-
-impl fmt::Display for AudioCodecId {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:#x}", self.0)
-    }
-}
+crate::common::impl_fourcc_id!(AudioCodecId);
 
 /// A method and expected value to perform verification on the decoded audio.
 #[non_exhaustive]
@@ -139,21 +119,7 @@ pub struct AudioCodecParameters {
 
 impl AudioCodecParameters {
     pub fn new() -> AudioCodecParameters {
-        AudioCodecParameters {
-            codec: CODEC_ID_NULL_AUDIO,
-            profile: None,
-            sample_rate: None,
-            sample_format: None,
-            bits_per_sample: None,
-            bits_per_coded_sample: None,
-            channels: None,
-            max_frames_per_packet: None,
-            verification_check: None,
-            channel_data_layout: None,
-            bit_order: None,
-            frames_per_block: None,
-            extra_data: None,
-        }
+        Self::default()
     }
 
     /// Provide the `AudioCodecId`.

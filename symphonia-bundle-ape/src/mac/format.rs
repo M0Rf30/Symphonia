@@ -64,7 +64,6 @@ pub struct ApeDescriptor {
 #[derive(Debug, Clone)]
 pub struct ApeHeader {
     pub compression_level: u16,
-    pub format_flags: u16,
     pub blocks_per_frame: u32,
     pub final_frame_blocks: u32,
     pub total_frames: u32,
@@ -248,7 +247,8 @@ fn read_descriptor<R: Read>(reader: &mut R) -> ApeResult<ApeDescriptor> {
 
 fn read_header<R: Read>(reader: &mut R) -> ApeResult<ApeHeader> {
     let compression_level = read_u16_le(reader)?;
-    let format_flags = read_u16_le(reader)?;
+    // The format flags of the current format carry nothing the decoder uses.
+    read_u16_le(reader)?;
     let blocks_per_frame = read_u32_le(reader)?;
     let final_frame_blocks = read_u32_le(reader)?;
     let total_frames = read_u32_le(reader)?;
@@ -258,7 +258,6 @@ fn read_header<R: Read>(reader: &mut R) -> ApeResult<ApeHeader> {
 
     Ok(ApeHeader {
         compression_level,
-        format_flags,
         blocks_per_frame,
         final_frame_blocks,
         total_frames,
@@ -276,7 +275,7 @@ fn read_old_header<R: Read + Seek>(
     reader: &mut R,
     magic: [u8; 4],
     version: u16,
-) -> ApeResult<(ApeDescriptor, ApeHeader, Vec<u8>)> {
+) -> ApeResult<(ApeDescriptor, ApeHeader, Vec<u8>, Vec<u64>)> {
     // We've already consumed magic (4) + version (2) = 6 bytes.
     // Old header is 32 bytes total; read remaining 26 bytes worth of fields.
     let compression_level = read_u16_le(reader)?;
@@ -372,7 +371,6 @@ fn read_old_header<R: Read + Seek>(
 
     let header = ApeHeader {
         compression_level,
-        format_flags,
         blocks_per_frame,
         final_frame_blocks,
         total_frames,
@@ -381,14 +379,19 @@ fn read_old_header<R: Read + Seek>(
         sample_rate,
     };
 
-    Ok((descriptor, header, wav_header_data))
+    Ok((descriptor, header, wav_header_data, convert_32bit_seek_table(&seek_raw)))
 }
 
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
 
-fn validate(descriptor: &ApeDescriptor, header: &ApeHeader, file_bytes: u64) -> ApeResult<()> {
+fn validate(
+    descriptor: &ApeDescriptor,
+    header: &ApeHeader,
+    seek_table_len: usize,
+    file_bytes: u64,
+) -> ApeResult<()> {
     // Channel count
     if header.channels < APE_MINIMUM_CHANNELS || header.channels > APE_MAXIMUM_CHANNELS {
         return Err(ApeError::InvalidFormat("channel count out of range (must be 1..=32)"));
@@ -413,6 +416,11 @@ fn validate(descriptor: &ApeDescriptor, header: &ApeHeader, file_bytes: u64) -> 
     // Final frame blocks
     if header.final_frame_blocks > header.blocks_per_frame {
         return Err(ApeError::InvalidFormat("final frame blocks exceeds blocks per frame"));
+    }
+
+    // Every frame needs a seek table entry.
+    if (seek_table_len as u64) < u64::from(header.total_frames) {
+        return Err(ApeError::InvalidFormat("seek table has fewer entries than frames"));
     }
 
     // Seek table elements sanity
@@ -454,7 +462,8 @@ pub fn parse<R: Read + Seek>(reader: &mut R) -> ApeResult<ApeFileInfo> {
 
     if version < 3980 {
         // Old format
-        let (descriptor, header, wav_header_data) = read_old_header(reader, magic, version)?;
+        let (descriptor, header, wav_header_data, seek_table) =
+            read_old_header(reader, magic, version)?;
 
         // Compute derived values
         let total_blocks: i64 = if header.total_frames == 0 {
@@ -488,44 +497,9 @@ pub fn parse<R: Read + Seek>(reader: &mut R) -> ApeResult<ApeFileInfo> {
             0
         };
 
-        let seek_table_elements = (descriptor.seek_table_bytes / 4) as i32;
+        let seek_table_elements = seek_table.len() as i32;
 
-        // The seek table was already read by read_old_header; we need to reconstruct it.
-        // Re-read it: seek back to the right position.
-        // Actually, we need a different approach - let's re-parse more carefully.
-        // For old format, the seek table was already read in read_old_header.
-        // Let's refactor to pass it through.
-
-        // For now, return empty seek table and note this limitation.
-        // Actually, let me refactor read_old_header to also return the seek table.
-        // ... We'll reconstruct from the raw read above.
-
-        // Since read_old_header consumed the seek table, we need to re-approach.
-        // Let me re-read from the file.
-        // Actually, let's just re-do this properly.
-
-        // We already read past everything in read_old_header. Let's re-seek and re-read.
-        // The seek table starts after: junk + 32 (old header) + optional peak (4) + optional seek_elements (4) + wav_header
-        let mut seek_offset = junk_header_bytes as u64 + APE_HEADER_OLD_BYTES as u64;
-        if header.format_flags & APE_FORMAT_FLAG_HAS_PEAK_LEVEL != 0 {
-            seek_offset += 4;
-        }
-        if header.format_flags & APE_FORMAT_FLAG_HAS_SEEK_ELEMENTS != 0 {
-            seek_offset += 4;
-        }
-        if header.format_flags & APE_FORMAT_FLAG_CREATE_WAV_HEADER == 0 {
-            seek_offset += descriptor.header_data_bytes as u64;
-        }
-
-        reader.seek(SeekFrom::Start(seek_offset))?;
-        let n_seek = seek_table_elements as usize;
-        let mut seek_raw = vec![0u32; n_seek];
-        for entry in seek_raw.iter_mut() {
-            *entry = read_u32_le(reader)?;
-        }
-        let seek_table = convert_32bit_seek_table(&seek_raw);
-
-        validate(&descriptor, &header, file_bytes)?;
+        validate(&descriptor, &header, seek_table.len(), file_bytes)?;
 
         return Ok(ApeFileInfo {
             descriptor,
@@ -593,7 +567,7 @@ pub fn parse<R: Read + Seek>(reader: &mut R) -> ApeResult<ApeFileInfo> {
     }
 
     // Validate
-    validate(&descriptor, &header, file_bytes)?;
+    validate(&descriptor, &header, seek_table.len(), file_bytes)?;
 
     // Compute derived values
     let total_blocks: i64 = if header.total_frames == 0 {
@@ -680,7 +654,7 @@ impl ApeFileInfo {
             return 0;
         }
         if frame_idx < self.header.total_frames - 1 {
-            self.seek_byte(frame_idx + 1) - self.seek_byte(frame_idx)
+            self.seek_byte(frame_idx + 1).saturating_sub(self.seek_byte(frame_idx))
         }
         else {
             // Final frame: from seek position to end of compressed data
@@ -709,3 +683,51 @@ impl ApeFileInfo {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::*;
+
+    fn new_format_file(total_frames: u32, seek_entries: &[u32]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"MAC ");
+        buf.extend_from_slice(&3990u16.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.extend_from_slice(&APE_DESCRIPTOR_BYTES.to_le_bytes());
+        buf.extend_from_slice(&APE_HEADER_BYTES.to_le_bytes());
+        buf.extend_from_slice(&((seek_entries.len() * 4) as u32).to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes()); // header data bytes
+        buf.extend_from_slice(&0u32.to_le_bytes()); // frame data bytes
+        buf.extend_from_slice(&0u32.to_le_bytes()); // frame data bytes (high)
+        buf.extend_from_slice(&0u32.to_le_bytes()); // terminating data bytes
+        buf.extend_from_slice(&[0u8; 16]); // md5
+        buf.extend_from_slice(&2000u16.to_le_bytes()); // compression level
+        buf.extend_from_slice(&0u16.to_le_bytes()); // format flags
+        buf.extend_from_slice(&73728u32.to_le_bytes()); // blocks per frame
+        buf.extend_from_slice(&100u32.to_le_bytes()); // final frame blocks
+        buf.extend_from_slice(&total_frames.to_le_bytes());
+        buf.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+        buf.extend_from_slice(&2u16.to_le_bytes()); // channels
+        buf.extend_from_slice(&44100u32.to_le_bytes()); // sample rate
+        for e in seek_entries {
+            buf.extend_from_slice(&e.to_le_bytes());
+        }
+        buf.extend_from_slice(&[0u8; 64]);
+        buf
+    }
+
+    #[test]
+    fn verify_seek_table_shorter_than_total_frames_is_rejected() {
+        let buf = new_format_file(3, &[100]);
+        let res = parse(&mut Cursor::new(buf));
+        assert!(matches!(res, Err(ApeError::InvalidFormat(_))));
+    }
+
+    #[test]
+    fn verify_seek_table_matching_total_frames_is_accepted() {
+        let buf = new_format_file(2, &[100, 120]);
+        assert!(parse(&mut Cursor::new(buf)).is_ok());
+    }
+}

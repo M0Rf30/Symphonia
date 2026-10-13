@@ -5,23 +5,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use std::f64::consts;
-
-/// For a given window size, generates the curve of the left-half of the window.
-fn generate_win_curve(bs: usize) -> Vec<f32> {
-    let len = bs / 2;
-    let denom = f64::from(len as u32);
-
-    let mut slope = vec![0.0; len];
-
-    for (i, s) in slope.iter_mut().enumerate() {
-        let num = f64::from(i as u32) + 0.5;
-        let frac = consts::FRAC_PI_2 * (num / denom);
-        *s = (consts::FRAC_PI_2 * frac.sin().powi(2)).sin() as f32
-    }
-
-    slope
-}
+use symphonia_core::dsp::window::vorbis_power_sine_slope;
 
 pub struct Windows {
     /// Short block window left-half curve.
@@ -32,8 +16,8 @@ pub struct Windows {
 
 impl Windows {
     pub fn new(blocksize0: usize, blocksize1: usize) -> Self {
-        let short = generate_win_curve(blocksize0);
-        let long = generate_win_curve(blocksize1);
+        let short = vorbis_power_sine_slope(blocksize0 / 2);
+        let long = vorbis_power_sine_slope(blocksize1 / 2);
         Windows { short, long }
     }
 }

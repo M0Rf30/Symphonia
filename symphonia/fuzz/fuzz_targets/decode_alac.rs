@@ -26,13 +26,7 @@ fuzz_target!(|data: Vec<u8>| {
 
     codec_params.extra_data = header;
 
-    // ALAC decoder try_new parses the extra data immediately.
-    // If successful, we decode the remaining data.
-    if !packet_data.is_empty() {
-        fuzz_audio_decoder::<AlacDecoder>(&codec_params, packet_data.to_vec());
-    }
-    else {
-        // Even if empty, we might want to check if try_new doesn't panic on just header
-        fuzz_audio_decoder::<AlacDecoder>(&codec_params, vec![]);
-    }
+    // ALAC decoder try_new parses the extra data immediately. If successful, the remaining data
+    // is decoded as a packet.
+    fuzz_audio_decoder::<AlacDecoder>(&codec_params, packet_data.to_vec());
 });

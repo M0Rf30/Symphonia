@@ -12,16 +12,25 @@
 
 #![allow(dead_code)]
 
-use crate::silk::macros::{silk_lshift, silk_rshift_round, silk_sat16, silk_smlabb_ovflw, silk_smulbb, silk_sub32_ovflw};
+use crate::silk::macros::{
+    silk_lshift, silk_rshift_round, silk_sat16, silk_smlabb_ovflw, silk_smulbb, silk_sub32_ovflw,
+};
 
 /// C: `silk_LPC_analysis_filter`. `out[0..len]` receives the filtered signal (first `d` samples
 /// zeroed); `in_sig[0..len]` is the input; `b` holds `d` Q12 MA prediction coefficients.
 /// `d` must be even and `>= 6`, and `d <= len`.
-pub(crate) fn silk_lpc_analysis_filter(out: &mut [i16], in_sig: &[i16], b: &[i16], len: usize, d: usize) {
+pub(crate) fn silk_lpc_analysis_filter(
+    out: &mut [i16],
+    in_sig: &[i16],
+    b: &[i16],
+    len: usize,
+    d: usize,
+) {
     debug_assert!(d >= 6);
     debug_assert!(d % 2 == 0);
     debug_assert!(d <= len);
 
+    #[allow(clippy::needless_range_loop)] // index shared across several buffers, mirrors the C loop
     for ix in d..len {
         // `in_ptr` conceptually points at `in_sig[ix - 1]`; indices below are relative to that.
         let in_ptr = ix - 1;
@@ -37,7 +46,8 @@ pub(crate) fn silk_lpc_analysis_filter(out: &mut [i16], in_sig: &[i16], b: &[i16
         let mut j = 6;
         while j < d {
             out32_q12 = silk_smlabb_ovflw(out32_q12, in_sig[in_ptr - j] as i32, b[j] as i32);
-            out32_q12 = silk_smlabb_ovflw(out32_q12, in_sig[in_ptr - j - 1] as i32, b[j + 1] as i32);
+            out32_q12 =
+                silk_smlabb_ovflw(out32_q12, in_sig[in_ptr - j - 1] as i32, b[j + 1] as i32);
             j += 2;
         }
 

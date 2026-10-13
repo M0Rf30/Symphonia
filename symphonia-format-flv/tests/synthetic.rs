@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+// Test code: a panic is a test failure.
 // Symphonia
 // Copyright (c) 2019-2026 The Project Symphonia Developers.
 //
@@ -244,10 +246,9 @@ fn pcm_formats() {
     }
 
     // 8-bit stereo, and big-endian 16-bit.
-    for (flags, codec, ch) in [
-        ((3 << 4) | (3 << 2) | 1, CODEC_ID_PCM_U8, 2),
-        ((0 << 4) | (3 << 2) | 2 | 1, CODEC_ID_PCM_S16BE, 2),
-    ] {
+    for (flags, codec, ch) in
+        [((3 << 4) | (3 << 2) | 1, CODEC_ID_PCM_U8, 2), ((3 << 2) | 2 | 1, CODEC_ID_PCM_S16BE, 2)]
+    {
         let mut mux = FlvMux::new();
         mux.audio(0, flags, &[0u8; 400]);
         mux.audio(10, flags, &[0u8; 400]);

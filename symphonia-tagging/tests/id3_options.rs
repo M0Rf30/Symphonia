@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+// Test code: a panic is a test failure.
 // Symphonia
 // Copyright (c) 2019-2026 The Project Symphonia Developers.
 //
@@ -103,20 +105,18 @@ fn find<'a>(tags: &'a [Tag], key: &str) -> Vec<&'a Tag> {
 }
 
 fn sub_field(tag: &Tag, name: &str) -> Option<String> {
-    tag.raw
-        .sub_fields
-        .as_ref()?
-        .iter()
-        .find(|f| f.field == name)
-        .map(|f| f.value.to_string())
+    tag.raw.sub_fields.as_ref()?.iter().find(|f| f.field == name).map(|f| f.value.to_string())
 }
 
 fn txxx_descriptions(tags: &[Tag]) -> Vec<String> {
     find(tags, "TXXX").iter().filter_map(|t| sub_field(t, "DESCRIPTION")).collect()
 }
 
+/// A frame: its ID and body.
+type Frame = ([u8; 4], Vec<u8>);
+
 /// The (version, frames) of the ID3v2 tag at the start of the file.
-fn leading_frames(path: &Path) -> (u8, Vec<([u8; 4], Vec<u8>)>) {
+fn leading_frames(path: &Path) -> (u8, Vec<Frame>) {
     let bytes = fs::read(path).unwrap();
     assert_eq!(&bytes[..3], b"ID3");
     let major = bytes[3];
@@ -243,10 +243,7 @@ fn utf16_text_round_trips_in_other_frames_and_multiple_values() {
             assert_eq!(artists, vec!["\u{41a}\u{438}\u{43d}\u{43e}/\u{20ac}uro"]);
         }
 
-        assert!(
-            read.iter()
-                .any(|t| t.std == Some(StandardTag::Comment(s("c\u{43e}mment"))))
-        );
+        assert!(read.iter().any(|t| t.std == Some(StandardTag::Comment(s("c\u{43e}mment")))));
         assert_eq!(find(&read, "TXXX")[0].raw.value.to_string(), "va\u{20ac}");
         cleanup(&path);
     }
@@ -403,26 +400,18 @@ fn ratings_of_other_users_are_preserved_and_raw_email_is_used() {
         ..opts(Id3v2Version::Preserve)
     };
     write_file(&path, &[std_tag(StandardTag::Rating(500_000))], &[], &o).unwrap();
-    assert_eq!(
-        popm_frames(&path),
-        vec![popm("me@example.org", 128, &[]), fixture_frame.clone()]
-    );
+    assert_eq!(popm_frames(&path), vec![popm("me@example.org", 128, &[]), fixture_frame.clone()]);
 
     // Writing again replaces only the configured user's frame.
     write_file(&path, &[std_tag(StandardTag::Rating(1_000_000))], &[], &o).unwrap();
-    assert_eq!(
-        popm_frames(&path),
-        vec![popm("me@example.org", 255, &[]), fixture_frame.clone()]
-    );
+    assert_eq!(popm_frames(&path), vec![popm("me@example.org", 255, &[]), fixture_frame.clone()]);
     cleanup(&path);
 
     // A rating that has an email in its raw tag is written for that email, and the counter of
     // the existing frame of that email is carried over.
     let path = work_copy("mpeg-v23.mp3");
-    let tags = [
-        std_tag(StandardTag::Rating(1_000_000)),
-        rating_with_email(200_000, "user@example.org"),
-    ];
+    let tags =
+        [std_tag(StandardTag::Rating(1_000_000)), rating_with_email(200_000, "user@example.org")];
     write_file(&path, &tags, &[], &o).unwrap();
     assert_eq!(
         popm_frames(&path),

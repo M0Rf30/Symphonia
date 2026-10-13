@@ -60,81 +60,12 @@ use super::error::{SbrError as Error, SbrResult as Result};
 
 /// A complex number, as used by the SBR subband domain (§4.6.18.2.2:
 /// the subband samples are complex-valued).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct Complex {
-    /// Real part.
-    pub re: f64,
-    /// Imaginary part.
-    pub im: f64,
-}
-
-impl Complex {
-    /// `re + i·im`.
-    #[inline]
-    #[must_use]
-    pub fn new(re: f64, im: f64) -> Self {
-        Complex { re, im }
-    }
-
-    /// The complex conjugate.
-    #[inline]
-    #[must_use]
-    pub fn conj(self) -> Self {
-        Complex { re: self.re, im: -self.im }
-    }
-
-    /// Squared magnitude `re² + im²`.
-    #[inline]
-    #[must_use]
-    pub fn norm_sqr(self) -> f64 {
-        self.re * self.re + self.im * self.im
-    }
-}
-
-impl core::ops::Add for Complex {
-    type Output = Complex;
-    #[inline]
-    fn add(self, rhs: Complex) -> Complex {
-        Complex::new(self.re + rhs.re, self.im + rhs.im)
-    }
-}
-
-impl core::ops::Sub for Complex {
-    type Output = Complex;
-    #[inline]
-    fn sub(self, rhs: Complex) -> Complex {
-        Complex::new(self.re - rhs.re, self.im - rhs.im)
-    }
-}
-
-impl core::ops::Mul for Complex {
-    type Output = Complex;
-    #[inline]
-    fn mul(self, rhs: Complex) -> Complex {
-        Complex::new(self.re * rhs.re - self.im * rhs.im, self.re * rhs.im + self.im * rhs.re)
-    }
-}
-
-impl core::ops::Mul<f64> for Complex {
-    type Output = Complex;
-    #[inline]
-    fn mul(self, rhs: f64) -> Complex {
-        Complex::new(self.re * rhs, self.im * rhs)
-    }
-}
-
-impl core::ops::AddAssign for Complex {
-    #[inline]
-    fn add_assign(&mut self, rhs: Complex) {
-        self.re += rhs.re;
-        self.im += rhs.im;
-    }
-}
+pub type Complex = symphonia_core::dsp::complex::Complex64;
 
 /// Table 4.A.89 — the 640 coefficients `c[i]` of the QMF bank window,
 /// shared by the analysis and both synthesis filterbanks.
 #[rustfmt::skip]
-pub const QMF_WINDOW: [f64; 640] = [
+pub static QMF_WINDOW: [f64; 640] = [
     0.0000000000, -0.0005525286, -0.0005617692, -0.0004947518,
     -0.0004875227, -0.0004893791, -0.0005040714, -0.0005226564,
     -0.0005466565, -0.0005677802, -0.0005870930, -0.0006132747,
@@ -724,6 +655,7 @@ impl AnalysisQmf {
 /// 32-band bank over the downsampled core signal, so slot `l` of this
 /// bank lines up with slot `l` of the decoder's `W` for the same
 /// audio — the property the §4.B.18.4 envelope estimator relies on.
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct EncoderAnalysisQmf {
     /// The Figure 4.B.16 input history `x` (640 samples; a higher
@@ -733,12 +665,14 @@ pub struct EncoderAnalysisQmf {
     m: &'static AnalysisMatrix,
 }
 
+#[cfg(test)]
 impl Default for EncoderAnalysisQmf {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(test)]
 impl EncoderAnalysisQmf {
     /// A fresh 64-band analysis bank with an all-zero history.
     #[must_use]

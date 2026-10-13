@@ -17,16 +17,16 @@ pub fn unpack_dsd_byte_to_f32(byte: u8, bit_order: BitOrder, output: &mut [f32; 
     match bit_order {
         BitOrder::LsbFirst => {
             // DSF format: LSB first
-            for i in 0..8 {
+            for (i, out) in output.iter_mut().enumerate() {
                 let bit = (byte >> i) & 1;
-                output[i] = if bit == 1 { 1.0 } else { -1.0 };
+                *out = if bit == 1 { 1.0 } else { -1.0 };
             }
         }
         BitOrder::MsbFirst => {
             // DFF format: MSB first
-            for i in 0..8 {
+            for (i, out) in output.iter_mut().enumerate() {
                 let bit = (byte >> (7 - i)) & 1;
-                output[i] = if bit == 1 { 1.0 } else { -1.0 };
+                *out = if bit == 1 { 1.0 } else { -1.0 };
             }
         }
     }
@@ -91,14 +91,10 @@ mod tests {
         unpack_dsd_bytes_to_f32(&input, BitOrder::LsbFirst, &mut output);
 
         // 0xFF = all 1s -> all 1.0
-        for i in 0..8 {
-            assert_eq!(output[i], 1.0);
-        }
+        assert!(output[..8].iter().all(|&v| v == 1.0));
 
         // 0x00 = all 0s -> all -1.0
-        for i in 8..16 {
-            assert_eq!(output[i], -1.0);
-        }
+        assert!(output[8..16].iter().all(|&v| v == -1.0));
 
         // 0xAA = alternating
         assert_eq!(&output[16..24], &[-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0]);

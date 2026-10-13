@@ -22,6 +22,7 @@ use symphonia_core::formats::FormatReader;
 use symphonia_core::formats::prelude::*;
 use symphonia_core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia_format_mkv::MkvReader;
+use symphonia_testutil::Lcg64;
 
 fn open_path(path: &Path) -> MkvReader<'static> {
     let file = File::open(path).expect("file should exist");
@@ -35,7 +36,8 @@ fn sample(dir: &str, name: &str) -> Option<PathBuf> {
 
     if path.exists() {
         Some(path)
-    } else {
+    }
+    else {
         eprintln!("skipping: {} does not exist", path.display());
         None
     }
@@ -69,19 +71,10 @@ fn generate(name: &str, rate: u32, channels: u32, encoder_args: &[&str]) -> Opti
 
     if status.success() {
         Some(Generated(path))
-    } else {
+    }
+    else {
         eprintln!("skipping: ffmpeg could not create {name}");
         None
-    }
-}
-
-/// A small deterministic pseudo-random number generator.
-struct Lcg(u64);
-
-impl Lcg {
-    fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        self.0 >> 33
     }
 }
 
@@ -112,7 +105,8 @@ fn decode_continuously(path: &Path) -> (Vec<Packet>, Vec<f32>, usize) {
     let params = audio_params(&reader);
     let channels = params.channels.as_ref().expect("the channels are known").count();
 
-    let mut decoder = VorbisDecoder::try_new(&params, &AudioDecoderOptions::default()).unwrap();
+    let mut decoder =
+        VorbisDecoder::try_new(&params, &AudioDecoderOptions::default()).expect("decoder");
 
     let mut packets = Vec::new();
     let mut samples: Vec<f32> = Vec::new();
@@ -150,14 +144,15 @@ fn check_vorbis_seeks(path: &Path, num_seeks: usize) {
     let params = audio_params(&reader);
     let sample_rate = i64::from(params.sample_rate.expect("the sample rate is known"));
     let track_id = reader.tracks()[0].id;
-    let mut decoder = VorbisDecoder::try_new(&params, &AudioDecoderOptions::default()).unwrap();
+    let mut decoder =
+        VorbisDecoder::try_new(&params, &AudioDecoderOptions::default()).expect("decoder");
 
     // The seek pre-roll of Vorbis, 200ms, and a packet.
     let max_backoff = sample_rate / 5 + 2 * 2048 + 1;
 
-    let mut rng = Lcg(2024);
+    let mut rng = Lcg64(2024);
     let mut targets = vec![0i64, 1, 100, 127, 128, 129, 1000, sample_rate / 5, total as i64 - 1];
-    targets.extend((0..num_seeks).map(|_| (rng.next() % total as u64) as i64));
+    targets.extend((0..num_seeks).map(|_| (rng.next_u64() % total as u64) as i64));
     targets.push(total as i64 / 2);
 
     let mut block: Vec<f32> = Vec::new();
@@ -194,7 +189,8 @@ fn check_vorbis_seeks(path: &Path, num_seeks: usize) {
                 // The first packet after a reset only primes the decoder.
                 assert_eq!(buf.frames(), 0);
                 first = false;
-            } else {
+            }
+            else {
                 assert_eq!(buf.frames() as u64, packet.dur.get());
 
                 buf.copy_to_vec_interleaved(&mut block);
@@ -243,7 +239,8 @@ fn ffmpeg_vorbis_seeks_are_sample_exact() {
         ("v96.mka", 96000, 2, &["-c:a", "libvorbis", "-q:a", "5"][..]),
         ("v8.mka", 8000, 1, &["-c:a", "libvorbis", "-q:a", "5"][..]),
     ] {
-        let Some(file) = generate(name, rate, channels, args) else {
+        let Some(file) = generate(name, rate, channels, args)
+        else {
             return;
         };
 
@@ -253,14 +250,15 @@ fn ffmpeg_vorbis_seeks_are_sample_exact() {
 
 #[test]
 fn ffmpeg_vorbis_has_short_and_long_blocks() {
-    let Some(file) = generate("blocks.mka", 44100, 2, &["-c:a", "libvorbis", "-q:a", "4"]) else {
+    let Some(file) = generate("blocks.mka", 44100, 2, &["-c:a", "libvorbis", "-q:a", "4"])
+    else {
         return;
     };
 
     let mut reader = open_path(&file.0);
     let mut durations = std::collections::BTreeSet::new();
 
-    while let Some(packet) = reader.next_packet().unwrap() {
+    while let Some(packet) = reader.next_packet().expect("packet") {
         durations.insert(packet.dur.get());
     }
 
@@ -280,12 +278,12 @@ fn check_opus_file(path: &Path) -> u64 {
     let track_id = reader.tracks()[0].id;
     let mut packets = Vec::new();
 
-    while let Some(packet) = reader.next_packet().unwrap() {
+    while let Some(packet) = reader.next_packet().expect("packet") {
         packets.push(packet);
     }
 
     // The delay is trimmed from the first packet, and the padding from the last.
-    assert_eq!(packets[0].pts.get(), -i64::from(reader.tracks()[0].delay.unwrap()));
+    assert_eq!(packets[0].pts.get(), -i64::from(reader.tracks()[0].delay.expect("delay")));
     assert_eq!(packets[1].pts.get(), packets[0].dur.get() as i64);
 
     for pair in packets.windows(2) {
@@ -295,14 +293,14 @@ fn check_opus_file(path: &Path) -> u64 {
     let total: u64 = packets.iter().map(|packet| packet.dur.get()).sum();
 
     // Seeks land on a packet, before the pre-roll.
-    let mut rng = Lcg(11);
+    let mut rng = Lcg64(11);
     let mut silk = false;
 
     for _ in 0..100 {
-        let target = (rng.next() % total) as i64;
+        let target = (rng.next_u64() % total) as i64;
         let seeked = reader
             .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(target), track_id })
-            .unwrap();
+            .expect("seek");
 
         let at = |preroll: i64| {
             let found = packets.iter().rev().find(|packet| packet.pts.get() <= target - preroll);
@@ -323,7 +321,7 @@ fn check_opus_file(path: &Path) -> u64 {
 
         assert_eq!(seeked.actual_ts, expected.pts, "{}: seek to {target}", path.display());
 
-        let packet = reader.next_packet().unwrap().unwrap();
+        let packet = reader.next_packet().expect("packet").expect("packet present");
         assert_eq!((packet.pts, packet.dur), (expected.pts, expected.dur));
     }
 
@@ -339,7 +337,8 @@ fn ffmpeg_opus_timeline_and_seeks_are_sample_exact() {
         ("o10.webm", &["-c:a", "libopus", "-b:a", "64k", "-frame_duration", "10"][..]),
         ("o60.mka", &["-c:a", "libopus", "-b:a", "64k", "-frame_duration", "60"][..]),
     ] {
-        let Some(file) = generate(name, 48000, 2, args) else {
+        let Some(file) = generate(name, 48000, 2, args)
+        else {
             return;
         };
 

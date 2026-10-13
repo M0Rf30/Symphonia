@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+// Example code: errors abort the example.
 use symphonia::core::codecs::audio::AudioDecoderOptions;
 use symphonia::core::errors::Error;
 use symphonia::core::formats::FormatOptions;

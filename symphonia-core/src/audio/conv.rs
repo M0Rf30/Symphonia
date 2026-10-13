@@ -8,6 +8,12 @@
 //! The `conv` module provides methods to convert samples between different sample types (formats).
 use crate::audio::sample::{Sample, i24, u24};
 
+/// The magnitude of full-scale signed 16-bit PCM expressed as a float (`2^15`).
+pub const I16_SCALE: f32 = 32768.0;
+
+/// The reciprocal of [`I16_SCALE`]: converts 16-bit-magnitude samples to the `[-1, 1)` range.
+pub const I16_SCALE_INV: f32 = 1.0 / I16_SCALE;
+
 pub mod dither {
     //! The `dither` module provides methods to apply a dither to a sample.
     //!

@@ -78,10 +78,13 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | Format   | Status    | Gapless* | Feature Flag | Default | Crate                       |
 |----------|-----------|----------|--------------|---------|-----------------------------|
 | AIFF     | Great     | Yes      | `aiff`       | No      | [`symphonia-format-riff`]   |
+| APE      | -         | -        | `ape-format` | No      | `symphonia-bundle-ape`      |
 | CAF      | Good      | No       | `caf`        | No      | [`symphonia-format-caf`]    |
+| DSD (DSF, DFF) | -   | -        | `dsd`        | No      | `symphonia-format-dsd`      |
 | FLV (audio only) | Good | No      | `flv`        | No      | [`symphonia-format-flv`]    |
 | ISO/MP4  | Great     | No       | `isomp4`     | No      | [`symphonia-format-isomp4`] |
 | MKV/WebM | Good      | Yes      | `mkv`        | Yes     | [`symphonia-format-mkv`]    |
+| Musepack | -         | -        | `musepack`   | No      | `symphonia-bundle-musepack` |
 | MPEG-PS (audio only) | Good | No   | `mpegps`     | No      | [`symphonia-format-mpegps`] |
 | MPEG-TS (audio only) | Good | No   | `mpegts`     | No      | [`symphonia-format-mpegts`] |
 | OGG      | Great     | Yes      | `ogg`        | Yes     | [`symphonia-format-ogg`]    |
@@ -108,16 +111,17 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | AAC-LC                       | Great     | No      | `aac`        | No      | [`symphonia-codec-aac`]    |
 | ADPCM                        | Good      | Yes     | `adpcm`      | Yes     | [`symphonia-codec-adpcm`]  |
 | ALAC                         | Great     | Yes     | `alac`       | No      | [`symphonia-codec-alac`]   |
-| HE-AAC (AAC+, aacPlus)       | -         | -       | `he-aac`     | No      | [`symphonia-codec-aac`]    |
-| HE-AACv2 (eAAC+, aacPlus v2) | -         | -       | `he-aac-v2`  | No      | [`symphonia-codec-aac`]    |
+| APE (Monkey's Audio)         | -         | -       | `ape-format` | No      | `symphonia-bundle-ape`     |
+| DSD                          | -         | -       | `dsd`        | No      | `symphonia-codec-dsd`      |
 | FLAC                         | Excellent | Yes     | `flac`       | Yes     | [`symphonia-bundle-flac`]  |
 | MP1                          | Great     | No      | `mp1`, `mpa` | No      | [`symphonia-bundle-mp3`]   |
 | MP2                          | Great     | No      | `mp2`, `mpa` | No      | [`symphonia-bundle-mp3`]   |
 | MP3                          | Excellent | Yes     | `mp3`, `mpa` | No      | [`symphonia-bundle-mp3`]   |
+| Musepack                     | -         | -       | `musepack`   | No      | `symphonia-bundle-musepack`|
 | Opus                         | Excellent | Yes     | `opus`       | Yes     | [`symphonia-codec-opus`]   |
 | PCM                          | Excellent | Yes     | `pcm`        | Yes     | [`symphonia-codec-pcm`]    |
 | Vorbis                       | Excellent | Yes     | `vorbis`     | Yes     | [`symphonia-codec-vorbis`] |
-| WavPack                      | -         | -       | `wavpack`    | Yes     | `symphonia-codec-wavpack`  |
+| WavPack                      | -         | -       | `wavpack`    | No      | `symphonia-codec-wavpack`  |
 
 A `symphonia-bundle-*` package is a combination of a decoder and a native demuxer.
 
@@ -147,8 +151,8 @@ For metadata formats that are standalone and not part of the media container, a 
 | ID3v2                 | Great     | `id3v2`      | Yes     |
 | ISO/MP4               | Great     | N/A          | N/A     |
 | RIFF                  | Great     | N/A          | N/A     |
-| Vorbis comment (FLAC) | Perfect   | N/A          | N/A     |
-| Vorbis comment (OGG)  | Perfect   | N/A          | N/A     |
+| Vorbis comment (FLAC) | Excellent | N/A          | N/A     |
+| Vorbis comment (OGG)  | Excellent | N/A          | N/A     |
 
 > [!TIP]
 > All metadata formats can be enabled with the `all-meta` feature flag.

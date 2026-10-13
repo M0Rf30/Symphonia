@@ -8,7 +8,8 @@
 // WavPack v2–v3 lossless sample unpacker, ported from unpack3.c by Conifer Software (BSD licence).
 
 use super::bits::Bits;
-use super::words::{get_old_word1, get_word1, get_word2, get_word3, WordState, WORD_EOF};
+use super::crc_accumulate;
+use super::words::{WORD_EOF, WordState, get_old_word1, get_word1, get_word2, get_word3};
 
 /// Upper bound on the number of samples per channel accepted in a single v2/v3 block. Real
 /// encoders emit blocks of well under 200k samples; the limit rejects a malformed or mutated
@@ -62,7 +63,7 @@ pub struct DcState {
     pub sample: [[i32; 2]; 2], // [2 channels][0=pos, 1=delta]
     pub weight: [[i32; 1]; 2], // [2 channels][0=weight]
     pub m: usize,              // ring-buffer modulo index
-    pub crc: i32,
+    pub crc: u32,
     pub sum_level: i32,
     pub left_level: i32,
     pub right_level: i32,
@@ -90,7 +91,8 @@ fn update_weight_n8(weight: &mut i32, source: i32, result: i32, min_weight: i32)
             if *weight < 256 {
                 *weight += 1;
             }
-        } else if *weight > min_weight {
+        }
+        else if *weight > min_weight {
             *weight -= 1;
         }
     }
@@ -103,7 +105,8 @@ fn update_weight_n9(weight: &mut i32, source: i32, result: i32, min_weight: i32)
             if *weight < 512 {
                 *weight += 1;
             }
-        } else if *weight > min_weight {
+        }
+        else if *weight > min_weight {
             *weight -= 1;
         }
     }
@@ -118,9 +121,11 @@ pub fn unpack_init3(flags: i16, passes: &mut Vec<DecorrPass>, num_terms: &mut us
 
     let table: &[i8] = if (flags & EXTREME_DECORR) != 0 {
         EXTREME_TERMS
-    } else if (flags & NEW_DECORR_FLAG) != 0 {
+    }
+    else if (flags & NEW_DECORR_FLAG) != 0 {
         DEFAULT_TERMS
-    } else {
+    }
+    else {
         SIMPLE_TERMS
     };
 
@@ -171,14 +176,20 @@ pub fn unpack_samples_v3(
 
     let min_weight: i32 = if wphdr_bits != 0 {
         if (flags & (NEW_DECORR_FLAG | EXTREME_DECORR)) != 0 { -256 } else { 0 }
-    } else if (flags & NEW_DECORR_FLAG) != 0 {
+    }
+    else if (flags & NEW_DECORR_FLAG) != 0 {
         if is_extreme { -512 } else { -256 }
-    } else {
+    }
+    else {
         0
     };
 
-    let (min_value, max_value): (i32, i32) =
-        if is_bytes3 { (-8_388_608 >> shift, 8_388_607 >> shift) } else { (-32768 >> shift, 32767 >> shift) };
+    let (min_value, max_value): (i32, i32) = if is_bytes3 {
+        (-8_388_608 >> shift, 8_388_607 >> shift)
+    }
+    else {
+        (-32768 >> shift, 32767 >> shift)
+    };
 
     let mut bits = Bits::new(audio_bytes);
 
@@ -208,13 +219,19 @@ pub fn unpack_samples_v3(
                 }
                 sample[0][1] = sample[0][1].wrapping_add(rw);
                 sample[0][0] = sample[0][0].wrapping_add(sample[0][1]);
-                crc = crc.wrapping_mul(3).wrapping_add(sample[0][0]);
+                crc = crc_accumulate(crc, sample[0][0] as u32);
                 out.push(sample[0][0] << shift);
                 decoded += 1;
             }
-        } else if is_high {
+        }
+        else if is_high {
             while decoded < sample_count {
-                let rw = if is_newhigh { get_word1(ws, &mut bits, 0, flags) } else { get_old_word1(ws, &mut bits, 0) };
+                let rw = if is_newhigh {
+                    get_word1(ws, &mut bits, 0, flags)
+                }
+                else {
+                    get_old_word1(ws, &mut bits, 0)
+                };
                 if rw == WORD_EOF {
                     break;
                 }
@@ -229,7 +246,8 @@ pub fn unpack_samples_v3(
                         p.samples_a[(m + p.term as usize) & (MAX_TERM - 1)] = temp;
                         val = temp;
                     }
-                } else {
+                }
+                else {
                     for p in passes.iter_mut().take(num_terms) {
                         let sam = p.samples_a[m];
                         let temp = apply_weight_n8(p.weight_a, sam) + val;
@@ -239,11 +257,12 @@ pub fn unpack_samples_v3(
                     }
                 }
                 m = (m + 1) & (MAX_TERM - 1);
-                crc = crc.wrapping_mul(3).wrapping_add(val);
+                crc = crc_accumulate(crc, val as u32);
                 out.push(val << shift);
                 decoded += 1;
             }
-        } else {
+        }
+        else {
             // Default: get_word3 + one-pass adaptive predictor from dc.weight
             while decoded < sample_count {
                 let rw = get_word3(ws, &mut bits, 0, 0);
@@ -257,7 +276,8 @@ pub fn unpack_samples_v3(
                     if weight[0][0] < 256 {
                         weight[0][0] += 1;
                     }
-                } else if weight[0][0] > 0 {
+                }
+                else if weight[0][0] > 0 {
                     weight[0][0] -= 1;
                 }
 
@@ -266,7 +286,7 @@ pub fn unpack_samples_v3(
                     sample[0][1]
                 });
 
-                crc = crc.wrapping_mul(3).wrapping_add(sample[0][0]);
+                crc = crc_accumulate(crc, sample[0][0] as u32);
                 out.push(sample[0][0] << shift);
                 decoded += 1;
             }
@@ -298,13 +318,14 @@ pub fn unpack_samples_v3(
                 sample[0][0] = sample[0][0].wrapping_add(sample[0][1]);
                 sample[1][0] = sample[1][0].wrapping_add(sample[1][1]);
 
-                crc = crc.wrapping_mul(3).wrapping_add(sample[0][0]);
-                crc = crc.wrapping_mul(3).wrapping_add(sample[1][0]);
+                crc = crc_accumulate(crc, sample[0][0] as u32);
+                crc = crc_accumulate(crc, sample[1][0] as u32);
                 out.push(sample[0][0] << shift);
                 out.push(sample[1][0] << shift);
                 decoded += 1;
             }
-        } else if is_high {
+        }
+        else if is_high {
             while decoded < sample_count {
                 let (left, right) = if (flags & CROSS_DECORR) != 0 {
                     let l = get_word1(ws, &mut bits, 0, flags);
@@ -316,7 +337,8 @@ pub fn unpack_samples_v3(
                         break;
                     }
                     (l, r)
-                } else if is_newhigh {
+                }
+                else if is_newhigh {
                     let rw0 = get_word1(ws, &mut bits, 0, flags);
                     if rw0 == WORD_EOF {
                         break;
@@ -335,7 +357,8 @@ pub fn unpack_samples_v3(
                         &mut diff_level,
                         flags,
                     )
-                } else {
+                }
+                else {
                     let rw0 = get_old_word1(ws, &mut bits, 0);
                     if rw0 == WORD_EOF {
                         break;
@@ -344,10 +367,13 @@ pub fn unpack_samples_v3(
                     if rw1 == WORD_EOF {
                         break;
                     }
-                    let (left, right, sum, diff) = stereo_adapt_oldhigh(rw0, rw1, sum_level, left_level, right_level);
-                    sum_level = sum_level.wrapping_sub(sum_level >> 8).wrapping_add((sum >> 1).abs());
+                    let (left, right, sum, diff) =
+                        stereo_adapt_oldhigh(rw0, rw1, sum_level, left_level, right_level);
+                    sum_level =
+                        sum_level.wrapping_sub(sum_level >> 8).wrapping_add((sum >> 1).abs());
                     left_level = left_level.wrapping_sub(left_level >> 8).wrapping_add(left.abs());
-                    right_level = right_level.wrapping_sub(right_level >> 8).wrapping_add(right.abs());
+                    right_level =
+                        right_level.wrapping_sub(right_level >> 8).wrapping_add(right.abs());
                     diff_level = diff_level.wrapping_sub(diff_level >> 8).wrapping_add(diff.abs());
                     (
                         if (flags & JOINT_STEREO) != 0 { diff } else { left },
@@ -371,7 +397,8 @@ pub fn unpack_samples_v3(
                             lv = l2;
                             p.samples_b[k] = r2;
                             rv = r2;
-                        } else if p.term == -1 {
+                        }
+                        else if p.term == -1 {
                             let l2 = lv + apply_weight_n9(p.weight_a, p.samples_a[0]);
                             update_weight_n9(&mut p.weight_a, p.samples_a[0], lv, min_weight);
                             lv = l2;
@@ -379,7 +406,8 @@ pub fn unpack_samples_v3(
                             update_weight_n9(&mut p.weight_b, lv, rv, min_weight);
                             p.samples_a[0] = rv;
                             rv = r2;
-                        } else {
+                        }
+                        else {
                             let r2 = rv + apply_weight_n9(p.weight_a, p.samples_a[0]);
                             update_weight_n9(&mut p.weight_a, p.samples_a[0], rv, min_weight);
                             rv = r2;
@@ -389,7 +417,8 @@ pub fn unpack_samples_v3(
                             lv = l2;
                         }
                     }
-                } else {
+                }
+                else {
                     for p in passes.iter_mut().take(num_terms) {
                         if p.term > 0 {
                             let sam_a = p.samples_a[m];
@@ -403,7 +432,8 @@ pub fn unpack_samples_v3(
                             lv = l2;
                             p.samples_b[k] = r2;
                             rv = r2;
-                        } else if p.term == -1 {
+                        }
+                        else if p.term == -1 {
                             let l2 = lv + apply_weight_n8(p.weight_a, p.samples_a[0]);
                             update_weight_n8(&mut p.weight_a, p.samples_a[0], lv, min_weight);
                             lv = l2;
@@ -411,7 +441,8 @@ pub fn unpack_samples_v3(
                             update_weight_n8(&mut p.weight_b, lv, rv, min_weight);
                             p.samples_a[0] = rv;
                             rv = r2;
-                        } else {
+                        }
+                        else {
                             let r2 = rv + apply_weight_n8(p.weight_a, p.samples_a[0]);
                             update_weight_n8(&mut p.weight_a, p.samples_a[0], rv, min_weight);
                             rv = r2;
@@ -432,7 +463,7 @@ pub fn unpack_samples_v3(
                     lv = (sum + lv) >> 1;
                 }
 
-                crc = crc.wrapping_mul(9).wrapping_add(lv.wrapping_mul(3)).wrapping_add(rv);
+                crc = crc_accumulate(crc_accumulate(crc, lv as u32), rv as u32);
                 out.push(lv << shift);
                 out.push(rv << shift);
                 decoded += 1;
@@ -442,7 +473,8 @@ pub fn unpack_samples_v3(
             dc.left_level = left_level;
             dc.right_level = right_level;
             dc.diff_level = diff_level;
-        } else {
+        }
+        else {
             // Default stereo: get_word3 + adaptive sum/diff + predictor
             while decoded < sample_count {
                 let rw0 = get_word3(ws, &mut bits, 0, 0);
@@ -454,7 +486,13 @@ pub fn unpack_samples_v3(
                     break;
                 }
 
-                let (left, right) = stereo_default_decode(rw0, rw1, &mut sum_level, &mut left_level, &mut right_level);
+                let (left, right) = stereo_default_decode(
+                    rw0,
+                    rw1,
+                    &mut sum_level,
+                    &mut left_level,
+                    &mut right_level,
+                );
 
                 let left2 = sample[0][0] + apply_weight_n8(weight[0][0], sample[0][1]) + left;
                 let right2 = sample[1][0] + apply_weight_n8(weight[1][0], sample[1][1]) + right;
@@ -463,14 +501,16 @@ pub fn unpack_samples_v3(
                     if weight[0][0] < 256 {
                         weight[0][0] += 1;
                     }
-                } else if weight[0][0] > 0 {
+                }
+                else if weight[0][0] > 0 {
                     weight[0][0] -= 1;
                 }
                 if (sample[1][1] >= 0) == (right > 0) {
                     if weight[1][0] < 256 {
                         weight[1][0] += 1;
                     }
-                } else if weight[1][0] > 0 {
+                }
+                else if weight[1][0] > 0 {
                     weight[1][0] -= 1;
                 }
 
@@ -483,7 +523,7 @@ pub fn unpack_samples_v3(
                     sample[1][1]
                 });
 
-                crc = crc.wrapping_mul(9).wrapping_add(sample[0][0].wrapping_mul(3)).wrapping_add(sample[1][0]);
+                crc = crc_accumulate(crc_accumulate(crc, sample[0][0] as u32), sample[1][0] as u32);
                 out.push(sample[0][0] << shift);
                 out.push(sample[1][0] << shift);
                 decoded += 1;
@@ -508,7 +548,8 @@ pub fn unpack_samples_v3(
             if wphdr_bits != 0 {
                 let clamped = sample[0][0].clamp(min_value, max_value);
                 out.push(clamped << shift);
-            } else {
+            }
+            else {
                 out.push(sample[0][0] << shift);
             }
             decoded += 1;
@@ -538,7 +579,8 @@ pub fn unpack_samples_v3(
             if wphdr_bits != 0 {
                 out.push(sample[0][0].clamp(min_value, max_value) << shift);
                 out.push(sample[1][0].clamp(min_value, max_value) << shift);
-            } else {
+            }
+            else {
                 out.push(sample[0][0] << shift);
                 out.push(sample[1][0] << shift);
             }
@@ -572,11 +614,13 @@ fn stereo_default_decode(
         let l = (sum + rw0) >> 1;
         let r = (sum - rw0) >> 1;
         (l, r, sum)
-    } else if *left_level <= *right_level {
+    }
+    else if *left_level <= *right_level {
         let r = rw1 - rw0;
         let s = rw1 + r;
         (rw1, r, s)
-    } else {
+    }
+    else {
         let l = rw0 + rw1;
         let s = rw1 + l;
         (l, rw1, s)
@@ -603,27 +647,32 @@ fn stereo_adapt_newhigh(
             let s = rw0 + rw1;
             let d = rw0 - rw1;
             (rw1, rw0, s, d)
-        } else if *sum_level < *left_level {
+        }
+        else if *sum_level < *left_level {
             let sum = (rw1 << 1) | (rw0 & 1);
             let l = (sum + rw0) >> 1;
             let r = (sum - rw0) >> 1;
             (l, r, sum, rw0)
-        } else {
+        }
+        else {
             let r = rw1 - rw0;
             let l = rw1;
             let s = l + r;
             (l, r, s, rw0)
         }
-    } else if *left_level + *right_level < *sum_level + *diff_level && *left_level < *diff_level {
+    }
+    else if *left_level + *right_level < *sum_level + *diff_level && *left_level < *diff_level {
         let s = rw0 + rw1;
         let d = rw0 - rw1;
         (rw0, rw1, s, d)
-    } else if *sum_level < *right_level {
+    }
+    else if *sum_level < *right_level {
         let sum = (rw1 << 1) | (rw0 & 1);
         let l = (sum + rw0) >> 1;
         let r = (sum - rw0) >> 1;
         (l, r, sum, rw0)
-    } else {
+    }
+    else {
         let l = rw0 + rw1;
         let r = rw1;
         let s = l + r;
@@ -650,12 +699,14 @@ fn stereo_adapt_oldhigh(
         let l = (sum + rw0) >> 1;
         let r = (sum - rw0) >> 1;
         (l, r, sum, rw0)
-    } else if left_level <= right_level {
+    }
+    else if left_level <= right_level {
         let l = rw1;
         let r = rw1 - rw0;
         let s = l + r;
         (l, r, s, rw0)
-    } else {
+    }
+    else {
         let r = rw1;
         let l = rw0 + r;
         let s = l + r;

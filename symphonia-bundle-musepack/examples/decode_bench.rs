@@ -14,7 +14,6 @@
 //! output, however small, changes the hash), the number of frames, and the minimum wall-clock
 //! decode time with the corresponding speed relative to real time.
 
-use std::fs::File;
 use std::time::Instant;
 
 use symphonia_bundle_musepack::{MpcDecoder, MpcReader};
@@ -22,21 +21,20 @@ use symphonia_core::audio::{Audio, GenericAudioBufferRef};
 use symphonia_core::codecs::CodecParameters;
 use symphonia_core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia_core::formats::{FormatOptions, FormatReader};
-use symphonia_core::io::MediaSourceStream;
 
 fn decode(path: &str) -> (u64, u64, u32, f64) {
-    let file = File::open(path).expect("open");
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mss = symphonia_testutil::open_mss(std::path::Path::new(path));
     let mut reader = MpcReader::try_new(mss, FormatOptions::default()).expect("probe");
     let track = reader.tracks()[0].clone();
-    let params = match track.codec_params.as_ref().unwrap() {
+    let params = match track.codec_params.as_ref().expect("unexpected failure") {
         CodecParameters::Audio(p) => p.clone(),
         _ => panic!("not audio"),
     };
     let rate = params.sample_rate.unwrap_or(44100);
-    let mut decoder = MpcDecoder::try_new(&params, &AudioDecoderOptions::default()).unwrap();
+    let mut decoder =
+        MpcDecoder::try_new(&params, &AudioDecoderOptions::default()).expect("unexpected failure");
 
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    let mut hash = symphonia_testutil::Fnv::new();
     let mut frames = 0u64;
     // Time spent demuxing + decoding only (hashing is excluded).
     let mut busy = std::time::Duration::ZERO;
@@ -56,13 +54,13 @@ fn decode(path: &str) -> (u64, u64, u32, f64) {
             let channels = b.spec().channels().count();
             frames += b.frames() as u64;
             for ch in 0..channels {
-                for s in b.plane(ch).unwrap() {
-                    hash = (hash ^ u64::from(s.to_bits())).wrapping_mul(0x100_0000_01b3);
+                for s in b.plane(ch).expect("unexpected failure") {
+                    hash.put(s.to_bits());
                 }
             }
         }
     }
-    (hash, frames, rate, busy.as_secs_f64())
+    (hash.finish(), frames, rate, busy.as_secs_f64())
 }
 
 fn main() {

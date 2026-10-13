@@ -47,26 +47,26 @@
 //! the FDK AAC source code, and checked against the output of its decoder.
 
 use super::cldfb::{CldfbAnalysis, CldfbSynthesis};
-use super::dequant::{dequant_coupled, dequant_single, DequantizedSbr};
+use super::dequant::{DequantizedSbr, dequant_coupled, dequant_single};
 use super::element::EXTENSION_ID_PS;
-use super::env_adjust::{adjust, EnvAdjustState, EnvParams};
+use super::env_adjust::{EnvAdjustState, EnvParams, adjust};
+use super::error::{SbrError as Error, SbrResult as Result};
 use super::extension::SbrExtensionData;
-use super::freq_bands::{k0 as derive_k0, k2 as derive_k2, master_table, HiLoTables};
+use super::freq_bands::{HiLoTables, k0 as derive_k0, k2 as derive_k2, master_table};
 use super::header::SbrHeader;
 use super::hf_gen::{
-    build_patches, chirp_factors, generate_hf, reflection_coefficient, Patches, T_HF_ADJ,
+    Patches, T_HF_ADJ, build_patches, chirp_factors, generate_hf, reflection_coefficient,
 };
 use super::limiter::limiter_table;
 use super::lp::{aliasing_degree, deg_patched};
+use super::ps::decoder::PsDecoder;
+use super::ps::hybrid::LOOKAHEAD;
 use super::qmf::{
     AnalysisQmf, Complex, DownsampledSynthesisQmf, RealAnalysisQmf, RealDownsampledSynthesisQmf,
     RealSynthesisQmf, SynthesisQmf,
 };
-use super::ps::decoder::PsDecoder;
-use super::ps::hybrid::LOOKAHEAD;
 use super::reconstruct::{EnvelopeScalefactors, NoiseScalefactors};
 use super::time_grid::derive_time_grid;
-use super::error::{SbrError as Error, SbrResult as Result};
 
 /// The time geometry of an SBR frame: how many QMF time slots it has, and how they relate to
 /// the envelope time borders and to the previous frame.
@@ -202,6 +202,7 @@ impl SynthesisBank {
 /// (whose output rides the same `Complex` slots with zero imaginary
 /// parts, so the HF generator and adjuster formulas apply unchanged).
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 enum AnalysisBank {
     Complex(AnalysisQmf),
     Real(RealAnalysisQmf),
@@ -213,9 +214,11 @@ impl AnalysisBank {
     fn new(low_power: bool, eld: bool) -> Self {
         if eld {
             AnalysisBank::Cldfb(CldfbAnalysis::new())
-        } else if low_power {
+        }
+        else if low_power {
             AnalysisBank::Real(RealAnalysisQmf::new())
-        } else {
+        }
+        else {
             AnalysisBank::Complex(AnalysisQmf::new())
         }
     }
@@ -393,7 +396,6 @@ impl SbrDecoder {
         Ok(dec)
     }
 
-
     /// Select the §4.6.18.4.3 downsampled output mode: the SBR-processed
     /// subband signals are synthesized through the 32-channel QMF bank,
     /// so the output stays at the *core* coder rate (1024 samples per
@@ -423,12 +425,14 @@ impl SbrDecoder {
         self.resumed = true;
     }
 
+    #[cfg(test)]
     /// `true` ⇔ the §4.6.18.4.3 downsampled output mode is selected.
     #[must_use]
     pub fn is_downsampled(&self) -> bool {
         self.downsampled
     }
 
+    #[cfg(test)]
     /// Select the §4.6.18.8 low-power SBR mode: the whole signal path
     /// runs on real-valued subband signals (the §4.6.18.8.2 real
     /// filterbanks), the envelope adjuster applies the §4.6.18.8.4
@@ -451,6 +455,7 @@ impl SbrDecoder {
         Ok(())
     }
 
+    #[cfg(test)]
     /// `true` ⇔ the §4.6.18.8 low-power mode is selected.
     #[must_use]
     pub fn is_low_power(&self) -> bool {
@@ -520,9 +525,7 @@ impl SbrDecoder {
             }
             // No Y for this frame; the next frame's lTemp splice sees
             // an empty previous envelope span.
-            ch.y_prev
-                .iter_mut()
-                .for_each(|c| *c = [Complex::default(); 64]);
+            ch.y_prev.iter_mut().for_each(|c| *c = [Complex::default(); 64]);
             ch.t_e_last_prev = ch.geo.num_time_slots as i32;
         }
         Ok(out)
@@ -608,7 +611,8 @@ impl SbrDecoder {
             let (l, r) =
                 dequant_coupled(&recon[0].0, &recon[0].1, &recon[1].0, &recon[1].1, amp_res);
             vec![l, r]
-        } else {
+        }
+        else {
             (0..n_ch)
                 .map(|c| {
                     let amp_res = effective_amp_res(&ext.header, &ext.element.channels[c].grid);
@@ -627,7 +631,8 @@ impl SbrDecoder {
             // inverse-filtering modes.
             let invf_modes = if coupling && c == 1 {
                 &ext.element.channels[0].invf.invf_mode
-            } else {
+            }
+            else {
                 &sbr_ch.invf.invf_mode
             };
 
@@ -656,18 +661,18 @@ impl SbrDecoder {
                 }
                 let deg = aliasing_degree(&refl);
                 Some(deg_patched(&deg, patches, bands.k_x, bands.m)?)
-            } else {
+            }
+            else {
                 None
             };
 
             // Envelope adjustment.
-            let freq_res: Vec<bool> = sbr_ch.grid.freq_res.clone();
             let params = EnvParams {
                 bands,
                 f_table_lim: &self.f_table_lim,
                 t_e: &grid.t_e,
                 t_q: &grid.t_q,
-                freq_res: &freq_res,
+                freq_res: &sbr_ch.grid.freq_res,
                 l_a: grid.l_a,
                 e_orig: &dequant[c].e_orig,
                 q_orig: &dequant[c].q_orig,
@@ -684,8 +689,8 @@ impl SbrDecoder {
             let y = adjust(&x_high, &params, &mut ch.env_state)?;
 
             // §4.6.18.5 X assembly.
-            let l_temp = (rate * ch.t_e_last_prev - self.geo.num_time_slots as i32 * rate).max(0)
-                as usize;
+            let l_temp =
+                (rate * ch.t_e_last_prev - self.geo.num_time_slots as i32 * rate).max(0) as usize;
             let mut x_cols = core::mem::take(&mut ch.x_cols_buf);
             x_cols.clear();
             x_cols.resize(lf, [Complex::default(); 64]);
@@ -693,7 +698,8 @@ impl SbrDecoder {
                 *x = [Complex::default(); 64];
                 let (kx_cur, m_cur, y_col) = if l < l_temp {
                     (ch.k_x_prev, ch.m_prev, &ch.y_prev[l + T_HF_ADJ + lf])
-                } else {
+                }
+                else {
                     (bands.k_x, bands.m, &y[l + T_HF_ADJ])
                 };
                 let kx_u = kx_cur.max(0) as usize;
@@ -703,11 +709,7 @@ impl SbrDecoder {
                 let hi = (kx_cur + m_cur).max(0) as usize;
                 // §4.6.18.8.5: the low-power sinusoid spill extends the
                 // Y range one subband above the SBR range (≤ 63)…
-                let hi = if self.low_power {
-                    (hi + 1).min(64)
-                } else {
-                    hi.min(64)
-                };
+                let hi = if self.low_power { (hi + 1).min(64) } else { hi.min(64) };
                 if kx_u < hi {
                     x[kx_u..hi].copy_from_slice(&y_col[kx_u..hi]);
                 }
@@ -729,7 +731,8 @@ impl SbrDecoder {
                     .as_ref()
                     .filter(|e| e.id == EXTENSION_ID_PS)
                     .map(|e| e.data.as_slice())
-            } else {
+            }
+            else {
                 None
             };
             if ps_payload.is_some() && self.low_power {
@@ -801,7 +804,6 @@ fn build_x_input(x_cols: &[[Complex; 64]], x_low: &[[Complex; 32]]) -> Vec<[Comp
     v
 }
 
-
 /// The effective `bs_amp_res` after the single-envelope FIXFIX
 /// override (§4.4.2.8 Table 4.69 Note).
 fn effective_amp_res(header: &SbrHeader, grid: &super::grid::SbrGrid) -> bool {
@@ -810,15 +812,13 @@ fn effective_amp_res(header: &SbrHeader, grid: &super::grid::SbrGrid) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::element::{SbrChannel, SbrElement};
     use super::super::envelope::{SbrEnvelopeData, SbrNoiseData};
     use super::super::grid::{FrameClass, SbrDtdf, SbrGrid, SbrInvf};
+    use super::*;
 
     fn sine(freq: f64, n: usize, offset: usize) -> Vec<f64> {
-        (0..n)
-            .map(|t| (2.0 * core::f64::consts::PI * freq * (t + offset) as f64).sin())
-            .collect()
+        (0..n).map(|t| (2.0 * core::f64::consts::PI * freq * (t + offset) as f64).sin()).collect()
     }
 
     /// Pure upsampling reproduces a 2×-upsampled, delayed sine across
@@ -886,18 +886,11 @@ mod tests {
             ld_borders: None,
             amp_res_frame: None,
         };
-        let dtdf = SbrDtdf {
-            df_env: vec![false],
-            df_noise: vec![false],
-        };
-        let invf = SbrInvf {
-            invf_mode: vec![0; n_q],
-        };
+        let dtdf = SbrDtdf { df_env: vec![false], df_noise: vec![false] };
+        let invf = SbrInvf { invf_mode: vec![0; n_q] };
         let mut env_row = vec![0i32; n_high];
         env_row[0] = env_start;
-        let envelope = SbrEnvelopeData {
-            data: vec![env_row],
-        };
+        let envelope = SbrEnvelopeData { data: vec![env_row] };
         let noise = SbrNoiseData {
             data: vec![{
                 let mut r = vec![0i32; n_q];
@@ -1027,12 +1020,7 @@ mod tests {
                 best = (ratio, delay);
             }
         }
-        assert!(
-            best.0 < 1e-4,
-            "identity error ratio {} at {}",
-            best.0,
-            best.1
-        );
+        assert!(best.0 < 1e-4, "identity error ratio {} at {}", best.0, best.1);
     }
 
     /// With the whole SBR range inside the first 32 QMF bands, the
@@ -1085,12 +1073,7 @@ mod tests {
                 best = (ratio, d);
             }
         }
-        assert!(
-            best.0 < 1e-3,
-            "decimation mismatch ratio {} at delay {}",
-            best.0,
-            best.1
-        );
+        assert!(best.0 < 1e-3, "decimation mismatch ratio {} at delay {}", best.0, best.1);
     }
 
     /// The §4.6.18.8 low-power mode reconstructs the same synthetic
@@ -1121,10 +1104,7 @@ mod tests {
         // prototype and delay).
         let e_hq: f64 = out_hq.iter().skip(4096).map(|v| v * v).sum();
         let e_lp: f64 = out_lp.iter().skip(4096).map(|v| v * v).sum();
-        assert!(
-            e_lp > 0.5 * e_hq && e_lp < 2.0 * e_hq,
-            "LP {e_lp} vs HQ {e_hq}"
-        );
+        assert!(e_lp > 0.5 * e_hq && e_lp < 2.0 * e_hq, "LP {e_lp} vs HQ {e_hq}");
         // The real-valued HF processing does not reproduce the complex
         // path's subband phases, so the comparison is energy-domain:
         // the core tone's amplitude (quadrature probe at the upsampled
@@ -1142,21 +1122,12 @@ mod tests {
             2.0 / n * (cs * cs + sn * sn).sqrt()
         };
         let (a_hq, a_lp) = (probe(&out_hq), probe(&out_lp));
-        assert!(
-            (a_lp - a_hq).abs() < 0.05 * a_hq,
-            "core tone amplitude LP {a_lp} vs HQ {a_hq}"
-        );
-        for (block_hq, block_lp) in out_hq
-            .chunks_exact(1024)
-            .zip(out_lp.chunks_exact(1024))
-            .skip(4)
+        assert!((a_lp - a_hq).abs() < 0.05 * a_hq, "core tone amplitude LP {a_lp} vs HQ {a_hq}");
+        for (block_hq, block_lp) in out_hq.chunks_exact(1024).zip(out_lp.chunks_exact(1024)).skip(4)
         {
             let e_h: f64 = block_hq.iter().map(|v| v * v).sum();
             let e_l: f64 = block_lp.iter().map(|v| v * v).sum();
-            assert!(
-                e_l > 0.4 * e_h && e_l < 2.5 * e_h,
-                "block energy LP {e_l} vs HQ {e_h}"
-            );
+            assert!(e_l > 0.4 * e_h && e_l < 2.5 * e_h, "block energy LP {e_l} vs HQ {e_h}");
         }
 
         // Determinism.
@@ -1215,17 +1186,11 @@ mod tests {
         use super::super::element::SbrExtension;
         let fs_sbr = 44_100;
         let mut ext = synthetic_ext(fs_sbr, 8, 6);
-        ext.element.extension = Some(SbrExtension {
-            id: EXTENSION_ID_PS,
-            data: vec![0u8; 4],
-        });
+        ext.element.extension = Some(SbrExtension { id: EXTENSION_ID_PS, data: vec![0u8; 4] });
         let mut lp = SbrDecoder::new(fs_sbr, 1).unwrap();
         lp.set_low_power(true).unwrap();
         let core = sine(0.05, 1024, 0);
-        assert!(matches!(
-            lp.process_frame(&ext, &[&core]),
-            Err(Error::SbrLowPowerPs)
-        ));
+        assert!(matches!(lp.process_frame(&ext, &[&core]), Err(Error::SbrLowPowerPs)));
     }
 
     /// A channel-count / buffer-length mismatch is rejected.

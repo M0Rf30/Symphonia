@@ -38,7 +38,6 @@ mod dsp;
 mod eld_window;
 mod ics;
 mod sbr;
-mod window;
 
 use common::*;
 
@@ -764,6 +763,8 @@ impl AacDecoder {
         // every frame — `process_frame()` when this frame carried a payload,
         // `upsample_frame()` (§4.6.18.5 pure upsampling) otherwise, so the QMF state and
         // output rate stay continuous even across headerless / SBR-silent frames.
+        #[allow(clippy::unnecessary_unwrap)]
+        // `self.sbr` is mutably borrowed only after the gather below.
         if self.sbr.is_some() {
             // Gather the core PCM for each element first, before taking a mutable borrow of
             // `self.sbr`. Symphonia's `AudioBuffer<f32>` samples are normalized to `[-1.0,
@@ -781,18 +782,16 @@ impl AacDecoder {
             // Symphonia's `~1.0` scale while the high band is forced to the transmitted
             // envelope's absolute `~32768` scale by the adjuster's gain match -- a 2^30
             // energy-scale mismatch between the two halves of the same reconstructed signal.
-            const PCM_SCALE: f64 = 32768.0;
-            let mut core_pcm: Vec<Vec<Vec<f64>>> = Vec::with_capacity(cur_pair);
+            const PCM_SCALE: f64 = symphonia_core::audio::conv::I16_SCALE as f64;
+            let mut core_pcm: Vec<f64> = Vec::new();
+            let mut plane_len = 0;
             for (is_pair, indices) in self.elem_targets.iter().take(cur_pair) {
                 let n_ch = if *is_pair { 2 } else { 1 };
-                let mut chans = Vec::with_capacity(n_ch);
                 for &ch_idx in indices.iter().take(n_ch) {
                     let plane = self.buf.plane(ch_idx).expect("core channel plane exists");
-                    chans.push(
-                        plane.iter().map(|&s| f64::from(s) * PCM_SCALE).collect::<Vec<f64>>(),
-                    );
+                    plane_len = plane.len();
+                    core_pcm.extend(plane.iter().map(|&s| f64::from(s) * PCM_SCALE));
                 }
-                core_pcm.push(chans);
             }
 
             let sbr = self.sbr.as_mut().expect("checked is_some above");
@@ -802,12 +801,20 @@ impl AacDecoder {
             // `try_new`) can only be discovered by the shape of an element's own decoded
             // output — see the growth branch below.
             let mut outs: Vec<Vec<Vec<f64>>> = Vec::with_capacity(cur_pair);
+            let mut core_rest = core_pcm.as_slice();
             for idx in 0..cur_pair {
-                let core_refs: Vec<&[f64]> = core_pcm[idx].iter().map(Vec::as_slice).collect();
+                let n_ch = if self.elem_targets[idx].0 { 2 } else { 1 };
+                let mut core_refs: [&[f64]; 2] = [&[], &[]];
+                for core_ref in core_refs.iter_mut().take(n_ch) {
+                    let (chan, rest) = core_rest.split_at(plane_len);
+                    *core_ref = chan;
+                    core_rest = rest;
+                }
+                let core_refs = &core_refs[..n_ch];
                 let elem = &mut sbr.elems[idx];
                 let out = match &sbr_ext[idx] {
-                    Some(ext) => elem.decoder.process_frame(ext, &core_refs)?,
-                    None => elem.decoder.upsample_frame(&core_refs)?,
+                    Some(ext) => elem.decoder.process_frame(ext, core_refs)?,
+                    None => elem.decoder.upsample_frame(core_refs)?,
                 };
                 outs.push(out);
             }

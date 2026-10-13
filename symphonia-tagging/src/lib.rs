@@ -51,8 +51,8 @@
 #![warn(rust_2018_idioms)]
 #![forbid(unsafe_code)]
 
-mod ape;
 mod aiff;
+mod ape;
 mod dsf;
 mod flac;
 mod mp4;
@@ -320,11 +320,28 @@ impl From<io::Error> for Error {
     }
 }
 
+impl From<symphonia_core::errors::Error> for Error {
+    fn from(e: symphonia_core::errors::Error) -> Self {
+        use symphonia_core::errors::Error as Core;
+
+        match e {
+            Core::IoError(e) => Error::Io(e),
+            Core::Unsupported(msg) => Error::Unsupported(msg.to_string()),
+            other => Error::Malformed(other.to_string()),
+        }
+    }
+}
+
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Replaces `path`'s tags with exactly `tags` and `visuals` (see the crate docs for what is
 /// preserved).
-pub fn write_file(path: &Path, tags: &[Tag], visuals: &[Visual], opts: &WriteOptions) -> Result<()> {
+pub fn write_file(
+    path: &Path,
+    tags: &[Tag],
+    visuals: &[Visual],
+    opts: &WriteOptions,
+) -> Result<()> {
     match sniff(path)? {
         Container::MpegAudio | Container::Tta => mpeg::write(path, tags, visuals, opts),
         Container::Flac => flac::write(path, tags, visuals, opts),
@@ -335,8 +352,11 @@ pub fn write_file(path: &Path, tags: &[Tag], visuals: &[Visual], opts: &WriteOpt
         Container::Wav => riff::write(path, tags, visuals, opts),
         Container::Aiff => aiff::write(path, tags, visuals, opts),
         Container::Dsf => dsf::write(path, tags, visuals, opts),
-        Container::WavPack | Container::MonkeysAudio | Container::Musepack
-        | Container::OptimFrog | Container::Tak => ape::write(path, tags, visuals, opts),
+        Container::WavPack
+        | Container::MonkeysAudio
+        | Container::Musepack
+        | Container::OptimFrog
+        | Container::Tak => ape::write(path, tags, visuals, opts),
         Container::Aac => ape::write_with_policy(path, tags, visuals, opts, opts.aac_ape),
         Container::Ac3 => ape::write_with_policy(path, tags, visuals, opts, opts.ac3_ape),
         Container::Other => Err(Error::Unsupported(path.display().to_string())),
@@ -347,71 +367,80 @@ pub fn write_file(path: &Path, tags: &[Tag], visuals: &[Visual], opts: &WriteOpt
 /// stacked ones) are skipped first (FLAC and APE files sometimes carry them).
 pub fn sniff(path: &Path) -> Result<Container> {
     let mut file = File::open(path)?;
-    let mut start = 0u64;
-    loop {
-        let mut head = [0u8; 10];
-        file.seek(SeekFrom::Start(start))?;
-        if read_up_to(&mut file, &mut head)? < 10 || &head[..3] != b"ID3" {
-            break;
-        }
-        let size = synchsafe(&head[6..10]);
-        let footer = if head[5] & 0x10 != 0 { 10 } else { 0 };
-        start += 10 + u64::from(size) + footer;
-    }
+    let start = leading_id3v2_end(&mut file)?;
     file.seek(SeekFrom::Start(start))?;
     let mut buf = [0u8; 64];
     let n = read_up_to(&mut file, &mut buf)?;
     let b = &buf[..n];
     let container = if b.starts_with(b"fLaC") {
         Container::Flac
-    } else if b.starts_with(b"OggS") && n >= 28 + 8 {
+    }
+    else if b.starts_with(b"OggS") && n >= 28 + 8 {
         // First page body starts after the 27-byte header + lacing table.
         let segs = usize::from(b[26]);
         let body = &b[(27 + segs).min(n)..];
         if body.starts_with(b"\x01vorbis") {
             Container::OggVorbis
-        } else if body.starts_with(b"OpusHead") {
+        }
+        else if body.starts_with(b"OpusHead") {
             Container::OggOpus
-        } else if body.starts_with(b"\x7fFLAC") {
+        }
+        else if body.starts_with(b"\x7fFLAC") {
             Container::OggFlac
-        } else if body.starts_with(b"Speex   ") {
+        }
+        else if body.starts_with(b"Speex   ") {
             Container::OggSpeex
-        } else {
+        }
+        else {
             Container::Other
         }
-    } else if n >= 12 && &b[4..8] == b"ftyp" {
+    }
+    else if n >= 12 && &b[4..8] == b"ftyp" {
         Container::Mp4
-    } else if n >= 12 && (b.starts_with(b"RIFF") || b.starts_with(b"RF64")) && &b[8..12] == b"WAVE"
+    }
+    else if n >= 12 && (b.starts_with(b"RIFF") || b.starts_with(b"RF64")) && &b[8..12] == b"WAVE"
     {
         Container::Wav
-    } else if n >= 12 && b.starts_with(b"FORM") && (&b[8..12] == b"AIFF" || &b[8..12] == b"AIFC")
-    {
+    }
+    else if n >= 12 && b.starts_with(b"FORM") && (&b[8..12] == b"AIFF" || &b[8..12] == b"AIFC") {
         Container::Aiff
-    } else if b.starts_with(b"DSD ") {
+    }
+    else if b.starts_with(b"DSD ") {
         Container::Dsf
-    } else if b.starts_with(b"wvpk") {
+    }
+    else if b.starts_with(b"wvpk") {
         Container::WavPack
-    } else if b.starts_with(b"MAC ") {
+    }
+    else if b.starts_with(b"MAC ") {
         Container::MonkeysAudio
-    } else if b.starts_with(b"MPCK") || b.starts_with(b"MP+") {
+    }
+    else if b.starts_with(b"MPCK") || b.starts_with(b"MP+") {
         Container::Musepack
-    } else if b.starts_with(b"tBaK") {
+    }
+    else if b.starts_with(b"tBaK") {
         Container::Tak
-    } else if b.starts_with(b"OFR ") {
+    }
+    else if b.starts_with(b"OFR ") {
         Container::OptimFrog
-    } else if b.starts_with(b"TTA1") {
+    }
+    else if b.starts_with(b"TTA1") {
         Container::Tta
-    } else if b.starts_with(&[0x0B, 0x77]) {
+    }
+    else if b.starts_with(&[0x0B, 0x77]) {
         Container::Ac3
-    } else if is_adts(&mut file, start, b)? {
+    }
+    else if is_adts(&mut file, start, b)? {
         Container::Aac
-    } else if n >= 2 && b[0] == 0xFF && b[1] & 0xE0 == 0xE0 {
+    }
+    else if n >= 2 && b[0] == 0xFF && b[1] & 0xE0 == 0xE0 {
         Container::MpegAudio
-    } else if start > 0 {
+    }
+    else if start > 0 {
         // An ID3v2 tag followed by something that isn't a known container
         // header: MPEG audio whose first frame is preceded by junk.
         Container::MpegAudio
-    } else {
+    }
+    else {
         Container::Other
     };
     Ok(container)
@@ -422,17 +451,21 @@ pub fn sniff(path: &Path) -> Result<Container> {
 /// never zero), and a second header must follow the first frame, unless the first frame is the
 /// whole stream.
 fn is_adts(file: &mut File, start: u64, head: &[u8]) -> Result<bool> {
-    let is_header = |b: &[u8]| b.len() >= 2 && b[0] == 0xFF && b[1] & 0xF6 == 0xF0;
+    use symphonia_common::mpeg::audio::adts::{
+        ADTS_MIN_HEADER_LEN, frame_len, starts_with_sync_word,
+    };
 
-    if head.len() < 7 || !is_header(head) {
+    if head.len() < ADTS_MIN_HEADER_LEN || !starts_with_sync_word(head) {
         return Ok(false);
     }
 
     // The 13-bit frame length (including the header) spans bytes 3..6.
-    let frame_len =
-        (usize::from(head[3] & 0x03) << 11) | (usize::from(head[4]) << 3) | usize::from(head[5] >> 5);
+    let Some(frame_len) = frame_len(head)
+    else {
+        return Ok(false);
+    };
 
-    if frame_len < 7 {
+    if frame_len < ADTS_MIN_HEADER_LEN {
         return Ok(false);
     }
 
@@ -440,13 +473,46 @@ fn is_adts(file: &mut File, start: u64, head: &[u8]) -> Result<bool> {
     file.seek(SeekFrom::Start(start + frame_len as u64))?;
     let n = read_up_to(file, &mut next)?;
 
-    Ok(is_header(&next[..n]) || n == 0)
+    Ok(starts_with_sync_word(&next[..n]) || n == 0)
 }
 
-/// Decodes a 4-byte ID3v2 synchsafe integer.
-#[must_use]
-pub(crate) fn synchsafe(b: &[u8]) -> u32 {
-    b.iter().take(4).fold(0, |acc, &x| (acc << 7) | u32::from(x & 0x7F))
+/// The largest tag, metadata block or chunk payload, in bytes, that is buffered in memory.
+pub(crate) const MAX_TAG_LEN: u64 = 256 * 1024 * 1024;
+
+/// Reads `len` bytes of `src` starting at `offset`.
+///
+/// # Errors
+///
+/// [`Error::Unsupported`] if `len` exceeds [`MAX_TAG_LEN`], and an I/O error if the file ends
+/// before `len` bytes.
+pub(crate) fn read_at(src: &mut File, offset: u64, len: u64) -> Result<Vec<u8>> {
+    if len > MAX_TAG_LEN {
+        return Err(Error::Unsupported(format!("{len} bytes is too large to buffer")));
+    }
+
+    let mut buf = vec![0u8; len as usize];
+    src.seek(SeekFrom::Start(offset))?;
+    src.read_exact(&mut buf)?;
+    Ok(buf)
+}
+
+/// Returns the offset just past the leading ID3v2 tags of `file` (0 if there are none).
+pub(crate) fn leading_id3v2_end(file: &mut File) -> io::Result<u64> {
+    let mut end = 0u64;
+
+    loop {
+        let mut head = [0u8; 10];
+        file.seek(SeekFrom::Start(end))?;
+
+        if read_up_to(file, &mut head)? < head.len() {
+            return Ok(end);
+        }
+
+        match symphonia_metadata::id3v2::write::tag_len(&head) {
+            Some(len) => end += len as u64,
+            None => return Ok(end),
+        }
+    }
 }
 
 /// Reads until `buf` is full or EOF; returns the byte count.
@@ -464,14 +530,16 @@ pub(crate) fn read_up_to(r: &mut impl Read, buf: &mut [u8]) -> io::Result<usize>
 }
 
 /// Copies `len` bytes of `src` starting at `offset` into `dst`.
-pub(crate) fn copy_range(src: &mut File, dst: &mut impl Write, offset: u64, len: u64) -> Result<()> {
+pub(crate) fn copy_range(
+    src: &mut File,
+    dst: &mut impl Write,
+    offset: u64,
+    len: u64,
+) -> Result<()> {
     src.seek(SeekFrom::Start(offset))?;
     let copied = io::copy(&mut (&mut *src).take(len), dst)?;
     if copied != len {
-        return Err(Error::Malformed(format!(
-            "file ended {} bytes early",
-            len - copied
-        )));
+        return Err(Error::Malformed(format!("file ended {} bytes early", len - copied)));
     }
     Ok(())
 }
@@ -490,12 +558,8 @@ pub(crate) fn replace_file(
     let perms = src.metadata()?.permissions();
     let tmp = temp_path(path);
     let result = (|| {
-        let mut out = BufWriter::new(
-            fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp)?,
-        );
+        let mut out =
+            BufWriter::new(fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?);
         build(&mut src, &mut out)?;
         let file = out.into_inner().map_err(|e| Error::Io(e.into_error()))?;
         file.sync_all()?;
@@ -511,10 +575,7 @@ pub(crate) fn replace_file(
 }
 
 fn temp_path(path: &Path) -> PathBuf {
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     path.with_file_name(format!(".{name}.aulos-tag-{}.tmp", std::process::id()))
 }
 
@@ -523,11 +584,7 @@ mod tests {
     use super::*;
 
     fn temp_file(name: &str, bytes: &[u8]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "aulos-tagio-{}-{}",
-            std::process::id(),
-            name
-        ));
+        let dir = std::env::temp_dir().join(format!("aulos-tagio-{}-{}", std::process::id(), name));
         fs::create_dir_all(&dir).unwrap();
         let p = dir.join(name);
         fs::write(&p, bytes).unwrap();
@@ -539,6 +596,15 @@ mod tests {
         let mut bytes = b"ID3\x04\x00\x00\x00\x00\x00\x02\0\0".to_vec();
         bytes.extend_from_slice(b"fLaC\0\0\0\x22");
         let p = temp_file("id3.flac", &bytes);
+        assert_eq!(sniff(&p).unwrap(), Container::Flac);
+    }
+
+    #[test]
+    fn sniff_ignores_the_footer_flag_of_an_id3v2_3_tag() {
+        // Bit 0x10 is not a footer flag before ID3v2.4, so only the 2 body bytes are skipped.
+        let mut bytes = b"ID3\x03\x00\x10\x00\x00\x00\x02\0\0".to_vec();
+        bytes.extend_from_slice(b"fLaC\0\0\0\x22");
+        let p = temp_file("id3v23.flac", &bytes);
         assert_eq!(sniff(&p).unwrap(), Container::Flac);
     }
 

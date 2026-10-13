@@ -13,6 +13,7 @@
 //!
 //! `cargo run -p symphonia-codec-opus --features ogg --release --example perf -- [dir] [reps]`
 
+#![allow(clippy::unwrap_used)] // test/example code: a panic is the failure signal
 use std::io::Cursor;
 use std::time::Instant;
 
@@ -21,23 +22,7 @@ use symphonia_codec_opus::encoder::{BitrateMode, EncoderConfig, OpusEncoder};
 use symphonia_core::formats::{FormatOptions, FormatReader};
 use symphonia_core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia_format_ogg::OggReader;
-
-struct Fnv(u64);
-
-impl Fnv {
-    fn new() -> Self {
-        Fnv(0xcbf29ce484222325)
-    }
-    fn bytes(&mut self, b: &[u8]) {
-        for &x in b {
-            self.0 = (self.0 ^ x as u64).wrapping_mul(0x100000001b3);
-        }
-    }
-    /// Cheaper word-at-a-time variant for bulk PCM, so hashing does not dominate the timing.
-    fn word(&mut self, w: u32) {
-        self.0 = (self.0 ^ w as u64).wrapping_mul(0x100000001b3).rotate_left(23);
-    }
-}
+use symphonia_testutil::{Fnv, Lcg32};
 
 /// Returns the channel count (as a one-byte first "packet") followed by the audio packets, for
 /// mono/stereo mapping-family-0 streams only.
@@ -93,22 +78,14 @@ fn decode_file(packets: &[Vec<u8>], keep: bool, loss: bool) -> Option<(u64, usiz
                     pcm.extend_from_slice(s);
                 }
             }
-            Err(_) => h.bytes(b"err"),
+            Err(_) => h.write(b"err"),
         }
     }
     Some((h.0, total, pcm, ch))
 }
 
-struct Lcg(u32);
-impl Lcg {
-    fn next(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(1664525).wrapping_add(1013904223);
-        ((self.0 >> 8) as f32 / (1u32 << 23) as f32) - 1.0
-    }
-}
-
 fn synth(frames: usize, ch: usize, seed: u32) -> Vec<f32> {
-    let mut rng = Lcg(seed);
+    let mut rng = Lcg32(seed);
     let mut out = Vec::with_capacity(frames * ch);
     for i in 0..frames {
         let t = i as f64 / 48000.0;
@@ -118,10 +95,10 @@ fn synth(frames: usize, ch: usize, seed: u32) -> Vec<f32> {
             * ((2.0 * std::f64::consts::PI * 440.0 * t).sin()
                 + 0.5 * (2.0 * std::f64::consts::PI * 3300.0 * t).sin()
                 + 0.25 * (2.0 * std::f64::consts::PI * 9100.0 * t).sin())) as f32
-            + 0.05 * rng.next();
+            + 0.05 * rng.next_f32();
         out.push(s);
         if ch == 2 {
-            out.push(0.8 * s + 0.05 * rng.next());
+            out.push(0.8 * s + 0.05 * rng.next_f32());
         }
     }
     out
@@ -132,8 +109,8 @@ fn encode_hash(cfg: EncoderConfig, pcm: &[f32], h: &mut Fnv) -> usize {
     let mut packets = enc.push(pcm);
     packets.extend(enc.finish());
     for p in &packets {
-        h.bytes(&(p.len() as u32).to_le_bytes());
-        h.bytes(p);
+        h.write(&(p.len() as u32).to_le_bytes());
+        h.write(p);
     }
     packets.len()
 }
@@ -144,8 +121,8 @@ fn main() {
         .get(1)
         .cloned()
         .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("RMPD_SAMPLES").ok().map(|d| format!("{d}/opus")))
-        .unwrap_or_else(|| "/home/gianluca/rmpd-samples/samples/opus".into());
+        .or_else(|| symphonia_testutil::sample_dir().map(|d| d.join("opus").display().to_string()))
+        .expect("usage: perf <dir-of-.opus-files> [reps] [dec|enc] (or set RMPD_SAMPLES)");
     let reps: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1);
     // Optional third argument: `dec` or `enc` restricts the run to one direction.
     let mode = args.get(3).map(String::as_str).unwrap_or("both");
@@ -177,7 +154,7 @@ fn main() {
             if let Some((h, n, pcm, ch)) = decode_file(pk, keep, false) {
                 if r == 0 {
                     println!("dec {name}: {h:016x} {n}");
-                    total_h.bytes(&h.to_le_bytes());
+                    total_h.write(&h.to_le_bytes());
                     samples += n;
                     if keep {
                         real.push((pcm, ch));
@@ -198,7 +175,7 @@ fn main() {
     for (name, pk) in &inputs {
         if let Some((h, n, _, _)) = decode_file(pk, false, true) {
             println!("plc {name}: {h:016x} {n}");
-            plc_h.bytes(&h.to_le_bytes());
+            plc_h.write(&h.to_le_bytes());
         }
     }
     println!("PLC hash {:016x}", plc_h.0);
@@ -243,7 +220,7 @@ fn main() {
                         "enc {name} {} {:?} cx{}: {:016x}",
                         cfg.bitrate, cfg.mode, cfg.complexity, h.0
                     );
-                    enc_h.bytes(&h.0.to_le_bytes());
+                    enc_h.write(&h.0.to_le_bytes());
                 }
             }
         }

@@ -6,38 +6,17 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! Tests against real files. The files are not part of the repository: the tests look for them in
-//! the directory in the `RMPD_SAMPLES_DIR` environment variable (by default
-//! `/home/gianluca/rmpd-samples/samples`), and are skipped when a file is absent.
-
-use std::fs::File;
-use std::path::PathBuf;
+//! the directory in the `RMPD_SAMPLES` environment variable, and are skipped when a file is absent.
 
 use symphonia_core::codecs::audio::well_known::{
     CODEC_ID_PCM_ALAW, CODEC_ID_PCM_MULAW, CODEC_ID_PCM_S8,
 };
 use symphonia_core::formats::{FormatOptions, FormatReader};
-use symphonia_core::io::MediaSourceStream;
 use symphonia_format_caf::CafReader;
-
-fn sample_path(name: &str) -> Option<PathBuf> {
-    let dir = std::env::var_os("RMPD_SAMPLES_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/home/gianluca/rmpd-samples/samples"));
-
-    let path = dir.join(name);
-
-    if path.exists() {
-        Some(path)
-    }
-    else {
-        eprintln!("skipping: {} not found", path.display());
-        None
-    }
-}
+use symphonia_testutil::open_sample;
 
 fn open(name: &str) -> Option<symphonia_core::errors::Result<CafReader<'static>>> {
-    let path = sample_path(name)?;
-    let mss = MediaSourceStream::new(Box::new(File::open(path).unwrap()), Default::default());
+    let mss = open_sample(name)?;
     Some(CafReader::try_new(mss, FormatOptions::default()))
 }
 

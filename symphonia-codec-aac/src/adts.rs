@@ -323,18 +323,14 @@ impl AdtsHeader {
     /// Returns true if the provided word is a valid sync word.
     #[inline(always)]
     fn is_sync_word(sync: u16) -> bool {
-        (sync & 0xfff6) == 0xfff0
+        symphonia_common::mpeg::audio::adts::is_sync_word(sync)
     }
 
     /// Resync the reader to the next sync word.
     fn sync<B: ReadBytes>(reader: &mut B) -> Result<u16> {
-        let mut sync = 0;
+        let sync = read_until_sync(reader, 0, |w| Self::is_sync_word(w as u16))?;
 
-        while !Self::is_sync_word(sync) {
-            sync = (sync << 8) | u16::from(reader.read_u8()?);
-        }
-
-        Ok(sync)
+        Ok(sync as u16)
     }
 
     /// Read a header from the current position of the reader.

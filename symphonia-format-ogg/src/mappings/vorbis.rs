@@ -42,6 +42,7 @@ const VORBIS_BLOCKSIZE_MIN: u8 = 6;
 /// The maximum block size (8192) expressed as a power-of-2 exponent.
 const VORBIS_BLOCKSIZE_MAX: u8 = 13;
 
+#[derive(Clone, Copy)]
 struct VorbisPacketParser {
     modes_block_flags: u64,
     num_modes: u8,
@@ -179,18 +180,10 @@ impl Mapper for VorbisMapper {
     }
 
     fn make_parser(&self) -> Option<Box<dyn PacketParser>> {
-        match &self.parser {
-            Some(base_parser) => {
-                let parser = Box::new(VorbisPacketParser::new(
-                    base_parser.bs0_exp,
-                    base_parser.bs1_exp,
-                    base_parser.num_modes,
-                    base_parser.modes_block_flags,
-                ));
-                Some(parser)
-            }
-            _ => None,
-        }
+        self.parser.map(|base_parser| {
+            Box::new(VorbisPacketParser { prev_bs_exp: None, ..base_parser })
+                as Box<dyn PacketParser>
+        })
     }
 
     fn map_packet(&mut self, packet: &[u8]) -> Result<MapResult> {
@@ -259,7 +252,9 @@ impl Mapper for VorbisMapper {
                         let num_modes = modes.len();
                         let mut modes_block_flags = 0;
 
-                        assert!(num_modes <= 64);
+                        if num_modes > 64 {
+                            return decode_error("ogg (vorbis): mode count exceeds 64");
+                        }
 
                         for (i, mode) in modes.iter().enumerate() {
                             if mode.block_flag {
@@ -390,7 +385,7 @@ fn read_setup(reader: &mut BufReader<'_>, ident: &IdentHeader) -> Result<Vec<Mod
     let mut bs = BitReaderRtl::new(reader.read_buf_bytes_available_ref());
 
     // Skip the codebooks.
-    skip_codebooks(&mut bs)?;
+    blocks::skip_codebooks(&mut bs)?;
 
     // Skip the time-domain transforms (placeholders in Vorbis 1).
     skip_time_domain_transforms(&mut bs)?;
@@ -413,93 +408,6 @@ fn read_setup(reader: &mut BufReader<'_>, ident: &IdentHeader) -> Result<Vec<Mod
     }
 
     Ok(modes)
-}
-
-fn skip_codebooks(bs: &mut BitReaderRtl<'_>) -> Result<()> {
-    let count = bs.read_bits_leq32(8)? + 1;
-    for _ in 0..count {
-        skip_codebook(bs)?;
-    }
-    Ok(())
-}
-
-pub fn skip_codebook(bs: &mut BitReaderRtl<'_>) -> Result<()> {
-    // Verify codebook synchronization word.
-    let sync = bs.read_bits_leq32(24)?;
-
-    if sync != 0x564342 {
-        return decode_error("ogg (vorbis): invalid codebook sync");
-    }
-
-    // Read codebook number of dimensions and entries.
-    let codebook_dimensions = bs.read_bits_leq32(16)? as u16;
-    let codebook_entries = bs.read_bits_leq32(24)?;
-    let is_length_ordered = bs.read_bool()?;
-
-    if !is_length_ordered {
-        // Codeword list is not length ordered.
-        let is_sparse = bs.read_bool()?;
-
-        if is_sparse {
-            // Sparsely packed codeword entry list.
-            for _ in 0..codebook_entries {
-                if bs.read_bool()? {
-                    let _ = bs.read_bits_leq32(5)?;
-                }
-            }
-        }
-        else {
-            bs.ignore_bits(codebook_entries * 5)?;
-        }
-    }
-    else {
-        // Codeword list is length ordered.
-        let mut cur_entry = 0;
-        let mut _cur_len = bs.read_bits_leq32(5)? + 1;
-
-        loop {
-            let num_bits =
-                if codebook_entries > cur_entry { ilog(codebook_entries - cur_entry) } else { 0 };
-
-            let num = bs.read_bits_leq32(num_bits)?;
-
-            cur_entry += num;
-
-            if cur_entry > codebook_entries {
-                return decode_error("ogg (vorbis): invalid codebook");
-            }
-
-            if cur_entry == codebook_entries {
-                break;
-            }
-        }
-    }
-
-    // Read and unpack vector quantization (VQ) lookup table.
-    let lookup_type = bs.read_bits_leq32(4)?;
-
-    match lookup_type & 0xf {
-        0 => (),
-        1 | 2 => {
-            let _min_value = bs.read_bits_leq32(32)?;
-            let _delta_value = bs.read_bits_leq32(32)?;
-            let value_bits = bs.read_bits_leq32(4)? + 1;
-            let _sequence_p = bs.read_bool()?;
-
-            // Lookup type is either 1 or 2 as per outer match.
-            let lookup_values = match lookup_type {
-                1 => lookup1_values(codebook_entries, codebook_dimensions),
-                2 => codebook_entries * u32::from(codebook_dimensions),
-                _ => unreachable!(),
-            };
-
-            // Multiplicands
-            bs.ignore_bits(lookup_values * value_bits)?;
-        }
-        _ => return decode_error("ogg (vorbis): invalid codeword lookup type"),
-    }
-
-    Ok(())
 }
 
 fn skip_time_domain_transforms(bs: &mut BitReaderRtl<'_>) -> Result<()> {
@@ -715,17 +623,4 @@ fn read_mode(bs: &mut BitReaderRtl<'_>) -> Result<Mode> {
 #[inline(always)]
 pub fn ilog(x: u32) -> u32 {
     32 - x.leading_zeros()
-}
-
-#[inline(always)]
-fn lookup1_values(entries: u32, dimensions: u16) -> u32 {
-    // (value ^ dimensions) <= entries
-    // [(value ^ dimensions) ^ (1 / dimensions)] = lower[entries ^ (1 / dimensions)]
-    // value = lower[entries ^ (1 / dimensions)]
-    let value = (entries as f32).powf(1.0f32 / f32::from(dimensions)).floor() as u32;
-
-    assert!(value.pow(u32::from(dimensions)) <= entries);
-    assert!((value + 1).pow(u32::from(dimensions)) > entries);
-
-    value
 }

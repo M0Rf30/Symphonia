@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 //! AAC-LD (audio object type 23) and AAC-ELD (audio object type 39), frame lengths of 512 and 480.
 //!
 //! The fixtures are the first access units of streams encoded with FDK. A fixture is an audio
@@ -542,9 +544,7 @@ fn mutation_fuzz_never_panics() {
 
 /// The generated format-coverage samples are used if `RMPD_SAMPLES` points at them.
 fn open_sample(name: &str) -> Option<MediaSourceStream<'static>> {
-    let dir = std::env::var_os("RMPD_SAMPLES")?;
-    let file = std::fs::File::open(std::path::Path::new(&dir).join("aac").join(name)).ok()?;
-    Some(MediaSourceStream::new(Box::new(file), Default::default()))
+    symphonia_testutil::open_sample(std::path::Path::new("aac").join(name))
 }
 
 #[test]

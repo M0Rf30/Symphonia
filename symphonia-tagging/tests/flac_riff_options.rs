@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+// Test code: a panic is a test failure.
 // Symphonia
 // Copyright (c) 2019-2026 The Project Symphonia Developers.
 //
@@ -12,13 +14,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::probe::Hint;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{MetadataOptions, RawTag, StandardTag, Tag};
-use symphonia_tagging::{
-    FlacId3, RiffInfoEncoding, RiffInfoPolicy, WriteOptions, write_file,
-};
+use symphonia_tagging::{FlacId3, RiffInfoEncoding, RiffInfoPolicy, WriteOptions, write_file};
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 
@@ -372,10 +372,7 @@ fn wave_info_windows_1252_and_utf8_text() {
 
     let utf8 = fixture("wave_info_utf8", "riffaiffdsf-ffmpeg.wav");
     write_file(&utf8, &[title(text)], &[], &WriteOptions::default()).unwrap();
-    assert_eq!(
-        info_sub_chunk(&fs::read(&utf8).unwrap(), b"INAM").unwrap(),
-        "Café €\0".as_bytes()
-    );
+    assert_eq!(info_sub_chunk(&fs::read(&utf8).unwrap(), b"INAM").unwrap(), "Café €\0".as_bytes());
 
     let opts = WriteOptions {
         riff_info_encoding: RiffInfoEncoding::Windows1252,
@@ -413,10 +410,8 @@ fn wave_info_windows_1252_and_utf8_text() {
 
 #[test]
 fn wave_info_windows_1252_encodes_the_special_block_and_replaces_the_rest() {
-    let opts = WriteOptions {
-        riff_info_encoding: RiffInfoEncoding::Windows1252,
-        ..Default::default()
-    };
+    let opts =
+        WriteOptions { riff_info_encoding: RiffInfoEncoding::Windows1252, ..Default::default() };
 
     let path = fixture("wave_info_1252_chars", "riffaiffdsf-ffmpeg.wav");
 

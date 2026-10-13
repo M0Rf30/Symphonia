@@ -10,23 +10,11 @@
 
 #![cfg(all(feature = "mp3", feature = "id3v1"))]
 
-use std::io::Cursor;
+mod common;
 
-use symphonia::core::formats::probe::{Hint, Probe};
-use symphonia::core::formats::{FormatOptions, FormatReader};
-use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::{MetadataOptions, StandardTag};
-
-fn probe(data: Vec<u8>) -> Box<dyn FormatReader> {
-    let mut probe = Probe::new();
-    symphonia::default::register_enabled_formats(&mut probe);
-
-    let mss = MediaSourceStream::new(Box::new(Cursor::new(data)), Default::default());
-
-    probe
-        .probe(&Hint::new(), mss, FormatOptions::default(), MetadataOptions::default())
-        .expect("the stream is probed")
-}
+use common::{mp3_frames, probe};
+use symphonia::core::formats::FormatReader;
+use symphonia::core::meta::StandardTag;
 
 /// All of the standard tags selected by `f` in all of the metadata revisions of a format reader.
 fn collect(
@@ -62,17 +50,6 @@ fn genres(format: &mut dyn FormatReader) -> Vec<String> {
         StandardTag::Genre(v) => Some(v.to_string()),
         _ => None,
     })
-}
-
-/// MPEG-1 layer 3, 128 kbps, 44.1 kHz frames (417 bytes, no padding).
-fn mp3_frames() -> Vec<u8> {
-    (0..32)
-        .flat_map(|_| {
-            let mut f = vec![0u8; 417];
-            f[..4].copy_from_slice(&[0xff, 0xfb, 0x90, 0x64]);
-            f
-        })
-        .collect()
 }
 
 fn id3v1(title: &[u8]) -> Vec<u8> {

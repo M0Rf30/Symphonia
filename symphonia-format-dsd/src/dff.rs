@@ -1,21 +1,21 @@
 // DFF (DSDIFF) Format Parser
+use crate::CODEC_TYPE_DSD;
+use crate::dff_info::{DffInfoParser, read_chunk_header};
+use log::warn;
 use std::io::{Seek, SeekFrom};
 use std::num::NonZero;
 use symphonia_core::audio::{Channels, Position};
-use symphonia_core::codecs::audio::{AudioCodecParameters, BitOrder, ChannelDataLayout};
 use symphonia_core::codecs::CodecParameters;
+use symphonia_core::codecs::audio::{AudioCodecParameters, BitOrder, ChannelDataLayout};
 use symphonia_core::common::FourCc;
-use symphonia_core::errors::{decode_error, seek_error, unsupported_error, Result, SeekErrorKind};
+use symphonia_core::errors::{Result, SeekErrorKind, decode_error, seek_error, unsupported_error};
 use symphonia_core::formats::prelude::*;
 use symphonia_core::formats::probe::{ProbeFormatData, ProbeableFormat, Score, Scoreable};
 use symphonia_core::io::*;
 use symphonia_core::meta::{Metadata, MetadataLog, MetadataRevision, MetadataSideData};
-use symphonia_metadata::embedded::riff::read_riff_id3_chunk;
 use symphonia_core::support_format;
-use symphonia_core::units::{TimeBase, Timestamp, Duration};
-use log::warn;
-use crate::dff_info::DffInfoParser;
-use crate::CODEC_TYPE_DSD;
+use symphonia_core::units::{Duration, TimeBase, Timestamp};
+use symphonia_metadata::embedded::riff::read_riff_id3_chunk;
 
 const DFF_FRM8_MAGIC: [u8; 4] = *b"FRM8";
 const DFF_DSD_FORM: [u8; 4] = *b"DSD ";
@@ -24,34 +24,53 @@ const DFF_PROP_ID: [u8; 4] = *b"PROP";
 const DFF_SND_FORM: [u8; 4] = *b"SND ";
 
 const DFF_FORMAT_INFO: FormatInfo = FormatInfo {
-    format: FormatId::new(FourCc::new(*b"DFF\0")), short_name: "dff", long_name: "DSDIFF",
+    format: FormatId::new(FourCc::new(*b"DFF\0")),
+    short_name: "dff",
+    long_name: "DSDIFF",
 };
 
 struct DffHeader;
 impl DffHeader {
     fn read<B: ReadBytes>(reader: &mut B) -> Result<Self> {
-        if reader.read_quad_bytes()? != DFF_FRM8_MAGIC { return decode_error("dff: bad magic"); }
+        if reader.read_quad_bytes()? != DFF_FRM8_MAGIC {
+            return decode_error("dff: bad magic");
+        }
         let _file_size = reader.read_be_u64()?;
-        if reader.read_quad_bytes()? != DFF_DSD_FORM { return decode_error("dff: not DSD"); }
+        if reader.read_quad_bytes()? != DFF_DSD_FORM {
+            return decode_error("dff: not DSD");
+        }
         Ok(DffHeader)
     }
 }
 
-struct DffFormatVersion { major: u32 }
+struct DffFormatVersion {
+    major: u32,
+}
 impl DffFormatVersion {
     fn read<B: ReadBytes>(reader: &mut B) -> Result<Self> {
-        if reader.read_quad_bytes()? != DFF_FVER_ID { return decode_error("dff: expected FVER"); }
+        if reader.read_quad_bytes()? != DFF_FVER_ID {
+            return decode_error("dff: expected FVER");
+        }
         let _chunk_size = reader.read_be_u64()?;
         Ok(DffFormatVersion { major: reader.read_be_u32()? >> 24 })
     }
 }
 
-struct DffSoundProperties { channel_count: u16, sample_rate: u32, compression: [u8; 4], channels: Channels }
+struct DffSoundProperties {
+    channel_count: u16,
+    sample_rate: u32,
+    compression: [u8; 4],
+    channels: Channels,
+}
 impl DffSoundProperties {
     fn read<B: ReadBytes>(reader: &mut B) -> Result<Self> {
-        if reader.read_quad_bytes()? != DFF_PROP_ID { return decode_error("dff: expected PROP"); }
+        if reader.read_quad_bytes()? != DFF_PROP_ID {
+            return decode_error("dff: expected PROP");
+        }
         let prop_size = reader.read_be_u64()?;
-        if reader.read_quad_bytes()? != DFF_SND_FORM { return decode_error("dff: not sound"); }
+        if reader.read_quad_bytes()? != DFF_SND_FORM {
+            return decode_error("dff: not sound");
+        }
         let mut consumed: u64 = 4;
         let mut sample_rate = None;
         let mut channel_count = None;
@@ -61,23 +80,47 @@ impl DffSoundProperties {
             let id = reader.read_quad_bytes()?;
             let size = reader.read_be_u64()?;
             match &id {
-                b"FS  " => { sample_rate = Some(reader.read_be_u32()?); if size > 4 { reader.ignore_bytes(size - 4)?; } }
+                b"FS  " => {
+                    sample_rate = Some(reader.read_be_u32()?);
+                    if size > 4 {
+                        reader.ignore_bytes(size - 4)?;
+                    }
+                }
                 b"CHNL" => {
                     let count = reader.read_be_u16()?;
-                    for _ in 0..count { channel_ids.push(reader.read_quad_bytes()?); }
+                    for _ in 0..count {
+                        channel_ids.push(reader.read_quad_bytes()?);
+                    }
                     let read_bytes = 2 + 4 * u64::from(count);
-                    if size > read_bytes { reader.ignore_bytes(size - read_bytes)?; }
+                    if size > read_bytes {
+                        reader.ignore_bytes(size - read_bytes)?;
+                    }
                     channel_count = Some(count);
                 }
-                b"CMPR" => { compression = reader.read_quad_bytes()?; if size > 4 { reader.ignore_bytes(size - 4)?; } }
-                _ => { reader.ignore_bytes(size)?; }
+                b"CMPR" => {
+                    compression = reader.read_quad_bytes()?;
+                    if size > 4 {
+                        reader.ignore_bytes(size - 4)?;
+                    }
+                }
+                _ => {
+                    reader.ignore_bytes(size)?;
+                }
             }
             let pad = size & 1;
-            if pad == 1 { reader.ignore_bytes(1)?; }
+            if pad == 1 {
+                reader.ignore_bytes(1)?;
+            }
             consumed = consumed.saturating_add(12).saturating_add(size).saturating_add(pad);
         }
-        let sample_rate = match sample_rate { Some(s) => s, None => return decode_error("dff: missing sample rate") };
-        let channel_count = match channel_count { Some(c) => c, None => return decode_error("dff: missing channel count") };
+        let sample_rate = match sample_rate {
+            Some(s) => s,
+            None => return decode_error("dff: missing sample rate"),
+        };
+        let channel_count = match channel_count {
+            Some(c) => c,
+            None => return decode_error("dff: missing channel count"),
+        };
         let channels = Self::map_channel_ids(&channel_ids, channel_count);
         Ok(DffSoundProperties { channel_count, sample_rate, compression, channels })
     }
@@ -94,32 +137,53 @@ impl DffSoundProperties {
                 b"LS  " => Position::REAR_LEFT,
                 b"RS  " => Position::REAR_RIGHT,
                 b"Cs  " => Position::REAR_CENTER,
-                _ => { all_known = false; break; }
+                _ => {
+                    all_known = false;
+                    break;
+                }
             };
             let bit = pos.bits().trailing_zeros() as i32;
-            if bit <= last_bit { all_known = false; break; }
+            if bit <= last_bit {
+                all_known = false;
+                break;
+            }
             last_bit = bit;
             mask |= pos;
         }
-        if all_known && mask.bits().count_ones() == count as u32 { Channels::Positioned(mask) } else { Channels::Discrete(count) }
+        if all_known && mask.bits().count_ones() == count as u32 {
+            Channels::Positioned(mask)
+        }
+        else {
+            Channels::Discrete(count)
+        }
     }
     fn validate(&self) -> Result<()> {
         if self.compression != *b"DSD " {
             return unsupported_error(
-                "dff: only uncompressed DSD is supported; DST (Direct Stream Transfer) compression is not implemented"
+                "dff: only uncompressed DSD is supported; DST (Direct Stream Transfer) compression is not implemented",
             );
         }
-        if self.channel_count < 1 || self.channel_count > 6 { return decode_error("dff: bad channels"); }
-        if self.sample_rate == 0 { return decode_error("dff: bad sample rate"); }
+        if self.channel_count < 1 || self.channel_count > 6 {
+            return decode_error("dff: bad channels");
+        }
+        if self.sample_rate == 0 {
+            return decode_error("dff: bad sample rate");
+        }
         Ok(())
     }
 }
 
-fn is_id3_chunk(id: &[u8; 4]) -> bool { id == b"ID3 " || id == b"id3 " }
+fn is_id3_chunk(id: &[u8; 4]) -> bool {
+    id == b"ID3 " || id == b"id3 "
+}
 
 /// Reads an ID3v2 tag from an `ID3 ` chunk, consuming exactly `chunk_size` bytes. Errors are
 /// logged and the chunk is skipped.
-fn read_id3_chunk(source: &mut MediaSourceStream<'_>, chunk_size: u64, out: &mut Vec<MetadataRevision>) {
+fn read_id3_chunk(
+    source: &mut MediaSourceStream<'_>,
+    chunk_size: u64,
+    out: &mut Vec<MetadataRevision>,
+) {
     let mut scoped = ScopedStream::new(&mut *source, chunk_size);
     let mut side_data = Vec::<MetadataSideData>::new();
     match read_riff_id3_chunk(&mut scoped, &mut side_data) {
@@ -127,19 +191,28 @@ fn read_id3_chunk(source: &mut MediaSourceStream<'_>, chunk_size: u64, out: &mut
         Err(e) => warn!("dff: failed to read ID3v2 metadata: {}", e),
     }
     // Always leave the stream at the end of the chunk.
-    if let Err(e) = scoped.ignore() { warn!("dff: failed to skip ID3 chunk remainder: {}", e); }
+    if let Err(e) = scoped.ignore() {
+        warn!("dff: failed to skip ID3 chunk remainder: {}", e);
+    }
 }
 
 pub struct DffReader<'s> {
-    reader: MediaSourceStream<'s>, media_info: MediaInfo, tracks: Vec<Track>,
-    metadata: MetadataLog, data_start_pos: u64, data_end_pos: u64, current_pos: u64,
+    reader: MediaSourceStream<'s>,
+    media_info: MediaInfo,
+    tracks: Vec<Track>,
+    metadata: MetadataLog,
+    data_start_pos: u64,
+    data_end_pos: u64,
+    current_pos: u64,
     channel_count: u16,
 }
 
 impl<'s> DffReader<'s> {
     pub fn try_new(mut source: MediaSourceStream<'s>, _options: FormatOptions) -> Result<Self> {
         let _header = DffHeader::read(&mut source)?;
-        if DffFormatVersion::read(&mut source)?.major != 1 { return unsupported_error("dff: bad version"); }
+        if DffFormatVersion::read(&mut source)?.major != 1 {
+            return unsupported_error("dff: bad version");
+        }
         let props = DffSoundProperties::read(&mut source)?;
         props.validate()?;
 
@@ -147,50 +220,96 @@ impl<'s> DffReader<'s> {
         let mut id3_revisions = Vec::new();
         let mut data_start_pos = None;
         let mut data_size = None;
-        while let Ok(chunk_id) = source.read_quad_bytes() {
-            let chunk_size = source.read_be_u64()?;
-            if &chunk_id == b"DSD " { data_start_pos = Some(source.pos()); data_size = Some(chunk_size); break; }
-            if is_id3_chunk(&chunk_id) { read_id3_chunk(&mut source, chunk_size, &mut id3_revisions); }
-            else { source.ignore_bytes(chunk_size)?; }
-            if chunk_size % 2 == 1 { source.ignore_bytes(1)?; }
+        while let Ok((chunk_id, chunk_size)) = read_chunk_header(&mut source) {
+            if &chunk_id == b"DSD " {
+                data_start_pos = Some(source.pos());
+                data_size = Some(chunk_size);
+                break;
+            }
+            if is_id3_chunk(&chunk_id) {
+                read_id3_chunk(&mut source, chunk_size, &mut id3_revisions);
+            }
+            else {
+                source.ignore_bytes(chunk_size)?;
+            }
+            if chunk_size % 2 == 1 {
+                source.ignore_bytes(1)?;
+            }
         }
-        let data_start_pos = match data_start_pos { Some(p) => p, None => return Err(decode_error::<u64>("dff: no data").unwrap_err()), };
-        let data_size = match data_size { Some(s) => s, None => return Err(decode_error::<u64>("dff: no data size").unwrap_err()), };
+        let (Some(data_start_pos), Some(data_size)) = (data_start_pos, data_size)
+        else {
+            return decode_error("dff: no data");
+        };
         let data_end_pos = data_start_pos.saturating_add(data_size);
         if source.is_seekable() {
             let pad = data_size & 1;
-            let _ = source.seek(SeekFrom::Start(data_end_pos + pad));
-            while let Ok(chunk_id) = source.read_quad_bytes() {
-                let chunk_size = source.read_be_u64()?;
+            let _ = source.seek(SeekFrom::Start(data_end_pos.saturating_add(pad)));
+            while let Ok((chunk_id, chunk_size)) = read_chunk_header(&mut source) {
+                let body_pos = source.pos();
                 match &chunk_id {
-                    b"DIIN" => { if let Err(e) = info_parser.parse_diin(&mut source, chunk_size) { warn!("DFF DIIN: {}", e); } }
-                    b"COMT" => { if let Err(e) = info_parser.parse_comt(&mut source, chunk_size) { warn!("DFF COMT: {}", e); } }
-                    id if is_id3_chunk(id) => { read_id3_chunk(&mut source, chunk_size, &mut id3_revisions); }
-                    _ => { source.ignore_bytes(chunk_size)?; }
+                    b"DIIN" => {
+                        if let Err(e) = info_parser.parse_diin(&mut source, chunk_size) {
+                            warn!("DFF DIIN: {}", e);
+                        }
+                    }
+                    b"COMT" => {
+                        if let Err(e) = info_parser.parse_comt(&mut source, chunk_size) {
+                            warn!("DFF COMT: {}", e);
+                        }
+                    }
+                    id if is_id3_chunk(id) => {
+                        read_id3_chunk(&mut source, chunk_size, &mut id3_revisions);
+                    }
+                    _ => {
+                        source.ignore_bytes(chunk_size)?;
+                    }
                 }
-                if chunk_size % 2 == 1 { source.ignore_bytes(1)?; }
+                if matches!(&chunk_id, b"DIIN" | b"COMT") {
+                    // The parsers are bounded by the chunk size but may stop early on error.
+                    source.seek(SeekFrom::Start(body_pos.saturating_add(chunk_size)))?;
+                }
+                if chunk_size % 2 == 1 {
+                    source.ignore_bytes(1)?;
+                }
             }
             source.seek(SeekFrom::Start(data_start_pos))?;
         }
         let channels = props.channels.clone();
         let mut params = AudioCodecParameters::new();
-        params.for_codec(CODEC_TYPE_DSD).with_sample_rate(props.sample_rate)
-            .with_bits_per_sample(1).with_channels(channels)
+        params
+            .for_codec(CODEC_TYPE_DSD)
+            .with_sample_rate(props.sample_rate)
+            .with_bits_per_sample(1)
+            .with_channels(channels)
             .with_channel_data_layout(ChannelDataLayout::Interleaved)
             .with_bit_order(BitOrder::MsbFirst);
         let total_bytes = data_size;
         let samples_per_channel = total_bytes.saturating_mul(8) / props.channel_count as u64;
-        let tb = TimeBase::new(NonZero::new(1).unwrap(), NonZero::new(props.sample_rate).unwrap());
+        let Some(rate) = NonZero::new(props.sample_rate)
+        else {
+            return decode_error("dff: bad sample rate");
+        };
+        let tb = TimeBase::new(NonZero::<u32>::MIN, rate);
         params.with_max_frames_per_packet(4096 * 8).with_frames_per_block(4096 * 8);
         let mut track = Track::new(0);
-        track.time_base = Some(tb); track.num_frames = Some(samples_per_channel);
+        track.time_base = Some(tb);
+        track.num_frames = Some(samples_per_channel);
         track.with_codec_params(CodecParameters::Audio(params));
         let mut metadata_log = MetadataLog::default();
         metadata_log.push(info_parser.into_metadata().build());
-        for rev in id3_revisions { metadata_log.push(rev); }
-        Ok(DffReader { reader: source, media_info: MediaInfo::new(), tracks: vec![track],
-            metadata: metadata_log, data_start_pos, data_end_pos, current_pos: data_start_pos,
-            channel_count: props.channel_count })
+        for rev in id3_revisions {
+            metadata_log.push(rev);
+        }
+        Ok(DffReader {
+            reader: source,
+            media_info: MediaInfo::new(),
+            tracks: vec![track],
+            metadata: metadata_log,
+            data_start_pos,
+            data_end_pos,
+            current_pos: data_start_pos,
+            channel_count: props.channel_count,
+        })
     }
 }
 
@@ -204,7 +323,10 @@ impl Scoreable for DffReader<'_> {
 }
 
 impl ProbeableFormat<'_> for DffReader<'_> {
-    fn try_probe_new(mss: MediaSourceStream<'_>, opts: FormatOptions) -> Result<Box<dyn FormatReader + '_>> {
+    fn try_probe_new(
+        mss: MediaSourceStream<'_>,
+        opts: FormatOptions,
+    ) -> Result<Box<dyn FormatReader + '_>> {
         Ok(Box::new(DffReader::try_new(mss, opts)?))
     }
     fn probe_data() -> &'static [ProbeFormatData] {
@@ -213,35 +335,56 @@ impl ProbeableFormat<'_> for DffReader<'_> {
 }
 
 impl FormatReader for DffReader<'_> {
-    fn format_info(&self) -> &FormatInfo { &DFF_FORMAT_INFO }
-    fn media_info(&self) -> &MediaInfo { &self.media_info }
+    fn format_info(&self) -> &FormatInfo {
+        &DFF_FORMAT_INFO
+    }
+    fn media_info(&self) -> &MediaInfo {
+        &self.media_info
+    }
     fn next_packet(&mut self) -> Result<Option<Packet>> {
         let channels = self.channel_count as u64;
-        if self.current_pos >= self.data_end_pos { return Ok(None); }
+        if self.current_pos >= self.data_end_pos {
+            return Ok(None);
+        }
         let aligned = (4096 / channels) * channels;
         let remaining = self.data_end_pos - self.current_pos;
         let mut to_read = aligned.min(remaining);
         to_read -= to_read % channels;
-        if to_read == 0 { return Ok(None); }
+        if to_read == 0 {
+            return Ok(None);
+        }
         let frames = (to_read * 8) / channels;
         let pts = ((self.current_pos - self.data_start_pos) * 8) / channels;
         let buf = self.reader.read_boxed_slice_exact(to_read as usize)?;
         self.current_pos += to_read;
-        Ok(Some(PacketBuilder::new().track_id(0).pts(Timestamp::new(pts as i64))
-            .dur(Duration::new(frames)).data(buf).build()))
+        Ok(Some(
+            PacketBuilder::new()
+                .track_id(0)
+                .pts(Timestamp::new(pts as i64))
+                .dur(Duration::new(frames))
+                .data(buf)
+                .build(),
+        ))
     }
-    fn metadata(&mut self) -> Metadata<'_> { self.metadata.metadata() }
-    fn tracks(&self) -> &[Track] { &self.tracks }
+    fn metadata(&mut self) -> Metadata<'_> {
+        self.metadata.metadata()
+    }
+    fn tracks(&self) -> &[Track] {
+        &self.tracks
+    }
     fn seek(&mut self, _mode: SeekMode, to: SeekTo) -> Result<SeekedTo> {
         let required_ts = match to {
             SeekTo::Timestamp { ts, .. } => ts,
             SeekTo::Time { time, .. } => {
-                let tb = self.tracks[0].time_base
+                let tb = self.tracks[0]
+                    .time_base
                     .ok_or(symphonia_core::errors::Error::SeekError(SeekErrorKind::Unseekable))?;
                 tb.calc_timestamp(time).unwrap_or(Timestamp::ZERO)
             }
         };
-        if required_ts.is_negative() { return seek_error(SeekErrorKind::OutOfRange); }
+        if required_ts.is_negative() {
+            return seek_error(SeekErrorKind::OutOfRange);
+        }
         // The timestamp is in DSD samples per channel. Each byte holds 8 samples of one channel,
         // and the channels are byte-interleaved, so a group of `channel_count` bytes must not be
         // split by the seek.
@@ -258,5 +401,10 @@ impl FormatReader for DffReader<'_> {
         let actual_ts = bytes_per_channel * 8;
         Ok(SeekedTo { track_id: 0, required_ts, actual_ts: Timestamp::new(actual_ts as i64) })
     }
-    fn into_inner<'a>(self: Box<Self>) -> MediaSourceStream<'a> where Self: 'a { self.reader }
+    fn into_inner<'a>(self: Box<Self>) -> MediaSourceStream<'a>
+    where
+        Self: 'a,
+    {
+        self.reader
+    }
 }

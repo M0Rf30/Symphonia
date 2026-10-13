@@ -12,20 +12,20 @@ use std::sync::Arc;
 
 use log::debug;
 use symphonia_core::audio::{Channels, layouts};
+use symphonia_core::codecs::audio::AudioCodecId;
 use symphonia_core::codecs::audio::well_known::{
     CODEC_ID_PCM_ALAW, CODEC_ID_PCM_F32BE, CODEC_ID_PCM_F64BE, CODEC_ID_PCM_MULAW, CODEC_ID_PCM_S8,
     CODEC_ID_PCM_S16BE, CODEC_ID_PCM_S16LE, CODEC_ID_PCM_S24BE, CODEC_ID_PCM_S32BE,
     CODEC_ID_PCM_S32LE, CODEC_ID_PCM_U8,
 };
 use symphonia_core::errors::{Result, decode_error, unsupported_error};
-use symphonia_core::io::{ReadBytes, ScopedStream};
-use symphonia_core::meta::{MetadataRevision, StandardTag, Tag};
+use symphonia_core::io::ReadBytes;
+use symphonia_core::meta::{StandardTag, Tag};
 use symphonia_core::util::text;
-use symphonia_metadata::embedded::riff;
 
 use crate::common::{
-    ChunkParser, FormatALaw, FormatData, FormatIeeeFloat, FormatMuLaw, FormatPcm, PacketInfo,
-    ParseChunk, ParseChunkTag,
+    ChunkParser, FormatALaw, FormatData, FormatIeeeFloat, FormatMuLaw, FormatPcm, Id3Chunk,
+    PacketInfo, ParseChunk, ParseChunkTag,
 };
 
 use extended::Extended;
@@ -78,43 +78,40 @@ impl CommonChunk {
         Ok(FormatData::MuLaw(FormatMuLaw { codec: CODEC_ID_PCM_MULAW, channels }))
     }
 
-    fn read_in24_fmt(bits_per_sample: u16, num_channels: u16) -> Result<FormatData> {
-        if bits_per_sample != 24 {
-            return decode_error("aifc: bits per sample invalid for in14");
-        }
+    /// Build a PCM format whose coded and valid sample widths are equal.
+    fn make_pcm_fmt(
+        bits_per_sample: u16,
+        num_channels: u16,
+        codec: AudioCodecId,
+    ) -> Result<FormatData> {
         let channels = map_aiff_channel_count(num_channels)?;
         Ok(FormatData::Pcm(FormatPcm {
             bits_per_sample,
             valid_bits_per_sample: bits_per_sample,
             channels,
-            codec: CODEC_ID_PCM_S24BE,
+            codec,
         }))
+    }
+
+    fn read_in24_fmt(bits_per_sample: u16, num_channels: u16) -> Result<FormatData> {
+        if bits_per_sample != 24 {
+            return decode_error("aifc: bits per sample invalid for in14");
+        }
+        Self::make_pcm_fmt(bits_per_sample, num_channels, CODEC_ID_PCM_S24BE)
     }
 
     fn read_in32_fmt(bits_per_sample: u16, num_channels: u16) -> Result<FormatData> {
         if bits_per_sample != 32 {
             return decode_error("aifc: bits per sample invalid for in32");
         }
-        let channels = map_aiff_channel_count(num_channels)?;
-        Ok(FormatData::Pcm(FormatPcm {
-            bits_per_sample,
-            valid_bits_per_sample: bits_per_sample,
-            channels,
-            codec: CODEC_ID_PCM_S32BE,
-        }))
+        Self::make_pcm_fmt(bits_per_sample, num_channels, CODEC_ID_PCM_S32BE)
     }
 
     fn read_23ni_fmt(bits_per_sample: u16, num_channels: u16) -> Result<FormatData> {
         if bits_per_sample != 32 {
             return decode_error("aifc: bits per sample invalid for 23ni");
         }
-        let channels = map_aiff_channel_count(num_channels)?;
-        Ok(FormatData::Pcm(FormatPcm {
-            bits_per_sample,
-            valid_bits_per_sample: bits_per_sample,
-            channels,
-            codec: CODEC_ID_PCM_S32LE,
-        }))
+        Self::make_pcm_fmt(bits_per_sample, num_channels, CODEC_ID_PCM_S32LE)
     }
 
     fn read_fl32_fmt(bits_per_sample: u16, num_channels: u16) -> Result<FormatData> {
@@ -141,13 +138,7 @@ impl CommonChunk {
             _ => return decode_error("aiff: bits per sample for sowt must be 16 bits"),
         };
 
-        let channels = map_aiff_channel_count(num_channels)?;
-        Ok(FormatData::Pcm(FormatPcm {
-            bits_per_sample,
-            valid_bits_per_sample: bits_per_sample,
-            channels,
-            codec,
-        }))
+        Self::make_pcm_fmt(bits_per_sample, num_channels, codec)
     }
 
     fn read_twos_fmt(bits_per_sample: u16, num_channels: u16) -> Result<FormatData> {
@@ -156,13 +147,7 @@ impl CommonChunk {
             _ => return decode_error("aiff: bits per sample for twos must be 16 bits"),
         };
 
-        let channels = map_aiff_channel_count(num_channels)?;
-        Ok(FormatData::Pcm(FormatPcm {
-            bits_per_sample,
-            valid_bits_per_sample: bits_per_sample,
-            channels,
-            codec,
-        }))
+        Self::make_pcm_fmt(bits_per_sample, num_channels, codec)
     }
 
     fn read_raw_fmt(bits_per_sample: u16, num_channels: u16) -> Result<FormatData> {
@@ -171,13 +156,7 @@ impl CommonChunk {
             _ => return decode_error("aiff: bits per sample for raw must be 8 bits"),
         };
 
-        let channels = map_aiff_channel_count(num_channels)?;
-        Ok(FormatData::Pcm(FormatPcm {
-            bits_per_sample,
-            valid_bits_per_sample: bits_per_sample,
-            channels,
-            codec,
-        }))
+        Self::make_pcm_fmt(bits_per_sample, num_channels, codec)
     }
 
     pub fn packet_info(&self) -> Result<PacketInfo> {
@@ -448,7 +427,7 @@ impl ParseChunk for TextChunk {
             b"AUTH" => StandardTag::Artist(value.clone()),
             b"(c) " => StandardTag::Copyright(value.clone()),
             b"ANNO" => StandardTag::Comment(value.clone()),
-            _ => unreachable!(),
+            _ => return decode_error("aiff: unknown text chunk"),
         };
 
         let tag_key = match str::from_utf8(&tag) {
@@ -458,25 +437,6 @@ impl ParseChunk for TextChunk {
         let tag = Tag::new_from_parts(tag_key, value, Some(std_tag));
 
         Ok(TextChunk { tag })
-    }
-}
-
-pub struct Id3Chunk {
-    pub metadata: MetadataRevision,
-}
-
-impl ParseChunk for Id3Chunk {
-    fn parse<B: ReadBytes>(reader: &mut B, _tag: [u8; 4], len: u32) -> Result<Self> {
-        // The tag must not be read past the end of the chunk.
-        let mut reader = ScopedStream::new(reader, u64::from(len));
-
-        let mut side_data = Vec::new();
-        let metadata = riff::read_riff_id3_chunk(&mut reader, &mut side_data)?;
-
-        // Skip any unread data in the chunk (e.g., padding).
-        reader.ignore()?;
-
-        Ok(Id3Chunk { metadata })
     }
 }
 

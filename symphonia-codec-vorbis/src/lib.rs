@@ -538,9 +538,27 @@ fn read_setup(reader: &mut BufReader<'_>, ident: &IdentHeader) -> Result<Setup> 
     Ok(Setup { codebooks, floors, residues, mappings, modes })
 }
 
+/// The maximum total number of VQ lookup table elements across all codebooks in a setup header.
+/// Real streams use a small fraction of this; it bounds the memory a crafted header can request.
+const MAX_TOTAL_VQ_ELEMENTS: usize = 16 * 1024 * 1024;
+
 fn read_codebooks(bs: &mut BitReaderRtl<'_>) -> Result<Vec<VorbisCodebook>> {
     let count = bs.read_bits_leq32(8)? + 1;
-    (0..count).map(|_| VorbisCodebook::read(bs)).collect()
+    let mut total_vq_elements = 0usize;
+
+    (0..count)
+        .map(|_| {
+            let codebook = VorbisCodebook::read(bs)?;
+
+            total_vq_elements = total_vq_elements.saturating_add(codebook.vq_len());
+
+            if total_vq_elements > MAX_TOTAL_VQ_ELEMENTS {
+                return decode_error("vorbis: codebooks are too large (report this)");
+            }
+
+            Ok(codebook)
+        })
+        .collect()
 }
 
 fn read_time_domain_transforms(bs: &mut BitReaderRtl<'_>) -> Result<()> {
@@ -786,4 +804,45 @@ fn map_vorbis_channel(num_channels: u8, ch: usize) -> usize {
     };
 
     usize::from(mapped_ch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Appends `num_bits` of `value` to `bits` in Vorbis (LSb-first) order.
+    fn push_bits(bits: &mut Vec<bool>, value: u64, num_bits: u32) {
+        bits.extend((0..num_bits).map(|i| (value >> i) & 1 == 1));
+    }
+
+    #[test]
+    fn verify_read_codebooks_bounds_total_vq_size() {
+        // Each codebook is a fully-specified, length-ordered codebook of 128K entries with 32
+        // dimensions and a type 1 lookup table (4M elements) described by only a few bits.
+        let mut bits = Vec::new();
+        push_bits(&mut bits, 4, 8);
+
+        for _ in 0..5 {
+            push_bits(&mut bits, 0x564342, 24);
+            push_bits(&mut bits, 32, 16);
+            push_bits(&mut bits, 128 * 1024, 24);
+            push_bits(&mut bits, 1, 1);
+            push_bits(&mut bits, 16, 5);
+            push_bits(&mut bits, 128 * 1024, 18);
+            push_bits(&mut bits, 1, 4);
+            push_bits(&mut bits, 0, 32);
+            push_bits(&mut bits, 0, 32);
+            push_bits(&mut bits, 0, 4);
+            push_bits(&mut bits, 0, 1);
+            push_bits(&mut bits, 0, 1);
+        }
+
+        let mut buf = vec![0u8; bits.len().div_ceil(8)];
+        for (i, _) in bits.iter().enumerate().filter(|(_, b)| **b) {
+            buf[i / 8] |= 1 << (i % 8);
+        }
+
+        let mut bs = BitReaderRtl::new(&buf);
+        assert!(read_codebooks(&mut bs).is_err());
+    }
 }

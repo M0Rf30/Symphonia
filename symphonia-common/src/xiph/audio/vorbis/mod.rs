@@ -157,11 +157,7 @@ mod tests {
     fn test_unpack_xiph_laced_extradata_large_sizes() {
         let setup_packet = b"setup";
 
-        let mut extradata = Vec::new();
-        extradata.push(XIPH_LACED_LEADING_HEADER);
-        extradata.push(255);
-        extradata.push(0);
-        extradata.push(0);
+        let mut extradata = vec![XIPH_LACED_LEADING_HEADER, 255, 0, 0];
         extradata.extend_from_slice(&vec![0; 255]);
         extradata.extend_from_slice(setup_packet);
 

@@ -47,11 +47,7 @@ pub const NOISE_FLOOR_OFFSET: f64 = 6.0;
 #[inline]
 #[must_use]
 pub fn pan_offset(amp_res: bool) -> f64 {
-    if amp_res {
-        12.0
-    } else {
-        24.0
-    }
+    if amp_res { 12.0 } else { 24.0 }
 }
 
 /// The §4.6.18.3.5 amplitude-resolution divisor `a`: `2` for
@@ -59,11 +55,7 @@ pub fn pan_offset(amp_res: bool) -> f64 {
 #[inline]
 #[must_use]
 pub fn amp_divisor(amp_res: bool) -> f64 {
-    if amp_res {
-        1.0
-    } else {
-        2.0
-    }
+    if amp_res { 1.0 } else { 2.0 }
 }
 
 /// Dequantized (linear-energy) envelope and noise-floor scalefactors
@@ -91,20 +83,12 @@ pub fn dequant_single(
     let e_orig = env
         .eq
         .iter()
-        .map(|l| {
-            l.iter()
-                .map(|&e| 64.0 * (f64::from(e) / a).exp2())
-                .collect()
-        })
+        .map(|l| l.iter().map(|&e| 64.0 * (f64::from(e) / a).exp2()).collect())
         .collect();
     let q_orig = noise
         .q
         .iter()
-        .map(|l| {
-            l.iter()
-                .map(|&q| (NOISE_FLOOR_OFFSET - f64::from(q)).exp2())
-                .collect()
-        })
+        .map(|l| l.iter().map(|&q| (NOISE_FLOOR_OFFSET - f64::from(q)).exp2()).collect())
         .collect();
     DequantizedSbr { e_orig, q_orig }
 }
@@ -160,14 +144,8 @@ pub fn dequant_coupled(
     }
 
     (
-        DequantizedSbr {
-            e_orig: left_e,
-            q_orig: left_q,
-        },
-        DequantizedSbr {
-            e_orig: right_e,
-            q_orig: right_q,
-        },
+        DequantizedSbr { e_orig: left_e, q_orig: left_q },
+        DequantizedSbr { e_orig: right_e, q_orig: right_q },
     )
 }
 
@@ -177,10 +155,7 @@ mod tests {
 
     fn env(eq: Vec<Vec<i32>>) -> EnvelopeScalefactors {
         let n = eq.len();
-        EnvelopeScalefactors {
-            eq,
-            freq_res: vec![true; n],
-        }
+        EnvelopeScalefactors { eq, freq_res: vec![true; n] }
     }
 
     fn noise(q: Vec<Vec<i32>>) -> NoiseScalefactors {
@@ -217,10 +192,7 @@ mod tests {
         for amp_res in [false, true] {
             let e0 = env(vec![vec![4, 8]]);
             let q0 = noise(vec![vec![3]]);
-            let e1 = env(vec![vec![
-                pan_offset(amp_res) as i32,
-                pan_offset(amp_res) as i32,
-            ]]);
+            let e1 = env(vec![vec![pan_offset(amp_res) as i32, pan_offset(amp_res) as i32]]);
             let q1 = noise(vec![vec![12]]);
             let (l, r) = dequant_coupled(&e0, &q0, &e1, &q1, amp_res);
             let mono = dequant_single(&e0, &q0, amp_res);

@@ -19,8 +19,8 @@ pub(crate) fn silk_bwexpander(ar: &mut [i16], d: usize, chirp_q16_init: i32) {
 
     // NB: Don't use silk_SMULWB, instead of silk_RSHIFT_ROUND(silk_MUL(), 16), below.
     // Bias in silk_SMULWB can lead to unstable filters.
-    for i in 0..d - 1 {
-        ar[i] = silk_rshift_round(silk_mul(chirp_q16, ar[i] as i32), 16) as i16;
+    for a in ar[..d - 1].iter_mut() {
+        *a = silk_rshift_round(silk_mul(chirp_q16, *a as i32), 16) as i16;
         chirp_q16 += silk_rshift_round(silk_mul(chirp_q16, chirp_minus_one_q16), 16);
     }
     ar[d - 1] = silk_rshift_round(silk_mul(chirp_q16, ar[d - 1] as i32), 16) as i16;
@@ -32,8 +32,8 @@ pub(crate) fn silk_bwexpander_32(ar: &mut [i32], d: usize, chirp_q16_init: i32) 
     let mut chirp_q16 = chirp_q16_init;
     let chirp_minus_one_q16 = chirp_q16 - 65536;
 
-    for i in 0..d - 1 {
-        ar[i] = silk_smulww(chirp_q16, ar[i]);
+    for a in ar[..d - 1].iter_mut() {
+        *a = silk_smulww(chirp_q16, *a);
         chirp_q16 += silk_rshift_round(silk_mul(chirp_q16, chirp_minus_one_q16), 16);
     }
     ar[d - 1] = silk_smulww(chirp_q16, ar[d - 1]);

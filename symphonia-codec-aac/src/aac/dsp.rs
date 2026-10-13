@@ -17,7 +17,8 @@ use symphonia_common::mpeg::audio::AudioObjectType;
 
 use crate::aac::common::*;
 use crate::aac::eld_window::{ELD_WINDOW_480, ELD_WINDOW_512};
-use crate::aac::window::*;
+use symphonia_core::dsp::complex::Complex64;
+use symphonia_core::dsp::window::{WindowType, generate_window};
 
 const SHORT_WIN_POINT0: usize = 512 - 64;
 const SHORT_WIN_POINT1: usize = 512 + 64;
@@ -32,58 +33,63 @@ pub fn delay_len(aot: AudioObjectType) -> usize {
     }
 }
 
-/// A complex number.
-#[derive(Clone, Copy, Default)]
-struct Cpx {
-    re: f64,
-    im: f64,
-}
-
-impl Cpx {
-    #[inline(always)]
-    fn mul(self, other: Cpx) -> Cpx {
-        Cpx {
-            re: self.re * other.re - self.im * other.im,
-            im: self.re * other.im + self.im * other.re,
-        }
-    }
-
-    #[inline(always)]
-    fn add(self, other: Cpx) -> Cpx {
-        Cpx { re: self.re + other.re, im: self.im + other.im }
-    }
+/// One level of the recursion of [`MixedFft`]: the transform of size `n` split into `p`
+/// transforms of size `n / p`.
+struct FftStage {
+    /// The radix, the smallest prime factor of the size of the stage.
+    p: usize,
+    /// The size of the sub-transforms.
+    m: usize,
+    /// `W_n^(r k)` for the sub-transform output `k` of the sub-transform `r`, at `k * p + r`.
+    tw_n: Vec<Complex64>,
+    /// `W_p^(r q)` for the butterfly output `q` and input `r`, at `q * p + r`.
+    tw_p: Vec<Complex64>,
 }
 
 /// A forward FFT of any size, by decimation in time with a radix of each prime factor of the size.
 struct MixedFft {
-    n: usize,
-    /// `exp(-2 pi i j / n)`
-    twiddle: Vec<Cpx>,
+    /// The stages from the size `n` down to the first prime size.
+    stages: Vec<FftStage>,
     /// The scratch for the radix butterflies, as long as the largest prime factor of `n`.
-    tmp: Vec<Cpx>,
+    tmp: Vec<Complex64>,
 }
 
 impl MixedFft {
     fn new(n: usize) -> Self {
-        let twiddle = (0..n)
+        // `exp(-2 pi i j / n)`
+        let twiddle: Vec<Complex64> = (0..n)
             .map(|j| {
                 let arg = -2.0 * std::f64::consts::PI * j as f64 / n as f64;
-                Cpx { re: arg.cos(), im: arg.sin() }
+                Complex64 { re: arg.cos(), im: arg.sin() }
             })
             .collect();
 
-        // The largest prime factor of n.
-        let (mut rest, mut largest, mut factor) = (n, 1, 2);
+        // The twiddle factors W_n^j and W_p^j are those of the full transform with a step.
+        let mut stages = Vec::new();
+        let mut largest = 1;
+        let mut size = n;
 
-        while rest > 1 {
-            while rest % factor == 0 {
-                rest /= factor;
-                largest = factor;
-            }
-            factor += 1;
+        while size > 1 {
+            let p = Self::smallest_factor(size);
+            let m = size / p;
+            let step_n = n / size;
+            let step_p = n / p;
+
+            let tw_n = (0..m)
+                .flat_map(|k| (0..p).map(move |r| (r * k * step_n) % n))
+                .map(|j| twiddle[j])
+                .collect();
+            let tw_p = (0..p)
+                .flat_map(|q| (0..p).map(move |r| ((r * q) % p) * step_p))
+                .map(|j| twiddle[j])
+                .collect();
+
+            largest = largest.max(p);
+            stages.push(FftStage { p, m, tw_n, tw_p });
+            size = m;
         }
 
-        MixedFft { n, twiddle, tmp: vec![Cpx::default(); largest] }
+        MixedFft { stages, tmp: vec![Complex64::default(); largest] }
     }
 
     /// The smallest prime factor of `n`.
@@ -91,53 +97,40 @@ impl MixedFft {
         (2..).find(|f| n % f == 0 || f * f > n).map_or(n, |f| if n % f == 0 { f } else { n })
     }
 
-    fn process(&mut self, x: &[Cpx], out: &mut [Cpx]) {
-        Self::recurse(&self.twiddle, self.n, &mut self.tmp, x, 1, self.n, out);
+    fn process(&mut self, x: &[Complex64], out: &mut [Complex64]) {
+        Self::recurse(&self.stages, &mut self.tmp, x, 1, out);
     }
 
     fn recurse(
-        twiddle: &[Cpx],
-        total: usize,
-        tmp: &mut [Cpx],
-        x: &[Cpx],
+        stages: &[FftStage],
+        tmp: &mut [Complex64],
+        x: &[Complex64],
         stride: usize,
-        n: usize,
-        out: &mut [Cpx],
+        out: &mut [Complex64],
     ) {
-        if n == 1 {
+        let Some((stage, rest)) = stages.split_first()
+        else {
             out[0] = x[0];
             return;
-        }
+        };
 
-        let p = Self::smallest_factor(n);
-        let m = n / p;
+        let FftStage { p, m, tw_n, tw_p } = stage;
+        let (p, m) = (*p, *m);
 
         for r in 0..p {
-            Self::recurse(
-                twiddle,
-                total,
-                tmp,
-                &x[r * stride..],
-                stride * p,
-                m,
-                &mut out[r * m..(r + 1) * m],
-            );
+            Self::recurse(rest, tmp, &x[r * stride..], stride * p, &mut out[r * m..(r + 1) * m]);
         }
-
-        // The twiddle factors W_n^j and W_p^j are those of the full transform with a step.
-        let step_n = total / n;
-        let step_p = total / p;
 
         for k in 0..m {
             for r in 0..p {
-                tmp[r] = out[r * m + k].mul(twiddle[(r * k * step_n) % total]);
+                tmp[r] = out[r * m + k] * tw_n[k * p + r];
             }
 
             for q in 0..p {
                 let mut sum = tmp[0];
 
                 for r in 1..p {
-                    sum = sum.add(tmp[r].mul(twiddle[((r * q) % p) * step_p]));
+                    sum += tmp[r] * tw_p[q * p + r];
                 }
 
                 out[k + q * m] = sum;
@@ -152,10 +145,10 @@ struct ImdctAny {
     n: usize,
     scale: f64,
     /// `exp(-i pi (j + 1/8) / n)`, the twiddle factor before and after the FFT.
-    twiddle: Vec<Cpx>,
+    twiddle: Vec<Complex64>,
     fft: MixedFft,
-    input: Vec<Cpx>,
-    output: Vec<Cpx>,
+    input: Vec<Complex64>,
+    output: Vec<Complex64>,
     /// The DCT-IV of the spectrum.
     dct: Vec<f64>,
 }
@@ -169,7 +162,7 @@ impl ImdctAny {
         let twiddle = (0..half)
             .map(|j| {
                 let arg = -std::f64::consts::PI * (j as f64 + 0.125) / n as f64;
-                Cpx { re: arg.cos(), im: arg.sin() }
+                Complex64 { re: arg.cos(), im: arg.sin() }
             })
             .collect();
 
@@ -178,8 +171,8 @@ impl ImdctAny {
             scale,
             twiddle,
             fft: MixedFft::new(half),
-            input: vec![Cpx::default(); half],
-            output: vec![Cpx::default(); half],
+            input: vec![Complex64::default(); half],
+            output: vec![Complex64::default(); half],
             dct: vec![0.0; n],
         }
     }
@@ -191,14 +184,14 @@ impl ImdctAny {
         // The DCT-IV, `sum(spec[k] cos(pi / n (m + 1/2) (k + 1/2)))` for each `m`, from the FFT
         // of half the size of a combination of the even and reversed odd samples.
         for j in 0..half {
-            let c = Cpx { re: f64::from(spec[2 * j]), im: f64::from(spec[n - 1 - 2 * j]) };
-            self.input[j] = c.mul(self.twiddle[j]);
+            let c = Complex64 { re: f64::from(spec[2 * j]), im: f64::from(spec[n - 1 - 2 * j]) };
+            self.input[j] = c * self.twiddle[j];
         }
 
         self.fft.process(&self.input, &mut self.output);
 
         for k in 0..half {
-            let d = self.output[k].mul(self.twiddle[k]);
+            let d = self.output[k] * self.twiddle[k];
             self.dct[2 * k] = d.re;
             self.dct[n - 1 - 2 * k] = -d.im;
         }
@@ -581,12 +574,12 @@ mod tests {
     #[test]
     fn mixed_fft_is_a_dft() {
         for n in [1, 2, 3, 5, 7, 12, 30, 120, 240] {
-            let x: Vec<Cpx> = spectrum(2 * n, 3)
+            let x: Vec<Complex64> = spectrum(2 * n, 3)
                 .chunks_exact(2)
-                .map(|c| Cpx { re: f64::from(c[0]), im: f64::from(c[1]) })
+                .map(|c| Complex64 { re: f64::from(c[0]), im: f64::from(c[1]) })
                 .collect();
 
-            let mut out = vec![Cpx::default(); n];
+            let mut out = vec![Complex64::default(); n];
             MixedFft::new(n).process(&x, &mut out);
 
             for (k, o) in out.iter().enumerate() {

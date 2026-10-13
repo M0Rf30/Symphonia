@@ -13,7 +13,10 @@
 #![allow(dead_code)]
 
 use crate::range::RangeDecoder;
-use crate::silk::tables::{SHELL_CODE_TABLE0, SHELL_CODE_TABLE1, SHELL_CODE_TABLE2, SHELL_CODE_TABLE3, SHELL_CODE_TABLE_OFFSETS};
+use crate::silk::tables::{
+    SHELL_CODE_TABLE_OFFSETS, SHELL_CODE_TABLE0, SHELL_CODE_TABLE1, SHELL_CODE_TABLE2,
+    SHELL_CODE_TABLE3,
+};
 
 /// C: `decode_split`. Splits `p` into `(p_child1, p_child2)` with `p_child1 + p_child2 == p`.
 #[inline]
@@ -22,7 +25,8 @@ fn decode_split(rd: &mut RangeDecoder<'_>, p: i32, shell_table: &[u8]) -> (i16, 
         let offset = SHELL_CODE_TABLE_OFFSETS[p as usize] as usize;
         let p_child1 = rd.dec_icdf(&shell_table[offset..], 8) as i16;
         (p_child1, p as i16 - p_child1)
-    } else {
+    }
+    else {
         (0, 0)
     }
 }

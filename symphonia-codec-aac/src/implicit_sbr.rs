@@ -21,8 +21,7 @@ use symphonia_core::packet::Packet;
 use symphonia_core::units::{Duration, Timestamp};
 
 use symphonia_common::mpeg::audio::{
-    AudioSpecificConfig, Mpeg4AudioSampleRate, ProgramConfig,
-    get_mpeg4_audio_sample_rate_by_index,
+    AudioSpecificConfig, Mpeg4AudioSampleRate, ProgramConfig, get_mpeg4_audio_sample_rate_by_index,
 };
 
 use crate::AacDecoder;

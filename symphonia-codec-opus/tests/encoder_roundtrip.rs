@@ -9,6 +9,7 @@
 //!
 //! Run with `cargo test -p symphonia-codec-opus --features ogg --release`.
 
+#![allow(clippy::unwrap_used)] // test/example code: a panic is the failure signal
 use std::io::Cursor;
 use std::path::PathBuf;
 
@@ -22,20 +23,11 @@ use symphonia_codec_opus::range::RangeDecoder;
 use symphonia_core::formats::{FormatOptions, FormatReader, TrackType};
 use symphonia_core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia_format_ogg::OggReader;
+use symphonia_testutil::Lcg32;
 
 const FRAME: usize = 960;
 
 // -- signal helpers ----------------------------------------------------------------------------
-
-/// Deterministic uniform noise in [-1, 1).
-struct Lcg(u32);
-
-impl Lcg {
-    fn next(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(1664525).wrapping_add(1013904223);
-        ((self.0 >> 8) as f32 / (1u32 << 23) as f32) - 1.0
-    }
-}
 
 /// A logarithmic sine sweep from `f0` to `f1` Hz over `frames` sample frames; interleaved. In
 /// stereo the right channel is the same sweep, attenuated and phase shifted.
@@ -57,7 +49,7 @@ fn sweep(frames: usize, channels: usize, f0: f64, f1: f64, amp: f32) -> Vec<f32>
 /// A synthetic "music" signal: decaying plucked notes with harmonics, panned, plus a little
 /// noise. Interleaved.
 fn music(frames: usize, channels: usize, seed: u32) -> Vec<f32> {
-    let mut rng = Lcg(seed);
+    let mut rng = Lcg32(seed);
     let mut out = vec![0.0f32; frames * channels];
     let note_len = 12000;
     let freqs = [220.0, 261.63, 329.63, 392.0, 440.0, 523.25, 659.25, 196.0];
@@ -88,7 +80,7 @@ fn music(frames: usize, channels: usize, seed: u32) -> Vec<f32> {
         n += 1;
     }
     for v in out.iter_mut() {
-        *v += 0.003 * rng.next();
+        *v += 0.003 * rng.next_f32();
     }
     out
 }
@@ -244,18 +236,18 @@ fn packets_are_valid_celt_only_20ms_and_sized_per_mode() {
 /// transient, stereo, low-rate and silent frames.
 #[test]
 fn final_range_matches_decoder() {
-    let mut rng = Lcg(77);
+    let mut rng = Lcg32(77);
     let mut signals: Vec<(&str, usize, Vec<f32>)> = vec![
         ("music stereo", 2, music(48000 * 3, 2, 41)),
         ("music mono", 1, music(48000 * 3, 1, 42)),
         ("sweep", 2, sweep(48000 * 2, 2, 60.0, 21000.0, 0.8)),
-        ("noise", 2, (0..48000 * 4).map(|_| rng.next() * 0.3).collect()),
+        ("noise", 2, (0..48000 * 4).map(|_| rng.next_f32() * 0.3).collect()),
     ];
     let mut clicks = vec![0.0f32; 48000 * 2 * 2];
     for pos in (2000..96000).step_by(6000) {
         for i in 0..250 {
-            clicks[(pos + i) * 2] = 0.9 * rng.next() * (-(i as f32) / 50.0).exp();
-            clicks[(pos + i) * 2 + 1] = 0.4 * rng.next() * (-(i as f32) / 50.0).exp();
+            clicks[(pos + i) * 2] = 0.9 * rng.next_f32() * (-(i as f32) / 50.0).exp();
+            clicks[(pos + i) * 2 + 1] = 0.4 * rng.next_f32() * (-(i as f32) / 50.0).exp();
         }
     }
     signals.push(("clicks with silence", 2, clicks));
@@ -333,13 +325,13 @@ fn stereo_edge_cases_decode() {
 fn transients_use_short_blocks_and_decode() {
     // Silence with sharp clicks: the encoder must flag transient frames.
     let frames = 48000;
-    let mut rng = Lcg(99);
+    let mut rng = Lcg32(99);
     let mut pcm = vec![0.0f32; frames * 2];
     for pos in (5000..frames).step_by(7000) {
         for i in 0..200 {
             let env = (-(i as f32) / 30.0).exp();
-            pcm[(pos + i) * 2] = 0.8 * env * rng.next();
-            pcm[(pos + i) * 2 + 1] = 0.8 * env * rng.next();
+            pcm[(pos + i) * 2] = 0.8 * env * rng.next_f32();
+            pcm[(pos + i) * 2 + 1] = 0.8 * env * rng.next_f32();
         }
     }
     let packets = encode_all(EncoderConfig::new(2, 128_000), &pcm);
@@ -398,15 +390,15 @@ fn digital_silence_is_cheap_and_does_not_disturb_neighbours() {
 
 #[test]
 fn hostile_input_never_breaks_the_stream() {
-    let mut rng = Lcg(1234);
+    let mut rng = Lcg32(1234);
     let n = 48000;
     let mut cases: Vec<(&str, Vec<f32>)> = Vec::new();
-    cases.push(("full-scale noise", (0..n * 2).map(|_| rng.next()).collect()));
+    cases.push(("full-scale noise", (0..n * 2).map(|_| rng.next_f32()).collect()));
     cases.push((
         "clipping square",
         (0..n * 2).map(|i| if (i / 200) % 2 == 0 { 1.0 } else { -1.0 }).collect(),
     ));
-    cases.push(("over-range", (0..n * 2).map(|_| rng.next() * 40.0).collect()));
+    cases.push(("over-range", (0..n * 2).map(|_| rng.next_f32() * 40.0).collect()));
     cases.push(("DC", vec![0.9f32; n * 2]));
     cases.push((
         "NaN/inf",
@@ -415,11 +407,11 @@ fn hostile_input_never_breaks_the_stream() {
                 0 => f32::NAN,
                 1 => f32::INFINITY,
                 2 => f32::NEG_INFINITY,
-                _ => rng.next() * 0.1,
+                _ => rng.next_f32() * 0.1,
             })
             .collect(),
     ));
-    cases.push(("tiny noise", (0..n * 2).map(|_| rng.next() * 1e-7).collect()));
+    cases.push(("tiny noise", (0..n * 2).map(|_| rng.next_f32() * 1e-7).collect()));
     cases.push((
         "impulse train",
         (0..n * 2).map(|i| if i % 1920 == 0 { 1.0 } else { 0.0 }).collect(),
@@ -606,15 +598,17 @@ fn read_ogg_opus(path: &std::path::Path) -> Option<(u8, Vec<Vec<u8>>)> {
     Some((head.channel_count, packets.split_off(2)))
 }
 
-fn fixture_dir() -> PathBuf {
-    std::env::var_os("OPUS_ENCODER_FIXTURE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/home/gianluca/Scaricati/nicotine"))
+fn fixture_dir() -> Option<PathBuf> {
+    std::env::var_os("OPUS_ENCODER_FIXTURE_DIR").map(PathBuf::from)
 }
 
 #[test]
 fn real_music_round_trip() {
-    let dir = fixture_dir();
+    let Some(dir) = fixture_dir()
+    else {
+        eprintln!("skipping: OPUS_ENCODER_FIXTURE_DIR not set");
+        return;
+    };
     let Ok(entries) = std::fs::read_dir(&dir)
     else {
         eprintln!("skipping: fixture directory {dir:?} not found");
@@ -623,7 +617,7 @@ fn real_music_round_trip() {
     let album = entries
         .flatten()
         .map(|e| e.path())
-        .find(|p| p.file_name().map_or(false, |n| n.to_string_lossy().starts_with("1968")));
+        .find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("1968")));
     let Some(album) = album
     else {
         eprintln!("skipping: no 1968* album in {dir:?}");
@@ -633,7 +627,7 @@ fn real_music_round_trip() {
         .unwrap()
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().map_or(false, |e| e == "opus"))
+        .filter(|p| p.extension().is_some_and(|e| e == "opus"))
         .collect();
     tracks.sort();
     assert!(!tracks.is_empty());

@@ -27,6 +27,7 @@ members = [
     "symphonia-format-riff",
     "symphonia-metadata",
     "symphonia-tagging",
+    "symphonia-testutil",
     "symphonia-play",
     "symphonia-check",
 ]
@@ -44,6 +45,33 @@ version = "0.6.1"
 lazy_static = "1.4.0"
 log = "0.4"
 smallvec = "1.13.1"
+symphonia-bundle-ape = { version = "0.6.1", path = "symphonia-bundle-ape", default-features = false }
+symphonia-bundle-flac = { version = "0.6.1", path = "symphonia-bundle-flac", default-features = false }
+symphonia-bundle-mp3 = { version = "0.6.1", path = "symphonia-bundle-mp3", default-features = false }
+symphonia-bundle-musepack = { version = "0.6.1", path = "symphonia-bundle-musepack", default-features = false }
+symphonia-codec-aac = { version = "0.6.1", path = "symphonia-codec-aac", default-features = false }
+symphonia-codec-adpcm = { version = "0.6.1", path = "symphonia-codec-adpcm", default-features = false }
+symphonia-codec-alac = { version = "0.6.1", path = "symphonia-codec-alac", default-features = false }
+symphonia-codec-dsd = { version = "0.6.1", path = "symphonia-codec-dsd", default-features = false }
+symphonia-codec-opus = { version = "0.6.1", path = "symphonia-codec-opus", default-features = false }
+symphonia-codec-pcm = { version = "0.6.1", path = "symphonia-codec-pcm", default-features = false }
+symphonia-codec-vorbis = { version = "0.6.1", path = "symphonia-codec-vorbis", default-features = false }
+symphonia-codec-wavpack = { version = "0.6.1", path = "symphonia-codec-wavpack", default-features = false }
+symphonia-common = { version = "0.6.1", path = "symphonia-common", default-features = false }
+symphonia-core = { version = "0.6.1", path = "symphonia-core", default-features = false }
+symphonia-format-caf = { version = "0.6.1", path = "symphonia-format-caf", default-features = false }
+symphonia-format-dsd = { version = "0.6.1", path = "symphonia-format-dsd", default-features = false }
+symphonia-format-flv = { version = "0.6.1", path = "symphonia-format-flv", default-features = false }
+symphonia-format-isomp4 = { version = "0.6.1", path = "symphonia-format-isomp4", default-features = false }
+symphonia-format-mkv = { version = "0.6.1", path = "symphonia-format-mkv", default-features = false }
+symphonia-format-mpegps = { version = "0.6.1", path = "symphonia-format-mpegps", default-features = false }
+symphonia-format-mpegts = { version = "0.6.1", path = "symphonia-format-mpegts", default-features = false }
+symphonia-format-ogg = { version = "0.6.1", path = "symphonia-format-ogg", default-features = false }
+symphonia-format-riff = { version = "0.6.1", path = "symphonia-format-riff", default-features = false }
+symphonia-metadata = { version = "0.6.1", path = "symphonia-metadata", default-features = false }
+symphonia-testutil = { path = "symphonia-testutil" }
+clap = "4.6.0"
+pretty_env_logger = "0.5"
 
 #cargo-features = ["profile-rustflags"]
 

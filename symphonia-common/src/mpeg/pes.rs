@@ -180,6 +180,22 @@ pub fn parse_pes_header(buf: &[u8]) -> Option<PesHeader> {
     Some(PesHeader { stream_id, packet_len, pts, dts, payload_offset: i })
 }
 
+/// Split a complete PES packet into the PES header and the payload. The payload is bounded by
+/// the packet length, if the packet length is not unbounded (0).
+pub fn split_pes(pes: &[u8]) -> Option<(PesHeader, &[u8])> {
+    let hdr = parse_pes_header(pes)?;
+
+    let end = if hdr.packet_len != 0 { (6 + hdr.packet_len).min(pes.len()) } else { pes.len() };
+    let payload = pes.get(hdr.payload_offset..end)?;
+
+    Some((hdr, payload))
+}
+
+/// Convert a time in milliseconds to the raw (33-bit) 90 kHz PTS.
+pub fn ms_to_pts(ms: u32) -> u64 {
+    (u64::from(ms) * (PTS_CLOCK_HZ / 1000)) % PTS_MODULUS
+}
+
 /// Returns the signed distance, `a - b`, in clock ticks, between two 33-bit timestamps, assuming
 /// that they are less than half the range apart.
 pub fn pts_delta(a: u64, b: u64) -> i64 {

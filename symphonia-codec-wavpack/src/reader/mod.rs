@@ -10,41 +10,38 @@ use std::io::{Seek, SeekFrom};
 use symphonia_core::codecs::audio::well_known::CODEC_ID_WAVPACK;
 use symphonia_core::support_format;
 
-use symphonia_core::errors::{decode_error, seek_error, unsupported_error, Error, Result, SeekErrorKind};
-use symphonia_core::formats::prelude::*;
-use symphonia_core::io::*;
-use symphonia_core::formats::probe::{ProbeFormatData, ProbeableFormat, Score, Scoreable};
-use symphonia_core::formats::well_known::FORMAT_ID_WAVPACK;
-use symphonia_core::formats::FormatReader;
-use symphonia_core::meta::{
-    Metadata, MetadataBuilder, MetadataInfo, MetadataLog, Tag, well_known,
-};
 use symphonia_core::audio::layouts;
+use symphonia_core::audio::sample::SampleFormat;
 use symphonia_core::audio::{Channels, Position};
 use symphonia_core::codecs::CodecParameters;
 use symphonia_core::codecs::audio::AudioCodecParameters;
-use symphonia_core::audio::sample::SampleFormat;
+use symphonia_core::errors::{
+    Error, Result, SeekErrorKind, decode_error, seek_error, unsupported_error,
+};
+use symphonia_core::formats::FormatReader;
+use symphonia_core::formats::prelude::*;
+use symphonia_core::formats::probe::{ProbeFormatData, ProbeableFormat, Score, Scoreable};
+use symphonia_core::formats::well_known::FORMAT_ID_WAVPACK;
+use symphonia_core::io::*;
+use symphonia_core::meta::{Metadata, MetadataBuilder, MetadataInfo, MetadataLog, Tag, well_known};
 
 use log::debug;
 
 use crate::decoder::{EXT_WVC_WVX_NEW, EXT_WVX_NEW, STREAM_HDR};
 
 mod sub_block;
-use sub_block::{decode_sub_block, Encoding, SubBlock};
+use sub_block::{Encoding, SubBlock, decode_sub_block};
 
-const WAVPACK_FORMAT_INFO: FormatInfo = FormatInfo {
-    format: FORMAT_ID_WAVPACK,
-    short_name: "wavpack",
-    long_name: "WavPack",
-};
+const WAVPACK_FORMAT_INFO: FormatInfo =
+    FormatInfo { format: FORMAT_ID_WAVPACK, short_name: "wavpack", long_name: "WavPack" };
 
 const STREAM_MARKER: [u8; 4] = *b"wvpk";
-const RIFF_MARKER:   [u8; 4] = *b"RIFF";
-const WAVE_MARKER:   [u8; 4] = *b"WAVE";
+const RIFF_MARKER: [u8; 4] = *b"RIFF";
+const WAVE_MARKER: [u8; 4] = *b"WAVE";
 
 const SAMPLE_RATES: [u32; 15] = [
-    6000, 8000, 9600, 11025, 12000, 16000, 22050, 24000, 32000, 44100,
-    48000, 64000, 88200, 96000, 192000,
+    6000, 8000, 9600, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000, 64000, 88200, 96000,
+    192000,
 ];
 
 macro_rules! combine_values {
@@ -168,7 +165,9 @@ impl<'s> WavPackReader<'s> {
         let mut reader = Self::try_new_main(mss, opts)?;
 
         if let Some(sidecar) = sidecar {
-            if let Err(err) = reader.attach_correction(MediaSourceStream::new(sidecar, Default::default())) {
+            if let Err(err) =
+                reader.attach_correction(MediaSourceStream::new(sidecar, Default::default()))
+            {
                 log::warn!("wavpack: ignoring the correction stream: {}", err);
             }
         }
@@ -229,7 +228,8 @@ impl<'s> WavPackReader<'s> {
 
         if magic == RIFF_MARKER {
             Self::try_new_v3(mss, external)
-        } else {
+        }
+        else {
             Self::try_new_v4v5(mss, original_pos, external)
         }
     }
@@ -257,7 +257,7 @@ impl<'s> WavPackReader<'s> {
         });
 
         loop {
-            let chunk_id   = mss.read_quad_bytes()?;
+            let chunk_id = mss.read_quad_bytes()?;
             let chunk_size = mss.read_u32()?;
 
             match &chunk_id {
@@ -265,16 +265,20 @@ impl<'s> WavPackReader<'s> {
                     if chunk_size < 16 {
                         return decode_error("wavpack v3: fmt chunk too small");
                     }
-                    let format_tag      = mss.read_u16()?;
-                    let num_channels    = mss.read_u16()?;
-                    let sample_rate     = mss.read_u32()?;
-                    let _bytes_per_sec  = mss.read_u32()?;
-                    let block_align     = mss.read_u16()?;
+                    let format_tag = mss.read_u16()?;
+                    let num_channels = mss.read_u16()?;
+                    let sample_rate = mss.read_u32()?;
+                    let _bytes_per_sec = mss.read_u32()?;
+                    let block_align = mss.read_u16()?;
                     let bits_per_sample = mss.read_u16()?;
 
                     let extra = chunk_size - 16;
-                    if extra > 0 { mss.ignore_bytes(extra as u64)?; }
-                    if chunk_size % 2 != 0 { let _ = mss.read_u8()?; }
+                    if extra > 0 {
+                        mss.ignore_bytes(extra as u64)?;
+                    }
+                    if chunk_size % 2 != 0 {
+                        let _ = mss.read_u8()?;
+                    }
 
                     if format_tag != 1 {
                         return unsupported_error("wavpack v3: non-PCM fmt");
@@ -284,18 +288,25 @@ impl<'s> WavPackReader<'s> {
                     }
                     let bytes_per_sample = block_align / num_channels;
                     wav_header = Some(WaveHeader3 {
-                        sample_rate, num_channels, bits_per_sample, bytes_per_sample,
+                        sample_rate,
+                        num_channels,
+                        bits_per_sample,
+                        bytes_per_sample,
                     });
                 }
 
                 b"smpl" => {
                     parse_smpl_chunk(&mut mss, chunk_size, &mut meta_builder)?;
-                    if chunk_size % 2 != 0 { let _ = mss.read_u8()?; }
+                    if chunk_size % 2 != 0 {
+                        let _ = mss.read_u8()?;
+                    }
                 }
 
                 b"cue " => {
                     parse_cue_chunk(&mut mss, chunk_size, &mut meta_builder)?;
-                    if chunk_size % 2 != 0 { let _ = mss.read_u8()?; }
+                    if chunk_size % 2 != 0 {
+                        let _ = mss.read_u8()?;
+                    }
                 }
 
                 b"data" => {
@@ -317,11 +328,12 @@ impl<'s> WavPackReader<'s> {
 
         let channel_layout = if wav.num_channels == 1 {
             layouts::CHANNEL_LAYOUT_MONO
-        } else {
+        }
+        else {
             layouts::CHANNEL_LAYOUT_STEREO
         };
 
-        let bits_per_sample  = wav.bits_per_sample  as u32;
+        let bits_per_sample = wav.bits_per_sample as u32;
         let bytes_per_sample = wav.bytes_per_sample as u32;
 
         if bytes_per_sample == 0 || bytes_per_sample > 4 {
@@ -650,7 +662,8 @@ impl FormatReader for WavPackReader<'_> {
             let next_ts = pkt.pts.saturating_add(pkt.dur);
             if ts < next_ts {
                 self.reader.seek(SeekFrom::Start(block_start))?;
-                if let (Some(correction), Some(mark)) = (self.correction.as_mut(), correction_mark) {
+                if let (Some(correction), Some(mark)) = (self.correction.as_mut(), correction_mark)
+                {
                     correction.restore(mark)?;
                 }
                 self.next_packet_ts = saved_next_ts;
@@ -695,7 +708,8 @@ impl WavPackReader<'_> {
             let audio_size = (ck_size - header_payload) as usize;
             let audio = self.reader.read_boxed_slice_exact(audio_size)?;
             pkt_data.extend_from_slice(&audio);
-        } else {
+        }
+        else {
             // Real WavPack 3.97 files: ck_size == header only; compressed audio
             // follows the block header and extends to the next "wvpk" or EOF.
             let audio = read_v3_audio(&mut self.reader)?;
@@ -706,12 +720,7 @@ impl WavPackReader<'_> {
         let ts = self.next_packet_ts;
         self.next_packet_ts += n_samples as i64;
 
-        Ok(Some(Packet::new(
-            0,
-            Timestamp::new(ts),
-            Duration::new(n_samples),
-            pkt_data,
-        )))
+        Ok(Some(Packet::new(0, Timestamp::new(ts), Duration::new(n_samples), pkt_data)))
     }
 
     fn next_packet_v4v5(&mut self) -> Result<Option<Packet>> {
@@ -724,11 +733,9 @@ impl WavPackReader<'_> {
         let mut streams: Vec<Vec<u8>> = Vec::new();
         let mut block_samples: u32 = 0;
 
-        loop {
-            let (header, mini) = match read_v4v5_stream_block(&mut self.reader, self.correction.as_mut())? {
-                Some(v) => v,
-                None => break,
-            };
+        while let Some((header, mini)) =
+            read_v4v5_stream_block(&mut self.reader, self.correction.as_mut())?
+        {
             if streams.is_empty() {
                 block_samples = header.block_samples;
             }
@@ -747,7 +754,7 @@ impl WavPackReader<'_> {
 
         // block_samples is the per-channel frame count, shared by every stream in the
         // group (they all cover the same span of the timeline).
-        let n  = block_samples as i64;
+        let n = block_samples as i64;
         let ts = self.next_packet_ts;
         self.next_packet_ts += n;
 
@@ -819,12 +826,12 @@ fn read_v4v5_stream_block(
 /// One block of a `.wvc` correction file.
 #[derive(Clone)]
 struct WvcBlock {
-    block_index:   u64,
+    block_index: u64,
     block_samples: u32,
-    flags:         u32,
+    flags: u32,
     /// The CRC of the *lossless* samples of the block.
-    crc:           u32,
-    parts:         BlockParts,
+    crc: u32,
+    parts: BlockParts,
 }
 
 /// The `.wvc` correction stream that accompanies the main (`.wv`) stream.
@@ -985,20 +992,20 @@ fn match_wvc_header(wv: &Header, wvc: &WvcBlock) -> i32 {
 /// The sub-blocks of one WavPack block that the decoder needs.
 #[derive(Default, Clone)]
 struct BlockParts {
-    terms:   Vec<u8>,
+    terms: Vec<u8>,
     weights: Vec<u8>,
     samples: Vec<u8>,
     entropy: Vec<u8>,
-    hybrid:  Vec<u8>,
-    float:   Vec<u8>,
-    int32:   Vec<u8>,
+    hybrid: Vec<u8>,
+    float: Vec<u8>,
+    int32: Vec<u8>,
     /// `ID_WVX_BITSTREAM` or `ID_WVX_NEW_BITSTREAM` (see `wvx_new`).
-    wvx:     Vec<u8>,
+    wvx: Vec<u8>,
     wvx_new: bool,
     shaping: Vec<u8>,
     /// `ID_WVC_BITSTREAM`: only in blocks of a `.wvc` file.
-    wvc:     Vec<u8>,
-    audio:   Vec<u8>,
+    wvc: Vec<u8>,
+    audio: Vec<u8>,
 }
 
 /// Read sub-blocks from `reader` until its position reaches `end_pos`.
@@ -1008,16 +1015,16 @@ fn read_block_parts<R: ReadBytes>(reader: &mut R, end_pos: u64) -> Result<BlockP
     while reader.pos() < end_pos {
         let sb = decode_sub_block(reader)?;
         match sb {
-            SubBlock::DecorrelationTerms(d)   => parts.terms   = d,
+            SubBlock::DecorrelationTerms(d) => parts.terms = d,
             SubBlock::DecorrelationWeights(d) => parts.weights = d,
             SubBlock::DecorrelationSamples(d) => parts.samples = d,
-            SubBlock::EntropyVariables(d)     => parts.entropy = d,
-            SubBlock::HybridProfile(d)        => parts.hybrid  = d,
-            SubBlock::FloatInfo(d)            => parts.float   = d,
-            SubBlock::Int32Info(d)            => parts.int32   = d,
-            SubBlock::ShapingWeights(d)       => parts.shaping = d,
-            SubBlock::WvBitStream(d)          => parts.audio   = d,
-            SubBlock::WvcBitStream(d)         => parts.wvc     = d,
+            SubBlock::EntropyVariables(d) => parts.entropy = d,
+            SubBlock::HybridProfile(d) => parts.hybrid = d,
+            SubBlock::FloatInfo(d) => parts.float = d,
+            SubBlock::Int32Info(d) => parts.int32 = d,
+            SubBlock::ShapingWeights(d) => parts.shaping = d,
+            SubBlock::WvBitStream(d) => parts.audio = d,
+            SubBlock::WvcBitStream(d) => parts.wvc = d,
             SubBlock::WvxBitStream(d) => {
                 parts.wvx = d;
                 parts.wvx_new = false;
@@ -1202,7 +1209,7 @@ fn parse_smpl_chunk(
     // GO_WAVESAMPLERCHUNK: 9 × u32 = 36 bytes
     const SAMPLER_HDR: u32 = 36;
     // GO_WAVESAMPLERLOOP: 6 × u32 = 24 bytes
-    const LOOP_ENTRY:  u32 = 24;
+    const LOOP_ENTRY: u32 = 24;
 
     if chunk_size < SAMPLER_HDR {
         debug!("wavpack: smpl chunk too small ({})", chunk_size);
@@ -1210,17 +1217,17 @@ fn parse_smpl_chunk(
         return Ok(());
     }
 
-    let _manufacturer  = source.read_u32()?;
-    let _product       = source.read_u32()?;
-    let sample_period  = source.read_u32()?;
-    let midi_note      = source.read_u32()?;
+    let _manufacturer = source.read_u32()?;
+    let _product = source.read_u32()?;
+    let sample_period = source.read_u32()?;
+    let midi_note = source.read_u32()?;
     let pitch_fraction = source.read_u32()?;
-    let _smpte_format  = source.read_u32()?;
-    let _smpte_offset  = source.read_u32()?;
-    let num_loops      = source.read_u32()?;
-    let _sampler_data  = source.read_u32()?;
+    let _smpte_format = source.read_u32()?;
+    let _smpte_offset = source.read_u32()?;
+    let num_loops = source.read_u32()?;
+    let _sampler_data = source.read_u32()?;
 
-    builder.add_tag(Tag::new_from_parts("WavPack/MidiNote",      midi_note,      None));
+    builder.add_tag(Tag::new_from_parts("WavPack/MidiNote", midi_note, None));
     builder.add_tag(Tag::new_from_parts("WavPack/PitchFraction", pitch_fraction, None));
     // Sample period (ns/sample) is used by Hauptwerk for fine tuning when it
     // disagrees with the format chunk's sample rate. Skip the trivial case
@@ -1231,7 +1238,7 @@ fn parse_smpl_chunk(
     builder.add_tag(Tag::new_from_parts("WavPack/LoopCount", num_loops, None));
 
     let loops_size = num_loops.saturating_mul(LOOP_ENTRY);
-    let remaining  = chunk_size.saturating_sub(SAMPLER_HDR);
+    let remaining = chunk_size.saturating_sub(SAMPLER_HDR);
 
     if loops_size > remaining {
         debug!("wavpack: smpl loop count exceeds chunk size");
@@ -1240,23 +1247,31 @@ fn parse_smpl_chunk(
     }
 
     for i in 0..num_loops {
-        let _id        = source.read_u32()?;
-        let loop_type  = source.read_u32()?;
-        let start      = source.read_u32()?;
-        let end        = source.read_u32()?;
-        let fraction   = source.read_u32()?;
-        let play_cnt   = source.read_u32()?;
+        let _id = source.read_u32()?;
+        let loop_type = source.read_u32()?;
+        let start = source.read_u32()?;
+        let end = source.read_u32()?;
+        let fraction = source.read_u32()?;
+        let play_cnt = source.read_u32()?;
         // Hauptwerk uses Type (0=forward, 1=alternating, 2=reverse) and
         // PlayCount (0 = infinite). GrandOrgue only consults Start/End but
         // is fine with the extras being present.
-        builder.add_tag(Tag::new_from_parts(format!("WavPack/Loop{i}/Type"),      loop_type, None));
-        builder.add_tag(Tag::new_from_parts(format!("WavPack/Loop{i}/Start"),     start,     None));
-        builder.add_tag(Tag::new_from_parts(format!("WavPack/Loop{i}/End"),       end,       None));
+        builder.add_tag(Tag::new_from_parts(format!("WavPack/Loop{i}/Type"), loop_type, None));
+        builder.add_tag(Tag::new_from_parts(format!("WavPack/Loop{i}/Start"), start, None));
+        builder.add_tag(Tag::new_from_parts(format!("WavPack/Loop{i}/End"), end, None));
         if fraction != 0 {
-            builder.add_tag(Tag::new_from_parts(format!("WavPack/Loop{i}/Fraction"),  fraction, None));
+            builder.add_tag(Tag::new_from_parts(
+                format!("WavPack/Loop{i}/Fraction"),
+                fraction,
+                None,
+            ));
         }
         if play_cnt != 0 {
-            builder.add_tag(Tag::new_from_parts(format!("WavPack/Loop{i}/PlayCount"), play_cnt, None));
+            builder.add_tag(Tag::new_from_parts(
+                format!("WavPack/Loop{i}/PlayCount"),
+                play_cnt,
+                None,
+            ));
         }
     }
 
@@ -1280,7 +1295,7 @@ fn parse_cue_chunk(
     // GO_WAVECUECHUNK:  1 × u32 = 4 bytes
     // GO_WAVECUEPOINT:  6 × u32 = 24 bytes
     //   (dwName, dwPosition, fccChunk, dwChunkStart, dwBlockStart, dwSampleOffset)
-    const CUE_HDR:   u32 = 4;
+    const CUE_HDR: u32 = 4;
     const CUE_ENTRY: u32 = 24;
 
     if chunk_size < CUE_HDR {
@@ -1289,9 +1304,9 @@ fn parse_cue_chunk(
         return Ok(());
     }
 
-    let num_cues   = source.read_u32()?;
+    let num_cues = source.read_u32()?;
     let entries_sz = num_cues.saturating_mul(CUE_ENTRY);
-    let remaining  = chunk_size.saturating_sub(CUE_HDR);
+    let remaining = chunk_size.saturating_sub(CUE_HDR);
 
     if entries_sz > remaining {
         debug!("wavpack: cue count exceeds chunk size");
@@ -1306,19 +1321,23 @@ fn parse_cue_chunk(
     // "ReleasePoint" (GrandOrgue's single-marker convention).
     let mut release_point: Option<u32> = None;
     for i in 0..num_cues {
-        let name          = source.read_u32()?;
-        let _position     = source.read_u32()?;
-        let _fcc_chunk    = source.read_u32()?;
-        let _chunk_start  = source.read_u32()?;
-        let _block_start  = source.read_u32()?;
+        let name = source.read_u32()?;
+        let _position = source.read_u32()?;
+        let _fcc_chunk = source.read_u32()?;
+        let _chunk_start = source.read_u32()?;
+        let _block_start = source.read_u32()?;
         let sample_offset = source.read_u32()?;
 
-        builder.add_tag(Tag::new_from_parts(format!("WavPack/Cue{i}/Name"),         name,          None));
-        builder.add_tag(Tag::new_from_parts(format!("WavPack/Cue{i}/SampleOffset"), sample_offset, None));
+        builder.add_tag(Tag::new_from_parts(format!("WavPack/Cue{i}/Name"), name, None));
+        builder.add_tag(Tag::new_from_parts(
+            format!("WavPack/Cue{i}/SampleOffset"),
+            sample_offset,
+            None,
+        ));
 
         release_point = Some(match release_point {
             Some(prev) => prev.max(sample_offset),
-            None       => sample_offset,
+            None => sample_offset,
         });
     }
 
@@ -1343,7 +1362,7 @@ fn mss_skip(source: &mut MediaSourceStream<'_>, n: u64) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 // Sub-block IDs we care about for metadata extraction.
-const SBID_RIFF_HEADER:  u8 = 0x21;
+const SBID_RIFF_HEADER: u8 = 0x21;
 const SBID_RIFF_TRAILER: u8 = 0x22;
 
 /// `ID_CHANNEL_INFO` (wavpack.h `0x0D`): total channel count + WAVEFORMATEXTENSIBLE-style
@@ -1356,8 +1375,11 @@ fn find_channel_info(body: &[u8]) -> Option<(u16, u32)> {
     while p + 2 <= body.len() {
         let id = body[p];
         let (hdr_len, words) = if id & 0x80 != 0 {
-            if p + 4 > body.len() { break; }
-            let w = (body[p + 1] as u32) | ((body[p + 2] as u32) << 8) | ((body[p + 3] as u32) << 16);
+            if p + 4 > body.len() {
+                break;
+            }
+            let w =
+                (body[p + 1] as u32) | ((body[p + 2] as u32) << 8) | ((body[p + 3] as u32) << 16);
             (4usize, w)
         }
         else {
@@ -1365,10 +1387,12 @@ fn find_channel_info(body: &[u8]) -> Option<(u16, u32)> {
         };
 
         let data_len = (words as usize) * 2;
-        let pad      = if id & 0x40 != 0 { 1 } else { 0 };
-        let start    = p + hdr_len;
+        let pad = if id & 0x40 != 0 { 1 } else { 0 };
+        let start = p + hdr_len;
         let end_full = start + data_len;
-        if end_full > body.len() { break; }
+        if end_full > body.len() {
+            break;
+        }
         let end_used = end_full - pad;
 
         if id & 0x3F == 0x0D {
@@ -1416,20 +1440,24 @@ fn scan_v4v5_riff_meta(body: &[u8], builder: &mut MetadataBuilder) -> Result<()>
         let id = body[p];
         // ID_LARGE_BLOCK uses a 3-byte size field, otherwise 1-byte.
         let (hdr_len, words) = if id & 0x80 != 0 {
-            if p + 4 > body.len() { break; }
-            let w = (body[p + 1] as u32)
-                  | ((body[p + 2] as u32) << 8)
-                  | ((body[p + 3] as u32) << 16);
+            if p + 4 > body.len() {
+                break;
+            }
+            let w =
+                (body[p + 1] as u32) | ((body[p + 2] as u32) << 8) | ((body[p + 3] as u32) << 16);
             (4usize, w)
-        } else {
+        }
+        else {
             (2usize, body[p + 1] as u32)
         };
 
         let data_len = (words as usize) * 2;
-        let pad      = if id & 0x40 != 0 { 1 } else { 0 };
-        let start    = p + hdr_len;
+        let pad = if id & 0x40 != 0 { 1 } else { 0 };
+        let start = p + hdr_len;
         let end_full = start + data_len;
-        if end_full > body.len() { break; }
+        if end_full > body.len() {
+            break;
+        }
         let end_used = end_full - pad;
 
         let fn_id = id & 0x3F;
@@ -1451,7 +1479,8 @@ fn parse_riff_meta_bytes(buf: &[u8], builder: &mut MetadataBuilder) -> Result<()
     let mut start = 0usize;
     if buf.len() >= 12 && &buf[0..4] == b"RIFF" && &buf[8..12] == b"WAVE" {
         start = 12;
-    } else if buf.len() >= 4 && &buf[0..4] == b"WAVE" {
+    }
+    else if buf.len() >= 4 && &buf[0..4] == b"WAVE" {
         start = 4;
     }
 
@@ -1468,11 +1497,15 @@ fn parse_riff_meta_bytes(buf: &[u8], builder: &mut MetadataBuilder) -> Result<()
         match &chunk_id {
             b"smpl" => {
                 parse_smpl_chunk(&mut mss, chunk_size, builder)?;
-                if chunk_size % 2 != 0 { let _ = mss.read_u8(); }
+                if chunk_size % 2 != 0 {
+                    let _ = mss.read_u8();
+                }
             }
             b"cue " => {
                 parse_cue_chunk(&mut mss, chunk_size, builder)?;
-                if chunk_size % 2 != 0 { let _ = mss.read_u8(); }
+                if chunk_size % 2 != 0 {
+                    let _ = mss.read_u8();
+                }
             }
             b"data" => {
                 // We don't expect 'data' inside a RiffHeader sub-block payload
@@ -1483,7 +1516,9 @@ fn parse_riff_meta_bytes(buf: &[u8], builder: &mut MetadataBuilder) -> Result<()
             }
             _ => {
                 let skip = (chunk_size as u64) + (chunk_size as u64 % 2);
-                if mss.ignore_bytes(skip).is_err() { break; }
+                if mss.ignore_bytes(skip).is_err() {
+                    break;
+                }
             }
         }
     }
@@ -1495,24 +1530,24 @@ fn parse_riff_meta_bytes(buf: &[u8], builder: &mut MetadataBuilder) -> Result<()
 // ---------------------------------------------------------------------------
 
 struct WaveHeader3 {
-    sample_rate:     u32,
-    num_channels:    u16,
+    sample_rate: u32,
+    num_channels: u16,
     bits_per_sample: u16,
     bytes_per_sample: u16,
 }
 
 struct Header3 {
-    ck_size:       i32,
-    version:       i16,
-    bits:          i16,
-    flags:         i16,
-    shift:         i16,
+    ck_size: i32,
+    version: i16,
+    bits: i16,
+    flags: i16,
+    shift: i16,
     total_samples: i32,
-    crc:           i32,
-    crc2:          i32,
-    ext:           [u8; 4],
-    extra_bc:      u8,
-    extras:        [u8; 3],
+    crc: i32,
+    crc2: i32,
+    ext: [u8; 4],
+    extra_bc: u8,
+    extras: [u8; 3],
 }
 
 impl Header3 {
@@ -1539,22 +1574,35 @@ impl Header3 {
         let bits = if version >= 2 { reader.read_i16()? } else { 0 };
 
         let (flags, shift, total_samples, crc, crc2, ext, extra_bc, extras) = if version >= 3 {
-            let flags         = reader.read_i16()?;
-            let shift         = reader.read_i16()?;
+            let flags = reader.read_i16()?;
+            let shift = reader.read_i16()?;
             let total_samples = reader.read_i32()?;
-            let crc           = reader.read_i32()?;
-            let crc2          = reader.read_i32()?;
+            let crc = reader.read_i32()?;
+            let crc2 = reader.read_i32()?;
             let mut ext = [0u8; 4];
             reader.read_buf_exact(&mut ext)?;
-            let extra_bc      = reader.read_u8()?;
+            let extra_bc = reader.read_u8()?;
             let mut extras = [0u8; 3];
             reader.read_buf_exact(&mut extras)?;
             (flags, shift, total_samples, crc, crc2, ext, extra_bc, extras)
-        } else {
+        }
+        else {
             (0, 0, 0, 0, 0, [0u8; 4], 0u8, [0u8; 3])
         };
 
-        Ok(Header3 { ck_size, version, bits, flags, shift, total_samples, crc, crc2, ext, extra_bc, extras })
+        Ok(Header3 {
+            ck_size,
+            version,
+            bits,
+            flags,
+            shift,
+            total_samples,
+            crc,
+            crc2,
+            ext,
+            extra_bc,
+            extras,
+        })
     }
 
     /// Serialise the header into a 32-byte packet prefix understood by `WavPackDecoder`.
@@ -1581,16 +1629,16 @@ impl Header3 {
 // ---------------------------------------------------------------------------
 
 struct Header {
-    ck_size:           u32,
+    ck_size: u32,
     #[allow(dead_code)]
-    version:           u16,
-    block_index_u8:    u8,
-    total_samples_u8:  u8,
+    version: u16,
+    block_index_u8: u8,
+    total_samples_u8: u8,
     total_samples_u32: u32,
-    block_index_u32:   u32,
-    block_samples:     u32,
-    flags:             u32,
-    crc:               u32,
+    block_index_u32: u32,
+    block_samples: u32,
+    flags: u32,
+    crc: u32,
 }
 
 impl Header {
@@ -1600,15 +1648,15 @@ impl Header {
             return unsupported_error("wavpack: missing marker");
         }
         Ok(Header {
-            ck_size:           reader.read_u32()?,
-            version:           reader.read_u16()?,
-            block_index_u8:    reader.read_u8()?,
-            total_samples_u8:  reader.read_u8()?,
+            ck_size: reader.read_u32()?,
+            version: reader.read_u16()?,
+            block_index_u8: reader.read_u8()?,
+            total_samples_u8: reader.read_u8()?,
             total_samples_u32: reader.read_u32()?,
-            block_index_u32:   reader.read_u32()?,
-            block_samples:     reader.read_u32()?,
-            flags:             reader.read_u32()?,
-            crc:               reader.read_u32()?,
+            block_index_u32: reader.read_u32()?,
+            block_samples: reader.read_u32()?,
+            flags: reader.read_u32()?,
+            crc: reader.read_u32()?,
         })
     }
 
@@ -1656,7 +1704,8 @@ impl Header {
     fn get_total_samples(&self) -> Option<u64> {
         if self.total_samples_u32 == u32::MAX {
             None
-        } else {
+        }
+        else {
             Some(combine_values!(self.total_samples_u32, self.total_samples_u8))
         }
     }
@@ -1734,7 +1783,8 @@ fn scan_v3_total_samples(mss: &mut MediaSourceStream<'_>, data_start_pos: u64) -
         let ck_size = hdr.ck_size as u32;
         let skip_ok = if ck_size > header_payload {
             mss.ignore_bytes((ck_size - header_payload) as u64).is_ok()
-        } else {
+        }
+        else {
             read_v3_audio(mss).is_ok()
         };
         if !skip_ok {
@@ -1937,8 +1987,11 @@ mod tests {
 
     fn correction(blocks: &[Vec<u8>]) -> Correction<'static> {
         let data = blocks.concat();
-        Correction::new(MediaSourceStream::new(Box::new(std::io::Cursor::new(data)), Default::default()))
-            .unwrap()
+        Correction::new(MediaSourceStream::new(
+            Box::new(std::io::Cursor::new(data)),
+            Default::default(),
+        ))
+        .unwrap()
     }
 
     fn wvc(index: u64, block_samples: u32, flags: u32) -> WvcBlock {
@@ -2019,11 +2072,13 @@ mod tests {
         assert_eq!(c.block_for(&main_header(1000, 1000, SINGLE)).unwrap().crc, 2);
 
         // A stream without any block cannot be a correction stream.
-        assert!(Correction::new(MediaSourceStream::new(
-            Box::new(std::io::Cursor::new(vec![0u8; 64])),
-            Default::default(),
-        ))
-        .is_err());
+        assert!(
+            Correction::new(MediaSourceStream::new(
+                Box::new(std::io::Cursor::new(vec![0u8; 64])),
+                Default::default(),
+            ))
+            .is_err()
+        );
     }
 
     #[test]
@@ -2051,7 +2106,8 @@ mod tests {
         let with = serialise_stream_packet(SINGLE, 10, 0xaaaa, &main, Some(&correction));
         let without = serialise_stream_packet(SINGLE, 10, 0xaaaa, &main, None);
 
-        let field = |p: &[u8], i: usize| u32::from_le_bytes(p[4 * i..4 * i + 4].try_into().unwrap());
+        let field =
+            |p: &[u8], i: usize| u32::from_le_bytes(p[4 * i..4 * i + 4].try_into().unwrap());
 
         // terms, wvx, shaping, wvc, wvc_wvx
         assert_eq!([field(&with, 3), field(&with, 10)], [2, 6]);

@@ -52,15 +52,12 @@
 //! decode-tree data at transcription time; every table satisfies the
 //! complete-prefix-code invariant (Kraft sum exactly 1).
 
+use super::super::codebook::Codebook;
 use super::super::error::{SbrError as Error, SbrResult as Result};
-
-/// Longest PS codeword across all Annex 8.B tables (`huff_iid_dt[0]`
-/// reaches 20 bits).
-pub const PS_HUFF_MAX_CODE_LEN: u32 = 20;
 
 /// `huff_iid_df[1]` — Table 8.B.17 (fine grid, frequency direction).
 /// Index `i` decodes the delta `i - 30`.
-pub const HUFF_IID_FINE_DF: [(u8, u32); 61] = [
+pub static HUFF_IID_FINE_DF: [(u8, u32); 61] = [
     (18, 0b011111111010110100), // -30
     (18, 0b011111111010110101), // -29
     (18, 0b011111110101110110), // -28
@@ -126,7 +123,7 @@ pub const HUFF_IID_FINE_DF: [(u8, u32); 61] = [
 
 /// `huff_iid_dt[1]` — Table 8.B.17 (fine grid, time direction).
 /// Index `i` decodes the delta `i - 30`.
-pub const HUFF_IID_FINE_DT: [(u8, u32); 61] = [
+pub static HUFF_IID_FINE_DT: [(u8, u32); 61] = [
     (16, 0b0100111011010100), // -30
     (16, 0b0100111011010101), // -29
     (16, 0b0100111011001110), // -28
@@ -192,7 +189,7 @@ pub const HUFF_IID_FINE_DT: [(u8, u32); 61] = [
 
 /// `huff_iid_df[0]` — Table 8.B.18 (coarse grid, frequency direction).
 /// Index `i` decodes the delta `i - 14`.
-pub const HUFF_IID_DF: [(u8, u32); 29] = [
+pub static HUFF_IID_DF: [(u8, u32); 29] = [
     (17, 0b11111111111111011),  // -14
     (17, 0b11111111111111100),  // -13
     (17, 0b11111111111111101),  // -12
@@ -226,7 +223,7 @@ pub const HUFF_IID_DF: [(u8, u32); 29] = [
 
 /// `huff_iid_dt[0]` — Table 8.B.18 (coarse grid, time direction).
 /// Index `i` decodes the delta `i - 14`.
-pub const HUFF_IID_DT: [(u8, u32); 29] = [
+pub static HUFF_IID_DT: [(u8, u32); 29] = [
     (19, 0b1111111111111111001),  // -14
     (19, 0b1111111111111111010),  // -13
     (19, 0b1111111111111111011),  // -12
@@ -260,7 +257,7 @@ pub const HUFF_IID_DT: [(u8, u32); 29] = [
 
 /// `huff_icc_df` — Table 8.B.19 (frequency direction).
 /// Index `i` decodes the delta `i - 7`.
-pub const HUFF_ICC_DF: [(u8, u32); 15] = [
+pub static HUFF_ICC_DF: [(u8, u32); 15] = [
     (14, 0b11111111111111), // -7
     (14, 0b11111111111110), // -6
     (12, 0b111111111110),   // -5
@@ -280,7 +277,7 @@ pub const HUFF_ICC_DF: [(u8, u32); 15] = [
 
 /// `huff_icc_dt` — Table 8.B.19 (time direction).
 /// Index `i` decodes the delta `i - 7`.
-pub const HUFF_ICC_DT: [(u8, u32); 15] = [
+pub static HUFF_ICC_DT: [(u8, u32); 15] = [
     (14, 0b11111111111110), // -7
     (13, 0b1111111111110),  // -6
     (11, 0b11111111110),    // -5
@@ -300,7 +297,7 @@ pub const HUFF_ICC_DT: [(u8, u32); 15] = [
 
 /// `huff_ipd_df` — Table 8.B.20 (frequency direction). Decodes the
 /// raw phase-index delta `0..8` (`lav = 0`).
-pub const HUFF_IPD_DF: [(u8, u32); 8] = [
+pub static HUFF_IPD_DF: [(u8, u32); 8] = [
     (1, 0b1),    // 0
     (3, 0b000),  // 1
     (4, 0b0110), // 2
@@ -313,7 +310,7 @@ pub const HUFF_IPD_DF: [(u8, u32); 8] = [
 
 /// `huff_ipd_dt` — Table 8.B.20 (time direction). Decodes the raw
 /// phase-index delta `0..8` (`lav = 0`).
-pub const HUFF_IPD_DT: [(u8, u32); 8] = [
+pub static HUFF_IPD_DT: [(u8, u32); 8] = [
     (1, 0b1),     // 0
     (3, 0b010),   // 1
     (4, 0b0010),  // 2
@@ -326,7 +323,7 @@ pub const HUFF_IPD_DT: [(u8, u32); 8] = [
 
 /// `huff_opd_df` — Table 8.B.21 (frequency direction). Decodes the
 /// raw phase-index delta `0..8` (`lav = 0`).
-pub const HUFF_OPD_DF: [(u8, u32); 8] = [
+pub static HUFF_OPD_DF: [(u8, u32); 8] = [
     (1, 0b1),     // 0
     (3, 0b001),   // 1
     (4, 0b0110),  // 2
@@ -339,7 +336,7 @@ pub const HUFF_OPD_DF: [(u8, u32); 8] = [
 
 /// `huff_opd_dt` — Table 8.B.21 (time direction). Decodes the raw
 /// phase-index delta `0..8` (`lav = 0`).
-pub const HUFF_OPD_DT: [(u8, u32); 8] = [
+pub static HUFF_OPD_DT: [(u8, u32); 8] = [
     (1, 0b1),     // 0
     (3, 0b010),   // 1
     (4, 0b0001),  // 2
@@ -350,38 +347,41 @@ pub const HUFF_OPD_DT: [(u8, u32); 8] = [
     (3, 0b011),   // 7
 ];
 
-/// Decode one PS Huffman codeword from `reader` against `table`,
+/// The PS codebooks over the tables above, each with its `lav` (see the module docs).
+pub mod books {
+    use super::*;
+
+    pub static IID_FINE_DF: Codebook = Codebook::new(&HUFF_IID_FINE_DF, 30);
+    pub static IID_FINE_DT: Codebook = Codebook::new(&HUFF_IID_FINE_DT, 30);
+    pub static IID_DF: Codebook = Codebook::new(&HUFF_IID_DF, 14);
+    pub static IID_DT: Codebook = Codebook::new(&HUFF_IID_DT, 14);
+    pub static ICC_DF: Codebook = Codebook::new(&HUFF_ICC_DF, 7);
+    pub static ICC_DT: Codebook = Codebook::new(&HUFF_ICC_DT, 7);
+    pub static IPD_DF: Codebook = Codebook::new(&HUFF_IPD_DF, 0);
+    pub static IPD_DT: Codebook = Codebook::new(&HUFF_IPD_DT, 0);
+    pub static OPD_DF: Codebook = Codebook::new(&HUFF_OPD_DF, 0);
+    pub static OPD_DT: Codebook = Codebook::new(&HUFF_OPD_DT, 0);
+}
+
+/// Decode one PS Huffman codeword from `reader` against `codebook`,
 /// returning `index - lav` (the signed DPCM delta).
 ///
 /// Reads bits MSB-first, accumulating a codeword until it matches an
-/// entry `(length, codeword)`. Returns [`Error::PsDataInvalid`] if no
-/// codeword of length up to [`PS_HUFF_MAX_CODE_LEN`] matches (a
+/// entry of the codebook. Returns [`Error::PsDataInvalid`] if no
+/// codeword of length up to [`HUFF_MAX_CODE_LEN`] matches (a
 /// corrupt or truncated `ps_data()` payload).
 pub fn ps_huff_dec(
     reader: &mut super::super::bits::BitReader<'_>,
-    table: &[(u8, u32)],
-    lav: i32,
+    codebook: &Codebook,
 ) -> Result<i32> {
-    let mut codeword: u32 = 0;
-    let mut len: u32 = 0;
-    loop {
-        codeword = (codeword << 1) | reader.read_u32(1).map_err(|_| Error::PsDataInvalid)?;
-        len += 1;
-        for (idx, &(clen, ccode)) in table.iter().enumerate() {
-            if u32::from(clen) == len && ccode == codeword {
-                return Ok(idx as i32 - lav);
-            }
-        }
-        if len >= PS_HUFF_MAX_CODE_LEN {
-            return Err(Error::PsDataInvalid);
-        }
-    }
+    codebook.decode(reader, Error::PsDataInvalid)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::super::bits::{BitReader, BitWriter};
+    use super::super::super::codebook::HUFF_MAX_CODE_LEN;
+    use super::*;
 
     /// Every table: codewords fit their declared length, the code is
     /// prefix-free, and it is *complete* (Kraft sum exactly 1) — the
@@ -389,18 +389,14 @@ mod tests {
     fn check_table(table: &[(u8, u32)]) {
         let mut kraft_num: u64 = 0; // sum of 2^(max_len - len)
         for &(len, code) in table {
-            assert!(len >= 1 && u32::from(len) <= PS_HUFF_MAX_CODE_LEN);
+            assert!(len >= 1 && u32::from(len) <= HUFF_MAX_CODE_LEN);
             assert!(
                 u64::from(code) < (1u64 << len),
                 "codeword 0x{code:08X} overflows its {len}-bit length"
             );
-            kraft_num += 1u64 << (PS_HUFF_MAX_CODE_LEN - u32::from(len));
+            kraft_num += 1u64 << (HUFF_MAX_CODE_LEN - u32::from(len));
         }
-        assert_eq!(
-            kraft_num,
-            1u64 << PS_HUFF_MAX_CODE_LEN,
-            "code is not complete"
-        );
+        assert_eq!(kraft_num, 1u64 << HUFF_MAX_CODE_LEN, "code is not complete");
         for (a, &(la, ca)) in table.iter().enumerate() {
             for (b, &(lb, cb)) in table.iter().enumerate() {
                 if a == b || lb < la {
@@ -428,25 +424,25 @@ mod tests {
     /// Round-trip every index of every table through ps_huff_dec.
     #[test]
     fn every_codeword_decodes_to_its_index() {
-        let cases: [(&[(u8, u32)], i32); 10] = [
-            (&HUFF_IID_FINE_DF, 30),
-            (&HUFF_IID_FINE_DT, 30),
-            (&HUFF_IID_DF, 14),
-            (&HUFF_IID_DT, 14),
-            (&HUFF_ICC_DF, 7),
-            (&HUFF_ICC_DT, 7),
-            (&HUFF_IPD_DF, 0),
-            (&HUFF_IPD_DT, 0),
-            (&HUFF_OPD_DF, 0),
-            (&HUFF_OPD_DT, 0),
+        let cases: [(&Codebook, i32); 10] = [
+            (&books::IID_FINE_DF, 30),
+            (&books::IID_FINE_DT, 30),
+            (&books::IID_DF, 14),
+            (&books::IID_DT, 14),
+            (&books::ICC_DF, 7),
+            (&books::ICC_DT, 7),
+            (&books::IPD_DF, 0),
+            (&books::IPD_DT, 0),
+            (&books::OPD_DF, 0),
+            (&books::OPD_DT, 0),
         ];
-        for (table, lav) in cases {
-            for (idx, &(len, code)) in table.iter().enumerate() {
+        for (book, lav) in cases {
+            for (idx, &(len, code)) in book.table().iter().enumerate() {
                 let mut w = BitWriter::new();
                 w.write_u32(code, u32::from(len));
                 let bytes = w.finish();
                 let mut r = BitReader::new(&bytes);
-                let got = ps_huff_dec(&mut r, table, lav).unwrap();
+                let got = ps_huff_dec(&mut r, book).unwrap();
                 assert_eq!(got, idx as i32 - lav);
                 assert_eq!(r.bit_position(), u64::from(len));
             }
@@ -477,9 +473,6 @@ mod tests {
         // 8 one-bits cannot complete a codeword; the reader runs dry.
         let bytes = [0xFFu8; 1];
         let mut r = BitReader::new(&bytes);
-        assert!(matches!(
-            ps_huff_dec(&mut r, &HUFF_IID_DT, 14),
-            Err(Error::PsDataInvalid)
-        ));
+        assert!(matches!(ps_huff_dec(&mut r, &books::IID_DT), Err(Error::PsDataInvalid)));
     }
 }

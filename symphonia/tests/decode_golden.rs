@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+// Test code: a panic is a test failure.
 //! Golden output hashes for full decodes of the RMPD sample corpus.
 //!
 //! Sample-gated: set `RMPD_SAMPLES` to the sample directory and run with `--features all`. Each
@@ -17,7 +19,6 @@
 use std::fs::File;
 use std::path::Path;
 
-use symphonia::core::audio::Audio;
 use symphonia::core::codecs::audio::AudioDecoderOptions;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, TrackType};
@@ -158,8 +159,8 @@ fn decode_hash(path: &Path) -> (u64, u64) {
         .make_audio_decoder(&params, &AudioDecoderOptions::default())
         .expect("decoder");
 
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    let mut put = |v: u32| hash = (hash ^ u64::from(v)).wrapping_mul(0x100_0000_01b3);
+    let mut hash = symphonia_testutil::Fnv::new();
+    let mut put = |v: u32| hash.put(v);
     let mut frames = 0u64;
     let (mut f, mut i, mut u) = (Vec::<f32>::new(), Vec::<i32>::new(), Vec::<u32>::new());
 
@@ -188,7 +189,7 @@ fn decode_hash(path: &Path) -> (u64, u64) {
         }
     }
 
-    (hash, frames)
+    (hash.finish(), frames)
 }
 
 #[test]

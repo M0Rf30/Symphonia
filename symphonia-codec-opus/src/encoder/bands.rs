@@ -130,6 +130,7 @@ pub(crate) fn spreading_decision(
     let mut sum = 0i32;
     let mut nb_bands = 0i32;
     for c in 0..channels as usize {
+        #[allow(clippy::needless_range_loop)] // `i` also indexes `e_bands`
         for i in 0..end as usize {
             let n = shift * (m.e_bands[i + 1] as i32 - m.e_bands[i] as i32);
             if n <= 8 {

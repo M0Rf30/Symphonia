@@ -9,9 +9,10 @@ use std::collections::VecDeque;
 use std::io::{ErrorKind, Seek, SeekFrom};
 
 use symphonia_common::mpeg::es::{EsParser, EsTrack, MpaEs};
-use symphonia_common::mpeg::pes::{PTS_MODULUS, unwrap_pts};
+use symphonia_common::mpeg::pes::{ms_to_pts, unwrap_pts};
 use symphonia_common::mpeg::seek::bisect;
 use symphonia_common::mpeg::timeline::ticks_to_clock;
+use symphonia_common::mpeg::track::set_track_duration;
 use symphonia_core::audio::{Channels, Position};
 use symphonia_core::codecs::CodecParameters;
 use symphonia_core::codecs::audio::AudioCodecParameters;
@@ -26,7 +27,7 @@ use symphonia_core::formats::well_known::FORMAT_ID_FLV;
 use symphonia_core::io::*;
 use symphonia_core::meta::{Metadata, MetadataLog};
 use symphonia_core::support_format;
-use symphonia_core::units::{Duration, TimeBase};
+use symphonia_core::units::TimeBase;
 
 use log::{debug, info, warn};
 
@@ -134,9 +135,23 @@ fn read_tag_header<B: ReadBytes>(reader: &mut B) -> Result<Option<TagHeader>> {
     Ok(TagHeader::parse(&b, pos))
 }
 
-/// The raw PTS of a tag time stamp in milliseconds.
-fn ts_to_pts(ts: u32) -> u64 {
-    (u64::from(ts) * 90) % PTS_MODULUS
+/// Read the body of a tag of `size` bytes into `buf`. Returns false if the stream ended.
+fn read_tag_body<B: ReadBytes>(reader: &mut B, size: usize, buf: &mut Vec<u8>) -> bool {
+    buf.clear();
+    buf.resize(size, 0);
+    reader.read_buf_exact(buf).is_ok()
+}
+
+/// Push the frames of the body of an audio tag, if it has any, into the elementary stream.
+/// Returns true if the tag had audio data.
+fn push_audio_tag(es: &mut EsTrack, format: u8, ts: u32, body: &[u8]) -> bool {
+    match frame_data(body, format) {
+        Some(payload) => {
+            es.push_pes(Some(ms_to_pts(ts)), payload);
+            true
+        }
+        None => false,
+    }
 }
 
 /// The properties of the audio of an audio tag header.
@@ -273,6 +288,7 @@ fn discover<B: ReadBytes>(reader: &mut B) -> Result<Discovered> {
     let mut meta = None;
     let mut meta_checked = false;
     let mut tags = 0;
+    let mut data = Vec::new();
 
     while reader.pos() - start < MAX_DISCOVERY_LEN {
         let Some(tag) = read_tag_header(reader)?
@@ -284,9 +300,7 @@ fn discover<B: ReadBytes>(reader: &mut B) -> Result<Discovered> {
 
         let eof = match tag.ty {
             TAG_AUDIO => {
-                let mut data = vec![0u8; tag.size];
-
-                if reader.read_buf_exact(&mut data).is_err() {
+                if !read_tag_body(reader, tag.size, &mut data) {
                     break;
                 }
 
@@ -301,8 +315,7 @@ fn discover<B: ReadBytes>(reader: &mut B) -> Result<Discovered> {
                 }
 
                 if let (Some(es), Some(_)) = (es.as_mut(), first_audio) {
-                    if let Some(payload) = frame_data(&data, format) {
-                        es.push_pes(Some(ts_to_pts(tag.ts)), payload);
+                    if push_audio_tag(es, format, tag.ts, &data) {
                         es.probe(false);
                     }
                 }
@@ -310,9 +323,7 @@ fn discover<B: ReadBytes>(reader: &mut B) -> Result<Discovered> {
                 false
             }
             TAG_SCRIPT if !meta_checked && tag.size <= MAX_SCRIPT_LEN => {
-                let mut data = vec![0u8; tag.size];
-
-                if reader.read_buf_exact(&mut data).is_err() {
+                if !read_tag_body(reader, tag.size, &mut data) {
                     break;
                 }
 
@@ -412,6 +423,8 @@ pub struct FlvReader<'s> {
     index: Vec<(u32, u64)>,
     index_period_ms: u32,
     out: VecDeque<Packet>,
+    /// The buffer for the body of a tag.
+    tag_buf: Vec<u8>,
     eof: bool,
     /// The timestamp of the last packet returned.
     last_ts: Option<i64>,
@@ -443,7 +456,7 @@ impl<'s> FlvReader<'s> {
         let info = es.info().expect("stream was probed").clone();
         let rate = info.rate;
 
-        let base = ts_to_pts(first_audio.1);
+        let base = ms_to_pts(first_audio.1);
         es.init_timeline(Some(base));
 
         // The seek index. The keyframe index is of the video keyframes of the file. It is only
@@ -467,6 +480,7 @@ impl<'s> FlvReader<'s> {
             index,
             index_period_ms: u32::from(opts.seek_index_fill_period_ms).max(1),
             out: VecDeque::new(),
+            tag_buf: Vec::new(),
             eof: false,
             last_ts: None,
         };
@@ -497,9 +511,7 @@ impl<'s> FlvReader<'s> {
         track.with_flags(TrackFlags::DEFAULT);
 
         if let Some(end_ts) = end_ts.filter(|&t| t > 0) {
-            let out_rate = info.params.sample_rate.unwrap_or(rate);
-            track.with_duration(Duration::new(end_ts as u64));
-            track.with_num_frames(end_ts as u64 * u64::from(out_rate) / u64::from(rate));
+            set_track_duration(&mut track, &info, end_ts as u64);
         }
 
         reader.media_info = MediaInfo::from_track(&track);
@@ -624,13 +636,16 @@ impl<'s> FlvReader<'s> {
             }
 
             if tag.ty == TAG_AUDIO {
-                let mut data = vec![0u8; tag.size];
-                self.reader.read_buf_exact(&mut data)?;
+                let mut data = Vec::new();
+
+                if !read_tag_body(&mut self.reader, tag.size, &mut data) {
+                    break;
+                }
 
                 if let Some(payload) = frame_data(&data, self.format) {
                     let clock = self.rel_clock(tag.ts, 0);
                     let ticks = self.es.timeline().ticks_for_clock(clock);
-                    let dur = self.es.payload_duration(&[payload.to_vec()]) as i64;
+                    let dur = self.es.payload_duration([payload]) as i64;
 
                     // The frame must contain samples.
                     if dur > 0 {
@@ -681,7 +696,7 @@ impl<'s> FlvReader<'s> {
 
     /// The time in 90 kHz clock ticks since the first audio tag of a tag time stamp.
     fn rel_clock(&self, ts: u32, hint: i64) -> i64 {
-        unwrap_pts(ts_to_pts(ts), ts_to_pts(self.first_audio.1), hint)
+        unwrap_pts(ms_to_pts(ts), ms_to_pts(self.first_audio.1), hint)
     }
 
     /// Flush the frames of the stream at the end of the stream.
@@ -726,21 +741,23 @@ impl<'s> FlvReader<'s> {
         };
 
         if tag.ty == TAG_AUDIO {
-            let mut data = vec![0u8; tag.size];
+            let mut data = std::mem::take(&mut self.tag_buf);
 
-            if self.reader.read_buf_exact(&mut data).is_err() {
+            if !read_tag_body(&mut self.reader, tag.size, &mut data) {
+                self.tag_buf = data;
                 self.flush();
                 return Ok(false);
             }
 
-            if let Some(payload) = frame_data(&data, self.format) {
+            if push_audio_tag(&mut self.es, self.format, tag.ts, &data) {
                 self.add_index_entry(tag.ts, tag.pos);
-                self.es.push_pes(Some(ts_to_pts(tag.ts)), payload);
 
                 while let Some(packet) = self.es.pop(false) {
                     self.out.push_back(packet);
                 }
             }
+
+            self.tag_buf = data;
         }
         else if self.reader.ignore_bytes(tag.size as u64).is_err() {
             self.flush();

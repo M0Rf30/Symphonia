@@ -274,10 +274,29 @@ fn cwrsi(mut n: i32, mut k: i32, mut i: u32, y: &mut [i32]) -> f32 {
     yy as f32
 }
 
+/// Whether every `CELT_PVQ_U` lookup that [`decode_pulses`] performs for `(n, k)` stays inside
+/// [`CELT_PVQ_U_DATA`]: the table only has rows for `min(n, k + 1) <= 14`, and the last rows are
+/// short.
+fn pvq_params_in_table(n: i32, k: i32) -> bool {
+    if n < 2 || k < 0 {
+        return false;
+    }
+    let (n, k1) = (n as usize, k as usize + 1);
+    let lo = n.min(k1);
+    lo < CELT_PVQ_U_ROW.len() && CELT_PVQ_U_ROW[lo] + n.max(k1) < CELT_PVQ_U_DATA.len()
+}
+
 /// C: `decode_pulses`. Decodes a pulse-vector index for an `n`-dimensional band with `k` pulses
 /// into `y` (length `n`), returning the sum of squares of `y` (used by
 /// [`crate::celt::vq::alg_unquant`]'s `normalise_residual`).
+///
+/// `(n, k)` combinations outside the PVQ table (which no valid bit allocation produces) leave `y`
+/// zeroed and return `0.0` without consuming any bits, instead of indexing out of range.
 pub fn decode_pulses(y: &mut [i32], n: i32, k: i32, rd: &mut RangeDecoder<'_>) -> f32 {
+    if !pvq_params_in_table(n, k) {
+        y.fill(0);
+        return 0.0;
+    }
     let ft = celt_pvq_v(n, k);
     let idx = rd.dec_uint(ft);
     cwrsi(n, k, idx, y)
@@ -308,7 +327,12 @@ fn icwrs(n: i32, y: &[i32]) -> u32 {
 /// C: `encode_pulses`. Writes the codeword index of the `n`-dimensional pulse vector `y` (which
 /// must hold exactly `k > 0` pulses) to the range encoder.
 #[cfg(feature = "encoder")]
-pub(crate) fn encode_pulses(y: &[i32], n: i32, k: i32, enc: &mut crate::encoder::entenc::RangeEncoder) {
+pub(crate) fn encode_pulses(
+    y: &[i32],
+    n: i32,
+    k: i32,
+    enc: &mut crate::encoder::entenc::RangeEncoder,
+) {
     debug_assert!(k > 0);
     enc.enc_uint(icwrs(n, y), celt_pvq_v(n, k));
 }
@@ -346,8 +370,10 @@ mod tests {
 
     /// C: `pn`/`pkmax` (`celt/tests/test_unit_cwrs32.c`, non-`CUSTOM_MODES` variant: `NDIMS`
     /// `== 22`).
-    const PN: [i32; 22] = [2, 3, 4, 6, 8, 9, 11, 12, 16, 18, 22, 24, 32, 36, 44, 48, 64, 72, 88, 96, 144, 176];
-    const PKMAX: [i32; 22] = [128, 128, 128, 88, 36, 26, 18, 16, 12, 11, 9, 9, 7, 7, 6, 6, 5, 5, 5, 5, 4, 4];
+    const PN: [i32; 22] =
+        [2, 3, 4, 6, 8, 9, 11, 12, 16, 18, 22, 24, 32, 36, 44, 48, 64, 72, 88, 96, 144, 176];
+    const PKMAX: [i32; 22] =
+        [128, 128, 128, 88, 36, 26, 18, 16, 12, 11, 9, 9, 7, 7, 6, 6, 5, 5, 5, 5, 4, 4];
 
     #[test]
     fn cwrs_round_trip() {
@@ -381,8 +407,8 @@ mod tests {
         // `decode_pulses` is `ec_dec_uint(dec, V(n,k))` then `cwrsi`; exercise it end-to-end
         // through a real [`crate::range::RangeDecoder`] fed indices via the shared test
         // encoder, for a handful of (N,K) pairs.
-        use crate::range::test_encoder::RangeEncoder;
         use crate::range::RangeDecoder;
+        use crate::range::test_encoder::RangeEncoder;
 
         for &(n, k) in &[(2, 4), (4, 8), (8, 5), (16, 3), (44, 2)] {
             let nc = celt_pvq_v(n, k);
@@ -402,6 +428,29 @@ mod tests {
                 assert_eq!(y, y_direct, "N={n} K={k} idx={idx}");
                 assert_eq!(yy, yy_direct);
             }
+        }
+    }
+
+    #[test]
+    fn decode_pulses_out_of_table_params_do_not_panic() {
+        use crate::range::RangeDecoder;
+
+        let data = [0xa5u8; 16];
+        // `min(n, k + 1) >= 15` has no row in `CELT_PVQ_U_ROW`; `(14, 14)` reads past the last row.
+        for &(n, k) in &[
+            (20, 20),
+            (16, 14),
+            (15, 15),
+            (176, 176),
+            (14, 14),
+            (2, i32::MAX - 1),
+            (3, -1),
+            (1, 1),
+        ] {
+            let mut dec = RangeDecoder::new(&data);
+            let mut y = vec![7i32; n as usize];
+            assert_eq!(decode_pulses(&mut y, n, k, &mut dec), 0.0, "N={n} K={k}");
+            assert!(y.iter().all(|&v| v == 0), "N={n} K={k}");
         }
     }
 }

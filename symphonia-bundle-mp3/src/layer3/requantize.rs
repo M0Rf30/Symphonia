@@ -18,17 +18,25 @@ use std::{f32, f64};
 use lazy_static::lazy_static;
 
 use log::info;
-
-/// The length of the `POW43` table.
-const POW43_LEN: usize = 8207;
+use symphonia_core::dsp::quant::{POW43_LEN, pow43_table};
 
 lazy_static! {
-    /// Lookup table for computing x(i) = s(i)^(4/3) where s(i) is a decoded Huffman sample. The
-    /// value of s(i) is bound between 0..8207.
-    static ref POW43: Box<[f32; POW43_LEN]> = {
-        let pow43: Vec<f32> = (0..POW43_LEN).map(|i| f32::powf(i as f32, 4.0 / 3.0)).collect();
-        pow43.into_boxed_slice().try_into().expect("vec initialized to POW43_LEN")
-    };
+    /// Lookup table for 2^(0.25*k) where k = A - B for long blocks, indexed by `k + POW2AB_OFFSET`.
+    static ref POW2AB: Vec<f32> =
+        (-POW2AB_OFFSET..=POW2AB_MAX).map(|k| f64::powf(2.0, 0.25 * f64::from(k)) as f32).collect();
+}
+
+/// The most negative value of A - B, negated. A is at least -210 and B is at most 4 * (31 + 3).
+const POW2AB_OFFSET: i32 = 350;
+/// The most positive value of A - B. A is at most 255 - 210.
+const POW2AB_MAX: i32 = 45;
+
+#[inline(always)]
+fn pow2ab(k: i32) -> f32 {
+    match POW2AB.get((k + POW2AB_OFFSET) as usize) {
+        Some(v) => *v,
+        None => f64::powf(2.0, 0.25 * f64::from(k)) as f32,
+    }
 }
 
 /// Zero a sample buffer.
@@ -58,7 +66,7 @@ pub(super) fn read_huffman_samples<B: ReadBitsLtr>(
 
     // Dereference the POW43 table once per granule since there is a tiny overhead each time a
     // lazy_static is dereferenced that should be amortized over as many samples as possible.
-    let pow43: &[f32; POW43_LEN] = &POW43;
+    let pow43: &[f32; POW43_LEN] = pow43_table();
 
     let mut bits_read = 0;
     let mut i = 0;
@@ -277,7 +285,7 @@ fn requantize_long(channel: &GranuleChannel, bands: &[usize], buf: &mut [f32; 57
         // Calculate 2^(0.25*A) * 2^(-B). This can be rewritten as 2^{ 0.25 * (A - 4 * B) }.
         // Since scalefac_shift was multiplies by 4 above, the final equation becomes
         // 2^{ 0.25 * (A - B) }.
-        let pow2ab = f64::powf(2.0, 0.25 * f64::from(a - b)) as f32;
+        let scale = pow2ab(a - b);
 
         // Calculate the ending sample index for the scale-factor band, clamping it to the length of
         // the sample buffer.
@@ -285,7 +293,7 @@ fn requantize_long(channel: &GranuleChannel, bands: &[usize], buf: &mut [f32; 57
 
         // The sample buffer contains s(i)^(4/3), now multiply in 2^(0.25*A) * 2^(-B) to get xr(i).
         for sample in &mut buf[*start..band_end] {
-            *sample *= pow2ab;
+            *sample *= scale;
         }
     }
 }

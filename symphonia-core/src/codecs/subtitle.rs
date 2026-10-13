@@ -7,11 +7,8 @@
 
 //! Subtitle decoder specific support.
 
-use std::fmt;
-
 #[cfg(feature = "exp-subtitle-codecs")]
 use crate::codecs::CodecInfo;
-use crate::common::FourCc;
 #[cfg(feature = "exp-subtitle-codecs")]
 use crate::errors::Result;
 #[cfg(feature = "exp-subtitle-codecs")]
@@ -25,7 +22,8 @@ use crate::subtitle::GenericSubtitleBufferRef;
 ///
 /// Using a [well-known](well_known) codec ID is *highly* recommended to maximize compatibility
 /// between components, libraries, and applications. However, if a codec requires custom codec ID,
-/// or there is no well-known ID, then the [`FourCc`] for the codec may be converted into a codec
+/// or there is no well-known ID, then the [`FourCc`](crate::common::FourCc) for the codec may be
+/// converted into a codec
 /// ID.
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -34,31 +32,13 @@ pub struct SubtitleCodecId(u32);
 /// Null subtitle codec ID
 pub const CODEC_ID_NULL_SUBTITLE: SubtitleCodecId = SubtitleCodecId(0x0);
 
-impl SubtitleCodecId {
-    /// Create a new subtitle codec ID from a FourCC.
-    pub const fn new(cc: FourCc) -> SubtitleCodecId {
-        // A FourCc always only contains ASCII characters. Therefore, the upper bits are always 0.
-        Self(0x8000_0000 | u32::from_be_bytes(cc.get()))
-    }
-}
-
 impl Default for SubtitleCodecId {
     fn default() -> Self {
         CODEC_ID_NULL_SUBTITLE
     }
 }
 
-impl From<FourCc> for SubtitleCodecId {
-    fn from(value: FourCc) -> Self {
-        SubtitleCodecId::new(value)
-    }
-}
-
-impl fmt::Display for SubtitleCodecId {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:#x}", self.0)
-    }
-}
+crate::common::impl_fourcc_id!(SubtitleCodecId);
 
 /// Codec parameters for subtitle codecs.
 #[derive(Clone, Debug, Default)]

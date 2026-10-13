@@ -9,14 +9,14 @@ use std::sync::Arc;
 
 use symphonia_core::errors::Error;
 use symphonia_core::io::{BufReader, ReadBytes};
+use symphonia_core::meta::RawValue;
 use symphonia_core::meta::well_known::METADATA_ID_ISOMP4;
 use symphonia_core::meta::{
     ContentAdvisory, MetadataBuilder, MetadataInfo, MetadataRevision, RawTag, StandardTag,
     StandardVisualKey, Tag,
 };
-use symphonia_core::meta::{RawValue, Visual};
 use symphonia_core::util::{bits, text};
-use symphonia_metadata::utils::images::try_get_image_info;
+use symphonia_metadata::utils::images::{try_get_image_info, visual_from_image_data};
 use symphonia_metadata::utils::{id3v1, itunes};
 
 use crate::atoms::{Atom, AtomHeader, AtomIterator, AtomType, ReadAtom, Result, decode_error};
@@ -383,14 +383,16 @@ fn add_visual_tag<R: ReadAtom>(
     for value in tag.values {
         let image_info = try_get_image_info(&value.data);
 
-        builder.add_visual(Visual {
-            media_type: image_info.as_ref().map(|info| info.media_type.clone()),
-            dimensions: image_info.as_ref().map(|info| info.dimensions),
-            color_mode: image_info.as_ref().map(|info| info.color_mode),
-            usage: Some(StandardVisualKey::FrontCover),
-            tags: Default::default(),
-            data: value.data,
-        });
+        // The covr atom has no per-image usage field (only an image format data type), so the
+        // front cover is the deliberate default.
+        builder.add_visual(visual_from_image_data(
+            value.data,
+            image_info,
+            None,
+            None,
+            Some(StandardVisualKey::FrontCover),
+            Vec::new(),
+        ));
     }
 
     Ok(())

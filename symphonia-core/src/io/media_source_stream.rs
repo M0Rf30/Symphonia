@@ -240,6 +240,24 @@ impl<'s> MediaSourceStream<'s> {
         }
     }
 
+    /// Reads exactly `N` bytes, using the contiguous readable slice when it is long enough.
+    #[inline(always)]
+    fn read_array<const N: usize>(&mut self) -> io::Result<[u8; N]> {
+        if let Some(bytes) = self.get_readable_slice().first_chunk::<N>() {
+            let bytes = *bytes;
+            self.consume(N);
+            return Ok(bytes);
+        }
+
+        let mut bytes = [0; N];
+
+        for byte in bytes.iter_mut() {
+            *byte = self.read_byte()?;
+        }
+
+        Ok(bytes)
+    }
+
     /// Get the current contiguous slice of readable data from the ring buffer. Returns an empty
     /// slice if the ring buffer is empty.
     #[inline(always)]
@@ -361,55 +379,15 @@ impl ReadBytes for MediaSourceStream<'_> {
     }
 
     fn read_double_bytes(&mut self) -> io::Result<[u8; 2]> {
-        let mut bytes = [0; 2];
-
-        let buf = self.get_readable_slice();
-
-        if buf.len() >= 2 {
-            bytes.copy_from_slice(&buf[..2]);
-            self.consume(2);
-        }
-        else {
-            for byte in bytes.iter_mut() {
-                *byte = self.read_byte()?;
-            }
-        };
-
-        Ok(bytes)
+        self.read_array()
     }
 
     fn read_triple_bytes(&mut self) -> io::Result<[u8; 3]> {
-        let mut bytes = [0; 3];
-
-        let buf = self.get_readable_slice();
-
-        if buf.len() >= 3 {
-            bytes.copy_from_slice(&buf[..3]);
-            self.consume(3);
-        }
-        else {
-            for byte in bytes.iter_mut() {
-                *byte = self.read_byte()?;
-            }
-        };
-        Ok(bytes)
+        self.read_array()
     }
 
     fn read_quad_bytes(&mut self) -> io::Result<[u8; 4]> {
-        let mut bytes = [0; 4];
-
-        let buf = self.get_readable_slice();
-
-        if buf.len() >= 4 {
-            bytes.copy_from_slice(&buf[..4]);
-            self.consume(4);
-        }
-        else {
-            for byte in bytes.iter_mut() {
-                *byte = self.read_byte()?;
-            }
-        };
-        Ok(bytes)
+        self.read_array()
     }
 
     fn read_buf(&mut self, buf: &mut [u8]) -> io::Result<usize> {
@@ -439,12 +417,36 @@ impl ReadBytes for MediaSourceStream<'_> {
 
     fn scan_bytes_aligned<'a>(
         &mut self,
-        _: &[u8],
-        _: usize,
-        _: &'a mut [u8],
+        pattern: &[u8],
+        align: usize,
+        buf: &'a mut [u8],
     ) -> io::Result<&'a mut [u8]> {
-        // Intentionally left unimplemented.
-        unimplemented!();
+        // The pattern must be atleast one byte, and the alignment non-zero.
+        debug_assert!(!pattern.is_empty());
+        debug_assert!(align > 0);
+
+        let mut len = 0;
+
+        while len < buf.len() {
+            match self.read_byte() {
+                Ok(byte) => {
+                    buf[len] = byte;
+                    len += 1;
+                }
+                // Like other implementations, an unmatched scan returns the bytes read so far.
+                Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => break,
+                Err(err) => return Err(err),
+            }
+
+            if len >= pattern.len()
+                && (len - pattern.len()) % align.max(1) == 0
+                && &buf[len - pattern.len()..len] == pattern
+            {
+                break;
+            }
+        }
+
+        Ok(&mut buf[..len])
     }
 
     fn ignore_bytes(&mut self, mut count: u64) -> io::Result<()> {
@@ -581,6 +583,20 @@ mod tests {
         }
 
         bytes.into_boxed_slice()
+    }
+
+    #[test]
+    fn verify_mss_scan_bytes_aligned() {
+        let ms = Cursor::new(b"AB\0\0CD".to_vec());
+        let mut mss = MediaSourceStream::new(Box::new(ms), Default::default());
+        let mut buf = [0u8; 6];
+        let scanned = mss.scan_bytes_aligned(&[0, 0], 2, &mut buf).unwrap();
+        assert_eq!(scanned, b"AB\0\0");
+        assert_eq!(mss.pos(), 4);
+
+        // No match returns the remainder.
+        let scanned = mss.scan_bytes(&[0, 0], &mut buf).unwrap();
+        assert_eq!(scanned, b"CD");
     }
 
     #[test]

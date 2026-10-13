@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+// Test code: a panic is a test failure.
 // Symphonia
 // Copyright (c) 2019-2026 The Project Symphonia Developers.
 //
@@ -28,7 +30,7 @@ fn open_file(path: &std::path::Path) -> MediaSourceStream<'static> {
 }
 
 fn ticks_to_pts(ticks: u64, rate: u64, base: u64) -> u64 {
-    (base + ticks * 90_000 / rate) % (1 << 33)
+    (base + ticks * 90_000 / rate) % symphonia_common::mpeg::pes::PTS_MODULUS
 }
 
 #[test]

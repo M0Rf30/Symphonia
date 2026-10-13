@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+// Test code: a panic is a test failure.
 // Symphonia
 // Copyright (c) 2019-2026 The Project Symphonia Developers.
 //
@@ -95,7 +97,8 @@ fn decode_all(path: &Path) -> usize {
 
     let track = format.default_track(TrackType::Audio).expect("audio track");
     let track_id = track.id;
-    let Some(CodecParameters::Audio(params)) = track.codec_params.clone() else {
+    let Some(CodecParameters::Audio(params)) = track.codec_params.clone()
+    else {
         panic!("not an audio track");
     };
     let mut decoder = symphonia::default::get_codecs()

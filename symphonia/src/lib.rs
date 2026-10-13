@@ -137,6 +137,8 @@ pub mod default {
         pub use symphonia_bundle_flac::FlacDecoder;
         #[cfg(any(feature = "mp1", feature = "mp2", feature = "mp3"))]
         pub use symphonia_bundle_mp3::MpaDecoder;
+        #[cfg(feature = "musepack")]
+        pub use symphonia_bundle_musepack::MpcDecoder;
         #[cfg(feature = "aac")]
         pub use symphonia_codec_aac::AacDecoder;
         #[cfg(feature = "adpcm")]
@@ -145,20 +147,14 @@ pub mod default {
         pub use symphonia_codec_alac::AlacDecoder;
         #[cfg(feature = "dsd")]
         pub use symphonia_codec_dsd::DsdDecoder;
-        #[cfg(feature = "musepack")]
-        pub use symphonia_bundle_musepack::MpcDecoder;
-        #[cfg(feature = "pcm")]
-        pub use symphonia_codec_pcm::PcmDecoder;
         #[cfg(feature = "opus")]
         pub use symphonia_codec_opus::OpusAudioDecoder;
+        #[cfg(feature = "pcm")]
+        pub use symphonia_codec_pcm::PcmDecoder;
         #[cfg(feature = "vorbis")]
         pub use symphonia_codec_vorbis::VorbisDecoder;
         #[cfg(feature = "wavpack")]
         pub use symphonia_codec_wavpack::WavPackDecoder;
-
-        #[deprecated = "use `default::codecs::MpaDecoder` instead"]
-        #[cfg(any(feature = "mp1", feature = "mp2", feature = "mp3"))]
-        pub type Mp3Decoder = MpaDecoder;
     }
 
     pub mod formats {
@@ -170,47 +166,43 @@ pub mod default {
         pub use symphonia_bundle_flac::FlacReader;
         #[cfg(any(feature = "mp1", feature = "mp2", feature = "mp3"))]
         pub use symphonia_bundle_mp3::MpaReader;
+        #[cfg(feature = "musepack")]
+        pub use symphonia_bundle_musepack::MpcReader;
         #[cfg(feature = "aac")]
         pub use symphonia_codec_aac::AdifReader;
         #[cfg(feature = "aac")]
         pub use symphonia_codec_aac::AdtsReader;
         #[cfg(feature = "aac")]
         pub use symphonia_codec_aac::LoasReader;
+        #[cfg(feature = "wavpack")]
+        pub use symphonia_codec_wavpack::WavPackReader;
+        /// The path of the `.wvc` correction file next to a WavPack `.wv` file, if any.
+        #[cfg(feature = "wavpack")]
+        pub use symphonia_codec_wavpack::correction_path as wavpack_correction_path;
+        /// Attach the `.wvc` correction file next to a hybrid WavPack `.wv` file to
+        /// `FormatOptions` (see `symphonia_codec_wavpack::with_sibling_correction`).
+        #[cfg(feature = "wavpack")]
+        pub use symphonia_codec_wavpack::with_sibling_correction as wavpack_with_sibling_correction;
         #[cfg(feature = "caf")]
         pub use symphonia_format_caf::CafReader;
         #[cfg(feature = "dsd")]
-        pub use symphonia_format_dsd::{DffReader, DsfReader, CODEC_TYPE_DSD};
+        pub use symphonia_format_dsd::{CODEC_TYPE_DSD, DffReader, DsfReader};
         #[cfg(feature = "flv")]
         pub use symphonia_format_flv::FlvReader;
-        #[cfg(feature = "mpegps")]
-        pub use symphonia_format_mpegps::MpegPsReader;
-        #[cfg(feature = "mpegts")]
-        pub use symphonia_format_mpegts::MpegTsReader;
-        #[cfg(feature = "musepack")]
-        pub use symphonia_bundle_musepack::MpcReader;
         #[cfg(feature = "isomp4")]
         pub use symphonia_format_isomp4::IsoMp4Reader;
         #[cfg(feature = "mkv")]
         pub use symphonia_format_mkv::MkvReader;
+        #[cfg(feature = "mpegps")]
+        pub use symphonia_format_mpegps::MpegPsReader;
+        #[cfg(feature = "mpegts")]
+        pub use symphonia_format_mpegts::MpegTsReader;
         #[cfg(feature = "ogg")]
         pub use symphonia_format_ogg::OggReader;
         #[cfg(feature = "aiff")]
         pub use symphonia_format_riff::AiffReader;
         #[cfg(feature = "wav")]
         pub use symphonia_format_riff::WavReader;
-        #[cfg(feature = "wavpack")]
-        pub use symphonia_codec_wavpack::WavPackReader;
-        /// Attach the `.wvc` correction file next to a hybrid WavPack `.wv` file to
-        /// `FormatOptions` (see `symphonia_codec_wavpack::with_sibling_correction`).
-        #[cfg(feature = "wavpack")]
-        pub use symphonia_codec_wavpack::with_sibling_correction as wavpack_with_sibling_correction;
-        /// The path of the `.wvc` correction file next to a WavPack `.wv` file, if any.
-        #[cfg(feature = "wavpack")]
-        pub use symphonia_codec_wavpack::correction_path as wavpack_correction_path;
-
-        #[deprecated = "use `default::formats::MpaReader` instead"]
-        #[cfg(any(feature = "mp1", feature = "mp2", feature = "mp3"))]
-        pub type Mp3Reader<'s> = MpaReader<'s>;
     }
 
     pub mod meta {

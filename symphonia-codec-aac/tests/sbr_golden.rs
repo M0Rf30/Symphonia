@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 //! Golden hashes of the decoded output of streams with SBR (HE-AAC v1/v2, AAC-ELD with SBR) and of
 //! the LC core. The hash is FNV-1a over the bit patterns of the interleaved f32 samples, so it pins
 //! the output of the decoder bit for bit: optimisations of the SBR filter banks, the envelope
@@ -23,23 +25,9 @@ use symphonia_core::io::MediaSourceStream;
 use symphonia_core::packet::Packet;
 use symphonia_core::units::{Duration, Timestamp};
 use symphonia_format_isomp4::IsoMp4Reader;
+use symphonia_testutil::Fnv;
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
-
-struct Fnv(u64);
-
-impl Fnv {
-    fn new() -> Self {
-        Fnv(0xcbf2_9ce4_8422_2325)
-    }
-
-    fn add(&mut self, v: u32) {
-        for b in v.to_le_bytes() {
-            self.0 ^= u64::from(b);
-            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
-}
 
 fn hash_buffer(h: &mut Fnv, buf: &GenericAudioBufferRef<'_>) {
     let GenericAudioBufferRef::F32(buf) = buf
@@ -48,13 +36,13 @@ fn hash_buffer(h: &mut Fnv, buf: &GenericAudioBufferRef<'_>) {
     };
 
     let n_ch = buf.spec().channels().count();
-    h.add(buf.frames() as u32);
-    h.add(n_ch as u32);
-    h.add(buf.spec().rate());
+    h.add_u32(buf.frames() as u32);
+    h.add_u32(n_ch as u32);
+    h.add_u32(buf.spec().rate());
 
     for f in 0..buf.frames() {
         for c in 0..n_ch {
-            h.add(buf.plane(c).unwrap()[f].to_bits());
+            h.add_u32(buf.plane(c).unwrap()[f].to_bits());
         }
     }
 }

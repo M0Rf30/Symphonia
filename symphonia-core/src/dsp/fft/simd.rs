@@ -55,7 +55,6 @@ impl Fft {
 
     /// Calculate the FFT in-place.
     pub fn fft_inplace(&mut self, x: &mut [Complex<f32>]) {
-        assert_eq!(x.len(), x.len());
         assert_eq!(x.len(), self.fft.len());
         self.fft.process_with_scratch(x, &mut self.scratch);
     }

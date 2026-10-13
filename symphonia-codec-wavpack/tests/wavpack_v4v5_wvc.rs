@@ -56,7 +56,7 @@ fn append_buf(out: &mut Vec<u8>, buf: &GenericAudioBufferRef<'_>) {
         ($b:expr, $conv:expr) => {
             for i in 0..n {
                 for ch in 0..nch {
-                    out.extend_from_slice(&$conv($b.plane(ch).unwrap()[i]));
+                    out.extend_from_slice(&$conv($b.plane(ch).expect("unexpected failure")[i]));
                 }
             }
         };
@@ -162,7 +162,7 @@ fn without_wvc_the_lossy_core_is_decoded() {
 #[test]
 fn sidecar_in_format_options_enables_lossless() {
     for name in ["int16_stereo", "float_stereo", "int16_6ch"] {
-        let wvc = File::open(fixture(&format!("wvc_{name}.wvc"))).unwrap();
+        let wvc = File::open(fixture(&format!("wvc_{name}.wvc"))).expect("unexpected failure");
         let opts = FormatOptions::default().sidecar(Box::new(wvc));
         let mut reader =
             WavPackReader::try_new(mss(&fixture(&format!("wvc_{name}.wv"))), opts).expect("reader");
@@ -217,17 +217,19 @@ fn unusable_correction_stream() {
 
     // ... a garbage sidecar is ignored (the lossy audio is decoded).
     let opts = FormatOptions::default().sidecar(Box::new(std::io::Cursor::new(vec![0x55u8; 4096])));
-    let mut reader = WavPackReader::try_new(mss(&fixture("wvc_int16_stereo.wv")), opts).unwrap();
+    let mut reader = WavPackReader::try_new(mss(&fixture("wvc_int16_stereo.wv")), opts)
+        .expect("unexpected failure");
     assert!(!reader.has_correction());
     assert_eq!(decode_all(&mut reader), decode_all(&mut wv_alone("int16_stereo")));
 
     // ... and so is a sidecar for a file that has no use for it.
-    let wvc = File::open(fixture("wvc_int16_stereo.wvc")).unwrap();
+    let wvc = File::open(fixture("wvc_int16_stereo.wvc")).expect("unexpected failure");
     let opts = FormatOptions::default().sidecar(Box::new(wvc));
-    let mut reader = WavPackReader::try_new(mss(&fixture("float_lossless.wv")), opts).unwrap();
+    let mut reader = WavPackReader::try_new(mss(&fixture("float_lossless.wv")), opts)
+        .expect("unexpected failure");
     let plain = decode_all(
         &mut WavPackReader::try_new(mss(&fixture("float_lossless.wv")), FormatOptions::default())
-            .unwrap(),
+            .expect("unexpected failure"),
     );
     assert_eq!(decode_all(&mut reader), plain);
 }
@@ -237,7 +239,10 @@ fn block_ranges(data: &[u8]) -> Vec<(usize, usize)> {
     let mut blocks = Vec::new();
     let mut pos = 0;
     while pos + 32 <= data.len() && &data[pos..pos + 4] == b"wvpk" {
-        let size = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap()) as usize + 8;
+        let size =
+            u32::from_le_bytes(data[pos + 4..pos + 8].try_into().expect("unexpected failure"))
+                as usize
+                + 8;
         blocks.push((pos, pos + size));
         pos += size;
     }
@@ -270,7 +275,7 @@ fn corrupt_correction_block_falls_back_to_lossy_for_that_block_only() {
     let lossy_blocks = decode_blocks(&mut wv_alone(name));
     assert_eq!(lossy_blocks.len(), 3);
 
-    let mut wvc = std::fs::read(fixture(&format!("wvc_{name}.wvc"))).unwrap();
+    let mut wvc = std::fs::read(fixture(&format!("wvc_{name}.wvc"))).expect("unexpected failure");
     let blocks = block_ranges(&wvc);
     assert_eq!(blocks.len(), 3);
 
@@ -283,7 +288,7 @@ fn corrupt_correction_block_falls_back_to_lossy_for_that_block_only() {
         mss_bytes(wvc),
         FormatOptions::default(),
     )
-    .unwrap();
+    .expect("unexpected failure");
     let blocks = decode_blocks(&mut reader);
     assert_eq!(blocks.len(), 3);
 
@@ -302,7 +307,7 @@ fn truncated_correction_stream_decodes_the_rest_lossy() {
     let reference = reference(name);
     let lossy_blocks = decode_blocks(&mut wv_alone(name));
 
-    let wvc = std::fs::read(fixture(&format!("wvc_{name}.wvc"))).unwrap();
+    let wvc = std::fs::read(fixture(&format!("wvc_{name}.wvc"))).expect("unexpected failure");
     let blocks = block_ranges(&wvc);
     // Cut in the middle of the last block (an unreadable block) ...
     for end in [blocks[2].0, (blocks[2].0 + blocks[2].1) / 2] {
@@ -311,7 +316,7 @@ fn truncated_correction_stream_decodes_the_rest_lossy() {
             mss_bytes(wvc[..end].to_vec()),
             FormatOptions::default(),
         )
-        .unwrap();
+        .expect("unexpected failure");
         let decoded = decode_blocks(&mut reader);
         assert_eq!(decoded.len(), 3);
         let split = lossy_blocks[0].len() + lossy_blocks[1].len();
@@ -328,19 +333,19 @@ fn mismatched_correction_stream_is_ignored() {
         mss(&fixture("wvc_int16_stereo_lr.wvc")),
         FormatOptions::default(),
     )
-    .unwrap();
+    .expect("unexpected failure");
     assert_eq!(decode_all(&mut reader), decode_all(&mut wv_alone("int16_stereo")));
 
     // A correction file that starts later than the main file (leading blocks missing) only
     // loses those blocks.
-    let wvc = std::fs::read(fixture("wvc_int16_stereo.wvc")).unwrap();
+    let wvc = std::fs::read(fixture("wvc_int16_stereo.wvc")).expect("unexpected failure");
     let blocks = block_ranges(&wvc);
     let mut reader = WavPackReader::try_new_with_correction(
         mss(&fixture("wvc_int16_stereo.wv")),
         mss_bytes(wvc[blocks[1].0..].to_vec()),
         FormatOptions::default(),
     )
-    .unwrap();
+    .expect("unexpected failure");
     let decoded = decode_blocks(&mut reader);
     let lossy = decode_blocks(&mut wv_alone("int16_stereo"));
     let reference = reference("int16_stereo");
@@ -375,14 +380,14 @@ fn seeking_keeps_the_correction_in_sync() {
 
 #[test]
 fn seeking_without_a_seekable_correction_stream_fails_cleanly() {
-    let wvc = File::open(fixture("wvc_int16_stereo.wvc")).unwrap();
+    let wvc = File::open(fixture("wvc_int16_stereo.wvc")).expect("unexpected failure");
     let wvc = MediaSourceStream::new(Box::new(ReadOnlySource::new(wvc)), Default::default());
     let mut reader = WavPackReader::try_new_with_correction(
         mss(&fixture("wvc_int16_stereo.wv")),
         wvc,
         FormatOptions::default(),
     )
-    .unwrap();
+    .expect("unexpected failure");
 
     // Reading from start to end works.
     assert!(decode_all(&mut reader) == reference("int16_stereo"));
@@ -400,11 +405,13 @@ fn seeking_without_a_seekable_correction_stream_fails_cleanly() {
 
 /// The PCM payload of a canonical little-endian RIFF/WAVE file.
 fn wav_data(path: &Path) -> Vec<u8> {
-    let data = std::fs::read(path).unwrap();
+    let data = std::fs::read(path).expect("unexpected failure");
     let mut pos = 12;
     while pos + 8 <= data.len() {
         let id = &data[pos..pos + 4];
-        let size = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        let size =
+            u32::from_le_bytes(data[pos + 4..pos + 8].try_into().expect("unexpected failure"))
+                as usize;
         if id == b"data" {
             return data[pos + 8..(pos + 8 + size).min(data.len())].to_vec();
         }
@@ -432,7 +439,7 @@ fn sample_hybrid_with_wvc_is_bit_exact() {
         mss(&wv.with_extension("wvc")),
         FormatOptions::default(),
     )
-    .unwrap();
+    .expect("unexpected failure");
     let decoded = decode_all(&mut reader);
 
     // Versus the lossless source the pair was made from ...
@@ -453,7 +460,7 @@ fn sample_hybrid_with_wvc_is_bit_exact() {
         .status()
     {
         Ok(status) if status.success() => {
-            let oracle = std::fs::read(&out).unwrap();
+            let oracle = std::fs::read(&out).expect("unexpected failure");
             let _ = std::fs::remove_file(&out);
             assert_eq!(decoded.len(), oracle.len());
             assert!(decoded == oracle, "differs from wvunpack");
@@ -462,8 +469,10 @@ fn sample_hybrid_with_wvc_is_bit_exact() {
     }
 
     // Without the correction file the same file decodes to the lossy core.
-    let lossy =
-        decode_all(&mut WavPackReader::try_new(mss(&wv), FormatOptions::default()).unwrap());
+    let lossy = decode_all(
+        &mut WavPackReader::try_new(mss(&wv), FormatOptions::default())
+            .expect("unexpected failure"),
+    );
     assert_eq!(lossy.len(), decoded.len());
     assert!(lossy != decoded);
 }
@@ -500,13 +509,13 @@ fn sample_corpus_matches_wvunpack() {
         let opts = with_sibling_correction(wv, FormatOptions::default());
         with_correction += opts.external_data.sidecar.is_some() as usize;
 
-        let mut reader = WavPackReader::try_new(mss(wv), opts).unwrap();
+        let mut reader = WavPackReader::try_new(mss(wv), opts).expect("unexpected failure");
         let decoded = decode_all(&mut reader);
 
         let out = std::env::temp_dir().join(format!(
             "wvc_corpus_{}_{}.raw",
             std::process::id(),
-            wv.file_stem().unwrap().to_string_lossy()
+            wv.file_stem().expect("unexpected failure").to_string_lossy()
         ));
         let status = std::process::Command::new("wvunpack")
             .args(["-q", "-y", "-r"])
@@ -514,9 +523,9 @@ fn sample_corpus_matches_wvunpack() {
             .arg("-o")
             .arg(&out)
             .status()
-            .unwrap();
+            .expect("unexpected failure");
         assert!(status.success(), "wvunpack failed on {}", wv.display());
-        let oracle = std::fs::read(&out).unwrap();
+        let oracle = std::fs::read(&out).expect("unexpected failure");
         let _ = std::fs::remove_file(&out);
 
         assert_eq!(decoded.len(), oracle.len(), "{}: length", wv.display());
@@ -545,7 +554,7 @@ fn mutated_correction_streams_never_panic() {
     };
 
     for name in ["int16_stereo", "int16_mono", "float_stereo", "int32_stereo", "int16_6ch"] {
-        let wvc = std::fs::read(fixture(&format!("wvc_{name}.wvc"))).unwrap();
+        let wvc = std::fs::read(fixture(&format!("wvc_{name}.wvc"))).expect("unexpected failure");
 
         for round in 0..150 {
             let mut data = wvc.clone();
@@ -581,7 +590,7 @@ fn mutated_main_streams_with_correction_never_panic() {
     };
 
     for name in ["int16_stereo", "float_mono", "int32_stereo", "int16_quad"] {
-        let wv = std::fs::read(fixture(&format!("wvc_{name}.wv"))).unwrap();
+        let wv = std::fs::read(fixture(&format!("wvc_{name}.wv"))).expect("unexpected failure");
 
         for round in 0..150 {
             let mut data = wv.clone();

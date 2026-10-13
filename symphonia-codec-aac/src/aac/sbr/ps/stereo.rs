@@ -51,16 +51,15 @@
 //! All truth from ISO/IEC 14496-3:2009 §8.6.4.6 staged under
 //! `docs/audio/aac/`.
 
+use super::super::error::{SbrError as Error, SbrResult as Result};
+use super::super::qmf::Complex;
 use super::data::{PsData, PsIndices};
 use super::hybrid::{HybridConfig, NUM_QMF_SLOTS};
-use super::map::{conjugate_flags, map_indices, parameter_map, MAP_20_TO_34, MAP_34_TO_20};
-use super::super::qmf::Complex;
-use super::super::error::{SbrError as Error, SbrResult as Result};
+use super::map::{MAP_20_TO_34, MAP_34_TO_20, conjugate_flags, map_indices, parameter_map};
 
 /// Table 8.25 — default IID quantization grid, dB, index −7..7.
-const IID_DB_COARSE: [f64; 15] = [
-    -25.0, -18.0, -14.0, -10.0, -7.0, -4.0, -2.0, 0.0, 2.0, 4.0, 7.0, 10.0, 14.0, 18.0, 25.0,
-];
+const IID_DB_COARSE: [f64; 15] =
+    [-25.0, -18.0, -14.0, -10.0, -7.0, -4.0, -2.0, 0.0, 2.0, 4.0, 7.0, 10.0, 14.0, 18.0, 25.0];
 
 /// Table 8.26 — fine IID quantization grid, dB, index −15..15.
 const IID_DB_FINE: [f64; 31] = [
@@ -115,7 +114,8 @@ impl PsStereo {
         let map = |vals: Vec<f64>| -> Vec<f64> {
             if n_bands == 34 {
                 MAP_20_TO_34.iter().map(|m| m.apply_f64(&vals)).collect()
-            } else {
+            }
+            else {
                 MAP_34_TO_20.iter().map(|m| m.apply_f64(&vals)).collect()
             }
         };
@@ -133,12 +133,6 @@ impl PsStereo {
         self.n_bands = n_bands;
         self.ipd_hist = [vec![0.0; n_bands], vec![0.0; n_bands]];
         self.opd_hist = [vec![0.0; n_bands], vec![0.0; n_bands]];
-    }
-
-    /// The stereo band count in force.
-    #[must_use]
-    pub fn n_bands(&self) -> usize {
-        self.n_bands
     }
 
     /// Process one stereo frame: mix `s` (mono hybrid) and `d`
@@ -175,17 +169,14 @@ impl PsStereo {
             for slot in h_slots.iter_mut() {
                 slot.copy_from_slice(&self.h_prev);
             }
-        } else {
+        }
+        else {
             // Envelope borders n_e.
             let borders: Vec<usize> = if ps.frame_class {
-                ps.border_position
-                    .iter()
-                    .map(|&b| usize::from(b).min(NUM_QMF_SLOTS - 1))
-                    .collect()
-            } else {
-                (0..ps.num_env)
-                    .map(|e| NUM_QMF_SLOTS * (e + 1) / ps.num_env - 1)
-                    .collect()
+                ps.border_position.iter().map(|&b| usize::from(b).min(NUM_QMF_SLOTS - 1)).collect()
+            }
+            else {
+                (0..ps.num_env).map(|e| NUM_QMF_SLOTS * (e + 1) / ps.num_env - 1).collect()
             };
 
             let mut h_from = self.h_prev.clone();
@@ -196,7 +187,8 @@ impl PsStereo {
                 // multiplier n; later regions by (n_e − n_{e−1}).
                 let (den, base) = if e == 0 {
                     (n_e.max(1) as f64, 0isize)
-                } else {
+                }
+                else {
                     (((n_e as isize - n_from).max(1)) as f64, n_from)
                 };
                 let lo = ((n_from + 1).max(0)) as usize;
@@ -264,13 +256,10 @@ impl PsStereo {
         let mut out = vec![[Complex::default(); 4]; nb];
         for b in 0..nb {
             let iid_db = if fine {
-                *IID_DB_FINE
-                    .get((iid[b] + 15) as usize)
-                    .ok_or(Error::PsDataInvalid)?
-            } else {
-                *IID_DB_COARSE
-                    .get((iid[b] + 7) as usize)
-                    .ok_or(Error::PsDataInvalid)?
+                *IID_DB_FINE.get((iid[b] + 15) as usize).ok_or(Error::PsDataInvalid)?
+            }
+            else {
+                *IID_DB_COARSE.get((iid[b] + 7) as usize).ok_or(Error::PsDataInvalid)?
             };
             let c = 10f64.powf(iid_db / 20.0);
             let rho = *ICC_RHO.get(icc[b] as usize).ok_or(Error::PsDataInvalid)?;
@@ -289,9 +278,11 @@ impl PsStereo {
             let nr = ps.config.nr_ipdopd_par();
             let native = if ps.config.iid_mode % 3 == 0 {
                 10
-            } else if ps.config.iid_mode % 3 == 1 {
+            }
+            else if ps.config.iid_mode % 3 == 1 {
                 20
-            } else {
+            }
+            else {
                 34
             };
             let extend = |v: Option<&Vec<i32>>| -> Vec<f64> {
@@ -323,10 +314,10 @@ impl PsStereo {
                 let (s2, c2) = phi2.sin_cos();
                 let r1 = Complex::new(c1, s1);
                 let r2 = Complex::new(c2, s2);
-                out[b][0] = out[b][0] * r1;
-                out[b][2] = out[b][2] * r1;
-                out[b][1] = out[b][1] * r2;
-                out[b][3] = out[b][3] * r2;
+                out[b][0] *= r1;
+                out[b][2] *= r1;
+                out[b][1] *= r2;
+                out[b][3] *= r2;
             }
             // Advance the history.
             self.ipd_hist[0] = core::mem::take(&mut self.ipd_hist[1]);
@@ -358,7 +349,8 @@ fn mix_rb(c: f64, rho: f64) -> (f64, f64, f64, f64) {
     let rho = rho.max(0.05);
     let mut alpha = if (c - 1.0).abs() < 1e-12 {
         core::f64::consts::FRAC_PI_4
-    } else {
+    }
+    else {
         0.5 * (2.0 * c * rho / (c * c - 1.0)).atan()
     };
     // Modulo correction into [0, π/2).
@@ -376,9 +368,9 @@ fn mix_rb(c: f64, rho: f64) -> (f64, f64, f64, f64) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::super::data::PsIndexState;
     use super::super::super::bits::{BitReader, BitWriter};
+    use super::super::data::PsIndexState;
+    use super::*;
 
     /// Build a one-envelope FIX ps_data with the given uniform IID /
     /// ICC index (coarse grid, 10 pars each) and resolve it.
@@ -398,7 +390,8 @@ mod tests {
             let (len, code) = super::super::huffman::HUFF_IID_DF[(iid_idx + 14) as usize];
             if b == 0 {
                 w.write_u32(code, u32::from(len));
-            } else {
+            }
+            else {
                 let (l0, c0) = super::super::huffman::HUFF_IID_DF[14];
                 w.write_u32(c0, u32::from(l0));
             }
@@ -408,7 +401,8 @@ mod tests {
             let (len, code) = super::super::huffman::HUFF_ICC_DF[(icc_idx + 7) as usize];
             if b == 0 {
                 w.write_u32(code, u32::from(len));
-            } else {
+            }
+            else {
                 let (l0, c0) = super::super::huffman::HUFF_ICC_DF[7];
                 w.write_u32(c0, u32::from(l0));
             }
@@ -422,15 +416,11 @@ mod tests {
     }
 
     fn ones(nr: usize) -> Vec<Vec<Complex>> {
-        (0..NUM_QMF_SLOTS)
-            .map(|_| vec![Complex::new(1.0, 0.0); nr])
-            .collect()
+        (0..NUM_QMF_SLOTS).map(|_| vec![Complex::new(1.0, 0.0); nr]).collect()
     }
 
     fn zeros(nr: usize) -> Vec<Vec<Complex>> {
-        (0..NUM_QMF_SLOTS)
-            .map(|_| vec![Complex::default(); nr])
-            .collect()
+        (0..NUM_QMF_SLOTS).map(|_| vec![Complex::default(); nr]).collect()
     }
 
     /// ICC = 1 (index 0) makes α = β = 0: the mix is pure IID panning
@@ -488,11 +478,7 @@ mod tests {
         // num_env = 1, FIX → n_0 = 31; H(n) = n/31 · h.
         for (n, row) in l.iter().enumerate() {
             let expect = n as f64 / 31.0;
-            assert!(
-                (row[20].re - expect).abs() < 1e-12,
-                "slot {n}: {} vs {expect}",
-                row[20].re
-            );
+            assert!((row[20].re - expect).abs() < 1e-12, "slot {n}: {} vs {expect}", row[20].re);
         }
         // A second identical frame is flat at the full value.
         let (l2, _) = st.process(&ps, &idx, config, &s, &d).unwrap();

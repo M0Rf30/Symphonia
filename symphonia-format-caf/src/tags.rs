@@ -52,14 +52,22 @@ pub fn push_tags(key: &str, value: &str, out: &mut Vec<Tag>) {
         "track number" | "track" => {
             let (number, total) = parse_number_pair(value);
             if let Some(total) = total {
-                out.push(Tag::new_from_parts("TRACK_TOTAL", total, Some(StandardTag::TrackTotal(total))));
+                out.push(Tag::new_from_parts(
+                    "TRACK_TOTAL",
+                    total,
+                    Some(StandardTag::TrackTotal(total)),
+                ));
             }
             number.map(StandardTag::TrackNumber)
         }
         "disc number" | "disc" => {
             let (number, total) = parse_number_pair(value);
             if let Some(total) = total {
-                out.push(Tag::new_from_parts("DISC_TOTAL", total, Some(StandardTag::DiscTotal(total))));
+                out.push(Tag::new_from_parts(
+                    "DISC_TOTAL",
+                    total,
+                    Some(StandardTag::DiscTotal(total)),
+                ));
             }
             number.map(StandardTag::DiscNumber)
         }

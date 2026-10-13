@@ -80,6 +80,20 @@ struct Params {
     block_align: usize,
 }
 
+/// The buffers a frame decode works in.
+struct Work<'a> {
+    /// Scratch space for the reconstructed samples of a block, one vector per channel.
+    scratch: &'a mut [Vec<i32>],
+    entropy_states: &'a mut [EntropyState],
+    /// The interleaved PCM output.
+    pcm: &'a mut Vec<u8>,
+}
+
+impl Work<'_> {
+    fn reborrow(&mut self) -> Work<'_> {
+        Work { scratch: self.scratch, entropy_states: self.entropy_states, pcm: self.pcm }
+    }
+}
 /// A stateful APE frame decoder that works on raw compressed frame bytes.
 ///
 /// `FrameDecoder` only performs decoding: the demuxer manages all I/O and supplies the compressed
@@ -151,23 +165,28 @@ impl FrameDecoder {
         })
     }
 
-    /// Decode a compressed frame to raw PCM bytes.
+    /// Decode a compressed frame to raw PCM bytes, replacing the contents of `pcm`.
     ///
     /// * `frame_data` -- Compressed frame bytes (including alignment prefix).
     /// * `seek_remainder` -- Byte alignment offset for this frame.
     /// * `frame_blocks` -- Number of audio blocks (samples per channel) in this frame.
+    /// * `pcm` -- Output buffer; its allocation is reused across frames.
     pub fn decode_frame(
         &mut self,
         frame_data: &[u8],
         seek_remainder: u32,
         frame_blocks: usize,
-    ) -> ApeResult<Vec<u8>> {
+        pcm: &mut Vec<u8>,
+    ) -> ApeResult<()> {
         let params = Params {
             version: self.version,
             channels: self.channels,
             bits_per_sample: self.bits_per_sample,
             block_align: self.block_align,
         };
+
+        let mut work =
+            Work { scratch: &mut self.scratch, entropy_states: &mut self.entropy_states, pcm };
 
         match &mut self.predictors {
             Predictors::Path16(predictors) => {
@@ -177,12 +196,11 @@ impl FrameDecoder {
                     seek_remainder,
                     frame_blocks,
                     predictors,
-                    &mut self.scratch,
-                    &mut self.entropy_states,
+                    work.reborrow(),
                 );
 
                 match result {
-                    Ok(pcm) => Ok(pcm),
+                    Ok(()) => Ok(()),
                     Err(ApeError::InvalidChecksum)
                         if self.bits_per_sample == 24 && !self.interim_mode =>
                     {
@@ -196,8 +214,7 @@ impl FrameDecoder {
                             seek_remainder,
                             frame_blocks,
                             predictors,
-                            &mut self.scratch,
-                            &mut self.entropy_states,
+                            work,
                         )
                     }
                     Err(e) => Err(e),
@@ -209,8 +226,7 @@ impl FrameDecoder {
                 seek_remainder,
                 frame_blocks,
                 predictors,
-                &mut self.scratch,
-                &mut self.entropy_states,
+                work,
             ),
         }
     }
@@ -222,9 +238,9 @@ fn decode_frame_impl<P: Predictor>(
     seek_remainder: u32,
     frame_blocks: usize,
     predictors: &mut [P],
-    scratch: &mut [Vec<i32>],
-    entropy_states: &mut [EntropyState],
-) -> ApeResult<Vec<u8>> {
+    work: Work<'_>,
+) -> ApeResult<()> {
+    let Work { scratch, entropy_states, pcm } = work;
     let Params { version, channels, bits_per_sample: bits, block_align } = *params;
     let mut br = ByteReader::new(frame_data, seek_remainder);
 
@@ -254,7 +270,10 @@ fn decode_frame_impl<P: Predictor>(
 
     // The 32-bit path only decodes mono and stereo, and produces no output otherwise.
     let decodes = channels <= 2 || P::MULTICHANNEL;
-    let mut pcm = if decodes { vec![0u8; pcm_size] } else { Vec::new() };
+    pcm.clear();
+    if decodes {
+        pcm.resize(pcm_size, 0);
+    }
 
     // The previous X output, which the Y predictor of the next block takes as input.
     let mut last_x: i32 = 0;
@@ -401,12 +420,12 @@ fn decode_frame_impl<P: Predictor>(
     }
 
     // --- EndFrame ---
-    let computed_crc = ape_crc(&pcm);
+    let computed_crc = ape_crc(pcm);
     if computed_crc != stored_crc {
         return Err(ApeError::InvalidChecksum);
     }
 
-    Ok(pcm)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -443,7 +462,8 @@ mod tests {
                 let frame = silent_frame(&pcm, special_codes);
                 let mut decoder =
                     FrameDecoder::new(3990, channels, bits, 2000).expect("valid frame");
-                let decoded = decoder.decode_frame(&frame, 0, blocks).expect("valid frame");
+                let mut decoded = Vec::new();
+                decoder.decode_frame(&frame, 0, blocks, &mut decoded).expect("valid frame");
                 assert_eq!(decoded, pcm, "{channels} channels, {bits} bits, {blocks} blocks");
             }
         }
@@ -453,8 +473,12 @@ mod tests {
     fn rejects_a_wrong_checksum() {
         let frame = silent_frame(&[0; 8], 3);
         let mut decoder = FrameDecoder::new(3990, 2, 16, 2000).expect("valid frame");
-        assert!(matches!(decoder.decode_frame(&frame, 0, 3), Err(ApeError::InvalidChecksum)));
-        assert!(decoder.decode_frame(&frame, 0, 2).is_ok());
+        let mut out = Vec::new();
+        assert!(matches!(
+            decoder.decode_frame(&frame, 0, 3, &mut out),
+            Err(ApeError::InvalidChecksum)
+        ));
+        assert!(decoder.decode_frame(&frame, 0, 2, &mut out).is_ok());
     }
 
     #[test]
@@ -470,7 +494,9 @@ mod tests {
         }
 
         let mut decoder = FrameDecoder::new(3990, 2, 16, 2000).expect("valid parameters");
-        assert_eq!(decoder.decode_frame(&file, 3, 4).expect("valid frame"), pcm);
+        let mut decoded = Vec::new();
+        decoder.decode_frame(&file, 3, 4, &mut decoded).expect("valid frame");
+        assert_eq!(decoded, pcm);
     }
 
     #[test]
@@ -488,6 +514,8 @@ mod tests {
         // The 32-bit path only decodes mono and stereo, and the checksum of no data is 0.
         let frame = silent_frame(&[], 0);
         let mut decoder = FrameDecoder::new(3990, 3, 32, 2000).expect("valid frame");
-        assert!(decoder.decode_frame(&frame, 0, 10).expect("valid frame").is_empty());
+        let mut pcm = vec![1u8; 4];
+        decoder.decode_frame(&frame, 0, 10, &mut pcm).expect("valid frame");
+        assert!(pcm.is_empty());
     }
 }

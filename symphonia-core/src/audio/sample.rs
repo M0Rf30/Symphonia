@@ -215,375 +215,130 @@ macro_rules! impl_shifts {
     };
 }
 
-// Implementation for i24
+// Implementation for i24 and u24
 
-impl i24 {
-    /// The largest value that can be represented by this integer type.
-    pub const MAX: i24 = i24(8_388_607);
-    /// The smallest value that can be represented by this integer type..
-    pub const MIN: i24 = i24(-8_388_608);
+macro_rules! impl_int24 {
+    ($t:ident, $inner:ty, $max:expr, $min:expr, $clamp:ident, [$($narrow:ty),+]) => {
+        impl $t {
+            /// The largest value that can be represented by this integer type.
+            pub const MAX: $t = $t($max);
+            /// The smallest value that can be represented by this integer type.
+            pub const MIN: $t = $t($min);
 
-    /// Get the underlying `i32` backing this `i24`.
-    #[inline(always)]
-    pub fn inner(self) -> i32 {
-        self.0
-    }
+            /// Get the underlying integer backing this 24-bit integer.
+            #[inline(always)]
+            pub fn inner(self) -> $inner {
+                self.0
+            }
 
-    /// Return the memory representation of this `i24` as a byte array in little-endian byte order.
-    #[inline(always)]
-    pub fn to_le_bytes(self) -> [u8; 3] {
-        let b = self.0.to_le_bytes();
+            /// Return the memory representation of this integer as a byte array in little-endian
+            /// byte order.
+            #[inline(always)]
+            pub fn to_le_bytes(self) -> [u8; 3] {
+                let b = self.0.to_le_bytes();
 
-        // In little-endian the MSB is the last byte. Drop it.
-        [b[0], b[1], b[2]]
-    }
+                // In little-endian the MSB is the last byte. Drop it.
+                [b[0], b[1], b[2]]
+            }
 
-    /// Return the memory representation of this `i24` as a byte array in big-endian byte order.
-    #[inline(always)]
-    pub fn to_be_bytes(self) -> [u8; 3] {
-        let b = self.0.to_be_bytes();
+            /// Return the memory representation of this integer as a byte array in big-endian
+            /// byte order.
+            #[inline(always)]
+            pub fn to_be_bytes(self) -> [u8; 3] {
+                let b = self.0.to_be_bytes();
 
-        // In big-endian the MSB is the first byte. Drop it.
-        [b[1], b[2], b[3]]
-    }
+                // In big-endian the MSB is the first byte. Drop it.
+                [b[1], b[2], b[3]]
+            }
 
-    /// Return the memory representation of this `i24` as a byte array in native byte order.
-    #[inline(always)]
-    pub fn to_ne_bytes(self) -> [u8; 3] {
-        let b = self.0.to_ne_bytes();
+            /// Return the memory representation of this integer as a byte array in native byte
+            /// order.
+            #[inline(always)]
+            pub fn to_ne_bytes(self) -> [u8; 3] {
+                let b = self.0.to_ne_bytes();
 
-        if cfg!(target_endian = "little") {
-            // In little-endian the MSB is the last byte. Drop it.
-            [b[0], b[1], b[2]]
+                if cfg!(target_endian = "little") {
+                    // In little-endian the MSB is the last byte. Drop it.
+                    [b[0], b[1], b[2]]
+                }
+                else {
+                    // In big-endian the MSB is the first byte. Drop it.
+                    [b[1], b[2], b[3]]
+                }
+            }
         }
-        else {
-            // In big-endian the MSB is the first byte. Drop it.
-            [b[1], b[2], b[3]]
+
+        impl fmt::Display for $t {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", self.0)
+            }
         }
-    }
-}
 
-impl fmt::Display for i24 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl From<i32> for i24 {
-    fn from(val: i32) -> Self {
-        i24(clamp_i24(val))
-    }
-}
-
-impl From<i16> for i24 {
-    fn from(val: i16) -> Self {
-        i24(i32::from(val))
-    }
-}
-
-impl From<i8> for i24 {
-    fn from(val: i8) -> Self {
-        i24(i32::from(val))
-    }
-}
-
-impl core::ops::Add<i24> for i24 {
-    type Output = i24;
-
-    #[inline]
-    fn add(self, other: Self) -> Self {
-        i24(self.0 + other.0)
-    }
-}
-
-impl core::ops::Sub<i24> for i24 {
-    type Output = i24;
-
-    #[inline]
-    fn sub(self, other: Self) -> Self {
-        i24(self.0 - other.0)
-    }
-}
-
-impl core::ops::Mul<i24> for i24 {
-    type Output = i24;
-
-    #[inline]
-    fn mul(self, other: Self) -> Self {
-        i24(self.0 * other.0)
-    }
-}
-
-impl core::ops::Div<i24> for i24 {
-    type Output = i24;
-
-    #[inline]
-    fn div(self, other: Self) -> Self {
-        i24(self.0 / other.0)
-    }
-}
-
-impl core::ops::Not for i24 {
-    type Output = i24;
-
-    #[inline]
-    fn not(self) -> Self {
-        i24(!self.0)
-    }
-}
-
-impl core::ops::Rem<i24> for i24 {
-    type Output = i24;
-
-    #[inline]
-    fn rem(self, other: Self) -> Self {
-        i24(self.0 % other.0)
-    }
-}
-
-impl core::ops::Shl<i24> for i24 {
-    type Output = i24;
-
-    #[inline]
-    fn shl(self, other: Self) -> Self {
-        i24(self.0 << other.0)
-    }
-}
-
-impl core::ops::Shr<i24> for i24 {
-    type Output = i24;
-
-    #[inline]
-    fn shr(self, other: Self) -> Self {
-        i24(self.0 >> other.0)
-    }
-}
-
-impl_shifts! { i24, u8 }
-impl_shifts! { i24, u16 }
-impl_shifts! { i24, u32 }
-impl_shifts! { i24, u64 }
-impl_shifts! { i24, u128 }
-impl_shifts! { i24, usize }
-
-impl_shifts! { i24, i8 }
-impl_shifts! { i24, i16 }
-impl_shifts! { i24, i32 }
-impl_shifts! { i24, i64 }
-impl_shifts! { i24, i128 }
-impl_shifts! { i24, isize }
-
-impl core::ops::BitAnd<i24> for i24 {
-    type Output = i24;
-
-    #[inline]
-    fn bitand(self, other: Self) -> Self {
-        i24(self.0 & other.0)
-    }
-}
-
-impl core::ops::BitOr<i24> for i24 {
-    type Output = i24;
-
-    #[inline]
-    fn bitor(self, other: Self) -> Self {
-        i24(self.0 | other.0)
-    }
-}
-
-impl core::ops::BitXor<i24> for i24 {
-    type Output = i24;
-
-    #[inline]
-    fn bitxor(self, other: Self) -> Self {
-        i24(self.0 ^ other.0)
-    }
-}
-
-// Implementation for u24
-
-impl u24 {
-    /// The largest value that can be represented by this integer type.
-    pub const MAX: u24 = u24(16_777_215);
-    /// The smallest value that can be represented by this integer type.
-    pub const MIN: u24 = u24(0);
-
-    /// Get the underlying `u32` backing this `u24`.
-    #[inline(always)]
-    pub fn inner(self) -> u32 {
-        self.0
-    }
-
-    /// Return the memory representation of this `u24` as a byte array in little-endian byte order.
-    #[inline(always)]
-    pub fn to_le_bytes(self) -> [u8; 3] {
-        let b = self.0.to_le_bytes();
-
-        // In little-endian the MSB is the last byte. Drop it.
-        [b[0], b[1], b[2]]
-    }
-
-    /// Return the memory representation of this `u24` as a byte array in big-endian byte order.
-    #[inline(always)]
-    pub fn to_be_bytes(self) -> [u8; 3] {
-        let b = self.0.to_be_bytes();
-
-        // In big-endian the MSB is the first byte. Drop it.
-        [b[1], b[2], b[3]]
-    }
-
-    /// Return the memory representation of this `u24` as a byte array in native byte order.
-    #[inline(always)]
-    pub fn to_ne_bytes(self) -> [u8; 3] {
-        let b = self.0.to_ne_bytes();
-
-        if cfg!(target_endian = "little") {
-            // In little-endian the MSB is the last byte. Drop it.
-            [b[0], b[1], b[2]]
+        impl From<$inner> for $t {
+            fn from(val: $inner) -> Self {
+                $t($clamp(val))
+            }
         }
-        else {
-            // In big-endian the MSB is the first byte. Drop it.
-            [b[1], b[2], b[3]]
+
+        $(
+            impl From<$narrow> for $t {
+                fn from(val: $narrow) -> Self {
+                    $t(<$inner>::from(val))
+                }
+            }
+        )+
+
+        impl_binop_24! { $t, Add, add, + }
+        impl_binop_24! { $t, Sub, sub, - }
+        impl_binop_24! { $t, Mul, mul, * }
+        impl_binop_24! { $t, Div, div, / }
+        impl_binop_24! { $t, Rem, rem, % }
+        impl_binop_24! { $t, Shl, shl, << }
+        impl_binop_24! { $t, Shr, shr, >> }
+        impl_binop_24! { $t, BitAnd, bitand, & }
+        impl_binop_24! { $t, BitOr, bitor, | }
+        impl_binop_24! { $t, BitXor, bitxor, ^ }
+
+        impl core::ops::Not for $t {
+            type Output = $t;
+
+            #[inline]
+            fn not(self) -> Self {
+                $t(!self.0)
+            }
         }
-    }
+
+        impl_shifts! { $t, u8 }
+        impl_shifts! { $t, u16 }
+        impl_shifts! { $t, u32 }
+        impl_shifts! { $t, u64 }
+        impl_shifts! { $t, u128 }
+        impl_shifts! { $t, usize }
+
+        impl_shifts! { $t, i8 }
+        impl_shifts! { $t, i16 }
+        impl_shifts! { $t, i32 }
+        impl_shifts! { $t, i64 }
+        impl_shifts! { $t, i128 }
+        impl_shifts! { $t, isize }
+    };
 }
 
-impl fmt::Display for u24 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
+macro_rules! impl_binop_24 {
+    ($t:ident, $trait:ident, $method:ident, $op:tt) => {
+        impl core::ops::$trait<$t> for $t {
+            type Output = $t;
+
+            #[inline]
+            fn $method(self, other: Self) -> Self {
+                $t(self.0 $op other.0)
+            }
+        }
+    };
 }
 
-impl From<u32> for u24 {
-    fn from(val: u32) -> Self {
-        u24(clamp_u24(val))
-    }
-}
-
-impl From<u16> for u24 {
-    fn from(val: u16) -> Self {
-        u24(u32::from(val))
-    }
-}
-
-impl From<u8> for u24 {
-    fn from(val: u8) -> Self {
-        u24(u32::from(val))
-    }
-}
-
-impl core::ops::Add<u24> for u24 {
-    type Output = u24;
-
-    #[inline]
-    fn add(self, other: Self) -> Self {
-        u24(self.0 + other.0)
-    }
-}
-
-impl core::ops::Sub<u24> for u24 {
-    type Output = u24;
-
-    #[inline]
-    fn sub(self, other: Self) -> Self {
-        u24(self.0 - other.0)
-    }
-}
-
-impl core::ops::Mul<u24> for u24 {
-    type Output = u24;
-
-    #[inline]
-    fn mul(self, other: Self) -> Self {
-        u24(self.0 * other.0)
-    }
-}
-
-impl core::ops::Div<u24> for u24 {
-    type Output = u24;
-
-    #[inline]
-    fn div(self, other: Self) -> Self {
-        u24(self.0 / other.0)
-    }
-}
-
-impl core::ops::Not for u24 {
-    type Output = u24;
-
-    #[inline]
-    fn not(self) -> Self {
-        u24(!self.0)
-    }
-}
-
-impl core::ops::Rem<u24> for u24 {
-    type Output = u24;
-
-    #[inline]
-    fn rem(self, other: Self) -> Self {
-        u24(self.0 % other.0)
-    }
-}
-
-impl core::ops::Shl<u24> for u24 {
-    type Output = u24;
-
-    #[inline]
-    fn shl(self, other: Self) -> Self {
-        u24(self.0 << other.0)
-    }
-}
-
-impl core::ops::Shr<u24> for u24 {
-    type Output = u24;
-
-    #[inline]
-    fn shr(self, other: Self) -> Self {
-        u24(self.0 >> other.0)
-    }
-}
-
-impl_shifts! { u24, u8 }
-impl_shifts! { u24, u16 }
-impl_shifts! { u24, u32 }
-impl_shifts! { u24, u64 }
-impl_shifts! { u24, u128 }
-impl_shifts! { u24, usize }
-
-impl_shifts! { u24, i8 }
-impl_shifts! { u24, i16 }
-impl_shifts! { u24, i32 }
-impl_shifts! { u24, i64 }
-impl_shifts! { u24, i128 }
-impl_shifts! { u24, isize }
-
-impl core::ops::BitAnd<u24> for u24 {
-    type Output = u24;
-
-    #[inline]
-    fn bitand(self, other: Self) -> Self {
-        u24(self.0 & other.0)
-    }
-}
-
-impl core::ops::BitOr<u24> for u24 {
-    type Output = u24;
-
-    #[inline]
-    fn bitor(self, other: Self) -> Self {
-        u24(self.0 | other.0)
-    }
-}
-
-impl core::ops::BitXor<u24> for u24 {
-    type Output = u24;
-
-    #[inline]
-    fn bitxor(self, other: Self) -> Self {
-        u24(self.0 ^ other.0)
-    }
-}
+impl_int24! { i24, i32, 8_388_607, -8_388_608, clamp_i24, [i16, i8] }
+impl_int24! { u24, u32, 16_777_215, 0, clamp_u24, [u16, u8] }
 
 mod sealed {
     /// A marker trait for indicating 1-byte alignment. This trait is sealed to prevent external
@@ -630,192 +385,36 @@ pub trait SampleBytes: Sample {
     fn to_be_sample_bytes(self) -> Self::RawType;
 }
 
-impl SampleBytes for u8 {
-    type RawType = [u8; 1];
+macro_rules! impl_sample_bytes {
+    ($t:ty, $n:literal) => {
+        impl SampleBytes for $t {
+            type RawType = [u8; $n];
 
-    #[inline(always)]
-    fn to_ne_sample_bytes(self) -> Self::RawType {
-        self.to_ne_bytes()
-    }
+            #[inline(always)]
+            fn to_ne_sample_bytes(self) -> Self::RawType {
+                self.to_ne_bytes()
+            }
 
-    #[inline(always)]
-    fn to_le_sample_bytes(self) -> Self::RawType {
-        self.to_le_bytes()
-    }
+            #[inline(always)]
+            fn to_le_sample_bytes(self) -> Self::RawType {
+                self.to_le_bytes()
+            }
 
-    #[inline(always)]
-    fn to_be_sample_bytes(self) -> Self::RawType {
-        self.to_be_bytes()
-    }
+            #[inline(always)]
+            fn to_be_sample_bytes(self) -> Self::RawType {
+                self.to_be_bytes()
+            }
+        }
+    };
 }
 
-impl SampleBytes for u16 {
-    type RawType = [u8; 2];
-
-    #[inline(always)]
-    fn to_ne_sample_bytes(self) -> Self::RawType {
-        self.to_ne_bytes()
-    }
-
-    #[inline(always)]
-    fn to_le_sample_bytes(self) -> Self::RawType {
-        self.to_le_bytes()
-    }
-
-    #[inline(always)]
-    fn to_be_sample_bytes(self) -> Self::RawType {
-        self.to_be_bytes()
-    }
-}
-
-impl SampleBytes for u24 {
-    type RawType = [u8; 3];
-
-    #[inline(always)]
-    fn to_ne_sample_bytes(self) -> Self::RawType {
-        self.to_ne_bytes()
-    }
-
-    #[inline(always)]
-    fn to_le_sample_bytes(self) -> Self::RawType {
-        self.to_le_bytes()
-    }
-
-    #[inline(always)]
-    fn to_be_sample_bytes(self) -> Self::RawType {
-        self.to_be_bytes()
-    }
-}
-
-impl SampleBytes for u32 {
-    type RawType = [u8; 4];
-
-    #[inline(always)]
-    fn to_ne_sample_bytes(self) -> Self::RawType {
-        self.to_ne_bytes()
-    }
-
-    #[inline(always)]
-    fn to_le_sample_bytes(self) -> Self::RawType {
-        self.to_le_bytes()
-    }
-
-    #[inline(always)]
-    fn to_be_sample_bytes(self) -> Self::RawType {
-        self.to_be_bytes()
-    }
-}
-
-impl SampleBytes for i8 {
-    type RawType = [u8; 1];
-
-    #[inline(always)]
-    fn to_ne_sample_bytes(self) -> Self::RawType {
-        self.to_ne_bytes()
-    }
-
-    #[inline(always)]
-    fn to_le_sample_bytes(self) -> Self::RawType {
-        self.to_le_bytes()
-    }
-
-    #[inline(always)]
-    fn to_be_sample_bytes(self) -> Self::RawType {
-        self.to_be_bytes()
-    }
-}
-
-impl SampleBytes for i16 {
-    type RawType = [u8; 2];
-
-    #[inline(always)]
-    fn to_ne_sample_bytes(self) -> Self::RawType {
-        self.to_ne_bytes()
-    }
-
-    #[inline(always)]
-    fn to_le_sample_bytes(self) -> Self::RawType {
-        self.to_le_bytes()
-    }
-
-    #[inline(always)]
-    fn to_be_sample_bytes(self) -> Self::RawType {
-        self.to_be_bytes()
-    }
-}
-
-impl SampleBytes for i24 {
-    type RawType = [u8; 3];
-
-    #[inline(always)]
-    fn to_ne_sample_bytes(self) -> Self::RawType {
-        self.to_ne_bytes()
-    }
-
-    #[inline(always)]
-    fn to_le_sample_bytes(self) -> Self::RawType {
-        self.to_le_bytes()
-    }
-
-    #[inline(always)]
-    fn to_be_sample_bytes(self) -> Self::RawType {
-        self.to_be_bytes()
-    }
-}
-
-impl SampleBytes for i32 {
-    type RawType = [u8; 4];
-
-    #[inline(always)]
-    fn to_ne_sample_bytes(self) -> Self::RawType {
-        self.to_ne_bytes()
-    }
-
-    #[inline(always)]
-    fn to_le_sample_bytes(self) -> Self::RawType {
-        self.to_le_bytes()
-    }
-
-    #[inline(always)]
-    fn to_be_sample_bytes(self) -> Self::RawType {
-        self.to_be_bytes()
-    }
-}
-
-impl SampleBytes for f32 {
-    type RawType = [u8; 4];
-
-    #[inline(always)]
-    fn to_ne_sample_bytes(self) -> Self::RawType {
-        self.to_ne_bytes()
-    }
-
-    #[inline(always)]
-    fn to_le_sample_bytes(self) -> Self::RawType {
-        self.to_le_bytes()
-    }
-
-    #[inline(always)]
-    fn to_be_sample_bytes(self) -> Self::RawType {
-        self.to_be_bytes()
-    }
-}
-
-impl SampleBytes for f64 {
-    type RawType = [u8; 8];
-
-    #[inline(always)]
-    fn to_ne_sample_bytes(self) -> Self::RawType {
-        self.to_ne_bytes()
-    }
-
-    #[inline(always)]
-    fn to_le_sample_bytes(self) -> Self::RawType {
-        self.to_le_bytes()
-    }
-
-    #[inline(always)]
-    fn to_be_sample_bytes(self) -> Self::RawType {
-        self.to_be_bytes()
-    }
-}
+impl_sample_bytes! { u8, 1 }
+impl_sample_bytes! { u16, 2 }
+impl_sample_bytes! { u24, 3 }
+impl_sample_bytes! { u32, 4 }
+impl_sample_bytes! { i8, 1 }
+impl_sample_bytes! { i16, 2 }
+impl_sample_bytes! { i24, 3 }
+impl_sample_bytes! { i32, 4 }
+impl_sample_bytes! { f32, 4 }
+impl_sample_bytes! { f64, 8 }

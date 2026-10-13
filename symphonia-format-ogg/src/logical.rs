@@ -504,16 +504,17 @@ impl LogicalStream {
 
         // If this is the last page, update the codec parameters.
         if page.header.is_last_page {
-            // TODO: What if this is negative?
             // TODO: Bounds are in timestamp units, not number of frames. Fix this up because it
             // only works for audio codecs.
-            let num_frames = bound.ts.get() as u64;
+            let num_frames = u64::try_from(bound.ts.get()).ok();
             let num_padding_frames = bound.discard.get() as u32;
 
             let track = self.mapper.track_mut();
 
-            track.with_num_frames(num_frames);
-            track.with_duration(Duration::from(num_frames));
+            if let Some(num_frames) = num_frames {
+                track.with_num_frames(num_frames);
+                track.with_duration(Duration::from(num_frames));
+            }
 
             if num_padding_frames > 0 {
                 track.with_padding(num_padding_frames);
@@ -590,17 +591,14 @@ impl LogicalStream {
             Box::from(packet_buf)
         }
         else {
-            let mut buf = vec![0u8; self.part_len + packet_buf.len()];
-
-            // Split packet buffer into two portions: saved and new.
-            let (vec0, vec1) = buf.split_at_mut(self.part_len);
+            let mut buf = Vec::with_capacity(self.part_len + packet_buf.len());
 
             // Copy and consume the saved partial packet.
-            vec0.copy_from_slice(&self.part_buf[..self.part_len]);
+            buf.extend_from_slice(&self.part_buf[..self.part_len]);
             self.part_len = 0;
 
             // Read the remainder of the partial packet from the page.
-            vec1.copy_from_slice(packet_buf);
+            buf.extend_from_slice(packet_buf);
 
             buf.into_boxed_slice()
         }

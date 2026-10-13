@@ -1,13 +1,13 @@
 // Integration tests for DSD format parsers
 
-use symphonia_core::formats::{FormatOptions, FormatReader};
-use symphonia_core::io::MediaSourceStream;
-use symphonia_format_dsd::{DsfReader, DffReader};
 use std::io::Cursor;
-use symphonia_core::formats::{SeekMode, SeekTo};
-use symphonia_core::units::Timestamp;
-use symphonia_core::codecs::audio::{ChannelDataLayout, BitOrder};
 use symphonia_core::audio::{Channels, Position};
+use symphonia_core::codecs::audio::{BitOrder, ChannelDataLayout};
+use symphonia_core::formats::FormatReader;
+use symphonia_core::formats::{SeekMode, SeekTo};
+use symphonia_core::io::MediaSourceStream;
+use symphonia_core::units::Timestamp;
+use symphonia_format_dsd::{DffReader, DsfReader};
 
 // Helper to create a MediaSourceStream from bytes
 fn create_stream(data: Vec<u8>) -> MediaSourceStream<'static> {
@@ -46,7 +46,7 @@ fn test_dsf_invalid_header_size() {
 
 #[test]
 fn test_dsf_unsupported_format_version() {
-    let mut data = vec![
+    let data = vec![
         // DSD header
         b'D', b'S', b'D', b' ', // Magic
         0x1C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // chunk size = 28
@@ -65,16 +65,13 @@ fn test_dsf_unsupported_format_version() {
 
 #[test]
 fn test_dsf_invalid_channel_count() {
-    let mut data = vec![
+    let data = vec![
         // DSD header
-        b'D', b'S', b'D', b' ',
-        0x1C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        b'D', b'S', b'D', b' ', 0x1C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         // fmt chunk
-        b'f', b'm', b't', b' ',
-        0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x01, 0x00, 0x00, 0x00, // format version = 1
+        b'f', b'm', b't', b' ', 0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+        0x00, // format version = 1
         0x00, 0x00, 0x00, 0x00, // format ID = 0 (DSD Raw)
         0x02, 0x00, 0x00, 0x00, // channel type = 2 (stereo)
         0x00, 0x00, 0x00, 0x00, // channel num = 0 (INVALID)
@@ -87,16 +84,13 @@ fn test_dsf_invalid_channel_count() {
 
 #[test]
 fn test_dsf_zero_block_size() {
-    let mut data = vec![
+    let data = vec![
         // DSD header
-        b'D', b'S', b'D', b' ',
-        0x1C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        b'D', b'S', b'D', b' ', 0x1C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         // fmt chunk
-        b'f', b'm', b't', b' ',
-        0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x01, 0x00, 0x00, 0x00, // format version = 1
+        b'f', b'm', b't', b' ', 0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+        0x00, // format version = 1
         0x00, 0x00, 0x00, 0x00, // format ID = 0
         0x02, 0x00, 0x00, 0x00, // channel type = 2
         0x02, 0x00, 0x00, 0x00, // channel num = 2
@@ -140,10 +134,8 @@ fn test_dff_invalid_form_type() {
 #[test]
 fn test_dff_missing_fver_chunk() {
     let data = vec![
-        b'F', b'R', b'M', b'8',
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20,
-        b'D', b'S', b'D', b' ',
-        // Missing FVER chunk - directly to PROP
+        b'F', b'R', b'M', b'8', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, b'D', b'S', b'D',
+        b' ', // Missing FVER chunk - directly to PROP
         b'P', b'R', b'O', b'P',
     ];
 
@@ -154,32 +146,23 @@ fn test_dff_missing_fver_chunk() {
 
 #[test]
 fn test_dff_dst_compression_error() {
-    let mut data = vec![
-        b'F', b'R', b'M', b'8',
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
-        b'D', b'S', b'D', b' ',
-        // FVER chunk
-        b'F', b'V', b'E', b'R',
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04,
-        0x01, 0x05, 0x00, 0x00, // version 1.5.0.0
+    let data = vec![
+        b'F', b'R', b'M', b'8', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, b'D', b'S', b'D',
+        b' ', // FVER chunk
+        b'F', b'V', b'E', b'R', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x01, 0x05, 0x00,
+        0x00, // version 1.5.0.0
         // PROP chunk
-        b'P', b'R', b'O', b'P',
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30,
-        b'S', b'N', b'D', b' ',
-        // FS chunk
-        b'F', b'S', b' ', b' ',
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04,
-        0x00, 0x10, 0x2B, 0x00, // 2822400 Hz
+        b'P', b'R', b'O', b'P', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, b'S', b'N', b'D',
+        b' ', // FS chunk
+        b'F', b'S', b' ', b' ', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x10, 0x2B,
+        0x00, // 2822400 Hz
         // CHNL chunk
-        b'C', b'H', b'N', b'L',
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0A,
-        0x00, 0x02, // 2 channels
-        b'S', b'L', b'F', b'T',
-        b'S', b'R', b'G', b'T',
+        b'C', b'H', b'N', b'L', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0A, 0x00,
+        0x02, // 2 channels
+        b'S', b'L', b'F', b'T', b'S', b'R', b'G', b'T',
         // CMPR chunk with DST compression
-        b'C', b'M', b'P', b'R',
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04,
-        b'D', b'S', b'T', b' ', // DST compression (unsupported)
+        b'C', b'M', b'P', b'R', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, b'D', b'S', b'T',
+        b' ', // DST compression (unsupported)
     ];
 
     let stream = create_stream(data);
@@ -195,32 +178,20 @@ fn test_dff_dst_compression_error() {
 
 #[test]
 fn test_dff_invalid_channel_count() {
-    let mut data = vec![
-        b'F', b'R', b'M', b'8',
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
-        b'D', b'S', b'D', b' ',
-        // FVER chunk
-        b'F', b'V', b'E', b'R',
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04,
-        0x01, 0x05, 0x00, 0x00,
-        // PROP chunk
-        b'P', b'R', b'O', b'P',
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2C,
-        b'S', b'N', b'D', b' ',
-        // FS chunk
-        b'F', b'S', b' ', b' ',
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04,
-        0x00, 0x10, 0x2B, 0x00,
-        // CHNL chunk with invalid count
-        b'C', b'H', b'N', b'L',
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0A,
-        0x00, 0x07, // 7 channels (invalid, max is 6)
-        b'S', b'L', b'F', b'T',
-        b'S', b'R', b'G', b'T',
-        // CMPR chunk
-        b'C', b'M', b'P', b'R',
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04,
-        b'D', b'S', b'D', b' ',
+    let data = vec![
+        b'F', b'R', b'M', b'8', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, b'D', b'S', b'D',
+        b' ', // FVER chunk
+        b'F', b'V', b'E', b'R', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x01, 0x05, 0x00,
+        0x00, // PROP chunk
+        b'P', b'R', b'O', b'P', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2C, b'S', b'N', b'D',
+        b' ', // FS chunk
+        b'F', b'S', b' ', b' ', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x10, 0x2B,
+        0x00, // CHNL chunk with invalid count
+        b'C', b'H', b'N', b'L', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0A, 0x00,
+        0x07, // 7 channels (invalid, max is 6)
+        b'S', b'L', b'F', b'T', b'S', b'R', b'G', b'T', // CMPR chunk
+        b'C', b'M', b'P', b'R', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, b'D', b'S', b'D',
+        b' ',
     ];
 
     let stream = create_stream(data);
@@ -228,21 +199,18 @@ fn test_dff_invalid_channel_count() {
     assert!(result.is_err());
 }
 
-#[cfg(test)]
-mod dff_info_tests {
-    use super::*;
-
-    #[test]
-    fn test_dff_text_decoding() {
-        // This is tested in the dff_info module unit tests
-        // Just a placeholder to show INFO chunk parsing would be tested
-    }
-}
 // ---------------------------------------------------------------------------
 // Byte-builder helpers
 // ---------------------------------------------------------------------------
 
-fn build_dsf(channel_type: u32, channels: u32, rate: u32, block: u32, sample_count: u64, data: &[u8]) -> Vec<u8> {
+fn build_dsf(
+    channel_type: u32,
+    channels: u32,
+    rate: u32,
+    block: u32,
+    sample_count: u64,
+    data: &[u8],
+) -> Vec<u8> {
     let mut v = Vec::new();
     v.extend_from_slice(b"DSD ");
     v.extend_from_slice(&28u64.to_le_bytes());
@@ -265,7 +233,9 @@ fn build_dsf(channel_type: u32, channels: u32, rate: u32, block: u32, sample_cou
     v
 }
 
-fn be_u64(n: u64) -> [u8; 8] { n.to_be_bytes() }
+fn be_u64(n: u64) -> [u8; 8] {
+    n.to_be_bytes()
+}
 
 fn diin(title: &str, artist: &str) -> Vec<u8> {
     let mut inner = Vec::new();
@@ -274,7 +244,9 @@ fn diin(title: &str, artist: &str) -> Vec<u8> {
         inner.extend_from_slice(&be_u64(4 + txt.len() as u64));
         inner.extend_from_slice(&(txt.len() as u32).to_be_bytes());
         inner.extend_from_slice(txt.as_bytes());
-        if txt.len() % 2 == 1 { inner.push(0); }
+        if txt.len() % 2 == 1 {
+            inner.push(0);
+        }
     }
     let mut v = Vec::new();
     v.extend_from_slice(b"DIIN");
@@ -292,7 +264,9 @@ fn comt(text: &str) -> Vec<u8> {
     body.extend_from_slice(&[0, 0]); // cmtRef
     body.extend_from_slice(&(text.len() as u32).to_be_bytes());
     body.extend_from_slice(text.as_bytes());
-    if text.len() % 2 == 1 { body.push(0); }
+    if text.len() % 2 == 1 {
+        body.push(0);
+    }
     let mut v = Vec::new();
     v.extend_from_slice(b"COMT");
     v.extend_from_slice(&be_u64(body.len() as u64));
@@ -300,25 +274,50 @@ fn comt(text: &str) -> Vec<u8> {
     v
 }
 
-fn build_dff(channels: u16, rate: u32, ch_ids: &[&[u8; 4]], data: &[u8], trailer: &[u8]) -> Vec<u8> {
+fn build_dff(
+    channels: u16,
+    rate: u32,
+    ch_ids: &[&[u8; 4]],
+    data: &[u8],
+    trailer: &[u8],
+) -> Vec<u8> {
     let mut prop = Vec::new();
     prop.extend_from_slice(b"SND ");
-    prop.extend_from_slice(b"FS  "); prop.extend_from_slice(&be_u64(4)); prop.extend_from_slice(&rate.to_be_bytes());
+    prop.extend_from_slice(b"FS  ");
+    prop.extend_from_slice(&be_u64(4));
+    prop.extend_from_slice(&rate.to_be_bytes());
     let chnl = 2u64 + 4 * ch_ids.len() as u64;
-    prop.extend_from_slice(b"CHNL"); prop.extend_from_slice(&be_u64(chnl));
+    prop.extend_from_slice(b"CHNL");
+    prop.extend_from_slice(&be_u64(chnl));
     prop.extend_from_slice(&channels.to_be_bytes());
-    for id in ch_ids { prop.extend_from_slice(*id); }
-    if chnl % 2 == 1 { prop.push(0); }
-    prop.extend_from_slice(b"CMPR"); prop.extend_from_slice(&be_u64(4)); prop.extend_from_slice(b"DSD ");
+    for id in ch_ids {
+        prop.extend_from_slice(*id);
+    }
+    if chnl % 2 == 1 {
+        prop.push(0);
+    }
+    prop.extend_from_slice(b"CMPR");
+    prop.extend_from_slice(&be_u64(4));
+    prop.extend_from_slice(b"DSD ");
     let mut v = Vec::new();
     v.extend_from_slice(b"FRM8");
     v.extend_from_slice(&be_u64(0)); // patched below
     v.extend_from_slice(b"DSD ");
-    v.extend_from_slice(b"FVER"); v.extend_from_slice(&be_u64(4)); v.extend_from_slice(&0x0100_0000u32.to_be_bytes());
-    v.extend_from_slice(b"PROP"); v.extend_from_slice(&be_u64(prop.len() as u64)); v.extend_from_slice(&prop);
-    if prop.len() % 2 == 1 { v.push(0); }
-    v.extend_from_slice(b"DSD "); v.extend_from_slice(&be_u64(data.len() as u64)); v.extend_from_slice(data);
-    if data.len() % 2 == 1 { v.push(0); }
+    v.extend_from_slice(b"FVER");
+    v.extend_from_slice(&be_u64(4));
+    v.extend_from_slice(&0x0100_0000u32.to_be_bytes());
+    v.extend_from_slice(b"PROP");
+    v.extend_from_slice(&be_u64(prop.len() as u64));
+    v.extend_from_slice(&prop);
+    if prop.len() % 2 == 1 {
+        v.push(0);
+    }
+    v.extend_from_slice(b"DSD ");
+    v.extend_from_slice(&be_u64(data.len() as u64));
+    v.extend_from_slice(data);
+    if data.len() % 2 == 1 {
+        v.push(0);
+    }
     v.extend_from_slice(trailer);
     let total = v.len() as u64 - 12;
     v[4..12].copy_from_slice(&total.to_be_bytes());
@@ -458,29 +457,28 @@ fn test_dff_metadata_diin_comt() {
     let stream = create_stream(raw);
     let mut reader = DffReader::try_new(stream, Default::default()).unwrap();
 
-    let rev = reader.metadata().current().cloned()
-        .expect("expected a metadata revision");
+    let rev = reader.metadata().current().cloned().expect("expected a metadata revision");
     let tags = &rev.media.tags;
 
-    let title_tag = tags.iter().find(|t| t.raw.key == "TITLE")
-        .expect("TITLE tag missing");
+    let title_tag = tags.iter().find(|t| t.raw.key == "TITLE").expect("TITLE tag missing");
     assert!(
         format!("{}", title_tag.raw.value).contains("My Title"),
-        "TITLE value did not contain 'My Title': {:?}", title_tag.raw.value
+        "TITLE value did not contain 'My Title': {:?}",
+        title_tag.raw.value
     );
 
-    let artist_tag = tags.iter().find(|t| t.raw.key == "ARTIST")
-        .expect("ARTIST tag missing");
+    let artist_tag = tags.iter().find(|t| t.raw.key == "ARTIST").expect("ARTIST tag missing");
     assert!(
         format!("{}", artist_tag.raw.value).contains("My Artist"),
-        "ARTIST value did not contain 'My Artist': {:?}", artist_tag.raw.value
+        "ARTIST value did not contain 'My Artist': {:?}",
+        artist_tag.raw.value
     );
 
-    let comment_tag = tags.iter().find(|t| t.raw.key == "COMMENT")
-        .expect("COMMENT tag missing");
+    let comment_tag = tags.iter().find(|t| t.raw.key == "COMMENT").expect("COMMENT tag missing");
     assert!(
         format!("{}", comment_tag.raw.value).contains("Hello"),
-        "COMMENT value did not contain 'Hello': {:?}", comment_tag.raw.value
+        "COMMENT value did not contain 'Hello': {:?}",
+        comment_tag.raw.value
     );
 }
 
@@ -585,12 +583,16 @@ fn test_dff_seek_is_in_samples_per_channel() {
     assert_eq!(packet.data.len() % 2, 0);
 
     // Beyond the end of the data is out-of-range.
-    assert!(reader
-        .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(1024), track_id: 0 })
-        .is_err());
-    assert!(reader
-        .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(-1), track_id: 0 })
-        .is_err());
+    assert!(
+        reader
+            .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(1024), track_id: 0 })
+            .is_err()
+    );
+    assert!(
+        reader
+            .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(-1), track_id: 0 })
+            .is_err()
+    );
 }
 
 /// DSF: the requested timestamp is reported as is.
@@ -605,9 +607,11 @@ fn test_dsf_seek_reports_required_ts() {
     assert_eq!(result.required_ts.get(), 200);
     assert_eq!(result.actual_ts.get(), 128);
 
-    assert!(reader
-        .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(-5), track_id: 0 })
-        .is_err());
+    assert!(
+        reader
+            .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(-5), track_id: 0 })
+            .is_err()
+    );
 }
 
 /// The timeline of the tracks is in DSD samples per channel, at the DSD rate, for both formats.
@@ -623,4 +627,3 @@ fn test_timeline_is_in_dsd_samples() {
     let tb = track.time_base.unwrap();
     assert_eq!(tb.calc_time(Timestamp::new(2822400)).unwrap().as_secs_f64(), 1.0);
 }
-

@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 //! Times the decoding of an AAC file (the packets are read first, so only the decoder is timed).
 //!
 //! Usage: `decode_bench <input> [adts|loas|mp4] [repetitions]`

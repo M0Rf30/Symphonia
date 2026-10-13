@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 use symphonia_codec_aac::{AacDecoder, AdtsReader, LoasReader};
 use symphonia_core::codecs::audio::{
     AudioCodecParameters, AudioDecoder, AudioDecoderOptions, well_known::CODEC_ID_AAC,
@@ -19,13 +21,8 @@ fn test_decode(data: Vec<u8>) -> symphonia_core::errors::Result<()> {
         &AudioDecoderOptions::default(),
     )?;
 
-    loop {
-        match reader.next_packet()? {
-            Some(packet) => {
-                let _ = decoder.decode(&packet);
-            }
-            None => break,
-        };
+    while let Some(packet) = reader.next_packet()? {
+        let _ = decoder.decode(&packet);
     }
 
     Ok(())

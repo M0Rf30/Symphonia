@@ -18,20 +18,9 @@
 
 use crate::celt::bands::{SPREAD_FACTOR, SPREAD_NONE};
 use crate::celt::cwrs::decode_pulses;
-use crate::celt::modes::{celt_cos_norm, celt_div, celt_rsqrt_norm, EPSILON};
+use crate::celt::modes::{EPSILON, celt_cos_norm, celt_div, celt_rsqrt_norm};
+use crate::celt::pitch::celt_inner_prod;
 use crate::range::RangeDecoder;
-
-/// C: `celt_inner_prod_c` (`celt/pitch.h`), the generic (non-SIMD) scalar dot product. A
-/// private copy here (not `crate::celt::pitch`, owned by "CeltSynthesis") since `vq.rs`/
-/// `bands.rs` only ever need this trivial O(N) form, never the SIMD-dispatched variants that
-/// live in the pitch-search/LPC machinery.
-pub(crate) fn celt_inner_prod(x: &[f32], y: &[f32], n: i32) -> f32 {
-    let mut sum = 0.0f32;
-    for i in 0..n as usize {
-        sum += x[i] * y[i];
-    }
-    sum
-}
 
 /// C: `exp_rotation1`. Applies a 2-D (Givens) rotation by `(c, s)` in-place to pairs of
 /// elements of `x` spaced `stride` apart.
@@ -149,7 +138,15 @@ fn extract_collapse_mask(iy: &[i32], n: i32, b: i32) -> u32 {
 
 /// C: `alg_unquant`. Decodes and denormalizes `n`-dimensional shape `x` with `k` pulses and
 /// gain `gain`; returns the per-`blocks`-subblock collapse mask.
-pub fn alg_unquant(x: &mut [f32], n: i32, k: i32, spread: i32, blocks: i32, gain: f32, rd: &mut RangeDecoder<'_>) -> u32 {
+pub fn alg_unquant(
+    x: &mut [f32],
+    n: i32,
+    k: i32,
+    spread: i32,
+    blocks: i32,
+    gain: f32,
+    rd: &mut RangeDecoder<'_>,
+) -> u32 {
     debug_assert!(k > 0);
     debug_assert!(n > 1);
     // `n` is a single (post-split) PVQ band width, always <= a full frame's worth of samples for
@@ -179,6 +176,11 @@ fn alg_unquant_cap<const CAP: usize>(
     let mut iy_buf = [0i32; CAP];
     let iy = &mut iy_buf[..n as usize];
     let ryy = decode_pulses(iy, n, k, rd);
+    if ryy <= 0.0 {
+        // Only an out-of-table `(n, k)` yields an empty pulse vector; emit an empty band.
+        x[..n as usize].fill(0.0);
+        return 0;
+    }
     normalise_residual(iy, x, n, ryy, gain);
     exp_rotation(x, n, -1, blocks, k, spread);
     extract_collapse_mask(iy, n, blocks)
@@ -186,10 +188,10 @@ fn alg_unquant_cap<const CAP: usize>(
 
 /// C: `renormalise_vector`. Rescales `x` (length `n`) to unit norm times `gain`.
 pub fn renormalise_vector(x: &mut [f32], n: i32, gain: f32) {
-    let e = EPSILON + celt_inner_prod(x, x, n);
+    let e = EPSILON + celt_inner_prod(x, x, n as usize);
     let g = celt_rsqrt_norm(e) * gain;
-    for i in 0..n as usize {
-        x[i] *= g;
+    for v in x[..n as usize].iter_mut() {
+        *v *= g;
     }
 }
 
@@ -207,12 +209,14 @@ pub fn stereo_itheta(x: &[f32], y: &[f32], stereo: bool, n: i32) -> i32 {
         }
     }
     else {
-        emid += celt_inner_prod(x, x, n);
-        eside += celt_inner_prod(y, y, n);
+        emid += celt_inner_prod(x, x, n as usize);
+        eside += celt_inner_prod(y, y, n as usize);
     }
     let mid = crate::celt::modes::celt_sqrt(emid);
     let side = crate::celt::modes::celt_sqrt(eside);
-    (0.5 + 16384.0 * 0.63662 * crate::celt::modes::fast_atan2f(side, mid)).floor() as i32
+    #[allow(clippy::approx_constant)] // C uses the truncated 0.63662 literal
+    let scale = 0.63662;
+    (0.5 + 16384.0 * scale * crate::celt::modes::fast_atan2f(side, mid)).floor() as i32
 }
 
 #[cfg(test)]
@@ -228,12 +232,16 @@ mod tests {
     fn exp_rotation_round_trips() {
         for &spread in &[SPREAD_LIGHT, SPREAD_NORMAL, SPREAD_AGGRESSIVE] {
             for &(len, stride, k) in &[(8, 1, 1), (16, 2, 2), (44, 1, 3), (44, 4, 1)] {
-                let original: Vec<f32> = (0..len).map(|i| ((i * 37 + 11) % 23) as f32 - 11.0).collect();
+                let original: Vec<f32> =
+                    (0..len).map(|i| ((i * 37 + 11) % 23) as f32 - 11.0).collect();
                 let mut x = original.clone();
                 exp_rotation(&mut x, len, -1, stride, k, spread);
                 exp_rotation(&mut x, len, 1, stride, k, spread);
                 for (a, b) in x.iter().zip(original.iter()) {
-                    assert!((a - b).abs() < 1e-3, "{a} vs {b} (spread={spread}, len={len}, stride={stride}, k={k})");
+                    assert!(
+                        (a - b).abs() < 1e-3,
+                        "{a} vs {b} (spread={spread}, len={len}, stride={stride}, k={k})"
+                    );
                 }
             }
         }
@@ -279,8 +287,14 @@ mod tests {
                     let mut x = vec![0f32; n as usize];
                     let cm = alg_unquant(&mut x, n, k, spread, blocks, gain, &mut rd);
                     let norm: f32 = x.iter().map(|v| v * v).sum::<f32>().sqrt();
-                    assert!((norm - gain).abs() < 1e-2, "N={n} K={k} spread={spread}: norm={norm} want {gain}");
-                    assert!(cm <= (1u32 << blocks.max(1)) - 1 || blocks <= 1, "cm={cm} out of range for blocks={blocks}");
+                    assert!(
+                        (norm - gain).abs() < 1e-2,
+                        "N={n} K={k} spread={spread}: norm={norm} want {gain}"
+                    );
+                    assert!(
+                        cm < (1u32 << blocks.max(1)) || blocks <= 1,
+                        "cm={cm} out of range for blocks={blocks}"
+                    );
                 }
             }
         }
