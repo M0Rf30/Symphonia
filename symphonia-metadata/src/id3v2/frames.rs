@@ -219,7 +219,7 @@ pub fn min_frame_size(major_version: u8) -> u64 {
 }
 
 lazy_static! {
-    static ref LEGACY_FRAME_MAP: HashMap<&'static [u8; 3], &'static [u8; 4]> = {
+    pub(super) static ref LEGACY_FRAME_MAP: HashMap<&'static [u8; 3], &'static [u8; 4]> = {
         let mut m = HashMap::new();
         m.insert(b"BUF", b"RBUF");
         m.insert(b"CNT", b"PCNT");
@@ -412,7 +412,7 @@ lazy_static! {
 }
 
 /// Validates that a frame id only contains uppercase letters (A-Z), and digits (0-9).
-fn validate_frame_id(id: &[u8]) -> bool {
+pub(super) fn validate_frame_id(id: &[u8]) -> bool {
     // Only frame IDs with 3 or 4 characters are valid.
     if id.len() != 4 && id.len() != 3 {
         return false;
@@ -711,7 +711,7 @@ pub fn read_id3v2p3_frame(reader: &mut BufReader<'_>) -> Result<FrameResult> {
 ///  * If any size byte has its most significant bit set, the size cannot be syncsafe.
 ///  * If the syncsafe size does not end at a frame, padding, or the end of the tag, but the plain
 ///    size does, then the plain size is used.
-fn id3v2p4_frame_size(raw: [u8; 4], after_header: &[u8]) -> u32 {
+pub(super) fn id3v2p4_frame_size(raw: [u8; 4], after_header: &[u8]) -> u32 {
     let plain = u32::from_be_bytes(raw);
 
     if raw.iter().any(|b| b & 0x80 != 0) {

@@ -28,6 +28,8 @@ use log::{debug, trace, warn};
 mod frames;
 mod legacy_date;
 mod unsync;
+#[cfg(feature = "write")]
+pub mod write;
 
 #[cfg(test)]
 mod content_tests;

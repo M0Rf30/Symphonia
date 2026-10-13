@@ -32,6 +32,28 @@ pub fn get_genre_name(num: u8) -> Option<String> {
     GENRES.get(usize::from(num)).map(|genre| genre.to_string())
 }
 
+/// Try to get the ID3v1 genre number of a genre name (compared case-insensitively).
+#[cfg(feature = "write")]
+pub fn get_genre_index(name: &str) -> Option<u8> {
+    GENRES.iter().position(|genre| genre.eq_ignore_ascii_case(name.trim())).map(|i| i as u8)
+}
+
+/// Encode a character as a single byte of ISO-8859-1 text that is read back by
+/// [`decode_windows_1252_byte`] as the same character. Returns `None` if the character cannot be
+/// represented.
+#[cfg(feature = "write")]
+pub fn encode_windows_1252_char(c: char) -> Option<u8> {
+    match u32::from(c) {
+        // The C1 control codes are never written. Windows-1252 has printable characters there.
+        0x80..=0x9f => None,
+        u @ 0..=0xff => Some(u as u8),
+        _ if c != char::REPLACEMENT_CHARACTER => {
+            (0x80..=0x9fu8).find(|&b| decode_windows_1252_byte(b) == c)
+        }
+        _ => None,
+    }
+}
+
 const GENRES: &[&str] = &[
     // Standard Genres as per ID3v1 specificaation
     "Blues",
