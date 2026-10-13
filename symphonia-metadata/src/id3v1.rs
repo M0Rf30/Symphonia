@@ -212,6 +212,172 @@ impl MetadataReader for Id3v1Reader<'_> {
     }
 }
 
+/// ID3v1 tag serializer.
+#[cfg(feature = "write")]
+pub mod write {
+    //! Serialization of an ID3v1.1 tag from tags.
+
+    use symphonia_core::meta::{StandardTag, Tag};
+
+    use crate::utils::id3v1::{encode_windows_1252_char, get_genre_index};
+
+    /// The length of an ID3v1 tag in bytes.
+    pub const ID3V1_TAG_LEN: usize = 128;
+
+    /// The length of the ID3v1 "enhanced" tag ("TAG+") that may immediately precede an ID3v1 tag.
+    pub const ID3V1_ENHANCED_TAG_LEN: usize = super::ID3V1_ENHANCED_LEN;
+
+    /// Write `text` into `field`: encoded as Windows-1252 (characters that cannot be represented
+    /// become `?`), truncated to the size of the field and padded with NULs.
+    fn put_text(field: &mut [u8], text: &str) {
+        let encoded = text
+            .chars()
+            .filter(|&c| c != '\0')
+            .map(|c| encode_windows_1252_char(c).unwrap_or(b'?'));
+
+        for (dst, src) in field.iter_mut().zip(encoded) {
+            *dst = src;
+        }
+    }
+
+    /// Serialize the tags into a 128 byte ID3v1.1 tag.
+    ///
+    /// Only the tags that ID3v1 can hold are written: the title, artist, album, year, comment,
+    /// track number (ID3v1.1: a comment is then limited to 28 characters) and genre. Fields are
+    /// truncated to their size. The genre is written as the index of the ID3v1 genre of the same
+    /// name, or as unset (255) when the genre is not an ID3v1 genre. The first tag of each kind is
+    /// used.
+    pub fn serialize(tags: &[Tag]) -> [u8; ID3V1_TAG_LEN] {
+        let mut buf = [0u8; ID3V1_TAG_LEN];
+        buf[..3].copy_from_slice(b"TAG");
+        // Unset genre.
+        buf[127] = 255;
+
+        let mut year: Option<String> = None;
+        let mut track = None;
+        let mut comment = None;
+
+        for tag in tags {
+            match &tag.std {
+                Some(StandardTag::TrackTitle(v)) if buf[3] == 0 => put_text(&mut buf[3..33], v),
+                Some(StandardTag::Artist(v)) if buf[33] == 0 => put_text(&mut buf[33..63], v),
+                Some(StandardTag::Album(v)) if buf[63] == 0 => put_text(&mut buf[63..93], v),
+                Some(StandardTag::RecordingDate(v)) => {
+                    // A recording date is preferred to a year only.
+                    let digits: String = v.chars().take_while(char::is_ascii_digit).collect();
+                    if digits.len() == 4 && year.is_none() {
+                        year = Some(digits);
+                    }
+                }
+                Some(StandardTag::RecordingYear(v)) if year.is_none() => {
+                    year = Some(format!("{v:04}"));
+                }
+                Some(StandardTag::Comment(v)) if comment.is_none() => comment = Some(v.clone()),
+                Some(StandardTag::TrackNumber(v)) if track.is_none() => {
+                    track = u8::try_from(*v).ok().filter(|&t| t != 0);
+                }
+                Some(StandardTag::Genre(v)) if buf[127] == 255 => {
+                    if let Some(index) = get_genre_index(v) {
+                        buf[127] = index;
+                    }
+                }
+                _ => (),
+            }
+        }
+
+        if let Some(year) = year.filter(|y| y.len() == 4) {
+            buf[93..97].copy_from_slice(year.as_bytes());
+        }
+
+        // In ID3v1.1 the last byte of the comment is the track number, and the byte before it is 0.
+        match (comment, track) {
+            (comment, Some(track)) => {
+                if let Some(comment) = comment {
+                    put_text(&mut buf[97..125], &comment);
+                }
+                buf[126] = track;
+            }
+            (Some(comment), None) => put_text(&mut buf[97..127], &comment),
+            (None, None) => (),
+        }
+
+        buf
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::sync::Arc;
+
+        use symphonia_core::io::BufReader;
+        use symphonia_core::meta::{MetadataBuilder, StandardTag, Tag};
+
+        use super::serialize;
+        use crate::id3v1::{ID3V1_METADATA_INFO, read_id3v1};
+
+        fn std(tag: StandardTag) -> Tag {
+            Tag::new_std(symphonia_core::meta::RawTag::new("", ""), tag)
+        }
+
+        fn s(v: &str) -> Arc<String> {
+            Arc::new(v.to_string())
+        }
+
+        fn read(buf: &[u8; 128]) -> Vec<StandardTag> {
+            let mut builder = MetadataBuilder::new(ID3V1_METADATA_INFO);
+            read_id3v1(&mut BufReader::new(buf), None, &mut builder).unwrap();
+            builder.build().media.tags.into_iter().filter_map(|t| t.std).collect()
+        }
+
+        #[test]
+        fn verify_round_trip_with_track_and_genre() {
+            let tags = [
+                std(StandardTag::TrackTitle(s("Caf\u{e9} \u{20ac}uro"))),
+                std(StandardTag::Artist(s("Artist"))),
+                std(StandardTag::Album(s("Album"))),
+                std(StandardTag::RecordingDate(s("1999-12-31"))),
+                std(StandardTag::Comment(s("A comment that is longer than twenty-eight"))),
+                std(StandardTag::TrackNumber(7)),
+                std(StandardTag::Genre(s("rock"))),
+            ];
+
+            let buf = serialize(&tags);
+            assert_eq!(&buf[..3], b"TAG");
+            assert_eq!(buf[127], 17);
+            assert_eq!(buf[125], 0);
+
+            let read = read(&buf);
+            assert!(read.contains(&StandardTag::TrackTitle(s("Caf\u{e9} \u{20ac}uro"))));
+            assert!(read.contains(&StandardTag::Artist(s("Artist"))));
+            assert!(read.contains(&StandardTag::Album(s("Album"))));
+            assert!(read.contains(&StandardTag::RecordingYear(1999)));
+            assert!(read.contains(&StandardTag::TrackNumber(7)));
+            assert!(read.contains(&StandardTag::Genre(s("Rock"))));
+            // The comment is truncated to 28 characters in ID3v1.1.
+            assert!(read.contains(&StandardTag::Comment(s("A comment that is longer tha"))));
+        }
+
+        #[test]
+        fn verify_long_comment_without_track_uses_30_characters() {
+            let buf = serialize(&[std(StandardTag::Comment(s("0123456789012345678901234567890")))]);
+            assert!(read(&buf).contains(&StandardTag::Comment(s("012345678901234567890123456789"))));
+            assert_eq!(buf[127], 255);
+        }
+
+        #[test]
+        fn verify_unrepresentable_characters_and_unknown_genre() {
+            let buf = serialize(&[
+                std(StandardTag::TrackTitle(s("\u{65e5}\u{672c}"))),
+                std(StandardTag::Genre(s("Not A Genre"))),
+                std(StandardTag::TrackNumber(300)),
+            ]);
+            assert_eq!(&buf[3..6], b"??\0");
+            assert_eq!(buf[127], 255);
+            // A track number that does not fit is not written.
+            assert_eq!(buf[126], 0);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
