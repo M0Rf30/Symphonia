@@ -86,12 +86,92 @@ mod info {
         let key = str::from_utf8(&chunk_id).expect("chunk_id contains only ASCII bytes");
         // RIFF INFO payloads are NUL-terminated strings, and are NUL- or space-padded to an
         // even length. Those padding bytes are not part of the value.
-        let value = String::from_utf8_lossy(buf);
+        let value = decode_info_text(buf);
         let value = value.trim_end_matches(['\0', ' ']).to_string();
 
         builder.add_mapped_tags(RawTag::new(key, value), &RIFF_INFO_MAP);
 
         Ok(())
+    }
+
+    /// The characters of the Windows-1252 bytes 0x80 - 0x9F. `None` where the byte is unassigned.
+    const WINDOWS_1252_C1: [Option<char>; 32] = [
+        Some('€'),
+        None,
+        Some('‚'),
+        Some('ƒ'),
+        Some('„'),
+        Some('…'),
+        Some('†'),
+        Some('‡'),
+        Some('ˆ'),
+        Some('‰'),
+        Some('Š'),
+        Some('‹'),
+        Some('Œ'),
+        None,
+        Some('Ž'),
+        None,
+        None,
+        Some('‘'),
+        Some('’'),
+        Some('“'),
+        Some('”'),
+        Some('•'),
+        Some('–'),
+        Some('—'),
+        Some('˜'),
+        Some('™'),
+        Some('š'),
+        Some('›'),
+        Some('œ'),
+        None,
+        Some('ž'),
+        Some('Ÿ'),
+    ];
+
+    /// Decodes Windows-1252 text. Unassigned bytes become U+FFFD.
+    fn decode_windows_1252(buf: &[u8]) -> String {
+        buf.iter()
+            .map(|&b| match b {
+                0x80..=0x9f => WINDOWS_1252_C1[usize::from(b - 0x80)].unwrap_or('\u{fffd}'),
+                _ => char::from(b),
+            })
+            .collect()
+    }
+
+    /// Decodes the text of an INFO sub-chunk: UTF-8, or Windows-1252 if the bytes are not valid
+    /// UTF-8.
+    fn decode_info_text(buf: &[u8]) -> String {
+        match str::from_utf8(buf) {
+            Ok(text) => text.to_string(),
+            Err(_) => decode_windows_1252(buf),
+        }
+    }
+
+    /// The encoding of the text of INFO sub-chunks written by [`serialize_info`].
+    #[cfg(feature = "write")]
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+    pub enum InfoEncoding {
+        /// UTF-8.
+        #[default]
+        Utf8,
+        /// Windows-1252. Characters it cannot represent are written as `?`.
+        Windows1252,
+    }
+
+    /// Encodes `text` as Windows-1252. Characters that cannot be represented become `?`.
+    #[cfg(feature = "write")]
+    pub fn encode_windows_1252(text: &str) -> Vec<u8> {
+        text.chars()
+            .map(|c| match u32::from(c) {
+                0x00..=0x7f | 0xa0..=0xff => c as u8,
+                _ => WINDOWS_1252_C1
+                    .iter()
+                    .position(|&x| x == Some(c))
+                    .map_or(b'?', |i| 0x80 + i as u8),
+            })
+            .collect()
     }
 
     /// Returns `true` if `chunk_id` is an INFO sub-chunk that the reader maps to a standard tag
@@ -159,11 +239,13 @@ mod info {
     ///
     /// Several tags for the same standard tag (e.g. two artists) are written as repeated
     /// sub-chunks, in order, which the reader returns as repeated tags. Numeric fields hold a
-    /// single number, so only the first such tag is written. Values are written as UTF-8, NUL
-    /// terminated, with a pad byte after an odd-length payload (not counted in the sub-chunk size).
+    /// single number, so only the first such tag is written. Values are written in `encoding`
+    /// (the reader decodes UTF-8, and falls back to Windows-1252 for bytes that are not UTF-8),
+    /// NUL terminated, with a pad byte after an odd-length payload (not counted in the sub-chunk
+    /// size).
     /// Interior NUL bytes are removed, and empty values are skipped.
     #[cfg(feature = "write")]
-    pub fn serialize_info(tags: &[Tag]) -> Vec<u8> {
+    pub fn serialize_info(tags: &[Tag], encoding: InfoEncoding) -> Vec<u8> {
         let mut out = Vec::new();
         let mut seen_numeric: Vec<[u8; 4]> = Vec::new();
 
@@ -190,7 +272,10 @@ mod info {
                 seen_numeric.push(id);
             }
 
-            let mut payload = value.into_bytes();
+            let mut payload = match encoding {
+                InfoEncoding::Utf8 => value.into_bytes(),
+                InfoEncoding::Windows1252 => encode_windows_1252(&value),
+            };
             payload.retain(|&b| b != 0);
 
             if payload.is_empty() {
@@ -285,7 +370,7 @@ mod info {
             ];
 
             let input: Vec<Tag> = tags.iter().cloned().map(tag).collect();
-            let out = serialize_info(&input);
+            let out = serialize_info(&input, InfoEncoding::Utf8);
             assert_eq!(out.len() % 2, 0);
             assert_eq!(read_back(&out), tags);
         }
@@ -293,10 +378,13 @@ mod info {
         #[test]
         fn verify_odd_and_even_values_are_word_aligned() {
             // "ab" + NUL = 3 bytes (odd, padded), "abc" + NUL = 4 bytes (even).
-            let out = serialize_info(&[
-                tag(StandardTag::TrackTitle(s("ab"))),
-                tag(StandardTag::Artist(s("abc"))),
-            ]);
+            let out = serialize_info(
+                &[
+                    tag(StandardTag::TrackTitle(s("ab"))),
+                    tag(StandardTag::Artist(s("abc"))),
+                ],
+                InfoEncoding::Utf8,
+            );
 
             assert_eq!(&out[0..4], b"INAM");
             assert_eq!(&out[4..8], &3u32.to_le_bytes());
@@ -317,7 +405,7 @@ mod info {
             ];
 
             let input: Vec<Tag> = tags.iter().cloned().map(tag).collect();
-            let back = read_back(&serialize_info(&input));
+            let back = read_back(&serialize_info(&input, InfoEncoding::Utf8));
 
             assert_eq!(
                 back,
@@ -331,12 +419,15 @@ mod info {
 
         #[test]
         fn verify_unmapped_tags_and_odd_ratings_are_skipped() {
-            let out = serialize_info(&[
-                tag(StandardTag::Bpm(120)),
-                tag(StandardTag::Rating(123_456)),
-                tag(StandardTag::Album(s(""))),
-                Tag::new(RawTag::new("free", "form")),
-            ]);
+            let out = serialize_info(
+                &[
+                    tag(StandardTag::Bpm(120)),
+                    tag(StandardTag::Rating(123_456)),
+                    tag(StandardTag::Album(s(""))),
+                    Tag::new(RawTag::new("free", "form")),
+                ],
+                InfoEncoding::Utf8,
+            );
 
             assert!(out.is_empty());
         }

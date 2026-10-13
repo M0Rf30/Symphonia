@@ -10,7 +10,10 @@
 //! A WAVE file carries tags in an `id3 ` chunk (ID3v2) and in a `LIST` chunk of type `INFO`. A
 //! write rebuilds both from the given tags: the `id3 ` chunk is replaced (or added, or removed
 //! when there is nothing to write), and the `INFO` list is rewritten, keeping the sub-chunks the
-//! reader does not map to standard tags. Every other chunk (`fmt `, `data`, `fact`, `bext`,
+//! reader does not map to standard tags. [`RiffInfoPolicy`] changes that: `Remove` drops every
+//! `INFO` list and writes none, `Keep` leaves them as they are and writes none; the `id3 ` chunk
+//! is independent of it. The text of the sub-chunks written is UTF-8 or Windows-1252
+//! ([`RiffInfoEncoding`]). Every other chunk (`fmt `, `data`, `fact`, `bext`,
 //! `cue `, other `LIST` types, ...) is copied byte for byte, in order.
 
 use std::fs::File;
@@ -18,10 +21,21 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use symphonia_core::meta::{Tag, Visual};
-use symphonia_metadata::embedded::riff::{is_managed_info_id, serialize_info};
+use symphonia_metadata::embedded::riff::{InfoEncoding, is_managed_info_id, serialize_info};
 use symphonia_metadata::id3v2::write::{self as id3w, Existing};
 
-use crate::{Error, Id3v2Version, Result, WriteOptions, copy_range, read_up_to, replace_file};
+use crate::{
+    Error, Id3v2Version, Result, RiffInfoEncoding, RiffInfoPolicy, WriteOptions, copy_range,
+    read_up_to, replace_file,
+};
+
+/// Maps the INFO text encoding option to the serializer's.
+fn info_encoding(encoding: RiffInfoEncoding) -> InfoEncoding {
+    match encoding {
+        RiffInfoEncoding::Utf8 => InfoEncoding::Utf8,
+        RiffInfoEncoding::Windows1252 => InfoEncoding::Windows1252,
+    }
+}
 
 /// The largest `id3 `/`INFO` payload that is read into memory.
 const MAX_METADATA_PAYLOAD: u32 = 256 * 1024 * 1024;
@@ -319,16 +333,21 @@ pub(crate) fn write(
             });
         }
 
-        let mut info_payload = serialize_info(tags);
-        info_payload.extend_from_slice(&unmanaged);
-
-        let info_chunk = if info_payload.is_empty() {
+        let info_chunk = if opts.riff_info != RiffInfoPolicy::Write {
             None
         }
         else {
-            let mut list = b"INFO".to_vec();
-            list.extend_from_slice(&info_payload);
-            Some(make_chunk(*b"LIST", &list, false)?)
+            let mut info_payload = serialize_info(tags, info_encoding(opts.riff_info_encoding));
+            info_payload.extend_from_slice(&unmanaged);
+
+            if info_payload.is_empty() {
+                None
+            }
+            else {
+                let mut list = b"INFO".to_vec();
+                list.extend_from_slice(&info_payload);
+                Some(make_chunk(*b"LIST", &list, false)?)
+            }
         };
 
         let id3 = build_id3(src, &scan, tags, visuals, opts)?;
@@ -344,7 +363,10 @@ pub(crate) fn write(
 
         for (i, chunk) in scan.chunks.iter().enumerate() {
             if is_info[i] {
-                if !std::mem::replace(&mut seen_info, true) {
+                if opts.riff_info == RiffInfoPolicy::Keep {
+                    items.push(Item::Copy(i));
+                }
+                else if !std::mem::replace(&mut seen_info, true) {
                     items.extend(info_chunk.take().map(Item::New));
                 }
             }
