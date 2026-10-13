@@ -10,7 +10,10 @@
 //! The metadata block chain is rewritten: `STREAMINFO` stays first, every block the tag model
 //! does not represent (`SEEKTABLE`, `APPLICATION`, `CUESHEET`, ...) is kept, the
 //! `VORBIS_COMMENT`, `PICTURE` and `PADDING` blocks are replaced by new ones, and the audio
-//! frames are copied unchanged. A leading ID3v2 tag is dropped.
+//! frames are copied unchanged. A leading ID3v2 tag is dropped by default
+//! ([`FlacId3::Remove`](crate::FlacId3::Remove)), or all the leading ID3v2 tags are copied as
+//! they are in front of the `fLaC` marker ([`FlacId3::Keep`](crate::FlacId3::Keep)). A `SEEKTABLE`
+//! block without seek points is dropped if `remove_empty_flac_seektable` is set.
 
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
@@ -22,9 +25,25 @@ use symphonia_metadata::embedded::flac::write::{
     BLOCK_TYPE_PADDING, BLOCK_TYPE_PICTURE, BLOCK_TYPE_STREAMINFO, BLOCK_TYPE_VORBIS_COMMENT,
     MAX_BLOCK_LEN, block_header, picture_block,
 };
-use symphonia_metadata::embedded::vorbis::write::{ExistingComments, comment_body, parse_existing};
+use symphonia_metadata::embedded::vorbis::write::{
+    CommentOptions, ExistingComments, comment_body_with, parse_existing,
+};
 
-use crate::{Error, Result, WriteOptions, copy_range, read_up_to, replace_file, synchsafe};
+use crate::{
+    Error, FlacId3, Result, VorbisRatingScale, WriteOptions, copy_range, read_up_to, replace_file,
+    synchsafe,
+};
+
+/// The `SEEKTABLE` block type.
+const BLOCK_TYPE_SEEKTABLE: u8 = 3;
+
+/// Gets the Vorbis comment writing options from the write options.
+pub(crate) fn comment_options(opts: &WriteOptions) -> CommentOptions {
+    CommentOptions {
+        rating_email: opts.rating_email.clone(),
+        rating_fraction: opts.vorbis_rating_scale == VorbisRatingScale::Fraction,
+    }
+}
 
 /// The vendor string written when the file does not have one already.
 pub(crate) fn default_vendor() -> Vec<u8> {
@@ -97,7 +116,7 @@ fn rewrite(
 ) -> Result<()> {
     let file_len = src.metadata()?.len();
 
-    // Skip the leading ID3v2 tags, if any. They are dropped.
+    // Skip the leading ID3v2 tags, if any. They are dropped or kept as is, see `FlacId3`.
     let mut start = 0u64;
 
     loop {
@@ -189,17 +208,20 @@ fn rewrite(
     let mut items: Vec<Item> = blocks
         .into_iter()
         .filter(|block| {
-            !matches!(
+            !(matches!(
                 block.kind,
                 BLOCK_TYPE_VORBIS_COMMENT | BLOCK_TYPE_PICTURE | BLOCK_TYPE_PADDING
-            )
+            ) || (opts.remove_empty_flac_seektable
+                && block.kind == BLOCK_TYPE_SEEKTABLE
+                && block.len == 0))
         })
         .map(Item::Copy)
         .collect();
 
     items.push(Item::Mem {
         kind: BLOCK_TYPE_VORBIS_COMMENT,
-        data: comment_body(&vendor, tags, &[], &preserved).map_err(meta_error)?,
+        data: comment_body_with(&vendor, tags, &[], &preserved, &comment_options(opts))
+            .map_err(meta_error)?,
     });
 
     for visual in visuals {
@@ -220,7 +242,8 @@ fn rewrite(
         .checked_sub(new_len + 4)
         .filter(|&padding| padding <= MAX_REUSED_PADDING.max(opts.padding as u64));
 
-    let padding = if let (false, Some(reusable)) = (had_id3v2, reusable) {
+    let offset_moves = had_id3v2 && opts.flac_id3 == FlacId3::Remove;
+    let padding = if let (false, Some(reusable)) = (offset_moves, reusable) {
         Some(reusable as usize)
     }
     else if opts.padding > 0 {
@@ -235,6 +258,10 @@ fn rewrite(
     }
 
     // Write the new file.
+    if opts.flac_id3 == FlacId3::Keep && start > 0 {
+        copy_range(src, out, 0, start)?;
+    }
+
     out.write_all(b"fLaC")?;
 
     let num_items = items.len();
