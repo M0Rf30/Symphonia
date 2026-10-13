@@ -84,7 +84,7 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | FLV (audio only) | Good | No      | `flv`        | No      | [`symphonia-format-flv`]    |
 | ISO/MP4  | Great     | No       | `isomp4`     | No      | [`symphonia-format-isomp4`] |
 | MKV/WebM | Good      | Yes      | `mkv`        | Yes     | [`symphonia-format-mkv`]    |
-| Musepack | -         | -        | `musepack`   | No      | `symphonia-bundle-musepack` |
+| Musepack | Great     | Yes      | `musepack`   | No      | `symphonia-bundle-musepack` |
 | MPEG-PS (audio only) | Good | No   | `mpegps`     | No      | [`symphonia-format-mpegps`] |
 | MPEG-TS (audio only) | Good | No   | `mpegts`     | No      | [`symphonia-format-mpegts`] |
 | OGG      | Great     | Yes      | `ogg`        | Yes     | [`symphonia-format-ogg`]    |
@@ -118,7 +118,7 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | MP2                          | Great     | No      | `mp2`, `mpa` | No      | [`symphonia-bundle-mp3`]   |
 | MP3                          | Excellent | Yes     | `mp3`, `mpa` | No      | [`symphonia-bundle-mp3`]   |
 | mp3PRO                       | Great     | No      | `mp3pro`     | No      | [`symphonia-bundle-mp3`]   |
-| Musepack                     | -         | -       | `musepack`   | No      | `symphonia-bundle-musepack`|
+| Musepack                     | Great     | Yes     | `musepack`   | No      | `symphonia-bundle-musepack`|
 | Opus                         | Excellent | Yes     | `opus`       | Yes     | [`symphonia-codec-opus`]   |
 | PCM                          | Excellent | Yes     | `pcm`        | Yes     | [`symphonia-codec-pcm`]    |
 | Vorbis                       | Excellent | Yes     | `vorbis`     | Yes     | [`symphonia-codec-vorbis`] |

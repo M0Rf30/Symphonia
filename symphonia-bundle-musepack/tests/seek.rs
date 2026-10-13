@@ -249,9 +249,15 @@ fn synthetic_sv7(frames: u32, last_frame_samples: u32, seed: u64) -> Vec<u8> {
     file
 }
 
+/// The length of a true-gapless SV7 stream. A last frame of more than `FRAME - SYNTH_DELAY`
+/// samples is completed by a flush frame decoded after the last one, as libmpcdec does.
 fn sv7_len(frames: u32, last: u32) -> u64 {
-    let max = u64::from(frames) * FRAME - SYNTH_DELAY;
-    (u64::from(frames) * FRAME - (FRAME - u64::from(last))).min(max)
+    u64::from(frames) * FRAME - (FRAME - u64::from(last))
+}
+
+/// The number of packets of a true-gapless SV7 stream, including the flush frame.
+fn sv7_packets(frames: u32, last: u32) -> u64 {
+    u64::from(frames) + u64::from(u64::from(last) > FRAME - SYNTH_DELAY)
 }
 
 #[test]
@@ -274,7 +280,7 @@ fn sv7_synthetic_packets_describe_the_stream() {
             total += p.dur.get();
             n += 1;
         }
-        assert_eq!(n, 40);
+        assert_eq!(n, sv7_packets(40, last));
         assert_eq!(total, s.len, "durations add up to the track length (last={last})");
     }
 }

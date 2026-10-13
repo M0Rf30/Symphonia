@@ -66,6 +66,8 @@ pub(crate) struct Sv7State {
     /// an appended APEv2 tag).
     frames_total: u64,
     frames_emitted: u64,
+    /// Emit an empty packet after the last frame, see `read_header`.
+    flush_frame: bool,
     /// Stream parameters needed to parse frames outside of the decoder (see `build_index`).
     max_band: i32,
     ms: bool,
@@ -152,12 +154,14 @@ pub(crate) fn read_header(
         samples
     };
 
-    // The decoder's output lags its input by `SYNTH_DELAY`, so a stream of `frames` frames can
-    // never yield more than `frames * FRAME_LENGTH - SYNTH_DELAY` samples. A true-gapless
-    // last-frame count above `FRAME_LENGTH - SYNTH_DELAY` would otherwise claim samples that
-    // were never encoded (libmpcdec silently stops short in that case as well).
-    let max_output = (frames * FRAME_LENGTH as u64).saturating_sub(u64::from(SYNTH_DELAY));
-
+    // The decoder's output lags its input by `SYNTH_DELAY`, so the last `SYNTH_DELAY` samples
+    // of a true-gapless stream whose last frame holds more than `FRAME_LENGTH - SYNTH_DELAY`
+    // samples only leave the synthesis filter while the decoder runs one frame past the end of
+    // the stream (libmpcdec decodes it as well). The demuxer emits that frame as an empty
+    // "flush" packet.
+    let flush_frame = is_true_gapless && last_frame_samples > FRAME_LENGTH as u32 - SYNTH_DELAY;
+    let decoded_frames = frames + u64::from(flush_frame);
+    let max_output = (decoded_frames * FRAME_LENGTH as u64).saturating_sub(u64::from(SYNTH_DELAY));
     let info = StreamInfo {
         stream_version: 7,
         sample_rate,
@@ -168,7 +172,7 @@ pub(crate) fn read_header(
         decoder_samples,
         beg_silence: 0,
         display_samples: samples.min(max_output),
-        total_frames: Some(frames),
+        total_frames: Some(decoded_frames),
         gain_title,
         peak_title,
         gain_album,
@@ -207,6 +211,7 @@ pub(crate) fn read_header(
             bit_pos: 0,
             frames_total: frames,
             frames_emitted: 0,
+            flush_frame,
             max_band,
             ms,
             index: None,
@@ -315,9 +320,14 @@ impl Sv7State {
     /// bits. See `crate::decoder::MpcDecoder` for the consumer.
     pub fn next_packet(&mut self, _mss: &mut MediaSourceStream<'_>) -> Result<Option<Vec<u8>>> {
         if self.frames_emitted >= self.frames_total {
-            return Ok(None);
+            if !self.flush_frame || self.frames_emitted > self.frames_total {
+                return Ok(None);
+            }
+            // Like libmpcdec, decode the flush frame from the bits that follow the last frame's
+            // 11-bit last-frame sample count (bits past the end read as zero).
+            self.bit_pos += 11;
         }
-        if self.bit_pos + 20 > (self.data.len() as u64) * 8 {
+        else if self.bit_pos + 20 > (self.data.len() as u64) * 8 {
             // Ran out of buffered data before the header's declared frame count; treat as a
             // truncated (e.g. network-cut) stream rather than panicking or erroring.
             return Ok(None);
