@@ -83,7 +83,7 @@ fn cover(data: &[u8]) -> Visual {
 }
 
 fn opts(version: Id3v2Version) -> WriteOptions {
-    WriteOptions { id3v2_version: version, padding: 0 }
+    WriteOptions { id3v2_version: version, padding: 0, ..Default::default() }
 }
 
 fn new_tags() -> Vec<Tag> {
@@ -662,7 +662,7 @@ fn a_tag_that_does_not_fit_grows_the_padding_policy_applies() {
         &path,
         &new_tags(),
         &[],
-        &WriteOptions { id3v2_version: Id3v2Version::V4, padding: 0 },
+        &WriteOptions { id3v2_version: Id3v2Version::V4, padding: 0, ..Default::default() },
     )
     .unwrap();
     let exact = leading_tags(&fs::read(&path).unwrap()).0[0];
@@ -672,7 +672,7 @@ fn a_tag_that_does_not_fit_grows_the_padding_policy_applies() {
         &path2,
         &new_tags(),
         &[],
-        &WriteOptions { id3v2_version: Id3v2Version::V4, padding: 4096 },
+        &WriteOptions { id3v2_version: Id3v2Version::V4, padding: 4096, ..Default::default() },
     )
     .unwrap();
     let padded = fs::read(&path2).unwrap();
@@ -684,7 +684,7 @@ fn a_tag_that_does_not_fit_grows_the_padding_policy_applies() {
         &path2,
         &smaller,
         &[],
-        &WriteOptions { id3v2_version: Id3v2Version::V4, padding: 4096 },
+        &WriteOptions { id3v2_version: Id3v2Version::V4, padding: 4096, ..Default::default() },
     )
     .unwrap();
     let again = fs::read(&path2).unwrap();

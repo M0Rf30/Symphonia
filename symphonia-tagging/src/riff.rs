@@ -187,7 +187,7 @@ pub(crate) fn serialize_id3(
         Id3v2Version::Preserve => id3w::Version::V4,
     };
 
-    let id3_opts = id3w::WriteOptions { version, padding: 0, reuse_len: None };
+    let id3_opts = opts.id3v2_options(version, 0, None);
 
     id3w::serialize(tags, visuals, &existing, &id3_opts)
 }

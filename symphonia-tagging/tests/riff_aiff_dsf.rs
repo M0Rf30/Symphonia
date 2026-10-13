@@ -70,7 +70,7 @@ fn cover(data: &[u8]) -> Visual {
 }
 
 fn opts() -> WriteOptions {
-    WriteOptions { id3v2_version: Id3v2Version::V4, padding: 0 }
+    WriteOptions { id3v2_version: Id3v2Version::V4, padding: 0, ..Default::default() }
 }
 
 /// The tags the standard tags of `tags` should read back as.
@@ -698,7 +698,7 @@ fn wav_ffmpeg_fixtures_round_trip() {
 #[test]
 fn wav_honours_the_id3v2_version() {
     let path = work_file("v3.wav", &rich_wav(b"id3 "));
-    let v3 = WriteOptions { id3v2_version: Id3v2Version::V3, padding: 0 };
+    let v3 = WriteOptions { id3v2_version: Id3v2Version::V3, padding: 0, ..Default::default() };
     write_file(&path, &sample_tags(), &[], &v3).unwrap();
     let (chunks, _) = chunks_of(&fs::read(&path).unwrap(), false);
     assert_eq!(&find(&chunks, b"id3 ")[0].payload[..4], b"ID3\x03");

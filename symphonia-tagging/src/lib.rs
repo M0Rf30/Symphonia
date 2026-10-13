@@ -43,9 +43,14 @@ use symphonia_core::meta::{Tag, Visual};
 /// Container families [`write_file`] handles, sniffed from the file's bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Container {
-    /// MPEG audio elementary stream (MP1/2/3, ADTS AAC): ID3v2 at the front, optional ID3v1 at
-    /// the end.
+    /// MPEG audio elementary stream (MP1/2/3): ID3v2 at the front, optional ID3v1 at the end.
     MpegAudio,
+    /// Raw AAC in ADTS frames. Tagged with an APEv2 tag at the end (as Picard does), see
+    /// [`WriteOptions::aac_ape`].
+    Aac,
+    /// AC-3 / E-AC-3 elementary stream. Tagged with an APEv2 tag at the end (as Picard does), see
+    /// [`WriteOptions::ac3_ape`].
+    Ac3,
     Flac,
     OggVorbis,
     OggOpus,
@@ -59,7 +64,13 @@ pub enum Container {
     WavPack,
     MonkeysAudio,
     Musepack,
-    /// Not writable (Matroska/WebM, CAF, DFF, ...).
+    /// OptimFROG (`.ofr`, `.ofs`): APEv2.
+    OptimFrog,
+    /// Tom's lossless Audio Kompressor (`.tak`): APEv2.
+    Tak,
+    /// True Audio (`.tta`): ID3v2 at the front, optional ID3v1 at the end.
+    Tta,
+    /// Not writable (Matroska/WebM, CAF, DFF, ASF, MIDI, ...).
     Other,
 }
 
@@ -80,19 +91,168 @@ pub enum Id3v2Version {
     V4,
 }
 
+/// What to do with the ID3v1 tag at the end of an MPEG audio or True Audio stream.
+///
+/// Picard writes ID3v1 only to these formats (mutagen `v1=2` when its `write_id3v1` setting is
+/// on, `v1=0` when it is off); it never writes ID3v1 to APEv2, ID3-in-RIFF/AIFF/DSF or other files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Id3v1Policy {
+    /// Rewrite an existing ID3v1 tag from the tags and never add one. An existing tag is removed
+    /// when there are no tags to write.
+    #[default]
+    Preserve,
+    /// Rewrite the ID3v1 tag from the tags, adding one if the file has none (mutagen `v1=2`).
+    /// Nothing is written when there are no tags.
+    Write,
+    /// Remove the ID3v1 tag (mutagen `v1=0`).
+    Remove,
+}
+
+/// The text encoding of ID3v2 frames. `Auto` (the default) is UTF-8 in ID3v2.4 and ISO-8859-1 (with
+/// a UTF-16 fallback) in ID3v2.3. See [`Id3Encoding`](symphonia_metadata::id3v2::write::TextEncoding).
+pub use symphonia_metadata::id3v2::write::TextEncoding as Id3Encoding;
+
+/// What to do with a leading ID3v2 tag in a FLAC file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FlacId3 {
+    /// Drop the tag (mutagen `deleteid3=True`, Picard `remove_id3_from_flac = True`).
+    #[default]
+    Remove,
+    /// Keep the tag untouched (Picard's default).
+    Keep,
+}
+
+/// What to do with the APEv2 tag of a raw AAC (ADTS) or AC-3 stream.
+///
+/// Picard's `aac_save_ape`/`remove_ape_from_aac` and `ac3_save_ape`/`remove_ape_from_ac3`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ApePolicy {
+    /// Replace the APEv2 tag with one built from the tags.
+    #[default]
+    Write,
+    /// Remove the APEv2 tag and write nothing.
+    Remove,
+    /// Leave the file as it is.
+    Keep,
+}
+
+/// What to do with the RIFF `LIST`/`INFO` chunk of a WAVE file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RiffInfoPolicy {
+    /// Rebuild the chunk from the tags (Picard `write_wave_riff_info`).
+    #[default]
+    Write,
+    /// Remove the chunk, with everything in it (Picard `remove_wave_riff_info`).
+    Remove,
+    /// Leave the chunk as it is.
+    Keep,
+}
+
+/// The encoding of the text in RIFF `INFO` sub-chunks (Picard `wave_riff_info_encoding`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RiffInfoEncoding {
+    #[default]
+    Utf8,
+    /// Windows-1252. Characters it cannot represent are written as `?`.
+    Windows1252,
+}
+
+/// How a [`StandardTag::Rating`](symphonia_core::meta::StandardTag::Rating) is written to a Vorbis
+/// comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VorbisRatingScale {
+    /// An integer from 0 to 100 (`RATING=80`).
+    #[default]
+    Percent,
+    /// A decimal number from 0.0 to 1.0 (`RATING=0.8`), the convention of Quod Libet and Picard.
+    Fraction,
+}
+
 /// Options for [`write_file`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteOptions {
     pub id3v2_version: Id3v2Version,
     /// Padding to leave after a tag that lives at the front of the file (ID3v2, FLAC metadata,
     /// MP4 `free`), so later edits can be done without moving the audio. Existing padding is
     /// reused when the new tag fits in it.
     pub padding: usize,
+    /// The ID3v1 tag of MPEG audio and True Audio streams. Default: [`Id3v1Policy::Preserve`].
+    pub id3v1: Id3v1Policy,
+    /// The text encoding of ID3v2 frames (also in WAVE, AIFF and DSF). Default: `Auto`.
+    pub id3_encoding: Id3Encoding,
+    /// The string that joins the values of a multi-valued frame in ID3v2.3 (Picard
+    /// `id3v23_join_with`). Default: `"/"`.
+    pub id3v23_join_with: String,
+    /// Write the grouping to `GRP1` and the work to `TIT1`, instead of the grouping to `TIT1` and
+    /// the work to `TXXX:WORK` (Picard `itunes_compatible_grouping`). Default: `false`.
+    pub itunes_grouping: bool,
+    /// The user a rating belongs to (Picard `rating_user_email`). `Some(email)`: an ID3v2
+    /// [`StandardTag::Rating`](symphonia_core::meta::StandardTag::Rating) is written to the
+    /// `POPM` frame of `email` (replacing the existing one), and to the Vorbis comment
+    /// `RATING:<email>` instead of `RATING`. `None` (the default): ratings are not written to
+    /// ID3v2 tags, and `POPM` frames are all preserved.
+    pub rating_email: Option<String>,
+    /// The scale of a rating written to a Vorbis comment. Default: `Percent`.
+    pub vorbis_rating_scale: VorbisRatingScale,
+    /// Remove an APEv2 tag from MPEG audio and True Audio streams (Picard `remove_ape_from_mp3`).
+    /// Default: `false`, the tag is left alone.
+    pub remove_ape_from_mpeg: bool,
+    /// A leading ID3v2 tag of a FLAC file. Default: [`FlacId3::Remove`].
+    pub flac_id3: FlacId3,
+    /// Remove a FLAC `SEEKTABLE` block that has no seek points (Picard
+    /// `fix_missing_seekpoints_flac`, which removes the empty table so that players do not trip
+    /// over it). Default: `false`.
+    pub remove_empty_flac_seektable: bool,
+    /// The `INFO` chunk of WAVE files. Default: [`RiffInfoPolicy::Write`].
+    pub riff_info: RiffInfoPolicy,
+    /// The encoding of the text of the `INFO` chunk. Default: UTF-8.
+    pub riff_info_encoding: RiffInfoEncoding,
+    /// The APEv2 tag of raw AAC (ADTS) streams. Default: [`ApePolicy::Write`].
+    pub aac_ape: ApePolicy,
+    /// The APEv2 tag of AC-3 streams. Default: [`ApePolicy::Write`].
+    pub ac3_ape: ApePolicy,
 }
 
 impl Default for WriteOptions {
     fn default() -> Self {
-        WriteOptions { id3v2_version: Id3v2Version::Preserve, padding: 4096 }
+        WriteOptions {
+            id3v2_version: Id3v2Version::Preserve,
+            padding: 4096,
+            id3v1: Id3v1Policy::Preserve,
+            id3_encoding: Id3Encoding::Auto,
+            id3v23_join_with: "/".to_string(),
+            itunes_grouping: false,
+            rating_email: None,
+            vorbis_rating_scale: VorbisRatingScale::Percent,
+            remove_ape_from_mpeg: false,
+            flac_id3: FlacId3::Remove,
+            remove_empty_flac_seektable: false,
+            riff_info: RiffInfoPolicy::Write,
+            riff_info_encoding: RiffInfoEncoding::Utf8,
+            aac_ape: ApePolicy::Write,
+            ac3_ape: ApePolicy::Write,
+        }
+    }
+}
+
+impl WriteOptions {
+    /// The options of the ID3v2 serializer for a tag of `version` that replaces a tag of
+    /// `reuse_len` bytes.
+    pub(crate) fn id3v2_options(
+        &self,
+        version: symphonia_metadata::id3v2::write::Version,
+        padding: usize,
+        reuse_len: Option<usize>,
+    ) -> symphonia_metadata::id3v2::write::WriteOptions {
+        symphonia_metadata::id3v2::write::WriteOptions {
+            version,
+            padding,
+            reuse_len,
+            encoding: self.id3_encoding,
+            join_v23: self.id3v23_join_with.clone(),
+            itunes_grouping: self.itunes_grouping,
+            rating_email: self.rating_email.clone(),
+        }
     }
 }
 
@@ -137,7 +297,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// preserved).
 pub fn write_file(path: &Path, tags: &[Tag], visuals: &[Visual], opts: &WriteOptions) -> Result<()> {
     match sniff(path)? {
-        Container::MpegAudio => mpeg::write(path, tags, visuals, opts),
+        Container::MpegAudio | Container::Tta => mpeg::write(path, tags, visuals, opts),
         Container::Flac => flac::write(path, tags, visuals, opts),
         Container::OggVorbis | Container::OggOpus | Container::OggFlac | Container::OggSpeex => {
             ogg::write(path, tags, visuals, opts)
@@ -146,9 +306,10 @@ pub fn write_file(path: &Path, tags: &[Tag], visuals: &[Visual], opts: &WriteOpt
         Container::Wav => riff::write(path, tags, visuals, opts),
         Container::Aiff => aiff::write(path, tags, visuals, opts),
         Container::Dsf => dsf::write(path, tags, visuals, opts),
-        Container::WavPack | Container::MonkeysAudio | Container::Musepack => {
-            ape::write(path, tags, visuals, opts)
-        }
+        Container::WavPack | Container::MonkeysAudio | Container::Musepack
+        | Container::OptimFrog | Container::Tak => ape::write(path, tags, visuals, opts),
+        Container::Aac => ape::write_with_policy(path, tags, visuals, opts, opts.aac_ape),
+        Container::Ac3 => ape::write_with_policy(path, tags, visuals, opts, opts.ac3_ape),
         Container::Other => Err(Error::Unsupported(path.display().to_string())),
     }
 }

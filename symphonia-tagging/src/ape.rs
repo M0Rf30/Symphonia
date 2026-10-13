@@ -18,7 +18,7 @@ use std::path::Path;
 use symphonia_core::meta::{Tag, Visual};
 use symphonia_metadata::ape::write::{self, APE_HEADER_SIZE, APE_PREAMBLE};
 
-use crate::{Result, WriteOptions, copy_range, read_up_to, replace_file};
+use crate::{ApePolicy, Result, WriteOptions, copy_range, read_up_to, replace_file};
 
 /// The size of an ID3v1 tag.
 const ID3V1_SIZE: u64 = 128;
@@ -171,6 +171,37 @@ pub(crate) fn write(
 
         copy_range(src, out, 0, layout.audio_end())?;
         out.write_all(&tag)?;
+        copy_range(src, out, layout.tail_start(), layout.len - layout.tail_start())?;
+
+        Ok(())
+    })
+}
+
+/// Writes an APEv2 tag to a stream according to `policy`.
+pub(crate) fn write_with_policy(
+    path: &Path,
+    tags: &[Tag],
+    visuals: &[Visual],
+    opts: &WriteOptions,
+    policy: ApePolicy,
+) -> Result<()> {
+    match policy {
+        ApePolicy::Write => write(path, tags, visuals, opts),
+        ApePolicy::Remove => remove(path),
+        ApePolicy::Keep => Ok(()),
+    }
+}
+
+/// Removes the APE tag(s) at the end of the file. The file is not touched when it has none.
+pub(crate) fn remove(path: &Path) -> Result<()> {
+    if find_tag(&mut File::open(path)?)?.tag.is_none() {
+        return Ok(());
+    }
+
+    replace_file(path, |src, out| {
+        let layout = find_tag(src)?;
+
+        copy_range(src, out, 0, layout.audio_end())?;
         copy_range(src, out, layout.tail_start(), layout.len - layout.tail_start())?;
 
         Ok(())

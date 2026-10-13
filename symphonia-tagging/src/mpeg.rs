@@ -25,7 +25,7 @@ use std::path::Path;
 use symphonia_core::io::MediaSourceStream;
 use symphonia_core::meta::{Tag, Visual};
 use symphonia_metadata::id3v1::write::{ID3V1_ENHANCED_TAG_LEN, ID3V1_TAG_LEN};
-use symphonia_metadata::id3v2::write::{Existing, Version, WriteOptions as Id3v2Options};
+use symphonia_metadata::id3v2::write::{Existing, Version};
 use symphonia_metadata::{id3v1, id3v2};
 
 use crate::{Error, Id3v2Version, Result, WriteOptions, copy_range, read_up_to, replace_file};
@@ -125,11 +125,8 @@ pub(crate) fn write(
         Id3v2Version::Preserve => Version::V4,
     };
 
-    let id3v2_opts = Id3v2Options {
-        version,
-        padding: opts.padding,
-        reuse_len: (audio_start > 0).then_some(audio_start as usize),
-    };
+    let id3v2_opts =
+        opts.id3v2_options(version, opts.padding, (audio_start > 0).then_some(audio_start as usize));
 
     let new_id3v2 = id3v2::write::serialize(tags, visuals, &existing, &id3v2_opts);
 

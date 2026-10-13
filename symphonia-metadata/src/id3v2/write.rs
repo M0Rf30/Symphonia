@@ -68,8 +68,24 @@ impl Version {
     }
 }
 
+/// The text encoding the serializer uses for the text of the frames it writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextEncoding {
+    /// ID3v2.4: UTF-8. ID3v2.3: ISO-8859-1, or UTF-16 for a frame with text that cannot be
+    /// represented in ISO-8859-1.
+    #[default]
+    Auto,
+    /// UTF-8 in ID3v2.4. ID3v2.3 has no UTF-8, so UTF-16 is written instead.
+    Utf8,
+    /// UTF-16 with a byte-order-mark, in both versions.
+    Utf16,
+    /// ISO-8859-1 in both versions, or UTF-16 for a frame with text that cannot be represented in
+    /// ISO-8859-1.
+    Latin1,
+}
+
 /// Options for [`serialize`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteOptions {
     /// The version of the tag to write.
     pub version: Version,
@@ -81,6 +97,32 @@ pub struct WriteOptions {
     /// unused), the new tag is padded to exactly this size, so the data that follows it does not
     /// move.
     pub reuse_len: Option<usize>,
+    /// The text encoding of the frames.
+    pub encoding: TextEncoding,
+    /// The string that joins the values of a multi-valued text frame in ID3v2.3 (which, unlike
+    /// ID3v2.4, cannot separate values with NUL). Picard's `id3v23_join_with`.
+    pub join_v23: String,
+    /// Write the grouping to `GRP1` and the work to `TIT1` (the convention of iTunes) instead of
+    /// the grouping to `TIT1` and the work to a `TXXX:WORK` frame. Picard's
+    /// `itunes_compatible_grouping`.
+    pub itunes_grouping: bool,
+    /// The email of the `POPM` frame a [`StandardTag::Rating`] is written to. When `None`,
+    /// ratings are not written to ID3v2 tags and `POPM` frames are all preserved.
+    pub rating_email: Option<String>,
+}
+
+impl Default for WriteOptions {
+    fn default() -> Self {
+        WriteOptions {
+            version: Version::V4,
+            padding: 0,
+            reuse_len: None,
+            encoding: TextEncoding::Auto,
+            join_v23: JOIN_V23.to_string(),
+            itunes_grouping: false,
+            rating_email: None,
+        }
+    }
 }
 
 /// A frame of an existing tag that is preserved.
@@ -1457,7 +1499,7 @@ mod tests {
     }
 
     fn opts(version: Version) -> WriteOptions {
-        WriteOptions { version, padding: 0, reuse_len: None }
+        WriteOptions { version, ..Default::default() }
     }
 
     fn read_back(bytes: &[u8]) -> (Vec<Tag>, Vec<Visual>) {
@@ -1711,7 +1753,7 @@ mod tests {
     #[test]
     fn verify_empty_output() {
         assert!(serialize(&[], &[], &Existing::new(), &opts(Version::V4)).is_empty());
-        let padded = WriteOptions { version: Version::V4, padding: 1024, reuse_len: Some(4096) };
+        let padded = WriteOptions { padding: 1024, reuse_len: Some(4096), ..Default::default() };
         assert!(serialize(&[], &[], &Existing::new(), &padded).is_empty());
     }
 
@@ -1720,7 +1762,7 @@ mod tests {
         let tags = [std(StandardTag::TrackTitle(s("T")))];
         let plain = serialize(&tags, &[], &Existing::new(), &opts(Version::V4));
 
-        let padded = WriteOptions { version: Version::V4, padding: 100, reuse_len: None };
+        let padded = WriteOptions { padding: 100, ..Default::default() };
         let bytes = serialize(&tags, &[], &Existing::new(), &padded);
         assert_eq!(bytes.len(), plain.len() + 100);
         assert_eq!(tag_len(&bytes), Some(bytes.len()));
@@ -1728,13 +1770,13 @@ mod tests {
         read_back(&bytes);
 
         // The old size is reused when the new tag fits in it.
-        let reuse = WriteOptions { reuse_len: Some(plain.len() + 150), ..padded };
+        let reuse = WriteOptions { reuse_len: Some(plain.len() + 150), ..padded.clone() };
         assert_eq!(serialize(&tags, &[], &Existing::new(), &reuse).len(), plain.len() + 150);
 
         // It is not reused when it does not fit, or when it wastes too much space.
-        let reuse = WriteOptions { reuse_len: Some(plain.len() - 1), ..padded };
+        let reuse = WriteOptions { reuse_len: Some(plain.len() - 1), ..padded.clone() };
         assert_eq!(serialize(&tags, &[], &Existing::new(), &reuse).len(), plain.len() + 100);
-        let reuse = WriteOptions { reuse_len: Some(plain.len() + 5000), ..padded };
+        let reuse = WriteOptions { reuse_len: Some(plain.len() + 5000), ..padded.clone() };
         assert_eq!(serialize(&tags, &[], &Existing::new(), &reuse).len(), plain.len() + 100);
     }
 
