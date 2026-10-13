@@ -525,7 +525,9 @@ fn empty_tags_remove_the_tags_but_keep_unmanaged_frames() {
     assert_eq!(&after[lens[0]..], &audio()[..]);
 
     let read = read_back(&path);
-    assert!(read.std.is_empty(), "{:?}", read.std);
+    // The preserved POPM frame reads back as a rating.
+    assert!(read.std.iter().all(|s| s.starts_with("Rating(")), "{:?}", read.std);
+    assert!(read.raw_keys.contains("POPM"));
     assert!(read.visuals.is_empty());
     assert!(read.raw_keys.contains("PRIV"));
     cleanup(&path);

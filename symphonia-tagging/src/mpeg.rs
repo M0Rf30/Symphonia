@@ -5,7 +5,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Tags of MPEG audio elementary streams (MP1/MP2/MP3, ADTS AAC).
+//! Tags of MPEG audio elementary streams (MP1/MP2/MP3) and True Audio (TTA) files.
 //!
 //! The stream is `[ID3v2 tag(s)] audio [ID3v2 tag] [APEv2 tag] [ID3v1 tag]`:
 //!
@@ -14,9 +14,16 @@
 //! * An ID3v2 tag that was appended to the stream (found by its `3DI` footer, or by its header
 //!   at the position that ends where the APEv2/ID3v1 tags begin) is removed. Its unmanaged
 //!   frames are carried over into the new tag.
-//! * An ID3v1 tag is rewritten from the tags. One is never added, and when there are no tags it
-//!   is removed. An enhanced ID3v1 tag (`TAG+`) is replaced by a plain one.
-//! * An APEv2 tag is not touched.
+//! * The ID3v1 tag follows [`WriteOptions::id3v1`](crate::WriteOptions::id3v1): `Preserve`
+//!   rewrites an existing tag from the tags (and removes it when there are no tags) but never
+//!   adds one, `Write` always writes one unless there are no tags, `Remove` drops it. Whatever
+//!   the policy, an enhanced ID3v1 tag (`TAG+`) is replaced by a plain one or removed with it.
+//! * An APEv2 tag is not touched, unless
+//!   [`WriteOptions::remove_ape_from_mpeg`](crate::WriteOptions::remove_ape_from_mpeg) is set:
+//!   then the APEv2 tag (v1 or v2) that ends where the ID3v1 tag(s) begin, or at the end of the
+//!   stream, is removed.
+//!
+//! Raw AAC (ADTS) streams are *not* handled here: they carry an APEv2 tag, see the `ape` module.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -28,7 +35,10 @@ use symphonia_metadata::id3v1::write::{ID3V1_ENHANCED_TAG_LEN, ID3V1_TAG_LEN};
 use symphonia_metadata::id3v2::write::{Existing, Version};
 use symphonia_metadata::{id3v1, id3v2};
 
-use crate::{Error, Id3v2Version, Result, WriteOptions, copy_range, read_up_to, replace_file};
+use crate::{
+    Error, Id3v1Policy, Id3v2Version, Result, WriteOptions, ape, copy_range, read_up_to,
+    replace_file,
+};
 
 pub(crate) fn write(
     path: &Path,
@@ -130,11 +140,30 @@ pub(crate) fn write(
 
     let new_id3v2 = id3v2::write::serialize(tags, visuals, &existing, &id3v2_opts);
 
-    // The ID3v1 tag is rewritten, never added.
-    let new_id3v1 = (has_id3v1 && !tags.is_empty()).then(|| id3v1::write::serialize(tags));
+    // The new ID3v1 tag, by policy.
+    let new_id3v1 = match opts.id3v1 {
+        Id3v1Policy::Preserve => has_id3v1 && !tags.is_empty(),
+        Id3v1Policy::Write => !tags.is_empty(),
+        Id3v1Policy::Remove => false,
+    }
+    .then(|| id3v1::write::serialize(tags));
+
+    // The APEv2 tag that ends where the ID3v1 tag(s) begin, if it is to be removed.
+    let ape_range = if opts.remove_ape_from_mpeg {
+        ape::find_tag_before(&mut file, tail_start)?.filter(|range| range.start >= audio_start)
+    }
+    else {
+        None
+    };
 
     // There is nothing to change in a stream without tags that is not given any.
-    if new_id3v2.is_empty() && audio_start == 0 && appended.is_none() && !has_id3v1 {
+    if new_id3v2.is_empty()
+        && audio_start == 0
+        && appended.is_none()
+        && !has_id3v1
+        && new_id3v1.is_none()
+        && ape_range.is_none()
+    {
         return Ok(());
     }
 
@@ -143,14 +172,21 @@ pub(crate) fn write(
     replace_file(path, |src, out| {
         out.write_all(&new_id3v2)?;
 
-        match &appended {
-            Some(range) => {
-                // Skip the appended tag.
-                copy_range(src, out, audio_start, range.start - audio_start)?;
-                copy_range(src, out, range.end, tail_start - range.end)?;
+        // Copy the audio, skipping the appended ID3v2 tag and the APEv2 tag to remove. The
+        // appended tag precedes the APEv2 tag, which ends at `tail_start`.
+        let mut pos = audio_start;
+
+        for range in [appended.as_ref(), ape_range.map(|r| r.start..r.end).as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            if range.start > pos {
+                copy_range(src, out, pos, range.start - pos)?;
             }
-            None => copy_range(src, out, audio_start, tail_start - audio_start)?,
+            pos = pos.max(range.end);
         }
+
+        copy_range(src, out, pos, tail_start.saturating_sub(pos))?;
 
         if let Some(id3v1) = &new_id3v1 {
             out.write_all(id3v1)?;
