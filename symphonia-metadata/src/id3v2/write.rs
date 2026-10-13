@@ -23,10 +23,30 @@
 //!
 //! * ID3v2.4: text is UTF-8, multiple values are NUL-separated.
 //! * ID3v2.3: text is ISO-8859-1, or UTF-16 with a byte-order-mark if it cannot be represented in
-//!   ISO-8859-1. Multiple values are joined with `/` (as Picard does).
-//!   Frames and tags that only exist in ID3v2.4 are written as their ID3v2.3 equivalent when there
-//!   is one (`TYER`/`TDAT`/`TIME`, `TORY`, `IPLS`, `TXXX` sort frames), otherwise, as the ID3v2.4
-//!   frame, which the reader accepts.
+//!   ISO-8859-1. Multiple values are joined with [`WriteOptions::join_v23`] (`/`, as Picard does).
+//!
+//! The text encoding can be forced with [`WriteOptions::encoding`].
+//!
+//! # Grouping and work
+//!
+//! With [`WriteOptions::itunes_grouping`], [`StandardTag::Grouping`] is written to `GRP1` and
+//! [`StandardTag::Work`] to `TIT1`. The reader maps both `TIT1` and `GRP1` to
+//! [`StandardTag::Grouping`], so a consumer of a tag written this way must treat a tag with the
+//! raw key `TIT1` as the work.
+//!
+//! # Ratings
+//!
+//! With [`WriteOptions::rating_email`], each [`StandardTag::Rating`] is written to a `POPM` frame
+//! (the rating byte is the rating in PPM scaled to 0-255). The owner is the `EMAIL` sub-field of
+//! the tag's raw tag if there is one, otherwise the option's email. The play counter of an
+//! existing `POPM` frame of the same owner is kept. Existing `POPM` frames of an owner that is
+//! written, or of the option's email, are replaced (or removed if there is no rating).
+//!
+//! # ID3v2.4-only frames
+//!
+//! Frames and tags that only exist in ID3v2.4 are written as their ID3v2.3 equivalent when there
+//! is one (`TYER`/`TDAT`/`TIME`, `TORY`, `IPLS`, `TXXX` sort frames), otherwise, as the ID3v2.4
+//! frame, which the reader accepts.
 //!
 //! Unsynchronisation is never applied to a tag that is written.
 
@@ -103,11 +123,13 @@ pub struct WriteOptions {
     /// ID3v2.4, cannot separate values with NUL). Picard's `id3v23_join_with`.
     pub join_v23: String,
     /// Write the grouping to `GRP1` and the work to `TIT1` (the convention of iTunes) instead of
-    /// the grouping to `TIT1` and the work to a `TXXX:WORK` frame. Picard's
-    /// `itunes_compatible_grouping`.
+    /// the grouping to `TIT1` and the work to a `TXXX:WORK` frame. The reader maps both `TIT1`
+    /// and `GRP1` to [`StandardTag::Grouping`], so when this is on, a consumer must treat the raw
+    /// frame `TIT1` as the work. Picard's `itunes_compatible_grouping`.
     pub itunes_grouping: bool,
-    /// The email of the `POPM` frame a [`StandardTag::Rating`] is written to. When `None`,
-    /// ratings are not written to ID3v2 tags and `POPM` frames are all preserved.
+    /// The email of the `POPM` frame a [`StandardTag::Rating`] is written to (see the module
+    /// documentation). When `None`, ratings are not written to ID3v2 tags and `POPM` frames are
+    /// all preserved.
     pub rating_email: Option<String>,
 }
 
@@ -414,18 +436,16 @@ fn is_latin1(s: &str) -> bool {
     })
 }
 
-/// Choose the text encoding identifier for `strings`.
-fn choose_encoding(version: Version, strings: &[&str]) -> u8 {
-    match version {
-        Version::V4 => 3,
-        Version::V3 => {
-            if strings.iter().all(|s| is_latin1(s)) {
-                0
-            }
-            else {
-                1
-            }
-        }
+/// Choose the text encoding identifier for `strings`, given the requested `encoding` and the
+/// tag `version`.
+fn choose_encoding(version: Version, encoding: TextEncoding, strings: &[&str]) -> u8 {
+    let latin1_or_utf16 = || if strings.iter().all(|s| is_latin1(s)) { 0 } else { 1 };
+
+    match (encoding, version) {
+        (TextEncoding::Auto, Version::V4) | (TextEncoding::Utf8, Version::V4) => 3,
+        (TextEncoding::Auto, Version::V3) | (TextEncoding::Latin1, _) => latin1_or_utf16(),
+        // ID3v2.3 has no UTF-8.
+        (TextEncoding::Utf8, Version::V3) | (TextEncoding::Utf16, _) => 1,
     }
 }
 
@@ -463,11 +483,18 @@ fn clean(s: &str) -> String {
 
 /// Build the body of a text frame (`prefix` is the content that follows the encoding byte and
 /// precedes the text, e.g. the description of a `TXXX` frame) holding `values`. In ID3v2.3, the
-/// values are joined with `JOIN_V23` unless `nul_separated` is set (frames that hold a list).
-fn text_body(version: Version, prefix: &[&str], values: &[String], nul_separated: bool) -> Vec<u8> {
+/// values are joined with `join_v23` unless `nul_separated` is set (frames that hold a list).
+fn text_body(
+    version: Version,
+    enc: TextEncoding,
+    join_v23: &str,
+    prefix: &[&str],
+    values: &[String],
+    nul_separated: bool,
+) -> Vec<u8> {
     let joined;
     let items: Vec<&str> = if version == Version::V3 && !nul_separated && values.len() > 1 {
-        joined = values.iter().map(String::as_str).collect::<Vec<_>>().join(JOIN_V23);
+        joined = values.iter().map(String::as_str).collect::<Vec<_>>().join(join_v23);
         vec![joined.as_str()]
     }
     else {
@@ -475,7 +502,7 @@ fn text_body(version: Version, prefix: &[&str], values: &[String], nul_separated
     };
 
     let all: Vec<&str> = prefix.iter().copied().chain(items.iter().copied()).collect();
-    let encoding = choose_encoding(version, &all);
+    let encoding = choose_encoding(version, enc, &all);
 
     let mut out = vec![encoding];
 
@@ -551,7 +578,12 @@ struct Pairs {
 
 struct Builder {
     version: Version,
+    encoding: TextEncoding,
+    join_v23: String,
+    itunes_grouping: bool,
     entries: Vec<Entry>,
+    /// The ratings (owner email if the tag has one, rating in PPM), in tag order.
+    ratings: Vec<(Option<String>, u32)>,
     /// (number, total) pairs.
     track: (Option<u64>, Option<u64>),
     disc: (Option<u64>, Option<u64>),
@@ -570,7 +602,11 @@ impl Builder {
     fn new(opts: &WriteOptions) -> Self {
         Builder {
             version: opts.version,
+            encoding: opts.encoding,
+            join_v23: opts.join_v23.clone(),
+            itunes_grouping: opts.itunes_grouping,
             entries: Vec::new(),
+            ratings: Vec::new(),
             track: (None, None),
             disc: (None, None),
             movement: (None, None),
@@ -658,7 +694,9 @@ impl Builder {
             EncodingDate(v) => self.text("TDEN", v.as_str()),
             Genre(v) => self.text("TCON", v.as_str()),
             // Picard writes TIT1 unless it is told to be iTunes compatible.
-            Grouping(v) => self.text("TIT1", v.as_str()),
+            Grouping(v) => {
+                self.text(if self.itunes_grouping { "GRP1" } else { "TIT1" }, v.as_str())
+            }
             IdentIsrc(v) => self.text("TSRC", v.as_str()),
             IdentPodcast(v) => self.text("TGID", v.as_str()),
             InitialKey(v) => self.text("TKEY", v.as_str()),
@@ -786,7 +824,14 @@ impl Builder {
             License(v) => self.txxx("LICENSE", v.as_str()),
             ReleaseDate(v) => self.txxx("RELEASEDATE", v.as_str()),
             Script(v) => self.txxx("SCRIPT", v.as_str()),
-            Work(v) => self.txxx("WORK", v.as_str()),
+            Work(v) => {
+                if self.itunes_grouping {
+                    self.text("TIT1", v.as_str())
+                }
+                else {
+                    self.txxx("WORK", v.as_str())
+                }
+            }
             Writer(v) => self.txxx("WRITER", v.as_str()),
             ReplayGainAlbumGain(v) => self.txxx("REPLAYGAIN_ALBUM_GAIN", v.as_str()),
             ReplayGainAlbumPeak(v) => self.txxx("REPLAYGAIN_ALBUM_PEAK", v.as_str()),
@@ -808,9 +853,8 @@ impl Builder {
                 self.txxx("ITUNESADVISORY", value)
             }
 
-            // The reader does not produce a rating from an ID3v2 tag, and the popularimeter (POPM)
-            // is preserved as it is.
-            Rating(_) => (),
+            // The rating is written to a popularimeter (POPM) by `serialize`, if it is told to.
+            Rating(v) => self.ratings.push((sub_field(raw, POPM_EMAIL), *v)),
 
             // There is no frame that the reader maps to the standard tag. Keep the value as a
             // free-form TXXX frame.
@@ -874,11 +918,12 @@ impl Builder {
             match &entry.key {
                 Key::Text([a, b, c, d]) => {
                     let id = [*a, *b, *c, *d];
-                    let body = text_body(v, &[], &entry.values, false);
+                    let body = text_body(v, self.encoding, &self.join_v23, &[], &entry.values, false);
                     frames.push(OutFrame { id, flags: 0, data: body });
                 }
                 Key::Txxx(desc) => {
-                    let body = text_body(v, &[desc], &entry.values, false);
+                    let body =
+                        text_body(v, self.encoding, &self.join_v23, &[desc], &entry.values, false);
                     frames.push(OutFrame::new("TXXX", body));
                 }
                 Key::Url(id) => {
@@ -890,7 +935,7 @@ impl Builder {
                 }
                 Key::Wxxx(desc) => {
                     for value in &entry.values {
-                        let encoding = choose_encoding(v, &[desc]);
+                        let encoding = choose_encoding(v, self.encoding, &[desc]);
                         let mut body = vec![encoding];
                         push_text(&mut body, desc, encoding);
                         push_terminator(&mut body, encoding);
@@ -901,7 +946,7 @@ impl Builder {
                 Key::Comm(lang, desc) | Key::Uslt(lang, desc) => {
                     let id = if matches!(entry.key, Key::Comm(..)) { "COMM" } else { "USLT" };
                     for value in &entry.values {
-                        let encoding = choose_encoding(v, &[desc, value]);
+                        let encoding = choose_encoding(v, self.encoding, &[desc, value]);
                         let mut body = vec![encoding];
                         body.extend_from_slice(lang.as_bytes());
                         push_text(&mut body, desc, encoding);
@@ -912,7 +957,7 @@ impl Builder {
                 }
                 Key::User(lang) => {
                     for value in &entry.values {
-                        let encoding = choose_encoding(v, &[value]);
+                        let encoding = choose_encoding(v, self.encoding, &[value]);
                         let mut body = vec![encoding];
                         body.extend_from_slice(lang.as_bytes());
                         push_text(&mut body, value, encoding);
@@ -951,7 +996,10 @@ impl Builder {
                 .collect();
 
             if !values.is_empty() {
-                frames.push(OutFrame::new(id, text_body(v, &[], &values, true)));
+                frames.push(OutFrame::new(
+                    id,
+                    text_body(v, self.encoding, &self.join_v23, &[], &values, true),
+                ));
             }
         }
 
@@ -1248,7 +1296,7 @@ fn picture_type(usage: Option<StandardVisualKey>) -> u8 {
     }
 }
 
-fn apic_frame(version: Version, visual: &Visual) -> OutFrame {
+fn apic_frame(version: Version, encoding: TextEncoding, visual: &Visual) -> OutFrame {
     let media_type = visual
         .media_type
         .clone()
@@ -1265,7 +1313,7 @@ fn apic_frame(version: Version, visual: &Visual) -> OutFrame {
         })
         .unwrap_or_default();
 
-    let encoding = choose_encoding(version, &[&desc]);
+    let encoding = choose_encoding(version, encoding, &[&desc]);
 
     let mut body = vec![encoding];
     push_latin1(&mut body, &media_type);
@@ -1415,6 +1463,38 @@ fn convert_embedded(id: &[u8; 4], data: &[u8], from: u8, to: Version) -> Option<
     Some(out)
 }
 
+/// Parse a preserved `POPM` frame into its owner email and the bytes of its play counter. Returns
+/// `None` if the frame is not a readable `POPM` frame.
+fn parse_popm(frame: &RawFrame) -> Option<(String, Vec<u8>)> {
+    if &frame.id != b"POPM" {
+        return None;
+    }
+
+    // Compressed and encrypted frames cannot be parsed.
+    let opaque = match frame.src_version {
+        3 => frame.flags & 0x00c0,
+        4 => frame.flags & 0x000c,
+        _ => 0,
+    };
+
+    if opaque != 0 {
+        return None;
+    }
+
+    let mut content = frame.data.get(prefix_len(frame)..)?.to_vec();
+
+    if frame.src_version == 4 && frame.flags & 0x0002 != 0 {
+        let len = decode_unsynchronisation(&mut content).len();
+        content.truncate(len);
+    }
+
+    let end = content.iter().position(|&b| b == 0)?;
+    content.get(end + 1)?;
+
+    let email = content[..end].iter().map(|&b| char::from(b)).collect();
+    Some((email, content[end + 2..].to_vec()))
+}
+
 /// Serialize a tag.
 ///
 /// The new tag has the frames that [`Tag`]s and [`Visual`]s map to, followed by the unmanaged
@@ -1435,13 +1515,54 @@ pub fn serialize(
         }
     }
 
+    let ratings = std::mem::take(&mut builder.ratings);
     let mut frames = builder.finish();
 
     for visual in visuals {
-        frames.push(apic_frame(opts.version, visual));
+        frames.push(apic_frame(opts.version, opts.encoding, visual));
+    }
+
+    // The `POPM` frames of the ratings, and the owners whose existing `POPM` frame they replace.
+    let mut replaced: Vec<String> = Vec::new();
+
+    if let Some(default_email) = &opts.rating_email {
+        replaced.push(default_email.clone());
+        let mut seen: Vec<String> = Vec::new();
+
+        for (email, ppm) in ratings {
+            let email = email.unwrap_or_else(|| default_email.clone());
+
+            if seen.contains(&email) {
+                continue;
+            }
+
+            // The play counter of the frame that is replaced is carried over.
+            let counter =
+                existing.frames.iter().filter_map(parse_popm).find(|(e, _)| *e == email);
+
+            let rating = ((u64::from(ppm) * 255 + 500_000) / 1_000_000).min(255) as u8;
+
+            let mut body = Vec::new();
+            push_latin1(&mut body, &email);
+            body.push(0);
+            body.push(rating);
+
+            if let Some((_, counter)) = counter {
+                body.extend_from_slice(&counter);
+            }
+
+            frames.push(OutFrame::new("POPM", body));
+            seen.push(email);
+        }
+
+        replaced.extend(seen);
     }
 
     for frame in &existing.frames {
+        if !replaced.is_empty() && parse_popm(frame).is_some_and(|(e, _)| replaced.contains(&e)) {
+            continue;
+        }
+
         if let Some(frame) = convert_frame(frame, opts.version) {
             frames.push(frame);
         }
@@ -1854,7 +1975,14 @@ mod tests {
         assert!(find_frame(&v3, b"APIC").is_none());
         let (read, visuals) = read_back(&v3);
         assert!(visuals.is_empty());
-        assert_eq!(std_tags(&read), vec![format!("{:?}", StandardTag::Artist(s("New Artist")))]);
+        // The preserved POPM frame is read as a rating.
+        assert_eq!(
+            std_tags(&read),
+            vec![
+                format!("{:?}", StandardTag::Artist(s("New Artist"))),
+                format!("{:?}", StandardTag::Rating(768_627)),
+            ]
+        );
 
         // A different version: the frames are converted, or dropped when they cannot be.
         let v4 = serialize(&tags, &[], &existing, &opts(Version::V4));
@@ -2054,6 +2182,276 @@ mod tests {
                 ("OPUS".to_string(), "Op. 1".to_string()),
                 ("TV_EPISODE_NUMBER".to_string(), "5".to_string())
             ]
+        );
+    }
+
+    fn encoding_of(tag: &[u8], id: &[u8; 4]) -> u8 {
+        find_frame(tag, id).unwrap().1[0]
+    }
+
+    fn encoded(version: Version, encoding: TextEncoding) -> WriteOptions {
+        WriteOptions { version, encoding, ..Default::default() }
+    }
+
+    #[test]
+    fn verify_text_encoding_option() {
+        let ascii = [std(StandardTag::TrackTitle(s("Plain")))];
+        let cyrillic = [std(StandardTag::TrackTitle(s("\u{41a}\u{438}\u{43d}\u{43e} \u{20ac}")))];
+
+        // (version, encoding, expected for ASCII, expected for non-Latin-1).
+        let cases = [
+            (Version::V4, TextEncoding::Auto, 3, 3),
+            (Version::V3, TextEncoding::Auto, 0, 1),
+            (Version::V4, TextEncoding::Utf8, 3, 3),
+            (Version::V3, TextEncoding::Utf8, 1, 1),
+            (Version::V4, TextEncoding::Utf16, 1, 1),
+            (Version::V3, TextEncoding::Utf16, 1, 1),
+            (Version::V4, TextEncoding::Latin1, 0, 1),
+            (Version::V3, TextEncoding::Latin1, 0, 1),
+        ];
+
+        for (version, encoding, ascii_enc, wide_enc) in cases {
+            let o = encoded(version, encoding);
+
+            let bytes = serialize(&ascii, &[], &Existing::new(), &o);
+            assert_eq!(encoding_of(&bytes, b"TIT2"), ascii_enc, "{version:?} {encoding:?}");
+            let (read, _) = read_back(&bytes);
+            assert_eq!(std_tags(&read), expected(&ascii));
+
+            let bytes = serialize(&cyrillic, &[], &Existing::new(), &o);
+            assert_eq!(encoding_of(&bytes, b"TIT2"), wide_enc, "{version:?} {encoding:?}");
+            let (read, _) = read_back(&bytes);
+            assert_eq!(std_tags(&read), expected(&cyrillic));
+        }
+    }
+
+    #[test]
+    fn verify_text_encoding_applies_to_every_text_frame() {
+        let comment = Tag::new_std(
+            RawTag::new_with_sub_fields(
+                "COMM",
+                "\u{43a}\u{43e}\u{43c}",
+                vec![
+                    RawTagSubField::new(COMM_LANGUAGE, "eng"),
+                    RawTagSubField::new(COMM_SHORT_DESCRIPTION, "d"),
+                ]
+                .into_boxed_slice(),
+            ),
+            StandardTag::Comment(s("\u{43a}\u{43e}\u{43c}")),
+        );
+
+        let tags = [
+            std(StandardTag::Artist(s("A"))),
+            std(StandardTag::Artist(s("B"))),
+            std(StandardTag::MusicBrainzAlbumId(s("id"))),
+            std(StandardTag::Lyrics(s("la"))),
+            std(StandardTag::Url(s("https://example.org/"))),
+            comment,
+        ];
+
+        for version in [Version::V3, Version::V4] {
+            for (encoding, expected_enc) in [(TextEncoding::Utf16, 1), (TextEncoding::Latin1, 0)] {
+                let bytes = serialize(&tags, &[], &Existing::new(), &encoded(version, encoding));
+
+                for id in [b"TPE1", b"TXXX", b"USLT", b"WXXX"] {
+                    assert_eq!(encoding_of(&bytes, id), expected_enc, "{version:?} {encoding:?}");
+                }
+
+                // The comment has text that is not representable in ISO-8859-1.
+                assert_eq!(encoding_of(&bytes, b"COMM"), 1);
+
+                let (read, _) = read_back(&bytes);
+                assert_eq!(std_tags(&read), {
+                    let mut e = expected(&tags);
+                    if version == Version::V3 {
+                        // The artists are joined.
+                        e.retain(|t| !t.starts_with("Artist"));
+                        e.push(format!("{:?}", StandardTag::Artist(s("A/B"))));
+                        e.sort();
+                    }
+                    e
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn verify_utf16_v4_multiple_values_have_wide_separators() {
+        let tags = [std(StandardTag::Artist(s("A"))), std(StandardTag::Artist(s("B")))];
+        let bytes = serialize(&tags, &[], &Existing::new(), &encoded(Version::V4, TextEncoding::Utf16));
+        let data = find_frame(&bytes, b"TPE1").unwrap().1;
+        assert_eq!(data, b"\x01\xff\xfeA\0\0\0\xff\xfeB\0");
+        let (read, _) = read_back(&bytes);
+        assert_eq!(std_tags(&read), expected(&tags));
+    }
+
+    #[test]
+    fn verify_v23_join_separator() {
+        let tags = [std(StandardTag::Artist(s("A"))), std(StandardTag::Artist(s("B")))];
+
+        for (join, joined) in [("; ", "A; B"), ("", "AB"), ("/", "A/B")] {
+            let o = WriteOptions {
+                version: Version::V3,
+                join_v23: join.to_string(),
+                ..Default::default()
+            };
+            let bytes = serialize(&tags, &[], &Existing::new(), &o);
+            assert_eq!(find_frame(&bytes, b"TPE1").unwrap().1, [b"\0", joined.as_bytes()].concat());
+        }
+
+        // ID3v2.4 is unaffected by the separator.
+        let o = WriteOptions { join_v23: "; ".to_string(), ..Default::default() };
+        let bytes = serialize(&tags, &[], &Existing::new(), &o);
+        assert_eq!(find_frame(&bytes, b"TPE1").unwrap().1, b"\x03A\0B");
+    }
+
+    #[test]
+    fn verify_itunes_grouping() {
+        let tags = [
+            std(StandardTag::Grouping(s("Group"))),
+            std(StandardTag::Work(s("Work"))),
+        ];
+
+        for version in [Version::V3, Version::V4] {
+            let o = WriteOptions { version, itunes_grouping: true, ..Default::default() };
+            let bytes = serialize(&tags, &[], &Existing::new(), &o);
+            assert_eq!(find_frame(&bytes, b"GRP1").unwrap().1[1..], *b"Group");
+            assert_eq!(find_frame(&bytes, b"TIT1").unwrap().1[1..], *b"Work");
+            assert!(find_frame(&bytes, b"TXXX").is_none());
+
+            let (read, _) = read_back(&bytes);
+            let raw: Vec<_> = read.iter().map(|t| (t.raw.key.clone(), t.raw.value.to_string())).collect();
+            assert!(raw.contains(&("GRP1".to_string(), "Group".to_string())));
+            assert!(raw.contains(&("TIT1".to_string(), "Work".to_string())));
+
+            // Without the option: TIT1 is the grouping, and the work is a TXXX frame.
+            let bytes = serialize(&tags, &[], &Existing::new(), &opts(version));
+            assert_eq!(find_frame(&bytes, b"TIT1").unwrap().1[1..], *b"Group");
+            assert!(find_frame(&bytes, b"GRP1").is_none());
+            assert!(find_frame(&bytes, b"TXXX").is_some());
+        }
+    }
+
+    fn popm(email: &str, rating: u8, counter: &[u8]) -> Vec<u8> {
+        [email.as_bytes(), &[0, rating], counter].concat()
+    }
+
+    fn popm_frames(tag: &[u8]) -> Vec<Vec<u8>> {
+        let header = parse_header(tag).unwrap();
+        let mut pos = 0;
+        let body = &tag[10..10 + header.size];
+        let mut out = Vec::new();
+        while let Some(frame) = next_frame(body, &mut pos, header.major) {
+            if &frame.id == b"POPM" {
+                out.push(frame.data);
+            }
+        }
+        out
+    }
+
+    fn rating_opts(version: Version, email: Option<&str>) -> WriteOptions {
+        WriteOptions { version, rating_email: email.map(String::from), ..Default::default() }
+    }
+
+    #[test]
+    fn verify_popm_reader_maps_rating() {
+        let bytes = serialize(
+            &[],
+            &[],
+            &{
+                let mut e = Existing::new();
+                e.parse_tag(&tag_bytes(
+                    4,
+                    0,
+                    &frame_v4(b"POPM", 0, &popm("a@b.c", 128, &[0, 0, 0, 5])),
+                ));
+                e
+            },
+            &opts(Version::V4),
+        );
+        let (read, _) = read_back(&bytes);
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].raw.key, "POPM");
+        assert_eq!(read[0].std, Some(StandardTag::Rating(501_961)));
+    }
+
+    #[test]
+    fn verify_rating_is_ignored_without_email() {
+        let mut old = Vec::new();
+        old.extend(frame_v4(b"POPM", 0, &popm("a@b.c", 128, &[3])));
+        let mut existing = Existing::new();
+        existing.parse_tag(&tag_bytes(4, 0, &old));
+
+        let tags = [std(StandardTag::Rating(1_000_000))];
+        let bytes = serialize(&tags, &[], &existing, &rating_opts(Version::V4, None));
+        assert_eq!(popm_frames(&bytes), vec![popm("a@b.c", 128, &[3])]);
+    }
+
+    #[test]
+    fn verify_rating_write_replace_remove() {
+        let mut old = Vec::new();
+        old.extend(frame_v3(b"POPM", 0, &popm("me@x.org", 64, &[0, 0, 0, 9])));
+        old.extend(frame_v3(b"POPM", 0, &popm("other@x.org", 255, &[1])));
+        let mut existing = Existing::new();
+        existing.parse_tag(&tag_bytes(3, 0, &old));
+
+        for version in [Version::V3, Version::V4] {
+            let o = rating_opts(version, Some("me@x.org"));
+
+            // Replaced: the counter is carried over, the other user's frame stays.
+            let tags = [std(StandardTag::Rating(1_000_000))];
+            let bytes = serialize(&tags, &[], &existing, &o);
+            assert_eq!(
+                popm_frames(&bytes),
+                vec![popm("me@x.org", 255, &[0, 0, 0, 9]), popm("other@x.org", 255, &[1])]
+            );
+            let (read, _) = read_back(&bytes);
+            assert!(read.iter().any(|t| t.std == Some(StandardTag::Rating(1_000_000))));
+
+            // Rounded.
+            let tags = [std(StandardTag::Rating(500_000))];
+            let bytes = serialize(&tags, &[], &existing, &o);
+            assert_eq!(popm_frames(&bytes)[0], popm("me@x.org", 128, &[0, 0, 0, 9]));
+
+            // Removed by omitting the rating.
+            let bytes = serialize(&[], &[], &existing, &o);
+            assert_eq!(popm_frames(&bytes), vec![popm("other@x.org", 255, &[1])]);
+
+            // A new owner has no counter.
+            let o = rating_opts(version, Some("new@x.org"));
+            let tags = [std(StandardTag::Rating(0))];
+            let bytes = serialize(&tags, &[], &existing, &o);
+            let frames = popm_frames(&bytes);
+            assert_eq!(frames[0], popm("new@x.org", 0, &[]));
+            assert_eq!(frames.len(), 3);
+        }
+    }
+
+    #[test]
+    fn verify_rating_with_raw_email_and_first_wins() {
+        let mut old = Vec::new();
+        old.extend(frame_v4(b"POPM", 0, &popm("other@x.org", 10, &[7])));
+        let mut existing = Existing::new();
+        existing.parse_tag(&tag_bytes(4, 0, &old));
+
+        let other = Tag::new_std(
+            RawTag::new_with_sub_fields(
+                "POPM",
+                255u8,
+                vec![RawTagSubField::new(POPM_EMAIL, "other@x.org")].into_boxed_slice(),
+            ),
+            StandardTag::Rating(1_000_000),
+        );
+        let tags = [
+            std(StandardTag::Rating(200_000)),
+            std(StandardTag::Rating(900_000)),
+            other,
+        ];
+
+        let bytes = serialize(&tags, &[], &existing, &rating_opts(Version::V4, Some("me@x.org")));
+        assert_eq!(
+            popm_frames(&bytes),
+            vec![popm("me@x.org", 51, &[]), popm("other@x.org", 255, &[7])]
         );
     }
 }
