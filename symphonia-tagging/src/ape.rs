@@ -5,11 +5,13 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! APEv2 tags appended to WavPack, Monkey's Audio and Musepack files.
+//! APEv2 tags appended to WavPack, Monkey's Audio, Musepack, OptimFROG, TAK, and raw AAC (ADTS) and
+//! AC-3 / E-AC-3 streams.
 //!
 //! The tag lives at the end of the file, optionally followed by an ID3v1 tag. Writing removes the
-//! existing APE tag (v1 or v2), appends the new one at the same place and leaves any ID3v1 tag
-//! after it untouched. The audio is copied verbatim.
+//! existing APE tag (v1 or v2), appends the new one at the same place (before the ID3v1 tag, or at
+//! the end of the file when a stream has no APE tag yet) and leaves any ID3v1 tag after it
+//! untouched. A leading ID3v2 tag is not touched either. The audio is copied verbatim.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -66,6 +68,20 @@ impl TailLayout {
     }
 }
 
+/// Finds the APE tag(s) that end exactly at `end`, walking backwards over consecutive tags. The
+/// returned range covers all of them.
+pub(crate) fn find_tag_before(file: &mut File, end: u64) -> Result<Option<TagRange>> {
+    let mut end = end;
+    let mut tag: Option<TagRange> = None;
+
+    while let Some(range) = tag_ending_at(file, end)? {
+        end = range.start;
+        tag = Some(TagRange { start: range.start, end: tag.map_or(range.end, |t| t.end) });
+    }
+
+    Ok(tag)
+}
+
 /// Finds the APE tag at the end of `file`: the footer must be the last 32 bytes of the file, or
 /// directly precede a trailing ID3v1 tag.
 pub(crate) fn find_tag(file: &mut File) -> Result<TailLayout> {
@@ -78,17 +94,10 @@ pub(crate) fn find_tag(file: &mut File) -> Result<TailLayout> {
         read_up_to(file, &mut marker)? == 3 && &marker == b"TAG"
     };
 
-    let mut end = if id3v1 { len - ID3V1_SIZE } else { len };
-    let tail_end = end;
-    let mut tag: Option<TagRange> = None;
+    let end = if id3v1 { len - ID3V1_SIZE } else { len };
+    let tag = find_tag_before(file, end)?;
 
-    // Walk backwards over every APE tag directly before `end`.
-    while let Some(range) = tag_ending_at(file, end)? {
-        end = range.start;
-        tag = Some(TagRange { start: range.start, end: tag.map_or(range.end, |t| t.end) });
-    }
-
-    debug_assert!(tag.map_or(true, |t| t.end == tail_end));
+    debug_assert!(tag.map_or(true, |t| t.end == end));
 
     Ok(TailLayout { tag, id3v1, len })
 }

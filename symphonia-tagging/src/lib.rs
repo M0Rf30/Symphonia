@@ -21,6 +21,32 @@
 //!   RIFF chunks, ...) is preserved, and the audio bitstream is never altered.
 //! * Every write builds the new file next to the original and renames it over the original, so a
 //!   failed write never leaves a half-written file.
+//!
+//! # Raw streams
+//!
+//! * **MP1/MP2/MP3** and **TTA** get ID3v2 at the front and, per [`WriteOptions::id3v1`], ID3v1 at
+//!   the end.
+//! * **ADTS AAC** ([`Container::Aac`]) is *not* tagged with ID3v2. Like Picard (mutagen's
+//!   `AACAPEv2`), it gets an APEv2 tag at the end, as do **AC-3 / E-AC-3**, **TAK** and
+//!   **OptimFROG**; see [`WriteOptions::aac_ape`] and [`WriteOptions::ac3_ape`]. Symphonia
+//!   has no demuxer for AC-3, TAK and OptimFROG, so [`read_tags`] reads the tags of those (and of
+//!   TTA and ADTS) files.
+//!
+//! # Formats that are not written
+//!
+//! Picard saves these formats, but this crate cannot, and [`sniff`] returns [`Container::Other`]
+//! for them:
+//!
+//! * **ASF / WMA**: the workspace has no ASF demuxer (no `symphonia-format-asf`), no ASF tag model
+//!   and no mapping of the `WM/*` attributes to standard tags, so a writer could neither be
+//!   round-tripped through Symphonia's own readers nor be loaded by consumers.
+//! * **MIDI**: Picard's `MIDIFile` is read-only (its `_save` does nothing) and Symphonia has no
+//!   MIDI reader, so there is nothing to write and nothing to load.
+//! * **DSDIFF / DFF**: `symphonia-format-dsd` does read DFF (`DffReader`: uncompressed DSD, the
+//!   `ID3 ` chunk and the `DIIN`/`COMT` chunks), but no writer for the `FRM8` container exists
+//!   yet, so it is sniffed as `Other` and not writable. (DSF is written, see [`Container::Dsf`].)
+//! * **Ogg Theora**: Symphonia has no Theora (or Ogg video) mapper in `symphonia-format-ogg`, and
+//!   [`sniff`] does not recognise `\x80theora` streams.
 
 #![warn(rust_2018_idioms)]
 #![forbid(unsafe_code)]
@@ -32,7 +58,10 @@ mod flac;
 mod mp4;
 mod mpeg;
 mod ogg;
+mod read;
 mod riff;
+
+pub use read::{ReadTags, read_tags};
 
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
@@ -314,16 +343,20 @@ pub fn write_file(path: &Path, tags: &[Tag], visuals: &[Visual], opts: &WriteOpt
     }
 }
 
-/// Identifies `path`'s container from its leading bytes. A leading ID3v2
-/// tag is skipped first (FLAC and APE files sometimes carry one).
+/// Identifies `path`'s container from its leading bytes. Leading ID3v2 tags (there may be several
+/// stacked ones) are skipped first (FLAC and APE files sometimes carry them).
 pub fn sniff(path: &Path) -> Result<Container> {
     let mut file = File::open(path)?;
-    let mut head = [0u8; 10];
     let mut start = 0u64;
-    if read_up_to(&mut file, &mut head)? == 10 && &head[..3] == b"ID3" {
+    loop {
+        let mut head = [0u8; 10];
+        file.seek(SeekFrom::Start(start))?;
+        if read_up_to(&mut file, &mut head)? < 10 || &head[..3] != b"ID3" {
+            break;
+        }
         let size = synchsafe(&head[6..10]);
         let footer = if head[5] & 0x10 != 0 { 10 } else { 0 };
-        start = 10 + u64::from(size) + footer;
+        start += 10 + u64::from(size) + footer;
     }
     file.seek(SeekFrom::Start(start))?;
     let mut buf = [0u8; 64];
@@ -362,6 +395,16 @@ pub fn sniff(path: &Path) -> Result<Container> {
         Container::MonkeysAudio
     } else if b.starts_with(b"MPCK") || b.starts_with(b"MP+") {
         Container::Musepack
+    } else if b.starts_with(b"tBaK") {
+        Container::Tak
+    } else if b.starts_with(b"OFR ") {
+        Container::OptimFrog
+    } else if b.starts_with(b"TTA1") {
+        Container::Tta
+    } else if b.starts_with(&[0x0B, 0x77]) {
+        Container::Ac3
+    } else if is_adts(&mut file, start, b)? {
+        Container::Aac
     } else if n >= 2 && b[0] == 0xFF && b[1] & 0xE0 == 0xE0 {
         Container::MpegAudio
     } else if start > 0 {
@@ -372,6 +415,32 @@ pub fn sniff(path: &Path) -> Result<Container> {
         Container::Other
     };
     Ok(container)
+}
+
+/// Whether the stream at `start` (of which `head` holds the first bytes) begins with ADTS AAC
+/// frames. The first header must have the sync word and zero layer bits (MPEG audio layers are
+/// never zero), and a second header must follow the first frame, unless the first frame is the
+/// whole stream.
+fn is_adts(file: &mut File, start: u64, head: &[u8]) -> Result<bool> {
+    let is_header = |b: &[u8]| b.len() >= 2 && b[0] == 0xFF && b[1] & 0xF6 == 0xF0;
+
+    if head.len() < 7 || !is_header(head) {
+        return Ok(false);
+    }
+
+    // The 13-bit frame length (including the header) spans bytes 3..6.
+    let frame_len =
+        (usize::from(head[3] & 0x03) << 11) | (usize::from(head[4]) << 3) | usize::from(head[5] >> 5);
+
+    if frame_len < 7 {
+        return Ok(false);
+    }
+
+    let mut next = [0u8; 2];
+    file.seek(SeekFrom::Start(start + frame_len as u64))?;
+    let n = read_up_to(file, &mut next)?;
+
+    Ok(is_header(&next[..n]) || n == 0)
 }
 
 /// Decodes a 4-byte ID3v2 synchsafe integer.
