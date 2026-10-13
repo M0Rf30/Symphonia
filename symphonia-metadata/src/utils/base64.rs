@@ -100,6 +100,48 @@ pub fn decode(encoded: &str) -> Option<Box<[u8]>> {
     Some(decoded.into_boxed_slice())
 }
 
+/// Encode bytes as a RFC4648 Base64 string, with padding.
+#[cfg(feature = "write")]
+pub fn encode(data: &[u8]) -> String {
+    const SYMBOLS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    let mut encoded = String::with_capacity(data.len().div_ceil(3) * 4);
+
+    let mut chunks = data.chunks_exact(3);
+
+    // Each chunk of 3 bytes (24 bits) encodes to 4 symbols of 6 bits.
+    for chunk in &mut chunks {
+        let n = (u32::from(chunk[0]) << 16) | (u32::from(chunk[1]) << 8) | u32::from(chunk[2]);
+
+        encoded.push(char::from(SYMBOLS[(n >> 18) as usize & 0x3f]));
+        encoded.push(char::from(SYMBOLS[(n >> 12) as usize & 0x3f]));
+        encoded.push(char::from(SYMBOLS[(n >> 6) as usize & 0x3f]));
+        encoded.push(char::from(SYMBOLS[n as usize & 0x3f]));
+    }
+
+    // The remaining 1 or 2 bytes are padded out to 4 symbols.
+    match *chunks.remainder() {
+        [a] => {
+            let n = u32::from(a) << 16;
+
+            encoded.push(char::from(SYMBOLS[(n >> 18) as usize & 0x3f]));
+            encoded.push(char::from(SYMBOLS[(n >> 12) as usize & 0x3f]));
+            encoded.push_str("==");
+        }
+        [a, b] => {
+            let n = (u32::from(a) << 16) | (u32::from(b) << 8);
+
+            encoded.push(char::from(SYMBOLS[(n >> 18) as usize & 0x3f]));
+            encoded.push(char::from(SYMBOLS[(n >> 12) as usize & 0x3f]));
+            encoded.push(char::from(SYMBOLS[(n >> 6) as usize & 0x3f]));
+            encoded.push('=');
+        }
+        _ => (),
+    }
+
+    encoded
+}
+
 #[cfg(test)]
 mod tests {
     use super::decode;
@@ -126,5 +168,23 @@ mod tests {
         assert_eq!(None, decode("a").as_deref());
         assert_eq!(None, decode("ab!c").as_deref());
         assert_eq!(None, decode("ab=c").as_deref());
+    }
+
+    #[cfg(feature = "write")]
+    #[test]
+    fn verify_base64_encode() {
+        use super::encode;
+
+        assert_eq!("", encode(b""));
+        assert_eq!("Zg==", encode(b"f"));
+        assert_eq!("Zm8=", encode(b"fo"));
+        assert_eq!("Zm9v", encode(b"foo"));
+        assert_eq!("Zm9vYg==", encode(b"foob"));
+        assert_eq!("Zm9vYmE=", encode(b"fooba"));
+        assert_eq!("Zm9vYmFy", encode(b"foobar"));
+
+        // Round trip all byte values.
+        let data: Vec<u8> = (0..=255).collect();
+        assert_eq!(Some(data.as_slice()), decode(&encode(&data)).as_deref());
     }
 }

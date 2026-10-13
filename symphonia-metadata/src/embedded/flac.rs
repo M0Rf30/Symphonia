@@ -26,6 +26,9 @@ use crate::embedded::vorbis;
 use crate::utils::id3v2::get_visual_key_from_picture_type;
 use crate::utils::images::try_get_image_info;
 
+#[cfg(feature = "write")]
+pub mod write;
+
 pub const FLAC_METADATA_INFO: MetadataInfo = MetadataInfo {
     metadata: METADATA_ID_FLAC,
     short_name: "flac",
