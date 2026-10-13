@@ -217,6 +217,7 @@ mod info {
     }
 
     #[cfg(all(test, feature = "write"))]
+    #[allow(clippy::unwrap_used)]
     mod tests {
         use std::sync::Arc;
 
@@ -308,7 +309,7 @@ mod info {
 
         #[test]
         fn verify_multiple_values_repeat_and_numbers_do_not() {
-            let tags = vec![
+            let tags = [
                 StandardTag::Artist(s("A")),
                 StandardTag::Artist(s("B")),
                 StandardTag::TrackNumber(1),
