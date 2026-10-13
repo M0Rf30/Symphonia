@@ -19,3 +19,12 @@ mod fp;
 mod stream;
 
 pub use demuxer::IsoMp4Reader;
+
+/// Serializers that turn tags back into ISO/MP4 metadata atoms.
+///
+/// The serializers are the exact reverse of the readers: a tag written here reads back as the
+/// same [`StandardTag`](symphonia_core::meta::StandardTag).
+#[cfg(feature = "writer")]
+pub mod writer {
+    pub use crate::atoms::ilst_write::{build_ilst, mdir_hdlr_box};
+}

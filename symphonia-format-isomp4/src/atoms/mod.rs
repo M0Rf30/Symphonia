@@ -36,6 +36,8 @@ pub(crate) mod hdlr;
 pub(crate) mod hvcc;
 pub(crate) mod id32;
 pub(crate) mod ilst;
+#[cfg(feature = "writer")]
+pub(crate) mod ilst_write;
 pub(crate) mod mdhd;
 pub(crate) mod mdia;
 pub(crate) mod mehd;

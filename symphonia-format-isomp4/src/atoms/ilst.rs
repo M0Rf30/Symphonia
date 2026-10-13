@@ -989,7 +989,7 @@ impl Atom for IlstAtom {
 }
 
 /// Get a raw tag key for a given metadata atom type.
-fn get_raw_tag_key(atom_type: AtomType) -> &'static str {
+pub(crate) fn get_raw_tag_key(atom_type: AtomType) -> &'static str {
     match atom_type {
         // Freeform tag.
         AtomType::FreeFormTag => "----",
@@ -1032,6 +1032,9 @@ fn get_raw_tag_key(atom_type: AtomType) -> &'static str {
         AtomType::LongDescriptionTag => "ldes",
         AtomType::LyricsTag => "\u{a9}lyr",
         AtomType::MediaTypeTag => "stik",
+        AtomType::MovementCountTag => "\u{a9}mvc",
+        AtomType::MovementIndexTag => "\u{a9}mvi",
+        AtomType::MovementTag => "\u{a9}mvn",
         AtomType::NarratorTag => "\u{a9}nrt",
         AtomType::OriginalArtistTag => "\u{a9}ope",
         AtomType::OwnerTag => "ownr",
@@ -1043,7 +1046,9 @@ fn get_raw_tag_key(atom_type: AtomType) -> &'static str {
         AtomType::PurchaseDateTag => "purd",
         AtomType::RatingTag => "rate",
         AtomType::RecordingCopyrightTag => "\u{a9}phg",
+        AtomType::ShowMovementTag => "shwm",
         AtomType::SoloistTag => "\u{a9}sol",
+        AtomType::SortShowNameTag => "sosn",
         AtomType::SortAlbumArtistTag => "soaa",
         AtomType::SortAlbumTag => "soal",
         AtomType::SortArtistTag => "soar",
