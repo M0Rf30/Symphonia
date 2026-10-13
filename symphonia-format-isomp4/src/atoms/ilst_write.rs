@@ -31,8 +31,8 @@ use symphonia_core::meta::{ContentAdvisory, RawTag, RawValue, StandardTag, Tag, 
 
 use log::{debug, warn};
 
-use crate::atoms::ilst::get_raw_tag_key;
 use crate::atoms::AtomType;
+use crate::atoms::ilst::get_raw_tag_key;
 
 /// The reverse-DNS namespace iTunes (and Picard) use for free-form atoms.
 const ITUNES_MEAN: &str = "com.apple.iTunes";
@@ -296,11 +296,9 @@ fn resolve(tag: &Tag) -> Option<(Slot, Vec<Datum>)> {
         let mapped = match (std, &raw_slot) {
             // The media kind is a number in `stik`, but the media format of a release (CD, ...)
             // is free-form text.
-            (StandardTag::MediaFormat(name), Some(Slot::Atom(STIK))) => {
-                media_kind_number(name).or_else(|| raw_integer(&tag.raw.value)).map(|n| {
-                    (Slot::Atom(STIK), Datum::int(n, 1))
-                })
-            }
+            (StandardTag::MediaFormat(name), Some(Slot::Atom(STIK))) => media_kind_number(name)
+                .or_else(|| raw_integer(&tag.raw.value))
+                .map(|n| (Slot::Atom(STIK), Datum::int(n, 1))),
             _ => classify(std),
         };
 
@@ -497,7 +495,9 @@ fn classify(std: &StandardTag) -> Option<(Slot, Datum)> {
             },
         ),
 
-        S::OriginalReleaseYear(year) => Some((Slot::free("ORIGINALYEAR"), Datum::text(&year.to_string()))),
+        S::OriginalReleaseYear(year) => {
+            Some((Slot::free("ORIGINALYEAR"), Datum::text(&year.to_string())))
+        }
 
         _ => {
             let (name, value) = freeform_name(std)?;
@@ -748,8 +748,7 @@ mod tests {
 
     fn read_back(ilst: &[u8]) -> (Vec<Tag>, Vec<Visual>) {
         let len = ilst.len() as u64;
-        let mss =
-            MediaSourceStream::new(Box::new(Cursor::new(ilst.to_vec())), Default::default());
+        let mss = MediaSourceStream::new(Box::new(Cursor::new(ilst.to_vec())), Default::default());
         let mut it = AtomIterator::new(mss, Some(len));
 
         assert!(it.next_header().ok().flatten().is_some(), "ilst header should be read");
@@ -889,10 +888,8 @@ mod tests {
 
     #[test]
     fn identical_values_are_not_repeated() {
-        let tags = vec![
-            std_tag(StandardTag::Genre(s("Rock"))),
-            std_tag(StandardTag::Genre(s("Rock"))),
-        ];
+        let tags =
+            vec![std_tag(StandardTag::Genre(s("Rock"))), std_tag(StandardTag::Genre(s("Rock")))];
 
         let (read, _) = read_back(&build(&tags, &[]));
         assert_eq!(std_tags(&read), vec![StandardTag::Genre(s("Rock"))]);
@@ -928,8 +925,7 @@ mod tests {
 
     #[test]
     fn a_total_without_a_number_is_kept() {
-        let (read, _) =
-            read_back(&build(&[std_tag(StandardTag::TrackTotal(11))], &[]));
+        let (read, _) = read_back(&build(&[std_tag(StandardTag::TrackTotal(11))], &[]));
         assert_eq!(std_tags(&read), vec![StandardTag::TrackTotal(11)]);
     }
 
@@ -945,10 +941,8 @@ mod tests {
         let ilst = build(&[std_tag(StandardTag::Composer(s("Bach")))], &[]);
         assert!(ilst.windows(4).any(|w| w == b"\xa9wrt"));
 
-        let from_com = Tag::new_std(
-            RawTag::new("\u{a9}com", "Bach"),
-            StandardTag::Composer(s("Bach")),
-        );
+        let from_com =
+            Tag::new_std(RawTag::new("\u{a9}com", "Bach"), StandardTag::Composer(s("Bach")));
         let ilst = build(&[from_com], &[]);
         assert!(ilst.windows(4).any(|w| w == b"\xa9com"));
         assert!(!ilst.windows(4).any(|w| w == b"\xa9wrt"));
@@ -1006,10 +1000,7 @@ mod tests {
     fn mapped_free_form_names_keep_their_casing_and_aliases() {
         // Read from a file that stored the names in other casings: the atom is kept.
         let tags = vec![
-            Tag::new_std(
-                RawTag::new("com.apple.iTunes:artists", "A"),
-                StandardTag::Artist(s("A")),
-            ),
+            Tag::new_std(RawTag::new("com.apple.iTunes:artists", "A"), StandardTag::Artist(s("A"))),
             Tag::new_std(
                 RawTag::new("com.apple.iTunes:musicbrainz album id", "m"),
                 StandardTag::MusicBrainzAlbumId(s("m")),
@@ -1079,11 +1070,7 @@ mod tests {
         assert_eq!(visuals[1].data.as_ref(), png.as_slice());
 
         // Data types 13 (JPEG) and 14 (PNG) in the data atom flags.
-        let types: Vec<u8> = ilst
-            .windows(8)
-            .filter(|w| &w[..4] == b"data")
-            .map(|w| w[7])
-            .collect();
+        let types: Vec<u8> = ilst.windows(8).filter(|w| &w[..4] == b"data").map(|w| w[7]).collect();
         assert_eq!(types, vec![13, 14]);
     }
 
@@ -1108,7 +1095,8 @@ mod tests {
         }
 
         let mut existing = Vec::new();
-        existing.extend(atom(b"\xa9nam", &atom(b"data", &[0, 0, 0, 1, 0, 0, 0, 0, b'o', b'l', b'd'])));
+        existing
+            .extend(atom(b"\xa9nam", &atom(b"data", &[0, 0, 0, 1, 0, 0, 0, 0, b'o', b'l', b'd'])));
         existing.extend(atom(b"hdvd", &atom(b"data", &[0, 0, 0, 21, 0, 0, 0, 0, 1])));
         existing.extend(atom(b"zzzz", b"opaque"));
         // The last atom extends to the end of the list.

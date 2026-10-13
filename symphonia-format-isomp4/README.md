@@ -7,6 +7,10 @@ ISO/MP4 demuxer for Project Symphonia.
 > [!NOTE]
 > This crate is part of Project Symphonia. Please use the [`symphonia`](https://crates.io/crates/symphonia) crate instead of this one directly.
 
+## Features
+
+* `writer`: exposes `symphonia_format_isomp4::writer`, the serializer that turns tags and pictures back into an `ilst` atom (the reverse of the reader's mapping), used by `symphonia-tagging` to write MP4/M4A tags.
+
 ## License
 
 Symphonia is provided under the MPL v2.0 license. Please refer to the LICENSE file for more details.
