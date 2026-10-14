@@ -5,16 +5,17 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! The core (format-agnostic) Musepack decoder state machine: SV7/SV8 bitstream parsing,
+//! The core (format-agnostic) Musepack decoder state machine: SV4-SV8 bitstream parsing,
 //! requantization and the frame decode driver.
 //!
 //! Ported from libmpcdec `mpc_decoder.c` (BSD-3-Clause), see `NOTICE`. Function names below
-//! mirror the C names (`read_bitstream_sv7`/`read_bitstream_sv8`/`requantize`/`decode_frame`) so
+//! mirror the C names
+//! (`read_bitstream_sv6`/`read_bitstream_sv7`/`read_bitstream_sv8`/`requantize`/`decode_frame`) so
 //! this file can be diffed against the reference frame-by-frame.
 
-use crate::bits::{BitReader, can_dec, huff_dec};
+use crate::bits::{BitReader, HuffTable, can_dec, huff_dec};
 use crate::cnk::{enum_dec, log_dec};
-use crate::huffman::{sv7_tables, sv8_tables};
+use crate::huffman::{sv7_tables, sv8_tables, sv46_tables};
 use crate::requant;
 use crate::synth;
 
@@ -30,7 +31,7 @@ fn absi(x: i32) -> i32 {
     x.wrapping_abs()
 }
 
-/// The core Musepack decoder state. Shared between SV7 and SV8; instantiate once per logical
+/// The core Musepack decoder state. Shared between SV4-SV6, SV7 and SV8; instantiate once per logical
 /// stream and reuse across all packets (`decode_frame` mutates persistent history: the
 /// scale-factor deltas, `last_max_band`, `DSCF_Flag`, and the synthesis filter's `V` buffers).
 pub struct Decoder {
@@ -46,8 +47,8 @@ pub struct Decoder {
 
     scf_index_l: [[i32; 3]; MAX_BANDS],
     scf_index_r: [[i32; 3]; MAX_BANDS],
-    q_l: [[i16; 36]; MAX_BANDS],
-    q_r: [[i16; 36]; MAX_BANDS],
+    q_l: [[i32; 36]; MAX_BANDS],
+    q_r: [[i32; 36]; MAX_BANDS],
     res_l: [i32; MAX_BANDS],
     res_r: [i32; MAX_BANDS],
     scfi_l: [i32; MAX_BANDS],
@@ -55,6 +56,13 @@ pub struct Decoder {
     dscf_flag_l: [bool; MAX_BANDS],
     dscf_flag_r: [bool; MAX_BANDS],
     ms_flag: [bool; MAX_BANDS],
+
+    /// SV4-SV5 streams of more than 128 kbit/s code the resolutions with fixed-length codes.
+    raw_res: bool,
+    /// First intensity stereo band (SV4-SV5), `MAX_BANDS` if the stream has none: from there to
+    /// `max_band` only the left channel's samples are coded, the right channel only has its own
+    /// scale factors.
+    is_start: usize,
 
     v_l: Vec<f32>,
     v_r: Vec<f32>,
@@ -86,12 +94,22 @@ impl Decoder {
             dscf_flag_l: [false; MAX_BANDS],
             dscf_flag_r: [false; MAX_BANDS],
             ms_flag: [false; MAX_BANDS],
+            raw_res: false,
+            is_start: MAX_BANDS,
             v_l: vec![0.0; synth::V_BUF_LEN],
             v_r: vec![0.0; synth::V_BUF_LEN],
             y_l: [[0.0; 32]; 36],
             y_r: [[0.0; 32]; 36],
             scf: requant::build_scf_table(1.0),
         }
+    }
+
+    /// Configures the SV4-SV5 features the stream header selects (see
+    /// `demuxer::sv7::Sv46Header::layout`): fixed-length resolution codes, and the first band
+    /// of the intensity stereo region (`None` if the stream does not use intensity stereo).
+    pub fn set_sv46_layout(&mut self, raw_res: bool, is_start: Option<usize>) {
+        self.raw_res = raw_res;
+        self.is_start = is_start.unwrap_or(MAX_BANDS).min(MAX_BANDS);
     }
 
     // ------------------------------------------------------------------
@@ -185,6 +203,114 @@ impl Decoder {
                 &mut self.r1,
                 &mut self.r2,
             );
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // SV4-SV6 bitstream
+    // ------------------------------------------------------------------
+
+    /// One band's resolution of an SV4-SV6 frame: Huffman coded, or for streams of more than
+    /// 128 kbit/s a fixed-length index into the band's quantizer list (`q_res_sv6`) as wide as
+    /// that list needs (4, 3 and 2 bits in the three band regions).
+    fn read_res_sv6(&self, r: &mut BitReader<'_>, n: usize, table: &HuffTable) -> i32 {
+        let code = if self.raw_res {
+            let bits = match n {
+                0..=10 => 4,
+                11..=22 => 3,
+                _ => 2,
+            };
+            r.read_bits(bits) as i32
+        }
+        else {
+            huff_dec(r, table)
+        };
+        q_res_sv6(n, code)
+    }
+
+    /// Ported from libmpcdec `mpc_decoder.c` (`mpc_decoder_read_bitstream_sv6`), which handles
+    /// the (identical) SV4, SV5 and SV6 frame layouts, plus what the reference leaves out: the
+    /// fixed-length resolutions of high bitrate streams and intensity stereo (see
+    /// `set_sv46_layout`).
+    fn read_bitstream_sv6(&mut self, r: &mut BitReader<'_>) {
+        let max_band = self.max_band.max(0) as usize;
+        let mut max_used_band = 0usize;
+
+        for n in 0..=max_band {
+            let table = match n {
+                0..=10 => &sv46_tables::T_REGION_A,
+                11..=22 => &sv46_tables::T_REGION_B,
+                _ => &sv46_tables::T_REGION_C,
+            };
+            self.res_l[n] = self.read_res_sv6(r, n, table);
+            if n >= self.is_start {
+                // Intensity stereo band: no right channel resolution (nor mid/side flag).
+                self.res_r[n] = 0;
+            }
+            else {
+                if self.ms {
+                    self.ms_flag[n] = r.read_bit() != 0;
+                }
+                self.res_r[n] = self.read_res_sv6(r, n, table);
+            }
+
+            if self.res_l[n] != 0 || self.res_r[n] != 0 {
+                max_used_band = n;
+            }
+        }
+
+        // The right channel of an intensity stereo band has scale factors but no samples.
+        let right_scf =
+            |s: &Self, n: usize| s.res_r[n] != 0 || (s.res_l[n] != 0 && n >= s.is_start);
+
+        for n in 0..=max_used_band {
+            if self.res_l[n] != 0 {
+                let v = huff_dec(r, &sv46_tables::T_SCFI_BUNDLE);
+                self.scfi_l[n] = v >> 1;
+                self.dscf_flag_l[n] = v & 1 != 0;
+            }
+            if right_scf(self, n) {
+                let v = huff_dec(r, &sv46_tables::T_SCFI_BUNDLE);
+                self.scfi_r[n] = v >> 1;
+                self.dscf_flag_r[n] = v & 1 != 0;
+            }
+        }
+
+        for n in 0..=max_used_band {
+            if self.res_l[n] != 0 {
+                decode_scf_sv6(r, self.scfi_l[n], self.dscf_flag_l[n], &mut self.scf_index_l[n]);
+            }
+            if right_scf(self, n) {
+                decode_scf_sv6(r, self.scfi_r[n], self.dscf_flag_r[n], &mut self.scf_index_r[n]);
+            }
+        }
+
+        for n in 0..=max_used_band {
+            let (res_l, res_r) = (self.res_l[n], self.res_r[n]);
+            let (x1, x2) = (sv46_tables::sample_huff(res_l), sv46_tables::sample_huff(res_r));
+            let (q_l, q_r) = (&mut self.q_l[n], &mut self.q_r[n]);
+
+            if x1.is_some() || x2.is_some() {
+                for k in 0..36 {
+                    if let Some(t) = x1 {
+                        q_l[k] = huff_dec(r, t);
+                    }
+                    if let Some(t) = x2 {
+                        q_r[k] = huff_dec(r, t);
+                    }
+                }
+            }
+
+            if res_l > 7 || res_r > 7 {
+                for k in 0..36 {
+                    if res_l > 7 {
+                        q_l[k] = sample_raw_sv6(r, res_l);
+                    }
+                    if res_r > 7 {
+                        q_r[k] = sample_raw_sv6(r, res_r);
+                    }
+                }
+            }
         }
     }
 
@@ -354,8 +480,10 @@ impl Decoder {
     /// Ported from libmpcdec `mpc_decoder.c` (`mpc_decoder_requantisierung`).
     fn requantize(&mut self) {
         let last_band = self.max_band.clamp(0, MAX_BANDS as i32 - 1) as usize;
+        // Bands from `is_start` on are intensity stereo bands (SV4-SV5 only).
+        let ms_bands = self.is_start.min(last_band + 1);
 
-        for band in 0..=last_band {
+        for band in 0..ms_bands {
             let ms = self.ms_flag[band];
             let res_l = self.res_l[band];
             let res_r = self.res_r[band];
@@ -370,8 +498,8 @@ impl Decoder {
                                 * self.scf[requant::scf_index(self.scf_index_r[band][third])];
                             for j in 0..12 {
                                 let n = third * 12 + j;
-                                let templ = fac_l * f32::from(self.q_l[band][n]);
-                                let tempr = fac_r * f32::from(self.q_r[band][n]);
+                                let templ = fac_l * self.q_l[band][n] as f32;
+                                let tempr = fac_r * self.q_r[band][n] as f32;
                                 self.y_l[n][band] = templ + tempr;
                                 self.y_r[n][band] = templ - tempr;
                             }
@@ -383,7 +511,7 @@ impl Decoder {
                                 * self.scf[requant::scf_index(self.scf_index_l[band][third])];
                             for j in 0..12 {
                                 let n = third * 12 + j;
-                                let v = fac_l * f32::from(self.q_l[band][n]);
+                                let v = fac_l * self.q_l[band][n] as f32;
                                 self.y_l[n][band] = v;
                                 self.y_r[n][band] = v;
                             }
@@ -396,7 +524,7 @@ impl Decoder {
                             * self.scf[requant::scf_index(self.scf_index_r[band][third])];
                         for j in 0..12 {
                             let n = third * 12 + j;
-                            let v = fac_r * f32::from(self.q_r[band][n]);
+                            let v = fac_r * self.q_r[band][n] as f32;
                             self.y_l[n][band] = v;
                             self.y_r[n][band] = -v;
                         }
@@ -418,8 +546,8 @@ impl Decoder {
                             * self.scf[requant::scf_index(self.scf_index_r[band][third])];
                         for j in 0..12 {
                             let n = third * 12 + j;
-                            self.y_l[n][band] = fac_l * f32::from(self.q_l[band][n]);
-                            self.y_r[n][band] = fac_r * f32::from(self.q_r[band][n]);
+                            self.y_l[n][band] = fac_l * self.q_l[band][n] as f32;
+                            self.y_r[n][band] = fac_r * self.q_r[band][n] as f32;
                         }
                     }
                 }
@@ -429,7 +557,7 @@ impl Decoder {
                             * self.scf[requant::scf_index(self.scf_index_l[band][third])];
                         for j in 0..12 {
                             let n = third * 12 + j;
-                            self.y_l[n][band] = fac_l * f32::from(self.q_l[band][n]);
+                            self.y_l[n][band] = fac_l * self.q_l[band][n] as f32;
                             self.y_r[n][band] = 0.0;
                         }
                     }
@@ -442,7 +570,7 @@ impl Decoder {
                     for j in 0..12 {
                         let n = third * 12 + j;
                         self.y_l[n][band] = 0.0;
-                        self.y_r[n][band] = fac_r * f32::from(self.q_r[band][n]);
+                        self.y_r[n][band] = fac_r * self.q_r[band][n] as f32;
                     }
                 }
             }
@@ -453,6 +581,9 @@ impl Decoder {
                 }
             }
         }
+        for band in ms_bands..=last_band {
+            self.requantize_intensity_band(band);
+        }
         // Unused higher bands contribute nothing to the synthesis filter (Y_L/Y_R indices
         // `max_band+1..32` are never referenced since the filter loop only reads
         // `Y_L[n][0..=max_band]` via `synth_channel`'s fixed 32-wide subband window -- but the
@@ -462,6 +593,32 @@ impl Decoder {
             for n in 0..36 {
                 self.y_l[n][band] = 0.0;
                 self.y_r[n][band] = 0.0;
+            }
+        }
+    }
+
+    /// Reconstructs an intensity stereo band (SV4-SV5): both channels are the left channel's
+    /// samples, divided by `2^(1/4)` and scaled by each channel's own scale factors. Ported from
+    /// the SV5 era decoder (`mppdec`, 18 Jun 2000); libmpcdec has no counterpart.
+    fn requantize_intensity_band(&mut self, band: usize) {
+        let res = self.res_l[band];
+        if res == 0 {
+            for n in 0..36 {
+                self.y_l[n][band] = 0.0;
+                self.y_r[n][band] = 0.0;
+            }
+            return;
+        }
+        // `fsqrt(fsqrt(2.0))` stored to a 32-bit float.
+        let divisor = std::f64::consts::SQRT_2.sqrt() as f32;
+        for third in 0..3 {
+            let scf_l = self.scf[requant::scf_index(self.scf_index_l[band][third])];
+            let scf_r = self.scf[requant::scf_index(self.scf_index_r[band][third])];
+            for j in 0..12 {
+                let n = third * 12 + j;
+                let v = requant::cc(res) * self.q_l[band][n] as f32 / divisor;
+                self.y_l[n][band] = scf_l * v;
+                self.y_r[n][band] = scf_r * v;
             }
         }
     }
@@ -501,29 +658,56 @@ impl Decoder {
             return false;
         }
 
-        if self.stream_version >= 8 {
-            self.read_bitstream_sv8(r, is_key_frame);
-        }
-        else {
-            self.read_bitstream_sv7(r);
+        match self.stream_version {
+            8.. => self.read_bitstream_sv8(r, is_key_frame),
+            7 => self.read_bitstream_sv7(r),
+            _ => self.read_bitstream_sv6(r),
         }
 
         self.requantize();
-        synth::synth_channel(&mut self.v_l, &self.y_l, &mut left[..FRAME_LENGTH], 1, 0);
-        if let (true, Some(right)) = (stereo, right) {
-            synth::synth_channel(&mut self.v_r, &self.y_r, &mut right[..FRAME_LENGTH], 1, 0);
-        }
+        self.synth_frame(left, right);
         true
     }
 
-    /// Parses one SV7 frame's bitstream without requantizing or synthesizing it, advancing only
-    /// the state that carries over between frames (scale-factor deltas, noise generator).
-    /// Used by the demuxer to recover that state at an arbitrary frame for seeking.
-    pub fn skip_frame_sv7(&mut self, r: &mut BitReader<'_>) {
-        self.read_bitstream_sv7(r);
+    /// Synthesizes one frame from all-zero subband samples, i.e. flushes the synthesis filter's
+    /// delay line. Used for the extra frame SV4-SV6 streams need to emit their last samples (the
+    /// reference decoder's `reset_y` path); the frame carries no bitstream data.
+    ///
+    /// Returns `false` (and writes nothing) if a required plane is too small or missing.
+    pub fn decode_silent_frame(&mut self, left: &mut [f32], right: Option<&mut [f32]>) -> bool {
+        let stereo = self.channels > 1;
+        if left.len() < FRAME_LENGTH
+            || (stereo && right.as_ref().is_none_or(|p| p.len() < FRAME_LENGTH))
+        {
+            return false;
+        }
+        self.y_l = [[0.0; 32]; 36];
+        self.y_r = [[0.0; 32]; 36];
+        self.synth_frame(left, right);
+        true
     }
 
-    /// SV8 counterpart of [`Decoder::skip_frame_sv7`]; `is_key_frame` is true for the first frame
+    /// Runs the synthesis filter over `y_l`/`y_r`. The planes must hold [`FRAME_LENGTH`] samples.
+    fn synth_frame(&mut self, left: &mut [f32], right: Option<&mut [f32]>) {
+        synth::synth_channel(&mut self.v_l, &self.y_l, &mut left[..FRAME_LENGTH], 1, 0);
+        if let (true, Some(right)) = (self.channels > 1, right) {
+            synth::synth_channel(&mut self.v_r, &self.y_r, &mut right[..FRAME_LENGTH], 1, 0);
+        }
+    }
+
+    /// Parses one SV4-SV7 frame's bitstream without requantizing or synthesizing it, advancing
+    /// only the state that carries over between frames (scale-factor deltas, noise generator).
+    /// Used by the demuxer to recover that state at an arbitrary frame for seeking.
+    pub fn skip_frame(&mut self, r: &mut BitReader<'_>) {
+        if self.stream_version >= 7 {
+            self.read_bitstream_sv7(r);
+        }
+        else {
+            self.read_bitstream_sv6(r);
+        }
+    }
+
+    /// SV8 counterpart of [`Decoder::skip_frame`]; `is_key_frame` is true for the first frame
     /// of a packet.
     pub fn skip_frame_sv8(&mut self, r: &mut BitReader<'_>, is_key_frame: bool) {
         self.read_bitstream_sv8(r, is_key_frame);
@@ -540,13 +724,13 @@ impl Decoder {
         self.r2 = r2;
     }
 
-    /// Snapshot of the SV7 inter-frame state (see [`Sv7Sync`]).
-    pub fn sv7_sync(&self) -> Sv7Sync {
-        Sv7Sync { scf_l: self.scf_index_l, scf_r: self.scf_index_r, r1: self.r1, r2: self.r2 }
+    /// Snapshot of the SV4-SV7 inter-frame state (see [`ScfSync`]).
+    pub fn scf_sync(&self) -> ScfSync {
+        ScfSync { scf_l: self.scf_index_l, scf_r: self.scf_index_r, r1: self.r1, r2: self.r2 }
     }
 
-    /// Restores the SV7 inter-frame state captured by [`Decoder::sv7_sync`].
-    pub fn set_sv7_sync(&mut self, sync: &Sv7Sync) {
+    /// Restores the SV4-SV7 inter-frame state captured by [`Decoder::scf_sync`].
+    pub fn set_scf_sync(&mut self, sync: &ScfSync) {
         self.scf_index_l = sync.scf_l;
         self.scf_index_r = sync.scf_r;
         self.r1 = sync.r1;
@@ -554,24 +738,24 @@ impl Decoder {
     }
 }
 
-/// The SV7 decoder state that is *not* reconstructible from a single frame.
+/// The SV4-SV7 decoder state that is *not* reconstructible from a single frame.
 ///
-/// SV7 scale factors are delta-coded against the previous frame (`decode_dscf_sv7`), with no
+/// SV4-SV7 scale factors are delta-coded against the previous frame (`decode_dscf_sv7`), with no
 /// periodic key frames, so decoding from an arbitrary frame requires knowing the scale factors
 /// at that point (resetting them to a constant, as libmpcdec's seek does, leaves a gain error
 /// that persists until each band happens to be re-coded with an escape). The noise-substitution
 /// generator (`Res == -1`) is likewise sequential. Everything else read by
 /// `read_bitstream_sv7` is rewritten by every frame.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Sv7Sync {
+pub struct ScfSync {
     scf_l: [[i32; 3]; MAX_BANDS],
     scf_r: [[i32; 3]; MAX_BANDS],
     r1: u32,
     r2: u32,
 }
 
-impl Sv7Sync {
-    /// Serialized size in bytes, see [`Sv7Sync::write_to`].
+impl ScfSync {
+    /// Serialized size in bytes, see [`ScfSync::write_to`].
     pub const ENCODED_LEN: usize = 2 * MAX_BANDS * 3 * 4 + 8;
 
     /// Appends the little-endian serialization of the state to `out`.
@@ -585,8 +769,8 @@ impl Sv7Sync {
         out.extend_from_slice(&self.r2.to_le_bytes());
     }
 
-    /// Parses the serialization written by [`Sv7Sync::write_to`]. Returns `None` if `data` is
-    /// shorter than [`Sv7Sync::ENCODED_LEN`].
+    /// Parses the serialization written by [`ScfSync::write_to`]. Returns `None` if `data` is
+    /// shorter than [`ScfSync::ENCODED_LEN`].
     pub fn read_from(data: &[u8]) -> Option<Self> {
         let data = data.get(..Self::ENCODED_LEN)?;
         let mut words = data.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]));
@@ -599,7 +783,7 @@ impl Sv7Sync {
         }
         let r1 = words.next()?;
         let r2 = words.next()?;
-        Some(Sv7Sync { scf_l, scf_r, r1, r2 })
+        Some(ScfSync { scf_l, scf_r, r1, r2 })
     }
 }
 
@@ -646,6 +830,63 @@ fn decode_dscf_sv7(r: &mut BitReader<'_>, res: i32, scfi: i32, scf: &mut [i32; 3
     }
 }
 
+/// Ported from libmpcdec `mpc_decoder.c` (`Q_res`): maps the Huffman-coded resolution code of
+/// `band` to a quantizer. The three region tables only code the quantizers a band can use: all
+/// of `0..=14` plus `17` for the lowest 11 bands, `0..=6` plus `17` up to band 22 and `0..=2`
+/// plus `17` above it. The last code of each region is `17`.
+fn q_res_sv6(band: usize, code: i32) -> i32 {
+    let last = match band {
+        0..=10 => 15,
+        11..=22 => 7,
+        _ => 3,
+    };
+    if code == last { 17 } else { code }
+}
+
+/// Ported from libmpcdec `mpc_decoder.c` (SV4-SV6 SCF/DSCF decode within
+/// `mpc_decoder_read_bitstream_sv6`). Unlike SV7, `dscf` selects delta (`true`) or absolute
+/// 6-bit coding for the whole band, and only deltas are range-limited.
+fn decode_scf_sv6(r: &mut BitReader<'_>, scfi: i32, dscf: bool, scf: &mut [i32; 3]) {
+    let next = |r: &mut BitReader<'_>, prev: i32| {
+        if dscf { prev + huff_dec(r, &sv46_tables::T_DSCF_ENTROPIE) } else { r.read_bits(6) as i32 }
+    };
+    match scfi {
+        3 => {
+            scf[0] = next(r, scf[2]);
+            scf[1] = scf[0];
+            scf[2] = scf[1];
+        }
+        1 => {
+            scf[0] = next(r, scf[2]);
+            scf[1] = next(r, scf[0]);
+            scf[2] = scf[1];
+        }
+        2 => {
+            scf[0] = next(r, scf[2]);
+            scf[1] = scf[0];
+            scf[2] = next(r, scf[1]);
+        }
+        0 => {
+            scf[0] = next(r, scf[2]);
+            scf[1] = next(r, scf[0]);
+            scf[2] = next(r, scf[1]);
+        }
+        _ => return,
+    }
+    if dscf {
+        for v in scf.iter_mut() {
+            if *v > 1024 {
+                *v = 0x8080;
+            }
+        }
+    }
+}
+
+/// One raw (`Res > 7`) sample of the SV4-SV6 frame layout.
+fn sample_raw_sv6(r: &mut BitReader<'_>, res: i32) -> i32 {
+    r.read_bits(u32::from(requant::RES_BIT[res as usize])) as i32 - requant::dc(res)
+}
+
 /// Ported from libmpcdec `mpc_decoder.c` (SV8 SCF/DSCF decode within `read_bitstream_sv8`).
 fn decode_dscf_sv8(
     r: &mut BitReader<'_>,
@@ -687,7 +928,7 @@ fn decode_dscf_sv8(
 fn decode_quant_sv7(
     r: &mut BitReader<'_>,
     res: i32,
-    q: &mut [i16; 36],
+    q: &mut [i32; 36],
     idx30: &[i32; 27],
     idx31: &[i32; 27],
     idx32: &[i32; 27],
@@ -704,7 +945,7 @@ fn decode_quant_sv7(
                     + ((tmp >> 16) & 0xFF)
                     + ((tmp >> 8) & 0xFF)
                     + (tmp & 0xFF);
-                *v = (sum as i32 - 510) as i16;
+                *v = sum as i32 - 510;
             }
         }
         1 => {
@@ -713,9 +954,9 @@ fn decode_quant_sv7(
             let mut k = 0usize;
             while k + 2 < 36 {
                 let idx = huff_dec(r, table).clamp(0, 26) as usize;
-                q[k] = idx30[idx] as i16;
-                q[k + 1] = idx31[idx] as i16;
-                q[k + 2] = idx32[idx] as i16;
+                q[k] = idx30[idx];
+                q[k + 1] = idx31[idx];
+                q[k + 2] = idx32[idx];
                 k += 3;
             }
         }
@@ -725,8 +966,8 @@ fn decode_quant_sv7(
             let mut k = 0usize;
             while k + 1 < 36 {
                 let idx = huff_dec(r, table).clamp(0, 24) as usize;
-                q[k] = idx50[idx] as i16;
-                q[k + 1] = idx51[idx] as i16;
+                q[k] = idx50[idx];
+                q[k + 1] = idx51[idx];
                 k += 2;
             }
         }
@@ -734,14 +975,14 @@ fn decode_quant_sv7(
             let sub = r.read_bits(1) as usize;
             let table = sv7_tables::huff_q(res as usize, sub & 1);
             for v in q.iter_mut() {
-                *v = huff_dec(r, table) as i16;
+                *v = huff_dec(r, table);
             }
         }
         8..=17 => {
             let bits = u32::from(requant::RES_BIT[res as usize]);
             let bias = requant::dc(res);
             for v in q.iter_mut() {
-                *v = (r.read_bits(bits) as i32 - bias) as i16;
+                *v = r.read_bits(bits) as i32 - bias;
             }
         }
         _ => {}
@@ -773,7 +1014,7 @@ const fn build_idx_repeat_block(base: [i32; 5], block: usize) -> [i8; 125] {
 fn decode_quant_sv8(
     r: &mut BitReader<'_>,
     res: i32,
-    q: &mut [i16; 36],
+    q: &mut [i32; 36],
     idx50: &[i8; 125],
     idx51: &[i8; 125],
     idx52: &[i8; 125],
@@ -794,9 +1035,9 @@ fn decode_quant_sv8(
             while k + 2 < 36 {
                 let sel = usize::from(idx > t);
                 let tmp = can_dec(r, tables[sel]).clamp(0, 124) as usize;
-                q[k] = i16::from(idx50[tmp]);
-                q[k + 1] = i16::from(idx51[tmp]);
-                q[k + 2] = i16::from(idx52[tmp]);
+                q[k] = i32::from(idx50[tmp]);
+                q[k + 1] = i32::from(idx51[tmp]);
+                q[k + 2] = i32::from(idx52[tmp]);
                 idx = (idx >> 1).wrapping_add(huffq2_var[tmp] as i32 as u32);
                 k += 3;
             }
@@ -816,7 +1057,7 @@ fn decode_quant_sv8(
                 while k < kmax {
                     q[k] = 0;
                     if idx & (1 << 17) != 0 {
-                        q[k] = ((r.read_bits(1) << 1) as i32 - 1) as i16;
+                        q[k] = (r.read_bits(1) << 1) as i32 - 1;
                     }
                     idx <<= 1;
                     k += 1;
@@ -830,7 +1071,7 @@ fn decode_quant_sv8(
                     + ((tmp >> 16) & 0xFF)
                     + ((tmp >> 8) & 0xFF)
                     + (tmp & 0xFF);
-                *v = (sum as i32 - 510) as i16;
+                *v = sum as i32 - 510;
             }
         }
         3 | 4 => {
@@ -842,8 +1083,8 @@ fn decode_quant_sv8(
                 let lo = if lo >= 8 { lo - 16 } else { lo };
                 let hi = ((sym >> 4) & 0x0F) as i8;
                 let hi = if hi >= 8 { hi - 16 } else { hi };
-                q[k] = i16::from(lo);
-                q[k + 1] = i16::from(hi);
+                q[k] = i32::from(lo);
+                q[k + 1] = i32::from(hi);
                 k += 2;
             }
         }
@@ -855,7 +1096,7 @@ fn decode_quant_sv8(
             for v in q.iter_mut() {
                 let sel = usize::from(idx > t);
                 let sym = can_dec(r, tables[sel]);
-                *v = sym as i16;
+                *v = sym;
                 idx = (idx >> 1).wrapping_add(absi(sym) as u32);
             }
         }
@@ -872,7 +1113,7 @@ fn decode_quant_sv8(
                     val = (val << extra_bits) | r.read_bits(extra_bits) as i32;
                 }
                 val -= requant::dc(res);
-                *v = val as i16;
+                *v = val;
             }
         }
     }
@@ -882,21 +1123,46 @@ fn decode_quant_sv8(
 mod tests {
     use super::*;
 
+    /// Resolution 17 codes 16 bits per sample around a bias of 32767, so a value reaches 32768:
+    /// one more than an `i16` holds.
     #[test]
-    fn sv7_sync_round_trips() {
+    fn resolution_17_samples_do_not_overflow() {
+        let data = [0xFFu8; 80];
+        let mut q = [0i32; 36];
+        let (mut r1, mut r2) = (1, 1);
+        let idx = [0; 27];
+        let idx5 = [0; 25];
+        decode_quant_sv7(
+            &mut BitReader::new(&data),
+            17,
+            &mut q,
+            &idx,
+            &idx,
+            &idx,
+            &idx5,
+            &idx5,
+            &mut r1,
+            &mut r2,
+        );
+        assert!(q.iter().all(|&v| v == 0xFFFF - requant::dc(17)));
+        assert!(q.iter().all(|&v| v > i32::from(i16::MAX)));
+    }
+
+    #[test]
+    fn scf_sync_round_trips() {
         let mut core = Decoder::new(7, 20, true, 2);
         // Garbage frame data exercises the scale-factor and noise-generator state.
         let data: Vec<u8> = (0..400u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
         for _ in 0..5 {
-            core.skip_frame_sv7(&mut BitReader::new(&data));
+            core.skip_frame(&mut BitReader::new(&data));
         }
-        let sync = core.sv7_sync();
-        assert_ne!(sync, Decoder::new(7, 20, true, 2).sv7_sync());
+        let sync = core.scf_sync();
+        assert_ne!(sync, Decoder::new(7, 20, true, 2).scf_sync());
 
         let mut bytes = Vec::new();
         sync.write_to(&mut bytes);
-        assert_eq!(bytes.len(), Sv7Sync::ENCODED_LEN);
-        assert_eq!(Sv7Sync::read_from(&bytes), Some(sync));
-        assert_eq!(Sv7Sync::read_from(&bytes[..bytes.len() - 1]), None);
+        assert_eq!(bytes.len(), ScfSync::ENCODED_LEN);
+        assert_eq!(ScfSync::read_from(&bytes), Some(sync));
+        assert_eq!(ScfSync::read_from(&bytes[..bytes.len() - 1]), None);
     }
 }

@@ -1,8 +1,8 @@
 This crate (`symphonia-bundle-musepack`) is a from-scratch, pure-Rust reimplementation of the
-Musepack (SV7/SV8) audio codec's demuxer and decoder. It is licensed under the Mozilla Public
+Musepack (SV4-SV8) audio codec's demuxer and decoder. It is licensed under the Mozilla Public
 License, v. 2.0, like the rest of Project Symphonia (see `LICENSE`).
 
-Portions of this crate's algorithms (the bitstream/canonical-huffman readers, SV7/SV8 stream-info
+Portions of this crate's algorithms (the bitstream/canonical-huffman readers, SV4-SV8 stream-info
 and block parsers, the Huffman code tables, requantization coefficients, the 32-band polyphase
 synthesis filter, and the seek-table format) are ported, function-by-function, from the reference
 `libmpcdec` implementation found in the MusicPack project
@@ -51,6 +51,15 @@ this crate; `mpcenc` was only used, unmodified and unlinked, as an external, thr
 generator during development (to produce test `.mpc` files that were fed to the *decoder*
 oracle), exactly like `ffmpeg` was used as a decode oracle. Its license has no bearing on this
 crate's contents. FFmpeg's own (L)GPL-licensed mpc7/mpc8 decoders were never read.
+
+# SV4-SV5 features missing from libmpcdec
+
+`libmpcdec` rejects SV4-SV5 streams with intensity stereo, a superframe size above one or a
+bitrate above 128 kbit/s. Those parts of the SV4-SV5 decoder (the length prefix covering a group
+of frames, the fixed-length resolution codes, the intensity stereo bitstream and reconstruction,
+and the bitrate dependent band layout) were derived by analysing the behaviour and disassembly
+of the original `mppdec` 2000-06-18 executable. No source code or data of it was copied; the
+tables used are the same ones `libmpcdec` carries.
 
 # Convention for ported files
 

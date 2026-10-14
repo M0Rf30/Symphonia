@@ -25,10 +25,10 @@ use symphonia_core::packet::PacketRef;
 use symphonia_core::support_audio_codec;
 
 use crate::bits::BitReader;
-use crate::decoder_core::{Decoder as Core, FRAME_LENGTH, Sv7Sync};
-use crate::demuxer::{PACKET_TAG_NOISE, PACKET_TAG_PLAIN, PACKET_TAG_SYNC};
+use crate::decoder_core::{Decoder as Core, FRAME_LENGTH, ScfSync};
+use crate::demuxer::{PACKET_TAG_NOISE, PACKET_TAG_PLAIN, PACKET_TAG_SILENCE, PACKET_TAG_SYNC};
 
-/// Musepack (SV7/SV8) decoder.
+/// Musepack (SV4-SV8) decoder.
 pub struct MpcDecoder {
     params: AudioCodecParameters,
     opts: AudioDecoderOptions,
@@ -48,6 +48,9 @@ struct ExtraData {
     ms: bool,
     channels: u32,
     block_pwr: u8,
+    /// SV4-SV5 stream features, see `Decoder::set_sv46_layout`.
+    raw_res: bool,
+    is_start: Option<usize>,
 }
 
 fn parse_extra_data(data: &[u8]) -> Result<ExtraData> {
@@ -60,6 +63,9 @@ fn parse_extra_data(data: &[u8]) -> Result<ExtraData> {
         ms: data[2] != 0,
         channels: u32::from(data[3]),
         block_pwr: data[4],
+        // Absent from the extra data of streams that have no use for them.
+        raw_res: data.get(21).is_some_and(|&b| b != 0),
+        is_start: data.get(22).filter(|&&b| b != 0xFF).map(|&b| usize::from(b)),
     })
 }
 
@@ -77,7 +83,8 @@ impl MpcDecoder {
         let channels =
             params.channels.clone().ok_or(Error::DecodeError("musepack: missing channels"))?;
 
-        let core = Core::new(extra.stream_version, extra.max_band, extra.ms, extra.channels);
+        let mut core = Core::new(extra.stream_version, extra.max_band, extra.ms, extra.channels);
+        core.set_sv46_layout(extra.raw_res, extra.is_start);
 
         let spec = symphonia_core::audio::AudioSpec::new(sample_rate, channels);
         let max_frames = (1usize << extra.block_pwr.min(20)) * FRAME_LENGTH;
@@ -98,17 +105,17 @@ impl MpcDecoder {
         let channels = self.channels;
 
         // Every packet starts with a tag byte, optionally followed by decoder state that the
-        // demuxer recovered for a seek (SV7: scale factors and noise generator, SV8: noise
+        // demuxer recovered for a seek (SV4-SV7: scale factors and noise generator, SV8: noise
         // generator; everything else is rewritten by each packet).
         let (&tag, mut data) =
             packet.data.split_first().ok_or(Error::DecodeError("musepack: empty packet"))?;
         match tag {
             PACKET_TAG_PLAIN => (),
             PACKET_TAG_SYNC if self.stream_version < 8 => {
-                let sync = Sv7Sync::read_from(data)
+                let sync = ScfSync::read_from(data)
                     .ok_or(Error::DecodeError("musepack: truncated SV7 state"))?;
-                self.core.set_sv7_sync(&sync);
-                data = &data[Sv7Sync::ENCODED_LEN..];
+                self.core.set_scf_sync(&sync);
+                data = &data[ScfSync::ENCODED_LEN..];
             }
             PACKET_TAG_NOISE if self.stream_version >= 8 => {
                 let state = data.get(..8).ok_or(Error::DecodeError("musepack: truncated state"))?;
@@ -118,8 +125,10 @@ impl MpcDecoder {
                 self.core.set_noise_state([word(0), word(4)]);
                 data = &data[8..];
             }
+            PACKET_TAG_SILENCE if (4..7).contains(&self.stream_version) => (),
             _ => return decode_error("musepack: invalid packet tag"),
         }
+        let silent = tag == PACKET_TAG_SILENCE;
 
         // The demuxer sizes `dur + trim_start + trim_end` to the number of frames actually
         // present (the last SV8 packet may hold fewer than `2^block_pwr`).
@@ -138,22 +147,26 @@ impl MpcDecoder {
             let start = self.buf.frames();
             self.buf.render_uninit(Some(FRAME_LENGTH));
             let end = start + FRAME_LENGTH;
+            let (core, buf) = (&mut self.core, &mut self.buf);
+            let mut decode = |l: &mut [f32], r_plane: Option<&mut [f32]>| {
+                if silent {
+                    core.decode_silent_frame(l, r_plane)
+                }
+                else {
+                    core.decode_frame(&mut r, is_key_frame, l, r_plane)
+                }
+            };
             let ok = if channels > 1 {
-                match self.buf.plane_pair_mut(0, 1) {
-                    Some((l, r_plane)) => self.core.decode_frame(
-                        &mut r,
-                        is_key_frame,
-                        &mut l[start..end],
-                        Some(&mut r_plane[start..end]),
-                    ),
+                match buf.plane_pair_mut(0, 1) {
+                    Some((l, r_plane)) => {
+                        decode(&mut l[start..end], Some(&mut r_plane[start..end]))
+                    }
                     None => false,
                 }
             }
             else {
-                match self.buf.plane_mut(0) {
-                    Some(l) => {
-                        self.core.decode_frame(&mut r, is_key_frame, &mut l[start..end], None)
-                    }
+                match buf.plane_mut(0) {
+                    Some(l) => decode(&mut l[start..end], None),
                     None => false,
                 }
             };
@@ -180,7 +193,7 @@ impl AudioDecoder for MpcDecoder {
         // Nothing to do: every packet carries all the state needed to decode it, so a seek needs
         // no help from the caller. SV8 packets start with a key frame; the first SV7 packet
         // after a seek is tagged with the scale-factor state recovered by the demuxer (see
-        // `Sv7Sync`); and the synthesis filter's history is flushed by the pre-roll packet the
+        // `ScfSync`); and the synthesis filter's history is flushed by the pre-roll packet the
         // demuxer emits (and trims away entirely) before the first audible one.
         self.buf.clear();
     }
@@ -220,6 +233,6 @@ impl RegisterableAudioDecoder for MpcDecoder {
     }
 
     fn supported_codecs() -> &'static [SupportedAudioCodec] {
-        &[support_audio_codec!(CODEC_ID_MUSEPACK, "musepack", "Musepack (SV7/SV8)")]
+        &[support_audio_codec!(CODEC_ID_MUSEPACK, "musepack", "Musepack (SV4-SV8)")]
     }
 }

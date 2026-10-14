@@ -537,3 +537,132 @@ fn real_file_seek_matches_linear_decode() {
     targets.retain(|&t| t < len);
     check_seeks(&bytes, &targets, block);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Synthetic SV4-SV6 stream
+// ---------------------------------------------------------------------------------------------
+
+/// Builds an SV4, SV5 or SV6 file whose header counts `frames` frames, of pseudo-random payload.
+///
+/// Like SV7's, the frames carry a 20-bit length field and their payload decodes to *something*
+/// deterministic. SV4 and SV5 streams hold one frame more than they count (the encoder's partial
+/// last frame); an SV6 stream stores the sample count of its last frame, `last_frame_samples`
+/// (`0` for a full frame), after its last frame.
+fn synthetic_sv46(version: u64, frames: u32, last_frame_samples: u32, seed: u64) -> Vec<u8> {
+    let mut rng = seed | 1;
+    let mut next = move || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng
+    };
+
+    let mut w = BitWriter { bytes: Vec::new(), bits: 0 };
+    w.put(0, 9); // bitrate (VBR)
+    w.put(0, 1); // intensity stereo
+    w.put(1, 1); // mid/side
+    w.put(version, 10);
+    w.put(20, 5); // max band
+    w.put(1, 6); // block size
+    if version == 4 {
+        w.put(u64::from(frames), 16);
+    }
+    else {
+        w.put(u64::from(frames), 32);
+    }
+    let stored = if version == 6 { frames } else { frames + 1 };
+    for _ in 0..stored {
+        let len = 200 + next() % 1800;
+        w.put(len, 20);
+        for _ in 0..len {
+            w.put(next() >> 40 & 1, 1);
+        }
+    }
+    if version == 6 {
+        w.put(u64::from(last_frame_samples), 11);
+    }
+    while w.bytes.len() % 4 != 0 {
+        w.bytes.push(0);
+    }
+    let mut file = Vec::new();
+    for word in w.bytes.chunks_exact(4) {
+        file.extend([word[3], word[2], word[1], word[0]]);
+    }
+    file
+}
+
+#[test]
+fn sv46_synthetic_packets_describe_the_stream() {
+    // (version, header frame count, SV6 last frame sample count, expected packets, expected length)
+    let cases: &[(u64, u32, u32, u64, u64)] = &[
+        (4, 41, 0, 40, 40 * FRAME - SYNTH_DELAY),
+        (5, 41, 0, 40, 40 * FRAME - SYNTH_DELAY),
+        (5, 2, 0, 1, FRAME - SYNTH_DELAY),
+        (6, 40, 0, 41, 40 * FRAME),
+        (6, 40, 1, 40, 39 * FRAME + 1),
+        (6, 40, 300, 40, 39 * FRAME + 300),
+        // A last frame of more than `FRAME - SYNTH_DELAY` samples needs a silent flush frame.
+        (6, 40, 671, 40, 39 * FRAME + 671),
+        (6, 40, 672, 41, 39 * FRAME + 672),
+        (6, 40, 1000, 41, 39 * FRAME + 1000),
+        (6, 40, 1152, 41, 40 * FRAME),
+        (6, 1, 600, 1, 600),
+    ];
+    for &(version, frames, last, packets, len) in cases {
+        let bytes = synthetic_sv46(version, frames, last, 7);
+        let mut s = open(&bytes);
+        assert_eq!(s.len, len, "SV{version} length (last={last})");
+
+        let mut total = 0;
+        let mut n = 0u64;
+        while let Some(p) = s.reader.next_packet().expect("unexpected failure") {
+            assert_eq!(p.pts.get(), (n * FRAME) as i64 - SYNTH_DELAY as i64, "pts of packet {n}");
+            assert_eq!(p.block_dur().get(), FRAME);
+            let GenericAudioBufferRef::F32(buf) = s.decoder.decode(&p).expect("unexpected failure")
+            else {
+                panic!()
+            };
+            assert_eq!(buf.frames() as u64, p.dur.get(), "packet {n} output matches its duration");
+            total += p.dur.get();
+            n += 1;
+        }
+        assert_eq!(n, packets, "SV{version} packets (last={last})");
+        assert_eq!(total, len, "durations add up to the track length (SV{version}, last={last})");
+    }
+}
+
+#[test]
+fn sv46_synthetic_seek_matches_linear_decode() {
+    for (version, frames, last) in
+        [(4u64, 150u32, 0u32), (5, 150, 0), (6, 150, 0), (6, 150, 300), (6, 150, 900), (5, 4, 0)]
+    {
+        let bytes = synthetic_sv46(version, frames, last, 0xBEEF + u64::from(frames) + version);
+        let len = open(&bytes).len;
+        check_seeks(
+            &bytes,
+            &targets_for(len, FRAME).into_iter().filter(|&t| t <= len).collect::<Vec<_>>(),
+            FRAME,
+        );
+    }
+}
+
+/// Streams whose frames come in groups with one length prefix (`-frm`), with intensity stereo or
+/// with fixed-length resolutions seek to any frame, inside a group too.
+#[test]
+fn sv46_encoder_feature_fixtures_seek_matches_linear_decode() {
+    for name in [
+        "tests/fixture_sv4_frm4.mpc",
+        "tests/fixture_sv5_frm4.mpc",
+        "tests/fixture_sv4_is.mpc",
+        "tests/fixture_sv5_is.mpc",
+        "tests/fixture_sv5_cbr256.mpc",
+    ] {
+        let bytes = std::fs::read(name).expect("fixture");
+        let len = open(&bytes).len;
+        let mut targets = targets_for(len, FRAME);
+        // The frames of the (4 frame) groups of the `-frm 4` streams.
+        targets.extend((1..11).map(|frame| frame * FRAME - FRAME / 2));
+        targets.retain(|&t| t <= len);
+        check_seeks(&bytes, &targets, FRAME);
+    }
+}

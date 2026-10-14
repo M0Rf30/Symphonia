@@ -5,15 +5,20 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Pure Rust Musepack (SV7/SV8, `.mpc`) demuxer and decoder.
+//! Pure Rust Musepack (SV4 to SV8, `.mpc`) demuxer and decoder.
+//!
+//! SV4 to SV6 streams are supported including the features `libmpcdec` rejects: intensity stereo,
+//! superframes (`mppenc`'s `-frm`) and the fixed-length resolution codes of streams above
+//! 128 kbit/s. Their semantics were recovered from the SV5 era `mppdec` binary (disassembly only;
+//! no code was copied), and are checked against its output.
 //!
 //! Ported from the reference `libmpcdec` (BSD-3-Clause); see `NOTICE` for attribution and the
 //! per-file porting convention.
 //!
-//! # Memory use (SV7)
+//! # Memory use (SV4 to SV7)
 //!
-//! SV7 streams are not byte-aligned (see `demuxer::sv7` for why), so this crate buffers an
-//! entire SV7 stream's audio-region bytes in memory once, at open time (capped at 512 MiB). SV8
+//! SV4 to SV7 streams are not byte-aligned (see `demuxer::sv7` for why), so this crate buffers an
+//! entire such stream's audio-region bytes in memory once, at open time (capped at 512 MiB). SV8
 //! streams are demuxed incrementally, packet by packet, with no such limitation.
 
 #![warn(rust_2018_idioms)]

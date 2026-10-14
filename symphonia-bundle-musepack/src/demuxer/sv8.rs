@@ -140,6 +140,8 @@ pub(crate) fn read_header(mss: &mut MediaSourceStream<'_>) -> Result<(StreamInfo
         channels: 0,
         max_band: -1,
         ms: false,
+        raw_res: false,
+        is_start: None,
         block_pwr: 0,
         decoder_samples: 0,
         beg_silence: 0,

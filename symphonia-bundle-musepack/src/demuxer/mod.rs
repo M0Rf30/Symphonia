@@ -5,7 +5,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Musepack (SV7/SV8) format reader.
+//! Musepack (SV4 to SV8) format reader.
 //!
 //! The block/stream-info parsing is ported from libmpcdec `mpc_demux.c` / `streaminfo.c`
 //! (BSD-3-Clause), see `NOTICE`. The `FormatReader` glue (probing, `Track`/`Packet`
@@ -15,15 +15,19 @@ mod seek_table;
 mod sv7;
 mod sv8;
 
-/// First byte of every packet's data (SV7: followed by the realigned frame bits, SV8: by the
+/// First byte of every packet's data (SV4-SV7: followed by the realigned frame bits, SV8: by the
 /// `AP` block payload), for a packet that needs no decoder state.
 pub(crate) const PACKET_TAG_PLAIN: u8 = 0;
-/// First byte of an SV7 packet's data: an encoded `Sv7Sync` follows, then the frame bits. Set on
+/// First byte of an SV4-SV7 packet's data: an encoded `ScfSync` follows, then the frame bits. Set on
 /// the first packet after a seek.
 pub(crate) const PACKET_TAG_SYNC: u8 = 1;
 /// First byte of an SV8 packet's data: the noise generator state (`r1`, `r2`, little-endian
 /// `u32`s) follows, then the packet payload. Set on the first packet after a seek.
 pub(crate) const PACKET_TAG_NOISE: u8 = 2;
+/// The only byte of an SV4-SV6 packet that carries no frame: the decoder synthesizes a frame of
+/// silence (the extra frame some streams need to flush the synthesis filter, see
+/// `sv7::read_header_sv46`).
+pub(crate) const PACKET_TAG_SILENCE: u8 = 3;
 
 use std::sync::Arc;
 
@@ -37,7 +41,7 @@ use symphonia_core::formats::prelude::*;
 use symphonia_core::formats::probe::{ProbeFormatData, ProbeableFormat, Score, Scoreable};
 use symphonia_core::formats::well_known::FORMAT_ID_MUSEPACK;
 use symphonia_core::formats::{MediaInfo, TrackFlags};
-use symphonia_core::io::{MediaSourceStream, ReadBytes, ScopedStream};
+use symphonia_core::io::{FiniteStream, MediaSourceStream, ReadBytes, ScopedStream};
 use symphonia_core::meta::{
     Metadata, MetadataBuilder, MetadataInfo, MetadataLog, RawValue, StandardTag, Tag, well_known,
 };
@@ -56,6 +60,10 @@ pub(crate) struct StreamInfo {
     pub channels: u32,
     pub max_band: i32,
     pub ms: bool,
+    /// SV4-SV5: the stream's resolutions are coded with fixed-length codes.
+    pub raw_res: bool,
+    /// SV4-SV5: first intensity stereo band.
+    pub is_start: Option<usize>,
     pub block_pwr: u8,
     /// Matches `mpc_decoder_t::samples` (`mpc_decoder_set_streaminfo`): the raw total sample
     /// count fed to the decoder, *before* subtracting `beg_silence` (SV8) / already rounded to
@@ -136,10 +144,11 @@ impl StreamInfo {
 /// Packs the fields an `AudioDecoder` needs to reconstruct its `decoder_core::Decoder`, that
 /// aren't otherwise carried by `AudioCodecParameters`.
 ///
-/// Layout (21 bytes, all little-endian): `stream_version(u8)`, `max_band(u8)`, `ms(u8)`,
-/// `channels(u8)`, `block_pwr(u8)`, `decoder_samples(u64)`, `beg_silence(u64)`.
+/// Layout (23 bytes, all little-endian): `stream_version(u8)`, `max_band(u8)`, `ms(u8)`,
+/// `channels(u8)`, `block_pwr(u8)`, `decoder_samples(u64)`, `beg_silence(u64)`, `raw_res(u8)`,
+/// `is_start(u8, 0xFF if none)`.
 pub(crate) fn encode_extra_data(info: &StreamInfo) -> Box<[u8]> {
-    let mut buf = Vec::with_capacity(21);
+    let mut buf = Vec::with_capacity(23);
     buf.push(info.stream_version as u8);
     buf.push(info.max_band.clamp(0, 31) as u8);
     buf.push(u8::from(info.ms));
@@ -147,6 +156,8 @@ pub(crate) fn encode_extra_data(info: &StreamInfo) -> Box<[u8]> {
     buf.push(info.block_pwr);
     buf.extend_from_slice(&info.decoder_samples.to_le_bytes());
     buf.extend_from_slice(&info.beg_silence.to_le_bytes());
+    buf.push(u8::from(info.raw_res));
+    buf.push(info.is_start.map_or(0xFF, |band| band.min(31) as u8));
     buf.into_boxed_slice()
 }
 
@@ -193,7 +204,7 @@ enum Inner {
     Sv8(sv8::Sv8State),
 }
 
-/// Musepack (SV7/SV8) format reader (demuxer).
+/// Musepack (SV4 to SV8) format reader (demuxer).
 pub struct MpcReader<'s> {
     reader: MediaSourceStream<'s>,
     media_info: MediaInfo,
@@ -221,6 +232,10 @@ impl<'s> MpcReader<'s> {
         else if &magic == b"MPCK" {
             let (info, state) = sv8::read_header(&mut mss)?;
             (info, Inner::Sv8(state))
+        }
+        else if sv7::Sv46Header::parse(magic).is_some() {
+            let (info, state) = sv7::read_header_sv46(&mut mss, magic)?;
+            (info, Inner::Sv7(Box::new(state)))
         }
         else {
             return decode_error("musepack: not a Musepack stream");
@@ -290,9 +305,70 @@ impl<'s> MpcReader<'s> {
     }
 }
 
+/// Largest superframe size (`-frm`) the SV4-SV5 encoders allow.
+const SV46_MAX_BLOCK: usize = 16;
+const SV46_MARKER_COUNT: usize = 4 * SV46_MAX_BLOCK * 24;
+
+/// The first two bytes of every SV4-SV6 stream the reader supports. These versions have no magic
+/// number: the bytes are the low 16 bits of the header's first word, which hold the stream
+/// version (4 to 6) and the maximum band (3 bits in the second byte and the low 2 bits as the
+/// high bits of the first one), followed by a block size of 1 to 16 in the low 6 bits of the first
+/// byte.
+static SV46_MARKER_BYTES: [[u8; 2]; SV46_MARKER_COUNT] = {
+    let mut bytes = [[0u8; 2]; SV46_MARKER_COUNT];
+    let mut i = 0;
+    while i < SV46_MARKER_COUNT {
+        let block = (i / 24 % SV46_MAX_BLOCK) as u8 + 1;
+        let band_low = (i / 24 / SV46_MAX_BLOCK) as u8;
+        let version_and_band_high = 0x20 + (i % 24) as u8;
+        bytes[i] = [band_low << 6 | block, version_and_band_high];
+        i += 1;
+    }
+    bytes
+};
+
+static SV46_MARKERS: [&[u8]; SV46_MARKER_COUNT] = {
+    let mut markers: [&[u8]; SV46_MARKER_COUNT] = [&[]; SV46_MARKER_COUNT];
+    let mut i = 0;
+    while i < SV46_MARKER_COUNT {
+        markers[i] = &SV46_MARKER_BYTES[i];
+        i += 1;
+    }
+    markers
+};
+
 impl Scoreable for MpcReader<'_> {
-    fn score(_src: ScopedStream<&mut MediaSourceStream<'_>>) -> Result<Score> {
-        Ok(Score::Supported(254))
+    fn score(mut src: ScopedStream<&mut MediaSourceStream<'_>>) -> Result<Score> {
+        let at_start = src.pos() == 0;
+        let Ok(magic) = src.read_quad_bytes()
+        else {
+            return Ok(Score::Unsupported);
+        };
+        if &magic == b"MPCK" || &magic[..3] == b"MP+" {
+            return Ok(Score::Supported(254));
+        }
+        if sv7::Sv46Header::parse(magic).is_none() {
+            return Ok(Score::Unsupported);
+        }
+
+        // SV4-SV6 can only be told apart from other data by parsing its first frames.
+        let mut window = vec![0u8; usize::try_from(src.byte_len()).unwrap_or(0).max(4)];
+        window[..4].copy_from_slice(&magic);
+        let mut filled = 4;
+        while filled < window.len() {
+            match src.read_buf(&mut window[filled..]) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => filled += n,
+            }
+        }
+        window.truncate(filled);
+
+        Ok(if sv7::looks_like_sv46(&window, at_start) {
+            Score::Supported(254)
+        }
+        else {
+            Score::Unsupported
+        })
     }
 }
 
@@ -305,22 +381,30 @@ impl ProbeableFormat<'_> for MpcReader<'_> {
     }
 
     fn probe_data() -> &'static [ProbeFormatData] {
-        &[
-            support_format!(
-                MUSEPACK_FORMAT_INFO,
-                &["mpc", "mp+", "mpp"],
-                &["audio/x-musepack"],
-                &[b"MPCK"]
-            ),
-            support_format!(
-                MUSEPACK_FORMAT_INFO,
-                &["mpc", "mp+", "mpp"],
-                &["audio/x-musepack"],
-                &[b"MP+\x07", b"MP+\x17"]
-            ),
-        ]
+        &PROBE_DATA
     }
 }
+
+static PROBE_DATA: [ProbeFormatData; 3] = [
+    support_format!(
+        MUSEPACK_FORMAT_INFO,
+        &["mpc", "mp+", "mpp"],
+        &["audio/x-musepack"],
+        &[b"MPCK"]
+    ),
+    support_format!(
+        MUSEPACK_FORMAT_INFO,
+        &["mpc", "mp+", "mpp"],
+        &["audio/x-musepack"],
+        &[b"MP+\x07", b"MP+\x17"]
+    ),
+    support_format!(
+        MUSEPACK_FORMAT_INFO,
+        &["mpc", "mp+", "mpp"],
+        &["audio/x-musepack"],
+        &SV46_MARKERS
+    ),
+];
 
 impl FormatReader for MpcReader<'_> {
     fn format_info(&self) -> &FormatInfo {
@@ -431,6 +515,8 @@ mod tests {
             channels: 2,
             max_band: 20,
             ms: true,
+            raw_res: false,
+            is_start: None,
             block_pwr,
             decoder_samples: samples,
             beg_silence,

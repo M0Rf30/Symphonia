@@ -5,8 +5,9 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Huffman code tables for SV7 and SV8. See `crate::bits` for the decode primitives that
+//! Huffman code tables for SV4-SV6, SV7 and SV8. See `crate::bits` for the decode primitives that
 //! consume these tables, and `NOTICE` for licensing/attribution.
 
+pub mod sv46_tables;
 pub mod sv7_tables;
 pub mod sv8_tables;
