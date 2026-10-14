@@ -11,7 +11,6 @@ use crate::mac::error::{ApeError, ApeResult};
 // ---------------------------------------------------------------------------
 
 pub const APE_FORMAT_FLAG_8_BIT: u16 = 1 << 0; // OBSOLETE
-#[allow(dead_code)]
 pub const APE_FORMAT_FLAG_CRC: u16 = 1 << 1; // OBSOLETE
 pub const APE_FORMAT_FLAG_HAS_PEAK_LEVEL: u16 = 1 << 2; // OBSOLETE
 pub const APE_FORMAT_FLAG_24_BIT: u16 = 1 << 3; // OBSOLETE
@@ -83,6 +82,14 @@ pub struct ApeFileInfo {
     // Seek table (64-bit corrected values, **not** including junk_header_bytes)
     pub seek_table: Vec<u64>,
 
+    /// The format flags of the header (`APE_FORMAT_FLAG_*`). Only those of the files older than
+    /// version 3980 are of use to the decoder.
+    pub format_flags: u16,
+
+    /// For the files up to version 3800, whose frames do not start on a byte boundary: the bit of
+    /// the byte of the seek table each frame starts at.
+    pub seek_bit_table: Vec<u8>,
+
     // Junk / header data
     pub junk_header_bytes: u32,
     pub wav_header_data: Vec<u8>,
@@ -101,6 +108,18 @@ pub struct ApeFileInfo {
 
     // File-level
     pub file_bytes: u64,
+
+    /// The offset of the end of the compressed data of the last frame: the end of the frame data
+    /// that the descriptor declares if the file holds it, and otherwise the end of the file, less
+    /// the terminating data and the tags (APEv2, ID3v1) at its end (as `CAPEInfo::GetInfo` of the
+    /// SDK).
+    pub data_end: u64,
+
+    /// The offset of the end of the compressed data of the last frame that the descriptor
+    /// declares: the end of the frame data, without the terminating data and the tags. Zero if the
+    /// header does not declare it (the files older than version 3980, and files that have no
+    /// frame data size in their descriptor). A file that is shorter than this is truncated.
+    pub declared_data_end: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -245,10 +264,9 @@ fn read_descriptor<R: Read>(reader: &mut R) -> ApeResult<ApeDescriptor> {
 // Read header (current format, version >= 3980)
 // ---------------------------------------------------------------------------
 
-fn read_header<R: Read>(reader: &mut R) -> ApeResult<ApeHeader> {
+fn read_header<R: Read>(reader: &mut R) -> ApeResult<(ApeHeader, u16)> {
     let compression_level = read_u16_le(reader)?;
-    // The format flags of the current format carry nothing the decoder uses.
-    read_u16_le(reader)?;
+    let format_flags = read_u16_le(reader)?;
     let blocks_per_frame = read_u32_le(reader)?;
     let final_frame_blocks = read_u32_le(reader)?;
     let total_frames = read_u32_le(reader)?;
@@ -256,26 +274,39 @@ fn read_header<R: Read>(reader: &mut R) -> ApeResult<ApeHeader> {
     let channels = read_u16_le(reader)?;
     let sample_rate = read_u32_le(reader)?;
 
-    Ok(ApeHeader {
-        compression_level,
-        blocks_per_frame,
-        final_frame_blocks,
-        total_frames,
-        bits_per_sample,
-        channels,
-        sample_rate,
-    })
+    Ok((
+        ApeHeader {
+            compression_level,
+            blocks_per_frame,
+            final_frame_blocks,
+            total_frames,
+            bits_per_sample,
+            channels,
+            sample_rate,
+        },
+        format_flags,
+    ))
 }
 
 // ---------------------------------------------------------------------------
 // Read old header (version < 3980)
 // ---------------------------------------------------------------------------
 
+/// The parts of the header of a file older than version 3980.
+struct OldHeader {
+    descriptor: ApeDescriptor,
+    header: ApeHeader,
+    format_flags: u16,
+    wav_header_data: Vec<u8>,
+    seek_table: Vec<u64>,
+    seek_bit_table: Vec<u8>,
+}
+
 fn read_old_header<R: Read + Seek>(
     reader: &mut R,
     magic: [u8; 4],
     version: u16,
-) -> ApeResult<(ApeDescriptor, ApeHeader, Vec<u8>, Vec<u64>)> {
+) -> ApeResult<OldHeader> {
     // We've already consumed magic (4) + version (2) = 6 bytes.
     // Old header is 32 bytes total; read remaining 26 bytes worth of fields.
     let compression_level = read_u16_le(reader)?;
@@ -348,10 +379,11 @@ fn read_old_header<R: Read + Seek>(
         *entry = read_u32_le(reader)?;
     }
 
-    // Skip seek bit table for version <= 3800
+    // The seek bit table of the version <= 3800: 1 byte per element
+    let mut seek_bit_table = Vec::new();
     if version <= 3800 {
-        // seek bit table: 1 byte per element
-        reader.seek(SeekFrom::Current(seek_table_elements as i64))?;
+        seek_bit_table.resize(seek_table_elements as usize, 0);
+        reader.read_exact(&mut seek_bit_table)?;
     }
 
     // Build a synthetic descriptor
@@ -379,7 +411,75 @@ fn read_old_header<R: Read + Seek>(
         sample_rate,
     };
 
-    Ok((descriptor, header, wav_header_data, convert_32bit_seek_table(&seek_raw)))
+    Ok(OldHeader {
+        descriptor,
+        header,
+        format_flags,
+        wav_header_data,
+        seek_table: convert_32bit_seek_table(&seek_raw),
+        seek_bit_table,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Tags at the end of the file
+// ---------------------------------------------------------------------------
+
+const ID3V1_TAG_BYTES: u64 = 128;
+const APE_TAG_FOOTER_BYTES: u64 = 32;
+const APE_TAG_FLAG_CONTAINS_HEADER: u32 = 1 << 31;
+const APE_TAG_FLAG_IS_HEADER: u32 = 1 << 29;
+const APE_TAG_MAXIMUM_FIELD_BYTES: i64 = 256 * 1024 * 1024;
+
+/// The size of the tags at the end of the file: an ID3v1 tag, and an APEv2 tag before it, as
+/// detected by `CAPETag::Analyze` of the SDK.
+fn trailing_tag_bytes<R: Read + Seek>(reader: &mut R, file_bytes: u64) -> ApeResult<u64> {
+    let mut tag_bytes = 0;
+
+    if file_bytes > ID3V1_TAG_BYTES {
+        reader.seek(SeekFrom::Start(file_bytes - ID3V1_TAG_BYTES))?;
+        let mut id3 = [0u8; 3];
+        reader.read_exact(&mut id3)?;
+        if &id3 == b"TAG" {
+            tag_bytes = ID3V1_TAG_BYTES;
+        }
+    }
+
+    if file_bytes >= tag_bytes + APE_TAG_FOOTER_BYTES {
+        reader.seek(SeekFrom::Start(file_bytes - tag_bytes - APE_TAG_FOOTER_BYTES))?;
+        let mut footer = [0u8; APE_TAG_FOOTER_BYTES as usize];
+        reader.read_exact(&mut footer)?;
+
+        let le_i32 = |at: usize| {
+            i32::from_le_bytes([footer[at], footer[at + 1], footer[at + 2], footer[at + 3]])
+        };
+        let (version, size, fields, flags) = (le_i32(8), le_i32(12), le_i32(16), le_i32(20) as u32);
+
+        let valid = &footer[..8] == b"APETAGEX"
+            && version <= 2000
+            && fields <= 65536
+            && i64::from(size) >= APE_TAG_FOOTER_BYTES as i64
+            && i64::from(size) - APE_TAG_FOOTER_BYTES as i64 <= APE_TAG_MAXIMUM_FIELD_BYTES
+            && flags & APE_TAG_FLAG_IS_HEADER == 0;
+
+        if valid {
+            let header =
+                if flags & APE_TAG_FLAG_CONTAINS_HEADER != 0 { APE_TAG_FOOTER_BYTES } else { 0 };
+            tag_bytes += size as u64 + header;
+        }
+    }
+
+    Ok(tag_bytes.min(file_bytes))
+}
+
+/// The offset of the end of the compressed data (see `ApeFileInfo::data_end`).
+fn data_end<R: Read + Seek>(
+    reader: &mut R,
+    file_bytes: u64,
+    terminating_data_bytes: u32,
+) -> ApeResult<u64> {
+    let tag_bytes = trailing_tag_bytes(reader, file_bytes)?;
+    Ok(file_bytes.saturating_sub(tag_bytes).saturating_sub(u64::from(terminating_data_bytes)))
 }
 
 // ---------------------------------------------------------------------------
@@ -462,8 +562,14 @@ pub fn parse<R: Read + Seek>(reader: &mut R) -> ApeResult<ApeFileInfo> {
 
     if version < 3980 {
         // Old format
-        let (descriptor, header, wav_header_data, seek_table) =
-            read_old_header(reader, magic, version)?;
+        let OldHeader {
+            descriptor,
+            header,
+            format_flags,
+            wav_header_data,
+            seek_table,
+            seek_bit_table,
+        } = read_old_header(reader, magic, version)?;
 
         // Compute derived values
         let total_blocks: i64 = if header.total_frames == 0 {
@@ -501,10 +607,14 @@ pub fn parse<R: Read + Seek>(reader: &mut R) -> ApeResult<ApeFileInfo> {
 
         validate(&descriptor, &header, seek_table.len(), file_bytes)?;
 
+        let data_end = data_end(reader, file_bytes, descriptor.terminating_data_bytes)?;
+
         return Ok(ApeFileInfo {
             descriptor,
             header,
             seek_table,
+            format_flags,
+            seek_bit_table,
             junk_header_bytes,
             wav_header_data,
             total_blocks,
@@ -518,6 +628,8 @@ pub fn parse<R: Read + Seek>(reader: &mut R) -> ApeResult<ApeFileInfo> {
             ape_frame_data_bytes,
             terminating_data_bytes: 0,
             file_bytes,
+            data_end,
+            declared_data_end: 0,
         });
     }
 
@@ -535,7 +647,7 @@ pub fn parse<R: Read + Seek>(reader: &mut R) -> ApeResult<ApeFileInfo> {
     }
 
     // Read header (24 bytes)
-    let header = read_header(reader)?;
+    let (header, format_flags) = read_header(reader)?;
 
     // Skip extra header bytes
     if descriptor.header_bytes > APE_HEADER_BYTES {
@@ -568,6 +680,35 @@ pub fn parse<R: Read + Seek>(reader: &mut R) -> ApeResult<ApeFileInfo> {
 
     // Validate
     validate(&descriptor, &header, seek_table.len(), file_bytes)?;
+
+    let tags_start = data_end(reader, file_bytes, descriptor.terminating_data_bytes)?;
+
+    let frame_data_bytes =
+        u64::from(descriptor.frame_data_bytes_high) << 32 | u64::from(descriptor.frame_data_bytes);
+    let declared_data_end = if frame_data_bytes == 0 {
+        0
+    }
+    else {
+        u64::from(junk_header_bytes)
+            + u64::from(descriptor.descriptor_bytes)
+            + u64::from(descriptor.header_bytes)
+            + u64::from(descriptor.seek_table_bytes)
+            + u64::from(descriptor.header_data_bytes)
+            + frame_data_bytes
+    };
+
+    // The end of the frame data that the descriptor declares is a better end of the last frame than
+    // the file less its terminating data and tags, if it is possible: a corrupt tag makes the size
+    // of the tags unreliable.
+    let last_frame_start = seek_table
+        .get(header.total_frames.saturating_sub(1) as usize)
+        .map_or(0, |&b| b + u64::from(junk_header_bytes));
+    let data_end = if declared_data_end > last_frame_start && declared_data_end <= file_bytes {
+        declared_data_end
+    }
+    else {
+        tags_start
+    };
 
     // Compute derived values
     let total_blocks: i64 = if header.total_frames == 0 {
@@ -607,6 +748,8 @@ pub fn parse<R: Read + Seek>(reader: &mut R) -> ApeResult<ApeFileInfo> {
         descriptor,
         header,
         seek_table,
+        format_flags,
+        seek_bit_table: Vec::new(),
         junk_header_bytes,
         wav_header_data,
         total_blocks,
@@ -620,6 +763,8 @@ pub fn parse<R: Read + Seek>(reader: &mut R) -> ApeResult<ApeFileInfo> {
         ape_frame_data_bytes,
         terminating_data_bytes: 0,
         file_bytes,
+        data_end,
+        declared_data_end,
     })
 }
 
@@ -659,11 +804,8 @@ impl ApeFileInfo {
         else {
             // Final frame: from seek position to end of compressed data
             // End of compressed data = file_size - terminating_data - tag_bytes
-            // For simplicity we exclude terminating data; tag detection would
-            // require more work. This matches the SDK pattern.
-            let end = self.file_bytes.saturating_sub(self.descriptor.terminating_data_bytes as u64);
-            let start = self.seek_byte(frame_idx);
-            end.saturating_sub(start)
+            // (`CAPEInfo::GetInfo(APE_INFO_FRAME_BYTES)` of the SDK).
+            self.data_end.saturating_sub(self.seek_byte(frame_idx))
         }
     }
 

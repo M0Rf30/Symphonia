@@ -11,8 +11,11 @@
 
 use crate::mac::crc::ape_crc;
 use crate::mac::error::{ApeError, ApeResult};
-use crate::mac::predictor::{Predictor3950, Predictor3950_32};
-use crate::mac::range_coder::{EntropyState, RangeCoder};
+use crate::mac::format::APE_FORMAT_FLAG_CRC;
+use crate::mac::legacy::LegacyDecoder;
+use crate::mac::nn_filter::COMPRESSION_INSANE;
+use crate::mac::predictor::{Predictor3930, Predictor3950, Predictor3950_32};
+use crate::mac::range_coder::{EntropyDecoder, EntropyState, RangeCoder, RangeCoderV1};
 use crate::mac::unprepare::{unprepare_mono, unprepare_multichannel, unprepare_stereo};
 
 use crate::mac::bitreader::ByteReader;
@@ -26,13 +29,18 @@ const SPECIAL_FRAME_PSEUDO_STEREO: i32 = 4;
 /// The number of blocks (samples per channel) that are decoded before they are formatted.
 const CHUNK: usize = 4096;
 
+/// The number of blocks that are decoded at a time from a truncated frame.
+const TRUNCATED_CHUNK: usize = 256;
+
 /// The largest PCM size of a frame that will be decoded.
-const MAX_FRAME_PCM_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_FRAME_PCM_BYTES: usize = 64 * 1024 * 1024;
 
 /// What the frame decoding needs from a predictor.
 trait Predictor {
-    /// Whether more than two channels are decoded (the 32-bit path only does mono and stereo).
-    const MULTICHANNEL: bool;
+    /// Whether the predictor of the second channel takes the previous sample of the first channel
+    /// as input, which makes the decoding order of a stereo pair second channel first (versions
+    /// from 3950).
+    const CROSS_CHANNEL: bool;
 
     fn flush(&mut self);
 
@@ -41,7 +49,7 @@ trait Predictor {
 }
 
 impl Predictor for Predictor3950 {
-    const MULTICHANNEL: bool = true;
+    const CROSS_CHANNEL: bool = true;
 
     fn flush(&mut self) {
         Predictor3950::flush(self);
@@ -54,7 +62,7 @@ impl Predictor for Predictor3950 {
 }
 
 impl Predictor for Predictor3950_32 {
-    const MULTICHANNEL: bool = false;
+    const CROSS_CHANNEL: bool = true;
 
     fn flush(&mut self) {
         Predictor3950_32::flush(self);
@@ -66,8 +74,22 @@ impl Predictor for Predictor3950_32 {
     }
 }
 
+impl Predictor for Predictor3930 {
+    const CROSS_CHANNEL: bool = false;
+
+    fn flush(&mut self) {
+        Predictor3930::flush(self);
+    }
+
+    #[inline(always)]
+    fn decompress_value(&mut self, residual: i64, _n_b: i32) -> i32 {
+        Predictor3930::decompress_value(self, residual)
+    }
+}
+
 /// The predictors of a decoder, one per channel.
 enum Predictors {
+    Path3930(Vec<Predictor3930>),
     Path16(Vec<Predictor3950>),
     Path32(Vec<Predictor3950_32>),
 }
@@ -94,11 +116,37 @@ impl Work<'_> {
         Work { scratch: self.scratch, entropy_states: self.entropy_states, pcm: self.pcm }
     }
 }
+/// The compressed bytes of a frame and where in them the frame starts.
+pub struct FrameInput<'a> {
+    /// The bytes of the frame, from the start of the 32-bit word the frame starts in, and with the
+    /// bytes after the frame that the decoder may read ahead.
+    pub data: &'a [u8],
+    /// The number of bytes of the first word that precede the frame.
+    pub seek_remainder: u32,
+    /// The bit of that position the frame starts at (versions up to 3.80, whose frames do not
+    /// start on a byte boundary).
+    pub seek_bit: u32,
+    /// The data ends before the frame does: the file is truncated.
+    pub truncated: bool,
+}
+
 /// A stateful APE frame decoder that works on raw compressed frame bytes.
 ///
 /// `FrameDecoder` only performs decoding: the demuxer manages all I/O and supplies the compressed
 /// frame data as byte slices.
 pub struct FrameDecoder {
+    core: Core,
+}
+
+enum Core {
+    /// Versions 3.93 and later.
+    Block(BlockDecoder),
+    /// Versions before 3.93.
+    Legacy(LegacyDecoder),
+}
+
+/// The decoder of the versions 3.93 and later, which decode the channels sample by sample.
+struct BlockDecoder {
     predictors: Predictors,
     entropy_states: Vec<EntropyState>,
     /// Scratch space for the reconstructed samples of a block, one vector per channel.
@@ -110,23 +158,30 @@ pub struct FrameDecoder {
     interim_mode: bool,
 }
 
+/// The oldest file version that is supported. The versions before it are not produced by any of the
+/// Monkey's Audio releases that are still in use.
+const MIN_VERSION: u16 = 3000;
+
 impl FrameDecoder {
     /// Create a new `FrameDecoder` with the given APE stream parameters.
     ///
-    /// * `version` -- APE file version (e.g., 3990). Must be >= 3950.
-    /// * `channels` -- Number of audio channels (1-32).
-    /// * `bits_per_sample` -- Bits per sample (8, 16, 24, or 32).
-    /// * `compression_level` -- Compression level (1000-5000).
+    /// * `version` -- APE file version (e.g., 3990), at least 3000.
+    /// * `channels` -- Number of audio channels (1-32; more than two need version 3990).
+    /// * `bits_per_sample` -- Bits per sample (8, 16, 24, or 32; 32 needs version 3950).
+    /// * `compression_level` -- Compression level (1000-5000; 5000 needs version 3950).
+    /// * `format_flags` -- The format flags of the header of a file older than version 3980
+    ///   (zero for the later versions, which do not have them).
     ///
     /// Returns an error if the parameters are invalid (unsupported version, zero channels, or
-    /// unsupported bit depth).
+    /// unsupported bit depth or compression level).
     pub fn new(
         version: u16,
         channels: u16,
         bits_per_sample: u16,
         compression_level: u16,
+        format_flags: u16,
     ) -> ApeResult<Self> {
-        if version < 3950 {
+        if version < MIN_VERSION {
             return Err(ApeError::UnsupportedVersion(version));
         }
         if channels == 0 {
@@ -135,12 +190,67 @@ impl FrameDecoder {
         if !matches!(bits_per_sample, 8 | 16 | 24 | 32) {
             return Err(ApeError::InvalidFormat("bits per sample must be 8, 16, 24, or 32"));
         }
+        // The predictors of the SDK throw for all other levels.
+        if !matches!(compression_level, 1000 | 2000 | 3000 | 4000 | 5000) {
+            return Err(ApeError::InvalidFormat("unsupported compression level"));
+        }
+        if u32::from(compression_level) == COMPRESSION_INSANE && version < 3950 {
+            return Err(ApeError::InvalidFormat("the extra insane level needs version 3.95"));
+        }
+        if bits_per_sample == 32 && version < 3950 {
+            return Err(ApeError::InvalidFormat("32 bit samples need version 3.95"));
+        }
+        if channels > 2 && version < 3990 {
+            return Err(ApeError::InvalidFormat("more than two channels need version 3.99"));
+        }
 
+        let core = if version < 3930 {
+            Core::Legacy(LegacyDecoder::new(
+                version,
+                channels,
+                bits_per_sample,
+                u32::from(compression_level),
+                format_flags & APE_FORMAT_FLAG_CRC != 0,
+            )?)
+        }
+        else {
+            Core::Block(BlockDecoder::new(version, channels, bits_per_sample, compression_level))
+        };
+
+        Ok(FrameDecoder { core })
+    }
+
+    /// Decode a compressed frame to raw PCM bytes, replacing the contents of `pcm`.
+    ///
+    /// * `input` -- The compressed bytes of the frame.
+    /// * `frame_blocks` -- Number of audio blocks (samples per channel) in this frame.
+    /// * `pcm` -- Output buffer; its allocation is reused across frames.
+    ///
+    /// Returns the number of blocks decoded, which is only less than `frame_blocks` if the input
+    /// is truncated.
+    pub fn decode_frame(
+        &mut self,
+        input: &FrameInput<'_>,
+        frame_blocks: usize,
+        pcm: &mut Vec<u8>,
+    ) -> ApeResult<usize> {
+        match &mut self.core {
+            Core::Block(decoder) => decoder.decode_frame(input, frame_blocks, pcm),
+            Core::Legacy(decoder) => decoder.decode_frame(input, frame_blocks, pcm),
+        }
+    }
+}
+
+impl BlockDecoder {
+    fn new(version: u16, channels: u16, bits_per_sample: u16, compression_level: u16) -> Self {
         let v = i32::from(version);
         let comp = u32::from(compression_level);
         let nch = usize::from(channels);
 
-        let predictors = if bits_per_sample >= 32 {
+        let predictors = if version < 3950 {
+            Predictors::Path3930((0..nch).map(|_| Predictor3930::new(comp, v)).collect())
+        }
+        else if bits_per_sample >= 32 {
             Predictors::Path32((0..nch).map(|_| Predictor3950_32::new(comp, v)).collect())
         }
         else {
@@ -153,7 +263,7 @@ impl FrameDecoder {
         let bytes_per_sample = usize::from(bits_per_sample / 8);
         let block_align = bytes_per_sample * nch;
 
-        Ok(FrameDecoder {
+        BlockDecoder {
             predictors,
             entropy_states,
             scratch: vec![vec![0; CHUNK]; nch],
@@ -162,22 +272,15 @@ impl FrameDecoder {
             bits_per_sample,
             block_align,
             interim_mode: false,
-        })
+        }
     }
 
-    /// Decode a compressed frame to raw PCM bytes, replacing the contents of `pcm`.
-    ///
-    /// * `frame_data` -- Compressed frame bytes (including alignment prefix).
-    /// * `seek_remainder` -- Byte alignment offset for this frame.
-    /// * `frame_blocks` -- Number of audio blocks (samples per channel) in this frame.
-    /// * `pcm` -- Output buffer; its allocation is reused across frames.
-    pub fn decode_frame(
+    fn decode_frame(
         &mut self,
-        frame_data: &[u8],
-        seek_remainder: u32,
+        input: &FrameInput<'_>,
         frame_blocks: usize,
         pcm: &mut Vec<u8>,
-    ) -> ApeResult<()> {
+    ) -> ApeResult<usize> {
         let params = Params {
             version: self.version,
             channels: self.channels,
@@ -189,18 +292,14 @@ impl FrameDecoder {
             Work { scratch: &mut self.scratch, entropy_states: &mut self.entropy_states, pcm };
 
         match &mut self.predictors {
+            Predictors::Path3930(predictors) => {
+                decode_frame_with(&params, input, frame_blocks, predictors, work)
+            }
             Predictors::Path16(predictors) => {
-                let result = decode_frame_impl(
-                    &params,
-                    frame_data,
-                    seek_remainder,
-                    frame_blocks,
-                    predictors,
-                    work.reborrow(),
-                );
+                let result =
+                    decode_frame_with(&params, input, frame_blocks, predictors, work.reborrow());
 
                 match result {
-                    Ok(()) => Ok(()),
                     Err(ApeError::InvalidChecksum)
                         if self.bits_per_sample == 24 && !self.interim_mode =>
                     {
@@ -208,41 +307,44 @@ impl FrameDecoder {
                         for p in predictors.iter_mut() {
                             p.set_interim_mode(true);
                         }
-                        decode_frame_impl(
-                            &params,
-                            frame_data,
-                            seek_remainder,
-                            frame_blocks,
-                            predictors,
-                            work,
-                        )
+                        decode_frame_with(&params, input, frame_blocks, predictors, work)
                     }
-                    Err(e) => Err(e),
+                    result => result,
                 }
             }
-            Predictors::Path32(predictors) => decode_frame_impl(
-                &params,
-                frame_data,
-                seek_remainder,
-                frame_blocks,
-                predictors,
-                work,
-            ),
+            Predictors::Path32(predictors) => {
+                decode_frame_with(&params, input, frame_blocks, predictors, work)
+            }
         }
     }
 }
 
-fn decode_frame_impl<P: Predictor>(
+/// Decode a frame with the range decoder of the file version.
+fn decode_frame_with<P: Predictor>(
     params: &Params,
-    frame_data: &[u8],
-    seek_remainder: u32,
+    input: &FrameInput<'_>,
     frame_blocks: usize,
     predictors: &mut [P],
     work: Work<'_>,
-) -> ApeResult<()> {
+) -> ApeResult<usize> {
+    if params.version >= 3990 {
+        decode_frame_impl::<P, RangeCoder>(params, input, frame_blocks, predictors, work)
+    }
+    else {
+        decode_frame_impl::<P, RangeCoderV1>(params, input, frame_blocks, predictors, work)
+    }
+}
+
+fn decode_frame_impl<P: Predictor, E: EntropyDecoder>(
+    params: &Params,
+    input: &FrameInput<'_>,
+    frame_blocks: usize,
+    predictors: &mut [P],
+    work: Work<'_>,
+) -> ApeResult<usize> {
     let Work { scratch, entropy_states, pcm } = work;
     let Params { version, channels, bits_per_sample: bits, block_align } = *params;
-    let mut br = ByteReader::new(frame_data, seek_remainder);
+    let mut br = ByteReader::new(input.data, input.seek_remainder);
 
     // --- StartFrame ---
     let mut stored_crc = br.next_u32();
@@ -260,7 +362,7 @@ fn decode_frame_impl<P: Predictor>(
     for s in entropy_states.iter_mut() {
         s.flush();
     }
-    let mut rc = RangeCoder::new(&mut br);
+    let mut rc = E::start(&mut br, version);
 
     let pcm_size =
         frame_blocks.checked_mul(block_align).ok_or(ApeError::InvalidFormat("frame too large"))?;
@@ -268,19 +370,20 @@ fn decode_frame_impl<P: Predictor>(
         return Err(ApeError::InvalidFormat("frame PCM size exceeds 64 MB"));
     }
 
-    // The 32-bit path only decodes mono and stereo, and produces no output otherwise.
-    let decodes = channels <= 2 || P::MULTICHANNEL;
     pcm.clear();
-    if decodes {
-        pcm.resize(pcm_size, 0);
-    }
+    pcm.resize(pcm_size, 0);
 
     // The previous X output, which the Y predictor of the next block takes as input.
     let mut last_x: i32 = 0;
 
+    // The blocks of a truncated frame are decoded in smaller steps, so that little of what the
+    // data holds is lost with the block that runs out of data.
+    let chunk = if input.truncated { TRUNCATED_CHUNK } else { CHUNK };
+
     let mut done = 0;
-    while decodes && done < frame_blocks {
-        let n = (frame_blocks - done).min(CHUNK);
+    let mut ran_out_of_data = false;
+    while done < frame_blocks {
+        let n = (frame_blocks - done).min(chunk);
         let out = &mut pcm[done * block_align..(done + n) * block_align];
 
         // The samples of the block are decoded one after the other, since the entropy decoding
@@ -290,8 +393,7 @@ fn decode_frame_impl<P: Predictor>(
         // takes precedence.
         let mut n_ok = n;
         let mut entropy_error = None;
-
-        if channels == 2 {
+        let unprepared: ApeResult<()> = if channels == 2 {
             let (s0, s1) = {
                 let (a, b) = scratch.split_at_mut(1);
                 (&mut a[0][..n], &mut b[0][..n])
@@ -314,7 +416,7 @@ fn decode_frame_impl<P: Predictor>(
             else if (special_codes & SPECIAL_FRAME_PSEUDO_STEREO) != 0 {
                 s1.fill(0);
                 for (i, x) in s0.iter_mut().enumerate() {
-                    match rc.decode_value(e0, &mut br) {
+                    match rc.decode(e0, &mut br) {
                         Ok(v) => *x = p0.decompress_value(v, 0),
                         Err(e) => {
                             entropy_error = Some(e);
@@ -330,15 +432,22 @@ fn decode_frame_impl<P: Predictor>(
                 // processor overlaps that with the reconstruction of the pair before it, which is
                 // placed first so that the mispredicted branches of the entropy decoding do not
                 // discard its work.
-                let decode_pair = |rc: &mut RangeCoder,
+                let decode_pair = |rc: &mut E,
                                    br: &mut ByteReader<'_>,
                                    e0: &mut EntropyState,
                                    e1: &mut EntropyState|
                  -> ApeResult<(i64, i64)> {
-                    // The second channel is coded first.
-                    let ny = rc.decode_value(e1, br)?;
-                    let nx = rc.decode_value(e0, br)?;
-                    Ok((nx, ny))
+                    if P::CROSS_CHANNEL {
+                        // The second channel is coded first.
+                        let ny = rc.decode(e1, br)?;
+                        let nx = rc.decode(e0, br)?;
+                        Ok((nx, ny))
+                    }
+                    else {
+                        let nx = rc.decode(e0, br)?;
+                        let ny = rc.decode(e1, br)?;
+                        Ok((nx, ny))
+                    }
                 };
 
                 let mut next = decode_pair(&mut rc, &mut br, e0, e1);
@@ -351,9 +460,15 @@ fn decode_frame_impl<P: Predictor>(
                             break;
                         }
                     };
-                    *y = p1.decompress_value(ny, last_x);
-                    *x = p0.decompress_value(nx, *y);
-                    last_x = *x;
+                    if P::CROSS_CHANNEL {
+                        *y = p1.decompress_value(ny, last_x);
+                        *x = p0.decompress_value(nx, *y);
+                        last_x = *x;
+                    }
+                    else {
+                        *x = p0.decompress_value(nx, 0);
+                        *y = p1.decompress_value(ny, 0);
+                    }
                     if i + 1 < n {
                         next = decode_pair(&mut rc, &mut br, e0, e1);
                     }
@@ -361,7 +476,7 @@ fn decode_frame_impl<P: Predictor>(
             }
 
             // s0 and s1 are the "mid" and "side" values, which are decorrelated here.
-            unprepare_stereo(bits, &s0[..n_ok], &s1[..n_ok], &mut out[..n_ok * block_align])?;
+            unprepare_stereo(bits, &s0[..n_ok], &s1[..n_ok], &mut out[..n_ok * block_align])
         }
         else if channels == 1 {
             let s0 = &mut scratch[0][..n];
@@ -374,7 +489,7 @@ fn decode_frame_impl<P: Predictor>(
             else {
                 // As for stereo, the decoding of a sample runs ahead of the reconstruction of the
                 // sample before it.
-                let mut next = rc.decode_value(e0, &mut br);
+                let mut next = rc.decode(e0, &mut br);
                 for (i, x) in s0.iter_mut().enumerate() {
                     let v = match next {
                         Ok(v) => v,
@@ -386,12 +501,12 @@ fn decode_frame_impl<P: Predictor>(
                     };
                     *x = p0.decompress_value(v, 0);
                     if i + 1 < n {
-                        next = rc.decode_value(e0, &mut br);
+                        next = rc.decode(e0, &mut br);
                     }
                 }
             }
 
-            unprepare_mono(bits, &s0[..n_ok], &mut out[..n_ok * block_align])?;
+            unprepare_mono(bits, &s0[..n_ok], &mut out[..n_ok * block_align])
         }
         else {
             // More than two channels; the samples of a block are coded channel by channel.
@@ -399,7 +514,7 @@ fn decode_frame_impl<P: Predictor>(
                 for ((p, e), s) in
                     predictors.iter_mut().zip(entropy_states.iter_mut()).zip(scratch.iter_mut())
                 {
-                    match rc.decode_value(e, &mut br) {
+                    match rc.decode(e, &mut br) {
                         Ok(v) => s[i] = p.decompress_value(v, 0),
                         Err(err) => {
                             entropy_error = Some(err);
@@ -410,13 +525,26 @@ fn decode_frame_impl<P: Predictor>(
                 }
             }
 
-            unprepare_multichannel(bits, scratch, n_ok, &mut out[..n_ok * block_align])?;
+            unprepare_multichannel(bits, scratch, n_ok, &mut out[..n_ok * block_align])
+        };
+
+        // The block that read beyond the data of a truncated frame is made of zero padding rather
+        // than of what the encoder wrote: it ends the frame, whatever it decoded to.
+        if input.truncated && br.is_past_end() {
+            ran_out_of_data = true;
+            break;
         }
 
+        unprepared?;
         if let Some(e) = entropy_error {
             return Err(e);
         }
         done += n;
+    }
+
+    if ran_out_of_data {
+        pcm.truncate(done * block_align);
+        return Ok(done);
     }
 
     // --- EndFrame ---
@@ -425,12 +553,16 @@ fn decode_frame_impl<P: Predictor>(
         return Err(ApeError::InvalidChecksum);
     }
 
-    Ok(())
+    Ok(frame_blocks)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn input(data: &[u8], seek_remainder: u32) -> FrameInput<'_> {
+        FrameInput { data, seek_remainder, seek_bit: 0, truncated: false }
+    }
 
     /// A frame that is flagged as silent: the checksum and the special codes, then the (unused)
     /// range coder bytes.
@@ -461,9 +593,9 @@ mod tests {
                     sample.iter().copied().cycle().take(blocks * sample.len()).collect();
                 let frame = silent_frame(&pcm, special_codes);
                 let mut decoder =
-                    FrameDecoder::new(3990, channels, bits, 2000).expect("valid frame");
+                    FrameDecoder::new(3990, channels, bits, 2000, 0).expect("valid frame");
                 let mut decoded = Vec::new();
-                decoder.decode_frame(&frame, 0, blocks, &mut decoded).expect("valid frame");
+                decoder.decode_frame(&input(&frame, 0), blocks, &mut decoded).expect("valid frame");
                 assert_eq!(decoded, pcm, "{channels} channels, {bits} bits, {blocks} blocks");
             }
         }
@@ -472,13 +604,13 @@ mod tests {
     #[test]
     fn rejects_a_wrong_checksum() {
         let frame = silent_frame(&[0; 8], 3);
-        let mut decoder = FrameDecoder::new(3990, 2, 16, 2000).expect("valid frame");
+        let mut decoder = FrameDecoder::new(3990, 2, 16, 2000, 0).expect("valid frame");
         let mut out = Vec::new();
         assert!(matches!(
-            decoder.decode_frame(&frame, 0, 3, &mut out),
+            decoder.decode_frame(&input(&frame, 0), 3, &mut out),
             Err(ApeError::InvalidChecksum)
         ));
-        assert!(decoder.decode_frame(&frame, 0, 2, &mut out).is_ok());
+        assert!(decoder.decode_frame(&input(&frame, 0), 2, &mut out).is_ok());
     }
 
     #[test]
@@ -493,29 +625,31 @@ mod tests {
             file[(3 + k) ^ 3] = header[k ^ 3];
         }
 
-        let mut decoder = FrameDecoder::new(3990, 2, 16, 2000).expect("valid parameters");
+        let mut decoder = FrameDecoder::new(3990, 2, 16, 2000, 0).expect("valid parameters");
         let mut decoded = Vec::new();
-        decoder.decode_frame(&file, 3, 4, &mut decoded).expect("valid frame");
+        decoder.decode_frame(&input(&file, 3), 4, &mut decoded).expect("valid frame");
         assert_eq!(decoded, pcm);
     }
 
     #[test]
     fn rejects_invalid_parameters() {
         assert!(matches!(
-            FrameDecoder::new(3940, 2, 16, 2000),
-            Err(ApeError::UnsupportedVersion(3940))
+            FrameDecoder::new(2990, 2, 16, 2000, 0),
+            Err(ApeError::UnsupportedVersion(2990))
         ));
-        assert!(FrameDecoder::new(3990, 0, 16, 2000).is_err());
-        assert!(FrameDecoder::new(3990, 2, 12, 2000).is_err());
-    }
-
-    #[test]
-    fn a_32_bit_frame_of_more_than_two_channels_has_no_output() {
-        // The 32-bit path only decodes mono and stereo, and the checksum of no data is 0.
-        let frame = silent_frame(&[], 0);
-        let mut decoder = FrameDecoder::new(3990, 3, 32, 2000).expect("valid frame");
-        let mut pcm = vec![1u8; 4];
-        decoder.decode_frame(&frame, 0, 10, &mut pcm).expect("valid frame");
-        assert!(pcm.is_empty());
+        // The versions the SDK has no decoder for, or levels it throws for.
+        assert!(matches!(
+            FrameDecoder::new(3895, 2, 16, 2000, 2),
+            Err(ApeError::UnsupportedVersion(3895))
+        ));
+        assert!(FrameDecoder::new(3940, 2, 16, 5000, 0).is_err());
+        assert!(FrameDecoder::new(3940, 3, 16, 2000, 0).is_err());
+        assert!(FrameDecoder::new(3990, 2, 16, 6000, 0).is_err());
+        assert!(FrameDecoder::new(3990, 2, 16, 0, 0).is_err());
+        assert!(FrameDecoder::new(3990, 0, 16, 2000, 0).is_err());
+        assert!(FrameDecoder::new(3990, 2, 12, 2000, 0).is_err());
+        for version in [3800, 3880, 3910, 3940, 3950, 3990] {
+            assert!(FrameDecoder::new(version, 2, 16, 2000, 2).is_ok(), "{version}");
+        }
     }
 }

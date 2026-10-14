@@ -38,9 +38,10 @@ const APE_FORMAT_INFO: FormatInfo = FormatInfo {
 
 /// Map an APE channel count onto Symphonia's channel position bitmask.
 ///
-/// Monkey's Audio does not encode a channel layout, only a channel count. For mono and stereo
-/// (by far the most common cases) the mapping is unambiguous. For higher channel counts a
-/// best-effort standard layout is assumed; if no such mapping exists the channels are reported as
+/// Monkey's Audio does not encode a channel layout, only a channel count, but the WAV header that
+/// it keeps may hold one (see `wave_channel_mask`). For mono and stereo (by far the most common
+/// cases) the mapping is unambiguous. For higher channel counts a best-effort standard layout is
+/// assumed; if no such mapping exists the channels are reported as
 /// discrete (unpositioned).
 fn channels_from_count(count: u16) -> Channels {
     let pos = match count {
@@ -78,18 +79,73 @@ fn channels_from_count(count: u16) -> Channels {
     Channels::Positioned(pos)
 }
 
+/// The channel mask of the `WAVE_FORMAT_EXTENSIBLE` format chunk of the WAV header that Monkey's
+/// Audio stores in the file, if it is there and fits the number of channels.
+fn wave_channel_mask(wav_header: &[u8], channels: u16) -> Option<Channels> {
+    const WAVE_FORMAT_EXTENSIBLE: u16 = 0xfffe;
+    // The format tag, channels, sample rate, byte rate, block align, bits per sample, the size of
+    // the extension, the valid bits per sample, and then the channel mask.
+    const MASK_OFFSET: usize = 20;
+
+    let le_u32 = |b: &[u8]| u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+
+    if wav_header.len() < 12 || &wav_header[0..4] != b"RIFF" || &wav_header[8..12] != b"WAVE" {
+        return None;
+    }
+
+    let mut chunks = &wav_header[12..];
+    while chunks.len() >= 8 {
+        let size = le_u32(&chunks[4..8]) as usize;
+        let body = &chunks[8..];
+
+        if &chunks[0..4] == b"fmt " {
+            let fmt = &body[..size.min(body.len())];
+            if fmt.len() < MASK_OFFSET + 4
+                || u16::from_le_bytes([fmt[0], fmt[1]]) != WAVE_FORMAT_EXTENSIBLE
+            {
+                return None;
+            }
+            let mask = le_u32(&fmt[MASK_OFFSET..]);
+            if mask.count_ones() != u32::from(channels) {
+                return None;
+            }
+            return Position::from_wave_channel_mask(mask).map(Channels::Positioned);
+        }
+
+        // The chunks are padded to an even size.
+        let next = size.checked_add(size & 1)?;
+        chunks = body.get(next..)?;
+    }
+
+    None
+}
+
 /// Pack the codec state the decoder needs to reconstruct its `FrameDecoder`, but
 /// that isn't otherwise carried by `AudioCodecParameters`.
 ///
-/// Layout (6 bytes, all little-endian): `version(u16)`, `compression_level(u16)`,
-/// `channels(u16)`.
+/// Layout (8 bytes, all little-endian): `version(u16)`, `compression_level(u16)`,
+/// `channels(u16)`, `format_flags(u16)`.
 fn build_extra_data(info: &crate::mac::format::ApeFileInfo) -> Box<[u8]> {
-    let mut buf = [0u8; 6];
+    let mut buf = [0u8; 8];
     buf[0..2].copy_from_slice(&info.descriptor.version.to_le_bytes());
     buf[2..4].copy_from_slice(&info.header.compression_level.to_le_bytes());
     buf[4..6].copy_from_slice(&info.header.channels.to_le_bytes());
+    buf[6..8].copy_from_slice(&info.format_flags.to_le_bytes());
     Box::new(buf)
 }
+
+/// The size of the header of a packet: the number of bytes of the first word of the data that
+/// precede the frame (u32), the bit of the first byte of the frame the frame starts at (u32), and
+/// the packet flags (u32), all little-endian.
+pub(crate) const PACKET_HEADER_BYTES: usize = 12;
+
+/// A packet flag: the data ends before the frame does, because the file is truncated.
+pub(crate) const PACKET_FLAG_TRUNCATED: u32 = 1;
+
+/// The number of bytes of the file that follow the frame that are put in the packet. The decoders
+/// read a few bytes beyond the end of a frame (the SDK reads 4: `CAPEDecompress::
+/// ScheduleFrameDecode`), and those of the oldest versions up to a 32-bit word more.
+const PACKET_READ_AHEAD_BYTES: usize = 16;
 
 /// Monkey's Audio (APE) format reader (demuxer).
 pub struct ApeReader<'s> {
@@ -99,6 +155,9 @@ pub struct ApeReader<'s> {
     metadata: MetadataLog,
     file_info: crate::mac::format::ApeFileInfo,
     current_frame: u32,
+    /// The file ended in the middle of a frame, and the data of it was delivered: the next call
+    /// of `next_packet` reports it.
+    truncated: bool,
 }
 
 impl<'s> ApeReader<'s> {
@@ -114,7 +173,8 @@ impl<'s> ApeReader<'s> {
             return decode_error("ape: invalid sample rate");
         }
 
-        let channels = channels_from_count(header.channels);
+        let channels = wave_channel_mask(&file_info.wav_header_data, header.channels)
+            .unwrap_or_else(|| channels_from_count(header.channels));
 
         let mut params = AudioCodecParameters::new();
         params
@@ -143,14 +203,25 @@ impl<'s> ApeReader<'s> {
             metadata,
             file_info,
             current_frame: 0,
+            truncated: false,
         })
     }
 
-    /// The byte alignment remainder for the given frame relative to the start of the first frame.
-    fn seek_remainder(&self, frame_idx: u32) -> u32 {
+    /// Where the data of the given frame starts, as the number of bytes of the 32-bit word that
+    /// holds its start that precede it, and the bit of the first byte of the frame it starts at.
+    ///
+    /// The bytes of the compressed stream are grouped in words, counted from the start of the
+    /// first frame. The frames of the files up to version 3800 start at any bit; the table of the
+    /// bits of their starts gives the bit, and their starts the word.
+    fn frame_start(&self, frame_idx: u32) -> (u32, u32) {
+        if self.file_info.descriptor.version <= 3800 {
+            let seek_bit = self.file_info.seek_bit_table.get(frame_idx as usize).copied();
+            return (0, u32::from(seek_bit.unwrap_or(0)));
+        }
+
         let seek_byte = self.file_info.seek_byte(frame_idx);
         let seek_byte_0 = self.file_info.seek_byte(0);
-        (seek_byte.saturating_sub(seek_byte_0) % 4) as u32
+        ((seek_byte.saturating_sub(seek_byte_0) % 4) as u32, 0)
     }
 }
 
@@ -201,12 +272,22 @@ impl FormatReader for ApeReader<'_> {
     fn next_packet(&mut self) -> Result<Option<Packet>> {
         let frame_idx = self.current_frame;
 
+        if self.truncated {
+            // Whatever the file held of the last frame was delivered.
+            self.truncated = false;
+            self.current_frame = self.file_info.header.total_frames;
+            return Err(Error::IoError(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "ape: the file ends in the middle of a frame",
+            )));
+        }
+
         if frame_idx >= self.file_info.header.total_frames {
             return Ok(None);
         }
 
         let seek_byte = self.file_info.seek_byte(frame_idx);
-        let seek_remainder = self.seek_remainder(frame_idx);
+        let (seek_remainder, seek_bit) = self.frame_start(frame_idx);
         let frame_bytes = self.file_info.frame_byte_count(frame_idx);
         let frame_blocks = self.file_info.frame_block_count(frame_idx);
 
@@ -214,15 +295,40 @@ impl FormatReader for ApeReader<'_> {
             return decode_error("ape: frame data exceeds maximum size");
         }
 
-        // The decoder needs the byte alignment remainder to correctly interpret the frame data;
-        // prepend it as a 4-byte little-endian header.
-        let read_len = 4 + seek_remainder as usize + frame_bytes as usize;
+        // The decoder needs where the frame starts to correctly interpret the frame data; it is
+        // in the header of the packet.
+        let frame_len = seek_remainder as usize + frame_bytes as usize;
+        let read_len = (frame_len + PACKET_READ_AHEAD_BYTES) as u64;
 
         self.reader.seek(SeekFrom::Start(seek_byte - u64::from(seek_remainder)))?;
 
-        let mut packet_data = vec![0u8; read_len];
+        let mut packet_data = Vec::with_capacity(PACKET_HEADER_BYTES + read_len as usize);
+        packet_data.resize(PACKET_HEADER_BYTES, 0);
+        Read::by_ref(&mut self.reader).take(read_len).read_to_end(&mut packet_data)?;
+
+        // A frame that ends after the end of the file (that has no seek table entry that tells
+        // where the next one starts, or whose entry is beyond the end of the file) is truncated.
+        let data_len = packet_data.len() - PACKET_HEADER_BYTES;
+        let is_last = frame_idx + 1 == self.file_info.header.total_frames;
+        let truncated = data_len < frame_len
+            || (is_last && self.file_info.declared_data_end > self.file_info.file_bytes);
+
+        if truncated {
+            if data_len <= seek_remainder as usize {
+                // Nothing of the frame is there.
+                self.current_frame = self.file_info.header.total_frames;
+                return Err(Error::IoError(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "ape: the file ends before the end of the frames",
+                )));
+            }
+            self.truncated = true;
+        }
+
         packet_data[0..4].copy_from_slice(&seek_remainder.to_le_bytes());
-        self.reader.read_exact(&mut packet_data[4..])?;
+        packet_data[4..8].copy_from_slice(&seek_bit.to_le_bytes());
+        let flags = if truncated { PACKET_FLAG_TRUNCATED } else { 0 };
+        packet_data[8..12].copy_from_slice(&flags.to_le_bytes());
 
         let ts = u64::from(frame_idx) * u64::from(self.file_info.header.blocks_per_frame);
 
@@ -268,6 +374,7 @@ impl FormatReader for ApeReader<'_> {
         let actual_ts = frame_idx as u64 * bpf;
 
         self.current_frame = frame_idx;
+        self.truncated = false;
 
         Ok(SeekedTo { track_id: 0, required_ts: ts, actual_ts: Timestamp::new(actual_ts as i64) })
     }

@@ -274,6 +274,76 @@ impl Predictor3950 {
 }
 
 // ===================================================================
+// Predictor3930 -- version 3930 to 3949
+// ===================================================================
+
+/// Predictor for the versions 3930 to 3949 (`CPredictorDecompress3930to3950` of
+/// `Old/NewPredictorOld.cpp`). Unlike the later versions the channels are not decorrelated by the
+/// predictor, and its first stage has a single filter with four taps.
+#[derive(Clone)]
+pub struct Predictor3930 {
+    nn_filters: Vec<NnFilter16>,
+    ary_m: [i32; 4],
+    /// The last four outputs of the first stage, the most recent first.
+    history: [i32; 4],
+    last_value: i32,
+}
+
+impl Predictor3930 {
+    /// The levels of the versions before 3950 are "fast" to "extra high"; for any other the
+    /// predictor has no filters.
+    pub fn new(compression_level: u32, version: i32) -> Self {
+        Self {
+            nn_filters: create_filters_16(compression_level, version),
+            ary_m: INITIAL_MA,
+            history: [0; 4],
+            last_value: 0,
+        }
+    }
+
+    /// Reset all state. Called at the start of each frame.
+    pub fn flush(&mut self) {
+        for f in &mut self.nn_filters {
+            f.flush();
+        }
+        self.ary_m = INITIAL_MA;
+        self.history = [0; 4];
+        self.last_value = 0;
+    }
+
+    /// Decompress a single sample.
+    #[inline(always)]
+    pub fn decompress_value(&mut self, input: i64) -> i32 {
+        // Stage 2: the neural network filters, the smallest first.
+        let mut input = input as i32;
+        for f in self.nn_filters.iter_mut().rev() {
+            input = f.step(input);
+        }
+
+        // Stage 1: a predictor of the order 2 and offset 1.
+        let [h1, h2, h3, h4] = self.history;
+        let p = [h1, h1.wrapping_sub(h2), h2.wrapping_sub(h3), h3.wrapping_sub(h4)];
+
+        let prediction = (p[0].wrapping_mul(self.ary_m[0]))
+            .wrapping_add(p[1].wrapping_mul(self.ary_m[1]))
+            .wrapping_add(p[2].wrapping_mul(self.ary_m[2]))
+            .wrapping_add(p[3].wrapping_mul(self.ary_m[3]));
+        let out = input.wrapping_add(prediction >> 9);
+
+        let direction = adapt_sign(input);
+        for (m, p) in self.ary_m.iter_mut().zip(p) {
+            *m = m.wrapping_add((((p >> 30) & 2) - 1).wrapping_mul(direction));
+        }
+
+        let result = out.wrapping_add(self.last_value.wrapping_mul(31) >> 5);
+        self.last_value = result;
+        self.history = [out, h1, h2, h3];
+
+        result
+    }
+}
+
+// ===================================================================
 // Predictor3950_32 -- version >= 3950, bitsPerSample >= 32
 // (INTTYPE=i64, DATATYPE=i32)
 // ===================================================================

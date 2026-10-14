@@ -18,6 +18,8 @@ use symphonia_core::errors::{Error, Result, decode_error, unsupported_error};
 use symphonia_core::packet::PacketRef;
 use symphonia_core::support_audio_codec;
 
+use crate::demuxer::{PACKET_FLAG_TRUNCATED, PACKET_HEADER_BYTES};
+use crate::mac::frame::FrameInput;
 use crate::map_ape_error;
 
 /// Fallback packet size cap (in frames) if the demuxer did not provide one.
@@ -76,23 +78,25 @@ impl ApeDecoder {
         let max_frames =
             params.max_frames_per_packet.unwrap_or(DEFAULT_MAX_FRAMES_PER_PACKET) as usize;
 
-        // Extra data layout (6 bytes, little-endian): version(u16), compression_level(u16),
-        // channels(u16). See `demuxer::build_extra_data`.
+        // Extra data layout (8 bytes, little-endian): version(u16), compression_level(u16),
+        // channels(u16), format_flags(u16). See `demuxer::build_extra_data`.
         let extra =
             params.extra_data.as_ref().ok_or(Error::DecodeError("ape: missing extra data"))?;
-        if extra.len() < 6 {
+        if extra.len() < 8 {
             return decode_error("ape: extra data too short");
         }
 
         let version = u16::from_le_bytes([extra[0], extra[1]]);
         let compression_level = u16::from_le_bytes([extra[2], extra[3]]);
         let channels_count = u16::from_le_bytes([extra[4], extra[5]]);
+        let format_flags = u16::from_le_bytes([extra[6], extra[7]]);
 
         let frame_decoder = crate::mac::frame::FrameDecoder::new(
             version,
             channels_count,
             bits_per_sample,
             compression_level,
+            format_flags,
         )
         .map_err(map_ape_error)?;
 
@@ -112,18 +116,27 @@ impl ApeDecoder {
     fn decode_inner(&mut self, packet: &PacketRef<'_>) -> Result<()> {
         let data = packet.data;
 
-        // The demuxer prepends the 4-byte little-endian seek (byte alignment) remainder.
-        if data.len() < 5 {
+        // The demuxer prepends the header of the packet to the compressed data.
+        if data.len() <= PACKET_HEADER_BYTES {
             return decode_error("ape: packet too short");
         }
 
-        let seek_remainder = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-        let frame_data = &data[4..];
+        let header_word = |i: usize| {
+            u32::from_le_bytes([data[4 * i], data[4 * i + 1], data[4 * i + 2], data[4 * i + 3]])
+        };
+        let input = FrameInput {
+            data: &data[PACKET_HEADER_BYTES..],
+            seek_remainder: header_word(0),
+            seek_bit: header_word(1),
+            truncated: header_word(2) & PACKET_FLAG_TRUNCATED != 0,
+        };
         let frame_blocks = packet.dur.get() as usize;
         let ch_count = self.channels as usize;
 
-        self.frame_decoder
-            .decode_frame(frame_data, seek_remainder, frame_blocks, &mut self.pcm)
+        // Less than the blocks of the packet are decoded from a truncated frame.
+        let frame_blocks = self
+            .frame_decoder
+            .decode_frame(&input, frame_blocks, &mut self.pcm)
             .map_err(map_ape_error)?;
         let pcm_bytes = self.pcm.as_slice();
 

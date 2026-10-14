@@ -5,11 +5,16 @@
 use symphonia_core::checksum::Crc32Ieee;
 use symphonia_core::io::Monitor;
 
-/// The APE frame checksum: the standard CRC-32 (IEEE) of the PCM bytes, shifted right by one bit.
-pub fn ape_crc(data: &[u8]) -> u32 {
+/// The standard CRC-32 (IEEE) of `data`.
+pub fn crc32(data: &[u8]) -> u32 {
     let mut crc = Crc32Ieee::new(!0);
     crc.process_buf_bytes(data);
-    !crc.crc() >> 1
+    !crc.crc()
+}
+
+/// The APE frame checksum: the standard CRC-32 (IEEE) of the PCM bytes, shifted right by one bit.
+pub fn ape_crc(data: &[u8]) -> u32 {
+    crc32(data) >> 1
 }
 
 #[cfg(test)]

@@ -32,6 +32,27 @@ impl<'a> ByteReader<'a> {
         u32::from(byte)
     }
 
+    /// Whether the reader has consumed more bytes than the data holds.
+    ///
+    /// The bytes of a last, partial, group of four are not counted as data: their stream order
+    /// puts the missing bytes first, so what is read from them is not what the encoder wrote.
+    #[inline(always)]
+    pub fn is_past_end(&self) -> bool {
+        self.pos > (self.raw.len() & !3)
+    }
+
+    /// Move the position forward by `bytes` without reading.
+    #[inline]
+    pub fn advance(&mut self, bytes: usize) {
+        self.pos = self.pos.wrapping_add(bytes);
+    }
+
+    /// Move the position back by `bytes` (stopping at the start of the stream).
+    #[inline]
+    pub fn rewind(&mut self, bytes: usize) {
+        self.pos = self.pos.saturating_sub(bytes);
+    }
+
     /// Read the next four stream bytes as a big-endian 32-bit value.
     #[inline]
     pub fn next_u32(&mut self) -> u32 {

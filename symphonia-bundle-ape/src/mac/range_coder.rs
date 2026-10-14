@@ -340,3 +340,207 @@ impl RangeCoder {
         Ok((((value >> 1) ^ m) - m) + odd)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Entropy decoder interface
+// ---------------------------------------------------------------------------
+
+/// The range decoders of the supported file versions. Both decode a stream of signed residuals
+/// whose adaptive state is the `EntropyState` of the channel.
+pub trait EntropyDecoder: Sized {
+    /// Start decoding at the position of `br` (`FlushBitArray` of the SDK).
+    fn start(br: &mut ByteReader<'_>, version: i32) -> Self;
+
+    /// Decode a residual.
+    fn decode(&mut self, es: &mut EntropyState, br: &mut ByteReader<'_>) -> ApeResult<i64>;
+}
+
+impl EntropyDecoder for RangeCoder {
+    #[inline(always)]
+    fn start(br: &mut ByteReader<'_>, _version: i32) -> Self {
+        RangeCoder::new(br)
+    }
+
+    #[inline(always)]
+    fn decode(&mut self, es: &mut EntropyState, br: &mut ByteReader<'_>) -> ApeResult<i64> {
+        self.decode_value(es, br)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RangeCoderV1: versions 3.91 to 3.98 (CUnBitArray3891To3989 in Old/UnBitArrayOld.cpp)
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::large_const_arrays)]
+const RANGE_TOTAL_1: [u32; 65] = [
+    0, 14824, 28224, 39348, 47855, 53994, 58171, 60926, 62682, 63786, 64463, 64878, 65126, 65276,
+    65365, 65419, 65450, 65469, 65480, 65487, 65491, 65493, 65494, 65495, 65496, 65497, 65498,
+    65499, 65500, 65501, 65502, 65503, 65504, 65505, 65506, 65507, 65508, 65509, 65510, 65511,
+    65512, 65513, 65514, 65515, 65516, 65517, 65518, 65519, 65520, 65521, 65522, 65523, 65524,
+    65525, 65526, 65527, 65528, 65529, 65530, 65531, 65532, 65533, 65534, 65535, 65536,
+];
+
+const RANGE_WIDTH_1: [u32; 64] = [
+    14824, 13400, 11124, 8507, 6139, 4177, 2755, 1756, 1104, 677, 415, 248, 150, 89, 54, 31, 19,
+    11, 7, 4, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+];
+
+/// RangeOverflowTable (UnBitArrayBase.cpp) of RANGE_TOTAL_1.
+const fn build_overflow_table_1() -> [u8; 65536] {
+    let mut table = [0u8; 65536];
+    let mut overflow: usize = 0;
+    let mut z: usize = 0;
+    while z < 65536 {
+        if z as u32 >= RANGE_TOTAL_1[overflow + 1] {
+            overflow += 1;
+        }
+        table[z] = overflow as u8;
+        z += 1;
+    }
+    table
+}
+
+static OVERFLOW_TABLE_1: [u8; 65536] = build_overflow_table_1();
+
+/// The range decoder of the versions 3.91 to 3.98 (also used for 3.90 by the old core): the
+/// overflow and the remainder are coded as separate range coded values, whose sizes depend on k.
+pub struct RangeCoderV1 {
+    low: u32,
+    range: u32,
+    buffer: u32,
+    /// From version 3910 a remainder of more than 16 bits is decoded in two parts.
+    split_wide_remainders: bool,
+}
+
+impl RangeCoderV1 {
+    /// `FlushBitArray` without the byte alignment: skip the dummy byte and read the seed byte.
+    pub fn new(br: &mut ByteReader<'_>, version: i32) -> Self {
+        br.next_byte();
+        let buffer = br.next_byte();
+        RangeCoderV1 {
+            buffer,
+            low: buffer >> (8 - EXTRA_BITS),
+            range: 1u32 << EXTRA_BITS,
+            split_wide_remainders: version >= 3910,
+        }
+    }
+
+    #[inline(always)]
+    fn shift_in(&mut self, br: &mut ByteReader<'_>) {
+        self.buffer = self.buffer.wrapping_shl(8) | br.next_byte();
+        self.low = self.low.wrapping_shl(8) | ((self.buffer >> 1) & 0xFF);
+        self.range = self.range.wrapping_shl(8);
+    }
+
+    /// RangeDecodeFast: no update of `low`; 0 when the range wrapped to zero (corrupt data).
+    #[inline(always)]
+    fn range_decode_fast(&mut self, br: &mut ByteReader<'_>, shift: u32) -> u32 {
+        while self.range <= BOTTOM_VALUE {
+            self.shift_in(br);
+            if self.range == 0 {
+                return 0;
+            }
+        }
+
+        self.range >>= shift;
+        self.low / self.range
+    }
+
+    /// RangeDecodeFastWithUpdate
+    #[inline(always)]
+    fn range_decode_fast_with_update(
+        &mut self,
+        br: &mut ByteReader<'_>,
+        shift: u32,
+    ) -> ApeResult<u32> {
+        while self.range <= BOTTOM_VALUE {
+            if self.range == 0 {
+                return Err(ApeError::DecodingError(
+                    "range coder: range is zero during normalization",
+                ));
+            }
+            self.shift_in(br);
+        }
+
+        self.range >>= shift;
+
+        if self.range == 0 {
+            return Err(ApeError::DecodingError("range coder: range is zero after shift"));
+        }
+
+        let result = self.low / self.range;
+        self.low %= self.range;
+        Ok(result)
+    }
+
+    /// DecodeValueRange
+    pub fn decode_value(
+        &mut self,
+        es: &mut EntropyState,
+        br: &mut ByteReader<'_>,
+    ) -> ApeResult<i64> {
+        let range_total = self.range_decode_fast(br, RANGE_OVERFLOW_SHIFT);
+        if range_total >= 65536 {
+            return Err(ApeError::DecodingError("range coder: range_total out of bounds"));
+        }
+
+        let mut overflow = u32::from(OVERFLOW_TABLE_1[range_total as usize]) & 63;
+
+        self.low = self.low.wrapping_sub(self.range.wrapping_mul(RANGE_TOTAL_1[overflow as usize]));
+        self.range = self.range.wrapping_mul(RANGE_WIDTH_1[overflow as usize]);
+
+        let temp_k = if overflow == MODEL_ELEMENTS - 1 {
+            overflow = 0;
+            self.range_decode_fast_with_update(br, 5)?
+        }
+        else {
+            es.k.saturating_sub(1)
+        };
+
+        let mut value: i64 = if temp_k <= 16 || !self.split_wide_remainders {
+            i64::from(self.range_decode_fast_with_update(br, temp_k)?)
+        }
+        else {
+            let x1 = self.range_decode_fast_with_update(br, 16)?;
+            let x2 = self.range_decode_fast_with_update(br, temp_k - 16)?;
+            i64::from(x1) | (i64::from(x2) << 16)
+        };
+
+        value += i64::from(overflow) << temp_k;
+
+        es.update(value);
+
+        let odd = value & 1;
+        let m = odd - 1;
+        Ok((((value >> 1) ^ m) - m) + odd)
+    }
+
+    /// `Finalize`: move the stream position behind the bytes of the range coder, for the next
+    /// array of the old core. Only the position of `br` is used afterwards.
+    pub fn finalize(&mut self, br: &mut ByteReader<'_>, version: i32) {
+        while self.range <= BOTTOM_VALUE {
+            br.advance(1);
+            self.range = self.range.wrapping_shl(8);
+            if self.range == 0 {
+                return;
+            }
+        }
+
+        if version <= 3950 {
+            br.rewind(2);
+        }
+    }
+}
+
+impl EntropyDecoder for RangeCoderV1 {
+    #[inline(always)]
+    fn start(br: &mut ByteReader<'_>, version: i32) -> Self {
+        RangeCoderV1::new(br, version)
+    }
+
+    #[inline(always)]
+    fn decode(&mut self, es: &mut EntropyState, br: &mut ByteReader<'_>) -> ApeResult<i64> {
+        self.decode_value(es, br)
+    }
+}

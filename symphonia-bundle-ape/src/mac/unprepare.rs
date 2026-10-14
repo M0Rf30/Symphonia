@@ -142,7 +142,7 @@ pub fn unprepare_multichannel(
     let mut samples = vec![0i32; nc];
 
     match bits_per_sample {
-        16 | 24 | 8 => (),
+        32 | 16 | 24 | 8 => (),
         _ => return Err(ApeError::DecodingError("unsupported bit depth")),
     }
 
@@ -169,6 +169,12 @@ pub fn unprepare_multichannel(
                 // Multichannel 24-bit uses simple encoding (u32 cast, not special negative)
                 for (o, &val) in o.chunks_exact_mut(3).zip(&samples) {
                     write_24bit_simple(val, o);
+                }
+            }
+            32 => {
+                // Multichannel 32-bit: passthrough all channels.
+                for (o, &val) in o.chunks_exact_mut(4).zip(&input) {
+                    o.copy_from_slice(&val.to_le_bytes());
                 }
             }
             _ => {
