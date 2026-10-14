@@ -47,6 +47,7 @@ mp2 = ["dep:symphonia-bundle-mp3", "symphonia-bundle-mp3/mp2"]
 mp3 = ["dep:symphonia-bundle-mp3", "symphonia-bundle-mp3/mp3"]
 mp3pro = ["mp3", "symphonia-bundle-mp3/mp3pro"]
 nellymoser = ["dep:symphonia-codec-nellymoser"]
+imc = ["dep:symphonia-codec-imc"]
 ogg = ["dep:symphonia-format-ogg"]
 opus = ["dep:symphonia-codec-opus"]
 pcm = ["dep:symphonia-codec-pcm"]
@@ -78,6 +79,7 @@ all-codecs = [
     "mp3",
     "musepack",
     "nellymoser",
+    "imc",
     "opus",
     "pcm",
     "speex",
@@ -179,6 +181,10 @@ workspace = true
 optional = true
 
 [dependencies.symphonia-codec-nellymoser]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-imc]
 workspace = true
 optional = true
 

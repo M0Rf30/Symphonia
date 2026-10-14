@@ -11,6 +11,7 @@ use std::io::{Seek, SeekFrom};
 use symphonia_core::audio::AmbisonicBFormat;
 use symphonia_core::audio::{ChannelLabel, Channels, Position};
 use symphonia_core::codecs::audio::AudioCodecId;
+use symphonia_core::codecs::audio::well_known::{CODEC_ID_IAC, CODEC_ID_IMC};
 use symphonia_core::codecs::audio::well_known::{
     CODEC_ID_AC3, CODEC_ID_ADPCM_G722, CODEC_ID_ADPCM_G726, CODEC_ID_ADPCM_IMA_WAV,
     CODEC_ID_ADPCM_MS, CODEC_ID_ADPCM_YAMAHA, CODEC_ID_DCA, CODEC_ID_EAC3, CODEC_ID_MP2,
@@ -519,6 +520,8 @@ impl ParseChunk for WaveFormatChunk {
         const WAVE_FORMAT_G726_ADPCM: u16 = 0x0064;
         const WAVE_FORMAT_G722: u16 = 0x028f;
         const WAVE_FORMAT_YAMAHA_ADPCM: u16 = 0x0020;
+        const WAVE_FORMAT_IMC: u16 = 0x0401;
+        const WAVE_FORMAT_IAC: u16 = 0x0402;
         const WAVE_FORMAT_MPEG: u16 = 0x0050;
         const WAVE_FORMAT_MPEGLAYER3: u16 = 0x0055;
         const WAVE_FORMAT_DOLBY_AC3_SPDIF: u16 = 0x0092;
@@ -596,6 +599,20 @@ impl ParseChunk for WaveFormatChunk {
                     bits_per_sample,
                     channels,
                     codec: CODEC_ID_ADPCM_G726,
+                    extra_data: None,
+                }))
+            }
+            // Intel Music Coder (0x0401, mono) and Indeo Audio Coder (0x0402, mono or stereo).
+            // Blocks of 64 bytes per channel hold 256 samples; the `WAVEFORMATEX` extension is
+            // not needed by the decoder.
+            WAVE_FORMAT_IMC | WAVE_FORMAT_IAC => {
+                Self::skip_fmt_extension(reader, len)?;
+                let channels = map_wave_channel_count(num_channels)?;
+                Ok(FormatData::Adpcm(FormatAdpcm {
+                    block_align,
+                    bits_per_sample,
+                    channels,
+                    codec: if format == WAVE_FORMAT_IMC { CODEC_ID_IMC } else { CODEC_ID_IAC },
                     extra_data: None,
                 }))
             }

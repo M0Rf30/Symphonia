@@ -16,7 +16,7 @@
 
 <p>
     <strong>
-        Symphonia is a pure Rust audio decoding and media demuxing library supporting AAC, AC-3, E-AC-3, ADPCM, AIFF, ALAC, APE, CAF, DSD, DTS, FLAC, FLV, MKV, MP1, MP2, MP3, mp3PRO, MP4, MPEG-PS, MPEG-TS, Musepack, Nellymoser, OGG, Opus, PCM, Speex, TrueHD, MLP, TrueSpeech, Vorbis, WAV, WavPack, and WebM.
+        Symphonia is a pure Rust audio decoding and media demuxing library supporting AAC, AC-3, E-AC-3, ADPCM, AIFF, ALAC, APE, CAF, DSD, DTS, FLAC, FLV, MKV, MP1, MP2, MP3, mp3PRO, MP4, MPEG-PS, MPEG-TS, Musepack, Nellymoser, IMC/IAC, OGG, Opus, PCM, Speex, TrueHD, MLP, TrueSpeech, Vorbis, WAV, WavPack, and WebM.
     </strong>
 </p>
 
@@ -129,6 +129,7 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | mp3PRO                       | Great     | No      | `mp3pro`     | No      | [`symphonia-bundle-mp3`]   |
 | Musepack                     | Excellent | Yes     | `musepack`   | No      | [`symphonia-bundle-musepack`]|
 | Nellymoser                   | Excellent | No      | `nellymoser` | No      | [`symphonia-codec-nellymoser`]|
+| IMC (Intel Music Coder), IAC | Excellent | No      | `imc`        | No      | [`symphonia-codec-imc`]      |
 | Opus                         | Excellent | Yes     | `opus`       | Yes     | [`symphonia-codec-opus`]   |
 | PCM                          | Excellent | Yes     | `pcm`        | Yes     | [`symphonia-codec-pcm`]    |
 | Speex                        | Excellent | Yes     | `speex`      | No      | [`symphonia-codec-speex`]    |
@@ -155,6 +156,7 @@ mp3PRO streams decode as plain MP3 by default. The `mp3pro` feature adds `Mp3Pro
 [`symphonia-codec-dca`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-dca
 [`symphonia-codec-dsd`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-dsd
 [`symphonia-codec-nellymoser`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-nellymoser
+[`symphonia-codec-imc`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-imc
 [`symphonia-codec-speex`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-speex
 [`symphonia-codec-truehd`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-truehd
 [`symphonia-codec-truespeech`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-truespeech

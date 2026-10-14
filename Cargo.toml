@@ -12,6 +12,7 @@ members = [
     "symphonia-codec-alac",
     "symphonia-codec-speex",
     "symphonia-codec-nellymoser",
+    "symphonia-codec-imc",
     "symphonia-codec-truespeech",
     "symphonia-codec-truehd",
     "symphonia-codec-dca",
@@ -62,6 +63,7 @@ symphonia-codec-ac3 = { version = "0.6.1", path = "symphonia-codec-ac3", default
 symphonia-codec-dca = { version = "0.6.1", path = "symphonia-codec-dca", default-features = false }
 symphonia-codec-truehd = { version = "0.6.1", path = "symphonia-codec-truehd", default-features = false }
 symphonia-codec-nellymoser = { version = "0.6.1", path = "symphonia-codec-nellymoser", default-features = false }
+symphonia-codec-imc = { version = "0.6.1", path = "symphonia-codec-imc", default-features = false }
 symphonia-codec-truespeech = { version = "0.6.1", path = "symphonia-codec-truespeech", default-features = false }
 symphonia-codec-speex = { version = "0.6.1", path = "symphonia-codec-speex", default-features = false }
 symphonia-codec-alac = { version = "0.6.1", path = "symphonia-codec-alac", default-features = false }

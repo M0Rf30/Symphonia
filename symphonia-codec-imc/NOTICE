@@ -1,0 +1,15 @@
+This crate (`symphonia-codec-imc`) is a pure-Rust IMC (Intel Music Coder) and IAC (Indeo Audio
+Coder) decoder. It is licensed under the Mozilla Public License, v. 2.0, like the rest of Project
+Symphonia.
+
+IMC has no public specification. The bitstream parsing, scale factor and bit allocation
+arithmetic, the Huffman, quantizer, band and masking tables (`src/tables.rs`, extracted
+programmatically from `libavcodec/imcdata.h`), the IAC table derivation and the overlap-add
+windowing follow FFmpeg's `libavcodec/imc.c` and `libavcodec/imcdata.h`, which are distributed under
+the GNU Lesser General Public License, version 2.1 or later.
+
+Copyright (c) 2002-2004 Maxim Poliakovski
+Copyright (c) 2006 Benjamin Larsson
+Copyright (c) 2006 Konstantin Shishkov
+
+The LGPL-2.1+ terms apply to those derived portions.

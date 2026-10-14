@@ -190,6 +190,9 @@ impl AcmFormat {
             (Self::WAVE_FORMAT_MULAW, 8) => CODEC_ID_PCM_MULAW,
             // Self-framing codecs (WAVE_FORMAT_MPEG, _MPEGLAYER3, Dolby AC-3 SPDIF, DTS).
             (0x0022, _) => CODEC_ID_TRUESPEECH,
+            // Intel Music Coder and Indeo Audio Coder.
+            (0x0401, _) => CODEC_ID_IMC,
+            (0x0402, _) => CODEC_ID_IAC,
             (0x0050, _) => CODEC_ID_MP2,
             (0x0055, _) => CODEC_ID_MP3,
             (0x2000, _) => CODEC_ID_AC3,
@@ -604,6 +607,18 @@ mod tests {
             panic!("truespeech")
         };
         assert_eq!(codec, CODEC_ID_TRUESPEECH);
+
+        // Intel Music Coder and Indeo Audio Coder.
+        let Some((codec, _)) = parse(&wave_format(0x401, 64, 0, &[]))
+        else {
+            panic!("imc")
+        };
+        assert_eq!(codec, CODEC_ID_IMC);
+        let Some((codec, _)) = parse(&wave_format(0x402, 128, 0, &[0; 2]))
+        else {
+            panic!("iac")
+        };
+        assert_eq!(codec, CODEC_ID_IAC);
 
         // ADPCM is not mapped, and a truncated EXTENSIBLE is rejected.
         assert!(parse(&wave_format(2, 1024, 4, &[0; 32])).is_none());

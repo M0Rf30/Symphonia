@@ -17,6 +17,7 @@ use symphonia_core::codecs::audio::well_known::{
     CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_MS, CODEC_ID_ADPCM_YAMAHA, CODEC_ID_PCM_F32BE,
     CODEC_ID_PCM_F32LE, CODEC_ID_PCM_F64BE, CODEC_ID_PCM_F64LE, CODEC_ID_TRUESPEECH,
 };
+use symphonia_core::codecs::audio::well_known::{CODEC_ID_IAC, CODEC_ID_IMC};
 use symphonia_core::codecs::audio::{AudioCodecId, AudioCodecParameters};
 use symphonia_core::errors::{Error, Result, decode_error, unsupported_error};
 use symphonia_core::formats::prelude::*;
@@ -333,6 +334,20 @@ impl FormatAdpcm {
                     return decode_error("riff (truespeech): invalid block align");
                 }
                 PacketInfo::with_blocks(self.block_align, u64::from(self.block_align / 32) * 240)
+            }
+            CODEC_ID_IMC | CODEC_ID_IAC => {
+                // Every channel is an independent 64-byte block of 256 frames; IMC is mono, IAC
+                // is mono or stereo. A packet holds one or more whole frames.
+                let max_channels = if self.codec == CODEC_ID_IMC { 1 } else { 2 };
+                if num_channels > max_channels {
+                    return unsupported_error("riff (imc): unsupported number of channels");
+                }
+                let frame_bytes = 64 * num_channels;
+                if self.block_align == 0 || self.block_align % frame_bytes != 0 {
+                    return decode_error("riff (imc): invalid block align");
+                }
+                let frames = u64::from(self.block_align / frame_bytes) * 256;
+                PacketInfo::with_blocks(self.block_align, frames)
             }
             _ => unimplemented!("incomplete new adpcm codec"),
         }

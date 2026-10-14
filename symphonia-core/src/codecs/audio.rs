@@ -500,6 +500,10 @@ pub mod well_known {
     pub const CODEC_ID_SMACKER_AUDIO: AudioCodecId = AudioCodecId(0x1020);
     /// Nellymoser Asao
     pub const CODEC_ID_NELLYMOSER: AudioCodecId = AudioCodecId(0x1021);
+    /// Intel Music Coder (IMC)
+    pub const CODEC_ID_IMC: AudioCodecId = AudioCodecId(0x110c);
+    /// Indeo Audio Coder (IAC), the stereo-capable variant of IMC
+    pub const CODEC_ID_IAC: AudioCodecId = AudioCodecId(0x110e);
 
     // Compressed lossless audio codecs
     //---------------------------------
