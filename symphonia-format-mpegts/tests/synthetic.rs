@@ -356,6 +356,113 @@ fn scrambled_and_error_packets_are_skipped() {
 }
 
 #[test]
+fn duplicate_packets_are_dropped_and_lost_packets_discard_the_pes() {
+    let frames = mpa_frames(20);
+    let mut mux = TsMux::new(188);
+    mux.psi(0x1000, &[StreamSpec { stream_type: 0x03, pid: 0x101, descriptors: vec![] }]);
+    mux_frames(&mut mux, 0x101, &frames, 1, 1152, 48_000, 0);
+
+    // The packets of the audio PID, after the PAT and PMT. Each PES packet is 3 packets.
+    let pkts: Vec<&[u8]> = mux.out.chunks(188).collect();
+    let audio: Vec<&[u8]> = pkts
+        .iter()
+        .copied()
+        .filter(|p| (u16::from(p[1] & 0x1f) << 8 | u16::from(p[2])) == 0x101)
+        .collect();
+    assert_eq!(audio.len(), 60);
+
+    let mut out: Vec<u8> = pkts[..2].concat();
+
+    for (i, p) in audio.iter().enumerate() {
+        // Lose the middle packet of PES 7.
+        if i == 7 * 3 + 1 {
+            continue;
+        }
+
+        out.extend_from_slice(p);
+
+        // Send the middle packet of PES 12, and the last packet of PES 3, twice.
+        if i == 12 * 3 + 1 || i == 3 * 3 + 2 {
+            out.extend_from_slice(p);
+        }
+    }
+
+    let mut reader = open(out);
+    let packets = read_all(&mut reader);
+
+    let got: Vec<u8> = packets.iter().map(|p| p.data[4]).collect();
+    let want: Vec<u8> = (0..20).filter(|&i| i != 7).collect();
+    assert_eq!(got, want);
+    assert!(packets.iter().all(|p| p.data.len() == 384));
+}
+
+#[test]
+fn programs_sharing_a_pmt_pid() {
+    let frames = mpa_frames(10);
+    let mut mux = TsMux::new(188);
+
+    // Two programs with their PMTs, in the same packet, on one PID.
+    let pat = build_section(0, 1, &[0x00, 0x01, 0xf0, 0x00, 0x00, 0x02, 0xf0, 0x00]);
+    mux.section(0, &pat);
+
+    let pmt = |program: u16, pid: u16| {
+        let body = [
+            0xe0 | (pid >> 8) as u8,
+            pid as u8,
+            0xf0,
+            0x00,
+            0x03,
+            0xe0 | (pid >> 8) as u8,
+            pid as u8,
+            0xf0,
+            0x00,
+        ];
+        build_section(2, program, &body)
+    };
+
+    let mut payload = vec![0u8];
+    payload.extend_from_slice(&pmt(1, 0x101));
+    payload.extend_from_slice(&pmt(2, 0x102));
+    mux.packet(0x1000, true, &payload);
+
+    mux_frames(&mut mux, 0x101, &frames, 2, 1152, 48_000, 0);
+    mux_frames(&mut mux, 0x102, &frames, 2, 1152, 48_000, 0);
+
+    let reader = open(mux.out);
+    let ids: Vec<u32> = reader.tracks().iter().map(|t| t.id).collect();
+    assert_eq!(ids, vec![0x101, 0x102]);
+}
+
+#[test]
+fn private_data_without_descriptors_is_identified_from_the_data() {
+    let mpa = mpa_frames(40);
+    let adts = adts_frames(40, 100);
+    let mut mux = TsMux::new(192);
+    mux.psi(
+        0x1000,
+        &[
+            StreamSpec { stream_type: 0x06, pid: 0x101, descriptors: vec![] },
+            StreamSpec { stream_type: 0x06, pid: 0x102, descriptors: vec![] },
+            // Not identified: the stream has a descriptor (teletext).
+            StreamSpec { stream_type: 0x06, pid: 0x103, descriptors: vec![0x56, 0x00] },
+        ],
+    );
+    mux_frames(&mut mux, 0x101, &mpa, 4, 1152, 48_000, 0);
+    mux_frames(&mut mux, 0x102, &adts, 4, 1024, 48_000, 0);
+
+    let mut reader = open(mux.out);
+    assert_eq!(reader.tracks().len(), 2);
+
+    let codecs: Vec<_> = (0..2).map(|i| audio_params(&reader, i).codec).collect();
+    assert_eq!(codecs[0], symphonia_core::codecs::audio::well_known::CODEC_ID_MP2);
+    assert_eq!(codecs[1], symphonia_core::codecs::audio::well_known::CODEC_ID_AAC);
+
+    let packets = read_all(&mut reader);
+    assert_eq!(packets.iter().filter(|p| p.track_id == 0x101).count(), 40);
+    assert_eq!(packets.iter().filter(|p| p.track_id == 0x102).count(), 40);
+}
+
+#[test]
 fn non_seekable_streams_can_only_seek_forward() {
     let frames = mpa_frames(200);
     let mut mux = TsMux::new(188);

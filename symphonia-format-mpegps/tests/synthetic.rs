@@ -36,6 +36,10 @@ fn mpa_frames(n: usize) -> Vec<Vec<u8>> {
         .collect()
 }
 
+fn mux_mpa_group(mux: &mut PsMux, group: &[Vec<u8>], n: usize) {
+    mux.pes(0xc0, Some(pts_of(n * 2, 1152, 48_000, 0)), &group.concat());
+}
+
 fn pts_of(frame: usize, samples: u64, rate: u64, base: u64) -> u64 {
     (base + frame as u64 * samples * 90_000 / rate) % symphonia_common::mpeg::pes::PTS_MODULUS
 }
@@ -369,6 +373,32 @@ fn probe_selects_the_program_stream_reader() {
             assert_eq!(reader.format_info().short_name, "mpegps");
             assert_eq!(read_all(&mut *reader).len(), 40, "mpeg1={mpeg1} prefix={prefix}");
         }
+    }
+}
+
+#[test]
+fn zero_padded_sectors_are_accepted() {
+    // The sectors of a Video CD are padded with zero bytes.
+    for mpeg1 in [false, true] {
+        let frames = mpa_frames(40);
+        let mut mux = PsMux::new(mpeg1);
+
+        for (n, group) in frames.chunks(2).enumerate() {
+            mux.pack(n as u64 * 4000);
+            mux_mpa_group(&mut mux, group, n);
+            mux.out.extend(std::iter::repeat_n(0u8, 700));
+        }
+
+        let mut probe = Probe::new();
+        probe.register_format::<MpegPsReader<'_>>();
+
+        let mss = MediaSourceStream::new(Box::new(Cursor::new(mux.out)), Default::default());
+        let mut reader = probe
+            .probe(&Hint::new(), mss, FormatOptions::default(), MetadataOptions::default())
+            .unwrap();
+
+        assert_eq!(reader.format_info().short_name, "mpegps");
+        assert_eq!(read_all(&mut *reader).len(), 40, "mpeg1={mpeg1}");
     }
 }
 

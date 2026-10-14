@@ -109,7 +109,19 @@ fn examine(buf: &[u8], eof: bool) -> Option<(usize, bool)> {
         }
 
         if rest[..3] != [0x00, 0x00, 0x01] {
-            return None;
+            // Packets may be followed by zero bytes that pad the sector (Video CD).
+            let zeros = rest.iter().take_while(|&&b| b == 0).count();
+
+            if zeros == rest.len() {
+                break;
+            }
+
+            if zeros < 3 || rest[zeros] != 1 {
+                return None;
+            }
+
+            pos += zeros - 2;
+            continue;
         }
 
         match rest[3] {

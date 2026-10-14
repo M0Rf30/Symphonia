@@ -32,9 +32,9 @@ pub struct SectionAssembler {
 }
 
 impl SectionAssembler {
-    /// Add the payload of a transport stream packet. Returns the complete section, if the packet
-    /// completed one (only the first section in a payload is returned; PSI tables of interest are
-    /// each sent in their own packets).
+    /// Add the payload of a transport stream packet. Returns the first complete section, if the
+    /// packet completed one. Any further sections are returned by
+    /// [`take_section`](Self::take_section).
     pub fn push(&mut self, pusi: bool, payload: &[u8]) -> Option<Vec<u8>> {
         if pusi {
             let pointer = usize::from(*payload.first()?);
@@ -53,7 +53,13 @@ impl SectionAssembler {
             return None;
         }
 
-        if self.buf.len() < 3 {
+        self.take_section()
+    }
+
+    /// Take the next complete section from the data buffered. Call after [`push`](Self::push)
+    /// returns a section, until it returns `None`, since a packet may contain several sections.
+    pub fn take_section(&mut self) -> Option<Vec<u8>> {
+        if !self.active || self.buf.len() < 3 {
             return None;
         }
 
@@ -70,10 +76,13 @@ impl SectionAssembler {
             return None;
         }
 
-        self.active = false;
-        self.buf.truncate(len);
+        // Any data after the section is the start of the next.
+        let rest = self.buf.split_off(len);
+        let section = std::mem::replace(&mut self.buf, rest);
 
-        Some(std::mem::take(&mut self.buf))
+        self.active = !self.buf.is_empty();
+
+        Some(section)
     }
 }
 
@@ -132,6 +141,8 @@ pub struct PmtStream {
     pub stream_type: u8,
     pub pid: u16,
     pub descriptors: StreamDescriptors,
+    /// The length of the descriptors of the stream, in bytes.
+    pub descriptor_len: usize,
 }
 
 /// A program map table.
@@ -203,7 +214,12 @@ pub fn parse_pmt(section: &[u8]) -> Option<Pmt> {
         let es_info_len = usize::from(section[i + 3] & 0xf) << 8 | usize::from(section[i + 4]);
 
         let descriptors = section.get(i + 5..(i + 5 + es_info_len).min(end))?;
-        streams.push(PmtStream { stream_type, pid, descriptors: parse_descriptors(descriptors) });
+        streams.push(PmtStream {
+            stream_type,
+            pid,
+            descriptors: parse_descriptors(descriptors),
+            descriptor_len: descriptors.len(),
+        });
 
         i += 5 + es_info_len;
     }
@@ -267,5 +283,30 @@ mod tests {
         assert!(asm.push(true, &first).is_none());
         assert!(asm.push(false, &sec[100..250]).is_none());
         assert_eq!(asm.push(false, &sec[250..]).as_deref(), Some(&sec[..]));
+        assert!(asm.take_section().is_none());
+    }
+
+    #[test]
+    fn verify_several_sections_in_a_packet() {
+        let a = build_section(2, 1, &[1, 2, 3]);
+        let b = build_section(2, 2, &[4, 5, 6, 7]);
+        let mut payload = vec![0u8];
+        payload.extend_from_slice(&a);
+        payload.extend_from_slice(&b);
+        payload.resize(184, 0xff);
+
+        let mut asm = SectionAssembler::default();
+        assert_eq!(asm.push(true, &payload).as_deref(), Some(&a[..]));
+        assert_eq!(asm.take_section().as_deref(), Some(&b[..]));
+        assert!(asm.take_section().is_none());
+
+        // A section that begins in this packet and continues in the next.
+        let mut payload = vec![0u8];
+        payload.extend_from_slice(&a);
+        payload.extend_from_slice(&b[..5]);
+        let mut asm = SectionAssembler::default();
+        assert_eq!(asm.push(true, &payload).as_deref(), Some(&a[..]));
+        assert!(asm.take_section().is_none());
+        assert_eq!(asm.push(false, &b[5..]).as_deref(), Some(&b[..]));
     }
 }

@@ -30,9 +30,10 @@ impl LpcmFormat {
     fn parse(header: &[u8]) -> Option<LpcmFormat> {
         let b = header.get(5)?;
 
-        // The quantisation word length: 16, 20, or 24 bits. 20-bit samples are not supported.
+        // The quantisation word length: 16, 20, or 24 bits.
         let bits = match b >> 6 {
             0 => 16,
+            1 => 20,
             2 => 24,
             _ => return None,
         };
@@ -47,10 +48,11 @@ impl LpcmFormat {
     }
 
     /// The number of bytes of the coded samples of all channels of one sample group (the
-    /// smallest unit of samples): one sample for 16-bit, and two for 24-bit.
+    /// smallest unit of samples): one sample for 16-bit, and two for 20-bit and 24-bit.
     fn group_len(&self) -> usize {
         match self.bits {
             16 => 2 * usize::from(self.channels),
+            20 => 5 * usize::from(self.channels),
             _ => 6 * usize::from(self.channels),
         }
     }
@@ -75,9 +77,11 @@ impl LpcmFormat {
 /// byte positions. The first access unit pointer of the first packet gives the position of the first
 /// complete sample group.
 ///
-/// 16-bit samples are big-endian, and are output unchanged. The 24-bit samples are stored in
-/// groups of two samples as the 16 most-significant bits of each sample followed by the least-
-/// significant 8 bits of each sample, and are re-ordered into big-endian 24-bit samples.
+/// 16-bit samples are big-endian, and are output unchanged. The 20-bit and 24-bit samples are
+/// stored in groups of two sample periods (of all channels) as the 16 most-significant bits of
+/// each sample followed by the remaining bits (8 per sample for 24-bit, 4 per sample for 20-bit,
+/// two samples to a byte), and are re-ordered into big-endian 24-bit samples. 20-bit samples are
+/// left-justified.
 #[derive(Default)]
 pub struct LpcmEs {
     pending: VecDeque<EsFrame>,
@@ -168,7 +172,7 @@ impl EsParser for LpcmEs {
             pcm.into()
         }
         else {
-            // The 24-bit samples.
+            // The 20-bit and 24-bit samples, as 24-bit samples.
             let mut out = Vec::with_capacity(groups * 2 * ch * 3);
 
             for group in pcm.chunks_exact(format.group_len()) {
@@ -176,7 +180,16 @@ impl EsParser for LpcmEs {
 
                 for i in 0..2 * ch {
                     out.extend_from_slice(&msb[2 * i..2 * i + 2]);
-                    out.push(lsb[i]);
+
+                    out.push(if format.bits == 24 {
+                        lsb[i]
+                    }
+                    else {
+                        // The 4 least-significant bits of two samples are packed in each byte, the
+                        // first sample in the high nibble. The 20-bit sample is left-justified.
+                        let byte = lsb[i / 2];
+                        if i % 2 == 0 { byte & 0xf0 } else { byte << 4 }
+                    });
                 }
             }
 
@@ -262,9 +275,26 @@ mod tests {
     }
 
     #[test]
-    fn verify_unsupported_formats_are_ignored() {
+    fn verify_20_bit_reordering() {
+        // Stereo: the 16-bit words of s0c0 s0c1 s1c0 s1c1, then the packed low nibbles.
         let mut es = LpcmEs::new();
         let mut data = header(1, 0, 2);
+        data.extend_from_slice(&[0x11, 0x12, 0x21, 0x22, 0x31, 0x32, 0x41, 0x42, 0xa1, 0xb2]);
+        es.push(&data);
+
+        let f = es.next_frame(false).unwrap();
+        assert_eq!(f.dur, 2);
+        assert_eq!(
+            &f.data[..],
+            &[0x11, 0x12, 0xa0, 0x21, 0x22, 0x10, 0x31, 0x32, 0xb0, 0x41, 0x42, 0x20]
+        );
+        assert_eq!(es.info().unwrap().params.codec, CODEC_ID_PCM_S24BE);
+    }
+
+    #[test]
+    fn verify_unsupported_formats_are_ignored() {
+        let mut es = LpcmEs::new();
+        let mut data = header(3, 0, 2);
         data.extend_from_slice(&[0u8; 100]);
         es.push(&data);
         assert!(es.next_frame(false).is_none());

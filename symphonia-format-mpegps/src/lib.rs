@@ -25,10 +25,11 @@
 //! | Stream ID         | Codec                                        |
 //! |-------------------|----------------------------------------------|
 //! | `0xc0` - `0xdf`   | MPEG-1/2 audio, layers 1, 2, 3               |
-//! | `0xbd` / `0xa0`..`0xa7` | DVD-Video LPCM (16 and 24-bit, 48 and 96 kHz) |
+//! | `0xbd` / `0xa0`..`0xa7` | DVD-Video LPCM (16, 20 and 24-bit, 48 and 96 kHz) |
 //!
-//! AC-3, DTS, and other audio carried in private stream 1 is ignored, as are 20-bit LPCM
-//! streams. Both the MPEG-2 and the MPEG-1 forms of the pack and PES headers are supported.
+//! AC-3, DTS, and other audio carried in private stream 1 is ignored. Both the MPEG-2 and the
+//! MPEG-1 forms of the pack and PES headers are supported, as is the zero padding that follows the
+//! packets in the sectors of a Video CD.
 //!
 //! # Timeline
 //!

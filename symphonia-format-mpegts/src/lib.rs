@@ -28,10 +28,13 @@
 //! | `0x03/0x04` | MPEG-1/2 audio, layers 1, 2, 3   |                                    |
 //! | `0x0f`      | AAC in ADTS                      |                                    |
 //! | `0x11`      | AAC in LATM (with LOAS framing)  | Single program and layer           |
+//! | `0x80`      | Blu-ray LPCM, 16 and 24-bit      | 48, 96, 192 kHz; up to 7.1        |
 //! | `0x06`      | Opus                             | Registration or extension descriptor |
+//! | `0x06`      | AAC (ADTS, LATM), MPEG audio     | Only without descriptors; identified from the data |
 //!
 //! The 188 byte packet, the 192 byte BDAV (M2TS), and the 204 byte (Reed-Solomon) packet formats
-//! are supported. Scrambled packets are skipped.
+//! are supported. Scrambled packets are skipped. Duplicate packets are dropped, and a PES packet
+//! that lost transport stream packets (a break in the continuity counter) is discarded.
 //!
 //! # Timeline
 //!
@@ -55,7 +58,9 @@
 //! The duration is found from the PTS of the last PES packets of the streams, if the stream is
 //! seekable and its length is known.
 
+mod bdlpcm;
 mod demuxer;
 pub mod psi;
+mod sniff;
 
 pub use demuxer::MpegTsReader;

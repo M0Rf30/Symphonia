@@ -27,7 +27,9 @@ use symphonia_core::support_format;
 
 use log::{debug, info, warn};
 
-use crate::psi::{PAT_PID, Pmt, PmtStream, SectionAssembler, parse_pat, parse_pmt};
+use crate::bdlpcm::BdLpcmEs;
+use crate::psi::{PAT_PID, PatEntry, Pmt, PmtStream, SectionAssembler, parse_pat, parse_pmt};
+use crate::sniff::SniffEs;
 
 const TS_SYNC: u8 = 0x47;
 
@@ -97,6 +99,10 @@ struct TsPacket {
     pid: u16,
     /// Payload unit start indicator.
     pusi: bool,
+    /// The continuity counter.
+    cc: u8,
+    /// The discontinuity indicator of the adaptation field.
+    discontinuity: bool,
     /// The range of the payload in the packet buffer.
     payload: std::ops::Range<usize>,
 }
@@ -185,7 +191,17 @@ fn read_packet(
             continue;
         }
 
-        return Ok(Some(TsPacket { pos, pid, pusi, payload: start..TS_PACKET_LEN }));
+        // The discontinuity indicator is bit 7 of the adaptation field flags.
+        let discontinuity = afc & 2 != 0 && buf[4] > 0 && buf[5] & 0x80 != 0;
+
+        return Ok(Some(TsPacket {
+            pos,
+            pid,
+            pusi,
+            cc: buf[3] & 0x0f,
+            discontinuity,
+            payload: start..TS_PACKET_LEN,
+        }));
     }
 }
 
@@ -194,9 +210,33 @@ fn read_packet(
 struct PesAssembler {
     buf: Vec<u8>,
     active: bool,
+    /// The continuity counter of the last packet accepted.
+    cc: Option<u8>,
 }
 
 impl PesAssembler {
+    /// Add the payload of a transport stream packet, checking the continuity counter (ISO/IEC
+    /// 13818-1 §2.4.3.3). A duplicate packet is dropped. If packets were lost, the PES packet
+    /// being assembled is damaged and is discarded, and assembly resumes at the next PES packet.
+    /// Completed PES packets are appended to `out`.
+    fn push_packet(&mut self, pkt: &TsPacket, payload: &[u8], out: &mut Vec<Vec<u8>>) {
+        if !pkt.discontinuity {
+            if self.cc == Some(pkt.cc) {
+                // A duplicate: the packet was sent twice.
+                return;
+            }
+
+            if self.cc.is_some_and(|cc| (cc + 1) & 0x0f != pkt.cc) {
+                debug!("mpegts: continuity error at {}", pkt.pos);
+                self.buf.clear();
+                self.active = false;
+            }
+        }
+
+        self.cc = Some(pkt.cc);
+        self.push(pkt.pusi, payload, out);
+    }
+
     /// Add the payload of a packet. Completed PES packets are appended to `out`.
     fn push(&mut self, pusi: bool, payload: &[u8], out: &mut Vec<Vec<u8>>) {
         if pusi {
@@ -242,6 +282,7 @@ impl PesAssembler {
     fn reset(&mut self) {
         self.buf.clear();
         self.active = false;
+        self.cc = None;
     }
 }
 
@@ -295,6 +336,15 @@ fn make_parser(stream: &PmtStream) -> Option<Box<dyn EsParser>> {
 
             OpusEs::new(channels).map(|es| Box::new(es) as Box<dyn EsParser>)
         }
+        // Blu-ray LPCM.
+        0x80 => Some(Box::new(BdLpcmEs::new())),
+        // PES private data without any descriptors does not identify its codec: the stream is
+        // identified from the data.
+        0x06 if stream.descriptor_len == 0 => Some(Box::new(SniffEs::new(vec![
+            Box::new(AdtsEs::with_detector(detect_implicit_sbr)),
+            Box::new(LatmEs::with_detector(detect_implicit_sbr)),
+            Box::new(MpaEs::new()),
+        ]))),
         _ => None,
     }
 }
@@ -440,7 +490,12 @@ impl<'s> MpegTsReader<'s> {
         let start = mss.pos();
 
         let mut pat_asm = SectionAssembler::default();
-        let mut programs: Option<Vec<(u16, SectionAssembler, Option<Pmt>)>> = None;
+        // The entries of each section of the PAT, by section number, and the last section number.
+        let mut pat_sections: Vec<Option<Vec<PatEntry>>> = vec![];
+        // The PMT PIDs, with the assembler of each, and the programs (PAT entries) with the PMT of
+        // each. Several programs may share a PMT PID.
+        let mut pmt_asms: Vec<(u16, SectionAssembler)> = vec![];
+        let mut programs: Option<Vec<(PatEntry, Option<Pmt>)>> = None;
 
         while mss.pos() - start < MAX_PSI_SCAN_LEN {
             let Some(pkt) = read_packet(mss, packet_size, buf)?
@@ -451,29 +506,64 @@ impl<'s> MpegTsReader<'s> {
             let payload = &buf[pkt.payload.clone()];
 
             if pkt.pid == PAT_PID && programs.is_none() {
-                if let Some(entries) = pat_asm.push(pkt.pusi, payload).and_then(|s| parse_pat(&s)) {
-                    programs = Some(
-                        entries
-                            .iter()
-                            .map(|e| (e.pmt_pid, SectionAssembler::default(), None))
-                            .collect(),
-                    );
+                let mut section = pat_asm.push(pkt.pusi, payload);
+
+                while let Some(sec) = section {
+                    if let Some(entries) = parse_pat(&sec) {
+                        // The section number and last section number.
+                        let (num, last) = (usize::from(sec[6]), usize::from(sec[7]));
+
+                        if pat_sections.len() != last + 1 {
+                            pat_sections = vec![None; last + 1];
+                        }
+
+                        if let Some(slot) = pat_sections.get_mut(num) {
+                            *slot = Some(entries);
+                        }
+                    }
+
+                    section = pat_asm.take_section();
+                }
+
+                if !pat_sections.is_empty() && pat_sections.iter().all(|s| s.is_some()) {
+                    let entries: Vec<PatEntry> =
+                        pat_sections.drain(..).flatten().flatten().collect();
+
+                    for e in &entries {
+                        if !pmt_asms.iter().any(|a| a.0 == e.pmt_pid) {
+                            pmt_asms.push((e.pmt_pid, SectionAssembler::default()));
+                        }
+                    }
+
+                    programs = Some(entries.into_iter().map(|e| (e, None)).collect());
                 }
             }
             else if let Some(programs) = programs.as_mut() {
-                if let Some(prog) = programs.iter_mut().find(|p| p.0 == pkt.pid) {
-                    if prog.2.is_none() {
-                        prog.2 = prog.1.push(pkt.pusi, payload).and_then(|s| parse_pmt(&s));
+                if let Some(asm) = pmt_asms.iter_mut().find(|a| a.0 == pkt.pid) {
+                    let mut section = asm.1.push(pkt.pusi, payload);
+
+                    while let Some(sec) = section {
+                        if let Some(pmt) = parse_pmt(&sec) {
+                            if let Some(prog) = programs.iter_mut().find(|p| {
+                                p.1.is_none()
+                                    && p.0.pmt_pid == pkt.pid
+                                    && p.0.program_number == pmt.program_number
+                            }) {
+                                prog.1 = Some(pmt);
+                            }
+                        }
+
+                        section = asm.1.take_section();
                     }
                 }
 
-                if programs.iter().all(|p| p.2.is_some()) {
+                if programs.iter().all(|p| p.1.is_some()) {
                     break;
                 }
             }
         }
 
-        let pmts: Vec<Pmt> = programs.into_iter().flatten().filter_map(|p| p.2).collect();
+        let pmts: Vec<Pmt> = programs.into_iter().flatten().filter_map(|p| p.1).collect();
 
         if pmts.is_empty() {
             return unsupported_error("mpegts: no program map table found");
@@ -504,7 +594,7 @@ impl<'s> MpegTsReader<'s> {
             };
 
             completed.clear();
-            stream.asm.push(pkt.pusi, &buf[pkt.payload.clone()], &mut completed);
+            stream.asm.push_packet(&pkt, &buf[pkt.payload.clone()], &mut completed);
 
             for pes in completed.drain(..) {
                 stream.handle_pes(&pes);
@@ -611,7 +701,7 @@ impl<'s> MpegTsReader<'s> {
             while let Some(pkt) = read_packet(&mut self.reader, self.packet_size, &mut buf)? {
                 if let Some(i) = self.streams.iter().position(|s| s.pid == pkt.pid) {
                     completed.clear();
-                    asms[i].push(pkt.pusi, &buf[pkt.payload.clone()], &mut completed);
+                    asms[i].push_packet(&pkt, &buf[pkt.payload.clone()], &mut completed);
 
                     for pes in completed.drain(..) {
                         record(&pes, &mut last[i]);
@@ -688,7 +778,7 @@ impl<'s> MpegTsReader<'s> {
 
         if let Some(stream) = self.streams.iter_mut().find(|s| s.pid == pkt.pid) {
             let mut completed = vec![];
-            stream.asm.push(pkt.pusi, &buf[pkt.payload.clone()], &mut completed);
+            stream.asm.push_packet(&pkt, &buf[pkt.payload.clone()], &mut completed);
 
             for pes in completed {
                 stream.handle_pes(&pes);
@@ -742,9 +832,8 @@ impl Scoreable for MpegTsReader<'_> {
 }
 
 /// The probe markers: the sync byte, followed by the first byte of the PID: the payload unit
-/// start indicator (as set for the first packet of a table or PES packet) and the upper bits of
-/// PID (the PAT, SDT, PMT, and audio PIDs commonly in the range `0x0000..=0x1fff`), or without
-/// the payload unit start indicator.
+/// start indicator (as set for the first packet of a table or PES packet), the transport priority,
+/// and the upper bits of the PID, with the transport error indicator clear.
 macro_rules! ts_markers {
     ($($b:literal),* $(,)?) => {
         &[$(&[TS_SYNC, $b]),*]
@@ -752,10 +841,14 @@ macro_rules! ts_markers {
 }
 
 const TS_MARKERS: &[&[u8]] = ts_markers![
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+    0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
+    0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
     0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f,
     0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f,
-    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f
+    0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f,
+    0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e, 0x7f,
 ];
 
 impl ProbeableFormat<'_> for MpegTsReader<'_> {
