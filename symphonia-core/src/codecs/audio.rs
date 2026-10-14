@@ -224,11 +224,35 @@ pub struct AudioDecoderOptions {
     ///
     /// Default: `false`.
     pub verify: bool,
+    /// Mix a multi-channel stream down to fewer channels.
+    ///
+    /// Only decoders that implement a down-mix honour this option; others ignore it. Streams
+    /// that already have no more channels than the requested layout are not changed.
+    ///
+    /// Default: [`Downmix::None`].
+    pub downmix: Downmix,
+}
+
+/// A down-mix of a multi-channel stream requested through [`AudioDecoderOptions`].
+#[non_exhaustive]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum Downmix {
+    /// Output every channel of the stream.
+    #[default]
+    None,
+    /// Stereo (Lo/Ro): the surround channels are mixed into the left and right channels
+    /// without a phase shift.
+    StereoLoRo,
+    /// Stereo (Lt/Rt): the surround channels are mixed in anti-phase so that a Pro Logic
+    /// decoder can recover them.
+    StereoLtRt,
+    /// A single mono channel.
+    Mono,
 }
 
 impl Default for AudioDecoderOptions {
     fn default() -> Self {
-        Self { gapless: true, verify: false }
+        Self { gapless: true, verify: false, downmix: Downmix::None }
     }
 }
 
@@ -248,6 +272,14 @@ impl AudioDecoderOptions {
     /// Default: `false`.
     pub fn verify(mut self, verify: bool) -> Self {
         self.verify = verify;
+        self
+    }
+
+    /// Request a down-mix of multi-channel streams if the decoder supports it.
+    ///
+    /// Default: [`Downmix::None`].
+    pub fn downmix(mut self, downmix: Downmix) -> Self {
+        self.downmix = downmix;
         self
     }
 }
