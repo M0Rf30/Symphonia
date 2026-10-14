@@ -12,7 +12,7 @@
 //! FFmpeg `nellymoser` decoder (see `NOTICE`).
 //!
 //! Every 64-byte block holds 256 samples (two overlapped 128-coefficient MDCT frames). A packet
-//! holds one or more whole blocks; any trailing partial block is ignored.
+//! holds one or more whole blocks (no upper limit); any trailing partial block is ignored.
 
 #![warn(rust_2018_idioms)]
 #![forbid(unsafe_code)]
@@ -28,7 +28,8 @@
 mod tables;
 
 use symphonia_core::audio::{
-    AsGenericAudioBufferRef, AudioBuffer, AudioMut, AudioSpec, GenericAudioBufferRef, layouts,
+    AsGenericAudioBufferRef, Audio, AudioBuffer, AudioMut, AudioSpec, GenericAudioBufferRef,
+    layouts,
 };
 use symphonia_core::codecs::CodecInfo;
 use symphonia_core::codecs::audio::well_known::CODEC_ID_NELLYMOSER;
@@ -59,8 +60,8 @@ const NELLY_BASE_SHIFT: i32 = 19;
 /// Number of output samples per block.
 const NELLY_SAMPLES: usize = 2 * NELLY_BUF_LEN;
 
-/// Maximum number of blocks decoded from a single packet.
-const MAX_BLOCKS_PER_PACKET: usize = 64;
+/// Number of blocks the output buffer is initially sized for. Larger packets grow it.
+const INITIAL_BLOCKS: usize = 16;
 
 /// Scale applied to dequantized values: 1 / (32768 * 8).
 const SCALE_BIAS: f64 = 1.0 / (32768.0 * 8.0);
@@ -361,7 +362,7 @@ impl NellymoserDecoder {
         }
 
         let spec = AudioSpec::new(rate, layouts::CHANNEL_LAYOUT_MONO);
-        let buf = AudioBuffer::new(spec, MAX_BLOCKS_PER_PACKET * NELLY_SAMPLES);
+        let buf = AudioBuffer::new(spec, INITIAL_BLOCKS * NELLY_SAMPLES);
 
         let mut params = params.clone();
         params.with_channels(layouts::CHANNEL_LAYOUT_MONO);
@@ -375,7 +376,11 @@ impl NellymoserDecoder {
         if blocks == 0 {
             return decode_error("nellymoser: packet is too small");
         }
-        let blocks = blocks.min(MAX_BLOCKS_PER_PACKET);
+
+        // Like the reference decoder, decode every whole block in the packet.
+        if blocks * NELLY_SAMPLES > self.buf.capacity() {
+            self.buf = AudioBuffer::new(self.buf.spec().clone(), blocks * NELLY_SAMPLES);
+        }
 
         self.buf.clear();
         self.buf.render_uninit(Some(blocks * NELLY_SAMPLES));
