@@ -19,8 +19,8 @@
 use std::cmp::min;
 
 use symphonia_core::audio::{
-    AsGenericAudioBufferRef, AudioBuffer, AudioMut, AudioSpec, Channels, GenericAudioBufferRef,
-    layouts,
+    AsGenericAudioBufferRef, Audio, AudioBuffer, AudioMut, AudioSpec, Channels,
+    GenericAudioBufferRef, layouts,
 };
 use symphonia_core::codecs::CodecInfo;
 use symphonia_core::codecs::audio::well_known::CODEC_ID_ALAC;
@@ -169,6 +169,11 @@ impl ElementChannel {
 
                 mb = 0;
                 zero_run_end = i + 1 + zeros as usize;
+
+                // A run of zeros must not extend past the end of the frame.
+                if zero_run_end > out_len {
+                    return decode_error("alac: zero run exceeds frame length");
+                }
             }
         }
         Ok(())
@@ -180,9 +185,14 @@ impl ElementChannel {
             return decode_error("alac: invalid mode");
         }
 
-        // An order of 0 indicates no prediction is done (the residuals are the samples).
         // If the output buffer is empty, there is nothing to predict.
-        if self.lpc_order == 0 || out.is_empty() {
+        if out.is_empty() {
+            return Ok(());
+        }
+
+        // An order of 0 indicates no regular prediction is done (the residuals are the samples),
+        // unless the mode requests the additional first-order pass.
+        if self.lpc_order == 0 && self.mode != 15 {
             return Ok(());
         }
 
@@ -191,16 +201,31 @@ impl ElementChannel {
         // clipped.
         let num_clip_bits = 32 - self.bps;
 
-        // An order of 31, or a mode of 15, are special cases where the predictor runs twice. The
-        // first-pass uses a first-order prediction. The second pass is then the regular prediction
-        // using the coefficients from the bitstream.
-        if self.lpc_order == 31 || self.mode == 15 {
+        // An order of 31 is a special case where only a simple first-order prediction is run. The
+        // coefficients in the bitstream (if any) are ignored. See `unpc_block` in the Apple
+        // reference decoder (matrixlib/dp_dec.c) and `lpc_prediction` in FFmpeg's alac.c.
+        if self.lpc_order == 31 {
+            for i in 1..out.len() {
+                out[i] = clip_msbs(out[i].wrapping_add(out[i - 1]), num_clip_bits);
+            }
+            return Ok(());
+        }
+
+        // A mode of 15 is a special case where the predictor runs twice. The first-pass uses a
+        // first-order prediction. The second pass is then the regular prediction using the
+        // coefficients from the bitstream.
+        if self.mode == 15 {
             for i in 1..out.len() {
                 out[i] = clip_msbs(out[i].wrapping_add(out[i - 1]), num_clip_bits);
             }
         }
 
         let order = self.lpc_order as usize;
+
+        // With no coefficients, the second pass is a plain copy.
+        if order == 0 {
+            return Ok(());
+        }
 
         // Process warm-up samples.
         // The loop is bounded by `out.len()` to prevent out-of-bounds access if the frame is
@@ -309,6 +334,11 @@ impl AlacDecoder {
         else {
             return unsupported_error("alac: missing extra data");
         };
+
+        // ALAC defines only 16, 20, 24, and 32-bit source bit-depths.
+        if !matches!(cookie.bit_depth, 16 | 20 | 24 | 32) {
+            return unsupported_error("alac: unsupported bit depth");
+        }
 
         // Limit the frame length to a reasonable value to prevent a single, 4-byte integer
         // value from crashing the entire application via memory exhaustion.
@@ -439,8 +469,17 @@ impl AlacDecoder {
         }
 
         // Trim gaps.
-        if self.opts.gapless {
-            self.buf.trim(packet.trim_start.get() as usize, packet.trim_end.get() as usize);
+        //
+        // The last frame of a stream may be shorter than the block duration the container
+        // advertises (the element header carries the real sample count). Therefore, rather than
+        // blindly removing `trim_end` frames, keep the valid frames
+        // `[trim_start, trim_start + dur)` of the decoded buffer.
+        if self.opts.gapless && (packet.trim_start.get() != 0 || packet.trim_end.get() != 0) {
+            let start = packet.trim_start.get() as usize;
+            let valid_end = start.saturating_add(packet.dur.get() as usize);
+            let end = self.buf.frames().saturating_sub(valid_end);
+
+            self.buf.trim(start, end);
         }
 
         Ok(())
@@ -511,10 +550,8 @@ fn decode_sce_or_cpe<B: ReadBitsLtr>(
     // Element instance tag.
     let _elem_instance_tag = bs.read_bits_leq32(4)?;
 
-    // Unused header bits.
-    if bs.read_bits_leq32(12)? != 0 {
-        return decode_error("alac: unused header bits not 0");
-    };
+    // Unused header bits. The Apple reference decoder and FFmpeg both ignore their value.
+    bs.ignore_bits(12)?;
 
     let is_partial_frame = bs.read_bool()?;
     let shift = 8 * bs.read_bits_leq32(2)? as u8;
@@ -788,6 +825,40 @@ mod tests {
         };
         let mut out = [i32::MIN, -1, 0, 5, -5];
         ch.predict(&mut out).unwrap();
+    }
+
+    fn channel(mode: u32, lpc_order: u32, coeff0: i32) -> ElementChannel {
+        let mut lpc_coeffs = [0; 32];
+        lpc_coeffs[0] = coeff0;
+        ElementChannel {
+            bps: 16,
+            kb: 0,
+            mb: 0,
+            mode,
+            shift: 0,
+            pb_factor: 0,
+            lpc_order,
+            lpc_coeffs,
+        }
+    }
+
+    #[test]
+    fn verify_predict_order_31_is_first_order_only() {
+        // Coefficients must be ignored for order 31.
+        let mut out = [
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1,
+        ];
+        channel(0, 31, 100).predict(&mut out).unwrap();
+        let expect: Vec<i32> = (1..=out.len() as i32).collect();
+        assert_eq!(&out[..], &expect[..]);
+    }
+
+    #[test]
+    fn verify_predict_mode_15_order_0_is_first_order_only() {
+        let mut out = [1, 1, 1, 1, 1];
+        channel(15, 0, 0).predict(&mut out).unwrap();
+        assert_eq!(out, [1, 2, 3, 4, 5]);
     }
 
     #[test]
