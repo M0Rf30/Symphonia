@@ -299,6 +299,17 @@ impl LogicalStream {
                 // the current packet.
                 next_pkt_pts = next_pkt_pts.saturating_add(packet.dur);
 
+                // The media begins at timestamp 0. If the granule position of the first page is
+                // smaller than the duration of the packets that complete on it, the leading
+                // frames of the stream have negative timestamps and are not part of the media.
+                // This is how the Vorbis I specification and libvorbisfile treat such a stream
+                // (e.g. a stream cut with its encoder delay trimmed). Discard all of them, not
+                // only the frames the codec itself discards at the start.
+                if packet.pts.is_negative() {
+                    let negative = packet.pts.get().unsigned_abs().min(packet.dur.get());
+                    packet.trim_start = packet.trim_start.max(Duration::new(negative));
+                }
+
                 // Remove the start trim from the packet's duration. The start trim was populated
                 // earlier.
                 packet.dur = packet.dur.saturating_sub(packet.trim_start);
@@ -315,6 +326,12 @@ impl LogicalStream {
         }
 
         Ok(side_data)
+    }
+
+    /// Returns true if the logical stream has buffered the start of a packet that has not yet
+    /// completed.
+    pub fn has_partial_packet(&self) -> bool {
+        self.part_len > 0
     }
 
     /// Returns true if the logical stream has packets buffered.
@@ -342,6 +359,16 @@ impl LogicalStream {
     pub fn inspect_start_page(&mut self, page: &Page<'_>) {
         if self.start_bound.is_some() {
             debug!("start page already found");
+            return;
+        }
+
+        // The first packet that completes on a continuation page began on an earlier page, so its
+        // duration cannot be determined from this page alone (packets larger than a page, e.g.
+        // FLAC frames of high sample rate or channel count). Without the duration, the start of
+        // the page is unknown; leave the start bound unset and let the stream start at the
+        // default.
+        if page.header.is_continuation && page.num_packets() > 0 {
+            debug!("start page begins with a partial packet");
             return;
         }
 
@@ -400,8 +427,17 @@ impl LogicalStream {
 
         track.with_start_ts(bound.ts);
 
-        if bound.discard > Duration::ZERO {
-            track.with_delay(bound.discard.get() as u32);
+        // All frames before timestamp 0 are delay. This is more than what the codec discards if
+        // the first granule position is smaller than the duration of the first packets.
+        let delay = if bound.ts.is_negative() {
+            bound.discard.max(Duration::new(bound.ts.get().unsigned_abs()))
+        }
+        else {
+            bound.discard
+        };
+
+        if delay > Duration::ZERO {
+            track.with_delay(u32::try_from(delay.get()).unwrap_or(u32::MAX));
         }
 
         // Update start bound.
@@ -440,7 +476,21 @@ impl LogicalStream {
         // doesn't have a duration of 0 due to lapping on some codecs.
         let mut total_pkt_dur = Duration::ZERO;
 
-        for buf in page.packets() {
+        // A page without a granule position (-1) has no completed packet, nothing to inspect.
+        if page.header.absgp == u64::MAX {
+            return;
+        }
+
+        // The first packet of a continuation page is the tail of a packet that began on an
+        // earlier page. It cannot be parsed, and the page duration is therefore unknown.
+        let mut packets = page.packets();
+        let partial_first = page.header.is_continuation && page.num_packets() > 0;
+
+        if partial_first {
+            packets.next();
+        }
+
+        for buf in packets {
             let (pkt_dur, _) = parser.parse_next_packet_dur(buf);
 
             // On overflow it will be impossible to determine the end bound.
@@ -455,7 +505,7 @@ impl LogicalStream {
 
         // The end delay can only be determined if this is the last page, and the timstamp of the
         // second last page is known, or this is the only page of the stream.
-        let end_delay = if page.header.is_last_page {
+        let end_delay = if page.header.is_last_page && !partial_first {
             if let Some(last_bound) = &state.bound {
                 // The actual ending timestamp of the decoded data is the timestamp of the previous
                 // page plus the decoded duration of this page. Subtract the stated page end
@@ -530,13 +580,27 @@ impl LogicalStream {
     }
 
     /// Examine a page in isolation and return the start and end timestamps as a tuple.
-    pub fn inspect_page(&mut self, page: &Page<'_>) -> (Timestamp, Timestamp) {
+    ///
+    /// Returns `None` for a page without a granule position (no packet completes on it). If the
+    /// page begins with the tail of a packet from an earlier page, that packet's duration is
+    /// unknown and ignored, which can only overestimate the start timestamp.
+    pub fn inspect_page(&mut self, page: &Page<'_>) -> Option<(Timestamp, Timestamp)> {
+        if page.header.absgp == u64::MAX {
+            return None;
+        }
+
         // Get the cumulative duration of all packets within this page.
         let mut total_pkt_dur = Duration::ZERO;
         let mut total_pkt_discard = Duration::ZERO;
 
         if let Some(mut parser) = self.mapper.make_parser() {
-            for buf in page.packets() {
+            let mut packets = page.packets();
+
+            if page.header.is_continuation && page.num_packets() > 0 {
+                packets.next();
+            }
+
+            for buf in packets {
                 let (pkt_dur, pkt_discard) = parser.parse_next_packet_dur(buf);
 
                 total_pkt_dur = total_pkt_dur.saturating_add(pkt_dur);
@@ -563,7 +627,7 @@ impl LogicalStream {
             None => page_start_ts_raw,
         };
 
-        (page_start_ts, page_end_ts)
+        Some((page_start_ts, page_end_ts))
     }
 
     /// Returns true if the stream is only a single page.

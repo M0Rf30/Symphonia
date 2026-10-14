@@ -137,8 +137,9 @@ impl PacketParser for OpusPacketParser {
             1 | 2 => 2,
             3 => match packet.get(1) {
                 Some(byte) => {
-                    // TOC byte is followed by number of frames. See page 18 section 3.2.5 code 3
-                    let m = byte & 0b11111; // Note: it's actually called "M" in the rfc.
+                    // TOC byte is followed by number of frames. See page 18 section 3.2.5 code 3.
+                    // The frame count byte is `v|p|M`: M is the low 6 bits (RFC 6716 figure 5).
+                    let m = byte & 0b11_1111; // Note: it's actually called "M" in the rfc.
                     m as u64
                 }
                 None => {
@@ -302,6 +303,16 @@ mod tests {
         // What has been learned is kept when the seek lands on the first page of the stream.
         mapper.reset_at_start();
         assert_eq!(mapper.max_rap_period(), Duration::new(480_000));
+    }
+
+    /// RFC 6716 section 3.2.5: the frame count of a code 3 packet is the low 6 bits of the frame
+    /// count byte, so 48 frames of 2.5 ms (the 120 ms maximum) are valid.
+    #[test]
+    fn code_3_frame_count_uses_six_bits() {
+        let mut parser = OpusPacketParser::new(0);
+        // CELT fullband 2.5 ms (configuration 28), code 3, 48 frames, CBR, no padding.
+        let (dur, _) = parser.parse_next_packet_dur(&[0xe3, 48, 0, 0]);
+        assert_eq!(dur, Duration::new(120 * 48));
     }
 
     #[test]

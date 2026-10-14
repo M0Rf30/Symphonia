@@ -318,6 +318,23 @@ impl PageReader {
         Ok(())
     }
 
+    /// Reads the next page with a specific serial, including pages that continue a packet from
+    /// an earlier page. If the next page is corrupted or invalid, the page is discarded and the
+    /// reader tries again until a valid page is read or end-of-stream.
+    pub fn next_any_page_for_serial<B>(&mut self, reader: &mut B, serial: u32) -> Result<()>
+    where
+        B: ReadBytes + SeekBuffered,
+    {
+        loop {
+            match self.try_next_page(reader) {
+                Ok(_) if self.header.serial == serial => break,
+                Err(Error::IoError(e)) => return Err(Error::from(e)),
+                _ => (),
+            }
+        }
+        Ok(())
+    }
+
     /// Gets a buffer to the first packet, if it exists.
     pub fn first_packet(&self) -> Option<&[u8]> {
         self.packet_lens.first().map(|&len| &self.page_buf[..usize::from(len)])

@@ -154,7 +154,15 @@ pub fn probe_stream_end(
 
         pages.next_page(reader)?;
 
-        scan_stream_end(reader, pages, streams, end)
+        // The bisection end is not on a page boundary: it is a position before the first page that
+        // does not belong to the stream. The last page of the stream may therefore extend past
+        // it. Allow for one maximum size page, the scan stops at the first foreign page anyway.
+        scan_stream_end(
+            reader,
+            pages,
+            streams,
+            (end + OGG_PAGE_MAX_SIZE as u64).min(byte_range_end),
+        )
     }
     else {
         result

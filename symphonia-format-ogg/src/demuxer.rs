@@ -180,6 +180,9 @@ impl<'s> OggReader<'s> {
 
             let Ok(link) = self.read_physical_stream(false)
             else {
+                // The link starts with a first page but cannot be demuxed (e.g. it has no
+                // supported logical stream). The timeline of the chain is not complete.
+                complete = false;
                 break;
             };
 
@@ -451,22 +454,46 @@ impl<'s> OggReader<'s> {
                 self.reader.seek(SeekFrom::Start(mid_byte_pos))?;
 
                 // Read the next page.
-                match self.pages.next_page_for_serial(&mut self.reader, serial) {
-                    Ok(_) => (),
-                    _ => {
-                        // No more pages for the stream from the mid-point onwards.
-                        debug!(
-                            "seek: bisect step: byte_range=\
-                            [{start_byte_pos}, {mid_byte_pos}, {end_byte_pos}]",
-                        );
+                //
+                // Pages that continue a packet are accepted since, for packets larger than a
+                // page, they may be the only pages with a granule position.
+                let mut inspected = None;
+                let mut is_packet_start = false;
+                let mut found =
+                    self.pages.next_any_page_for_serial(&mut self.reader, serial).is_ok();
 
-                        end_byte_pos = mid_byte_pos;
-                        continue;
+                if found {
+                    // The first page is only usable as the seek target if it begins a packet and
+                    // has a granule position.
+                    is_packet_start = !self.pages.header().is_continuation;
+
+                    // Skip forward over pages without a granule position (a packet spanning
+                    // multiple pages) to find a page that can be inspected.
+                    while found {
+                        inspected = stream.inspect_page(&self.pages.page());
+
+                        if inspected.is_some() {
+                            break;
+                        }
+
+                        is_packet_start = false;
+                        found =
+                            self.pages.next_any_page_for_serial(&mut self.reader, serial).is_ok();
                     }
                 }
 
                 // Probe the page to get the start and end timestamp.
-                let (start_ts, end_ts) = stream.inspect_page(&self.pages.page());
+                let Some((start_ts, end_ts)) = inspected
+                else {
+                    // No more pages for the stream from the mid-point onwards.
+                    debug!(
+                        "seek: bisect step: byte_range=\
+                        [{start_byte_pos}, {mid_byte_pos}, {end_byte_pos}]",
+                    );
+
+                    end_byte_pos = mid_byte_pos;
+                    continue;
+                };
 
                 debug!(
                     "seek: bisect step: page={{ start_ts={start_ts}, end_ts={end_ts} }} \
@@ -483,12 +510,18 @@ impl<'s> OggReader<'s> {
                     // the in the page. Update the lower bound and bisect again.
                     start_byte_pos = mid_byte_pos;
                 }
-                else {
+                else if is_packet_start {
                     // The sample with the required timestamp is contained in the page. The
                     // bisection has converged on the correct page so stop the bisection.
                     start_byte_pos = mid_byte_pos;
                     end_byte_pos = mid_byte_pos;
                     break;
+                }
+                else {
+                    // The page contains the required timestamp, but it does not begin a packet,
+                    // so it cannot be decoded from. Continue bisecting to find an earlier page
+                    // from which the linear search can start.
+                    end_byte_pos = mid_byte_pos;
                 }
             }
 
@@ -644,16 +677,39 @@ impl<'s> OggReader<'s> {
             self.pages.try_next_page(&mut self.reader)?;
         }
 
+        // A physical stream with no logical stream that has a known mapping (e.g. a Theora-only
+        // video file) has nothing to demux. The unknown streams never yield header or data
+        // packets, so scanning for the first packets would only end in a misleading unexpected
+        // end of stream.
+        if streams.values().all(|stream| stream.track().codec_params.is_none()) {
+            return unsupported_error("ogg: no logical stream with a supported mapping");
+        }
+
         // Each logical stream may contain additional header packets after the identification packet
         // that contains format-relevant information such as setup and metadata. These packets,
         // for all logical streams, should be grouped together after the identification packets.
         // Reading pages consumes these headers and returns any relevant data as side data. Read
         // pages until all headers are consumed and the first bitstream packets are buffered.
+        //
+        // If the first bitstream packet is larger than a page, it begins on an earlier page than
+        // the one on which it completes. Keep track of where the packet's first page starts so
+        // that seeking can reach the first packet.
+        let mut partial_start: Option<u64> = None;
+
         loop {
             let page = self.pages.page();
 
             if let Some(stream) = streams.get_mut(&page.header.serial) {
                 let side_data = stream.read_page_init(&page, true)?;
+
+                if !stream.has_packets() {
+                    if !stream.has_partial_packet() {
+                        partial_start = None;
+                    }
+                    else if partial_start.is_none() {
+                        partial_start = Some(byte_range_start);
+                    }
+                }
 
                 // Consume each piece of side data.
                 for data in side_data {
@@ -710,6 +766,12 @@ impl<'s> OggReader<'s> {
                 )?;
             }
         }
+
+        // The first packet may begin before the page it completes on.
+        let byte_range_start = match partial_start {
+            Some(start) if self.pages.header().is_continuation => start.min(byte_range_start),
+            _ => byte_range_start,
+        };
 
         Ok(PhysicalStream { streams, byte_range_start, byte_range_end })
     }
