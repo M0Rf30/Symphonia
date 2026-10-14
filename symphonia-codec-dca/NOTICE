@@ -1,0 +1,45 @@
+This crate (`symphonia-codec-dca`) is a pure-Rust DTS Coherent Acoustics (DCA) decoder, written
+for Project Symphonia (licensed under the Mozilla Public License, v. 2.0, see `LICENSE`).
+
+The decoder is a port of the DCA decoder of FFmpeg (libavcodec), which is distributed under the
+GNU Lesser General Public License, version 2.1 or (at your option) any later version. The port was
+made from upstream FFmpeg, git commit 946fcce07b6d, files:
+
+  libavcodec/dca.c, dca.h, dca_core.c, dca_core.h, dca_exss.c, dcadec.c, dcadsp.c, dcamath.h,
+  dcaadpcm.c/.h, dcahuff.c/.h, dcadata.c, dca_syncwords.h, synth_filter.c, dca_xll.c, dca_xll.h,
+  dcadct.c
+
+Copyright (C) 2016 foo86; (C) 2004 Gildas Bazin, (C) 2004 Benjamin Zores; (C) 2006 Benjamin
+Larsson; (C) 2007 Konstantin Shishkov; and other FFmpeg contributors, as stated in the headers
+of the files above.
+
+Derived material:
+
+* `src/tables.rs` is generated programmatically from the data tables in `dcadata.c`, `dcahuff.c`
+  and `dcadsp.c`/`dcadata.c` (quantizer step sizes, scale factor tables, ADPCM and high frequency
+  VQ code books, joint scale factors, downmix tables, the 32/64-band QMF prototype filters, LFE
+  interpolation filters, and the Huffman code book sources), and the fixed-point filter bank
+  coefficient tables, the XLL reflection coefficient and frequency band assembly tables.
+* `src/tables_dct.rs` is generated programmatically from the fixed-point IMDCT twiddle tables
+  computed by `dcadct.c`.
+* `src/xll.rs` is a port of `dca_xll.c` (lossless extension parsing, entropy decoding, inverse
+  prediction, decorrelation, frequency band assembly, downmix undo, residual combination with the
+  fixed-point core, and peak bit rate smoothing).
+* `src/decoder.rs`, `src/exss.rs`, `src/dsp.rs`, `src/huff.rs` and `src/bits.rs` follow the
+  bitstream parsing, dequantization, ADPCM, joint intensity, XCH/XXCH/X96/XBR handling,
+  extension substream parsing, synthesis filter bank and LFE interpolation logic of the files
+  listed above. The synthesis IMDCT is implemented independently as a direct (matrix) evaluation
+  of the inverse MDCT definition in the floating-point path; the fixed-point path follows
+  `dcadct.c`, `dcadsp.c` and `synth_filter.c` to be bit-exact with the reference.
+
+Because portions of this crate are derived from LGPL-2.1-or-later code, those portions remain
+subject to the LGPL-2.1-or-later in addition to the MPL-2.0 licensing of the crate; consult the
+licensing requirements of FFmpeg's LGPL when redistributing this crate or products linking it.
+The full text of the LGPL-2.1 is available at https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html.
+
+The bitstream syntax is defined by ETSI TS 102 114 ("DTS Coherent Acoustics; Core and Extensions
+with Additional Profiles"), which was used as the specification reference.
+
+The FFmpeg `ffmpeg` binary was used unmodified, as an external decoder oracle and as an encoder
+for test streams during development. Test streams under `tests/data/` were generated from
+synthetic sine tones by FFmpeg's native DCA encoder.
