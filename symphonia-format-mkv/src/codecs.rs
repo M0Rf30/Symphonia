@@ -399,6 +399,7 @@ mod tests {
             track_timestamp_scale: 1.0,
             seek_pre_roll: MatroskaTicks::default(),
             flags: Default::default(),
+            content_encodings: Vec::new(),
         }
     }
 

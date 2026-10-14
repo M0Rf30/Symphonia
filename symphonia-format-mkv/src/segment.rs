@@ -355,6 +355,7 @@ pub(crate) struct TrackElement {
     pub(crate) track_timestamp_scale: f64,
     pub(crate) seek_pre_roll: MatroskaTicks,
     pub(crate) flags: TrackFlags,
+    pub(crate) content_encodings: Vec<ContentEncodingElement>,
 }
 
 impl EbmlElement<MkvSchema> for TrackElement {
@@ -371,6 +372,7 @@ impl EbmlElement<MkvSchema> for TrackElement {
         let mut codec_id = None;
         let mut codec_private = None;
         let mut codec_delay = None;
+        let mut content_encodings = Vec::new();
         let mut default_duration = None;
         let mut default_decoded_field_duration = None;
         let mut track_timestamp_scale = None;
@@ -412,6 +414,10 @@ impl EbmlElement<MkvSchema> for TrackElement {
                 MkvElement::CodecDelay => {
                     // Mandatory element. Schema-defined default is 0.
                     codec_delay = it.read_u64()?.map(MatroskaTicks);
+                }
+                MkvElement::ContentEncodings => {
+                    // Non-mandatory element.
+                    content_encodings = it.read_master_element::<ContentEncodingsElement>()?.0;
                 }
                 MkvElement::Audio => {
                     // Non-mandatory element.
@@ -522,7 +528,117 @@ impl EbmlElement<MkvSchema> for TrackElement {
             track_timestamp_scale,
             seek_pre_roll,
             flags,
+            content_encodings,
         })
+    }
+}
+
+/// The `ContentEncodings` of a track, in the order they appear in the file.
+#[derive(Debug)]
+pub(crate) struct ContentEncodingsElement(Vec<ContentEncodingElement>);
+
+impl EbmlElement<MkvSchema> for ContentEncodingsElement {
+    const TYPE: MkvElement = MkvElement::ContentEncodings;
+
+    fn read<R: ReadEbml>(it: &mut MkvEbmlIterator<R>, hdr: &MkvEbmlElementHeader) -> Result<Self> {
+        let mut encodings = Vec::new();
+
+        while let Some(child) = it.next_header()? {
+            match child.element_type() {
+                MkvElement::ContentEncoding => {
+                    encodings.push(it.read_master_element()?);
+                }
+                other => {
+                    log::debug!("ignored {:?} child {:?}", hdr.element_type(), other);
+                }
+            }
+        }
+
+        Ok(Self(encodings))
+    }
+}
+
+/// `ContentCompAlgo` value of zlib compression.
+pub(crate) const COMP_ALGO_ZLIB: u64 = 0;
+/// `ContentCompAlgo` value of header stripping.
+pub(crate) const COMP_ALGO_HEADER_STRIPPING: u64 = 3;
+
+/// A `ContentEncoding` of a track: a transformation of the content of the track's frames (or of
+/// its `CodecPrivate`) that the demuxer must undo.
+#[derive(Debug)]
+pub(crate) struct ContentEncodingElement {
+    /// The order the encodings were applied in. Encodings are undone in decreasing order.
+    pub(crate) order: u64,
+    /// A bit set of the contents encoded: 1 is the frames, 2 is `CodecPrivate`, 4 is the next
+    /// `ContentEncoding`.
+    pub(crate) scope: u64,
+    /// `true` if the encoding is encryption instead of compression.
+    pub(crate) encrypted: bool,
+    /// The compression algorithm. Zlib (0) if absent (RFC 9559 section 5.1.4.1.31.6).
+    pub(crate) comp_algo: u64,
+    /// The compression settings. For header stripping, the bytes stripped from every frame.
+    pub(crate) comp_settings: Option<Box<[u8]>>,
+}
+
+#[derive(Debug)]
+struct ContentCompressionElement {
+    algo: u64,
+    settings: Option<Box<[u8]>>,
+}
+
+impl EbmlElement<MkvSchema> for ContentCompressionElement {
+    const TYPE: MkvElement = MkvElement::ContentCompression;
+
+    fn read<R: ReadEbml>(it: &mut MkvEbmlIterator<R>, hdr: &MkvEbmlElementHeader) -> Result<Self> {
+        let mut algo = COMP_ALGO_ZLIB;
+        let mut settings = None;
+
+        while let Some(child) = it.next_header()? {
+            match child.element_type() {
+                MkvElement::ContentCompAlgo => algo = it.read_u64_default(COMP_ALGO_ZLIB)?,
+                MkvElement::ContentCompSettings => settings = Some(it.read_binary()?),
+                other => {
+                    log::debug!("ignored {:?} child {:?}", hdr.element_type(), other);
+                }
+            }
+        }
+
+        Ok(Self { algo, settings })
+    }
+}
+
+impl EbmlElement<MkvSchema> for ContentEncodingElement {
+    const TYPE: MkvElement = MkvElement::ContentEncoding;
+
+    fn read<R: ReadEbml>(it: &mut MkvEbmlIterator<R>, hdr: &MkvEbmlElementHeader) -> Result<Self> {
+        // All mandatory elements have defaults: order 0, scope 1, type 0 (compression).
+        let mut order = 0;
+        let mut scope = 1;
+        let mut encrypted = false;
+        let mut comp_algo = COMP_ALGO_ZLIB;
+        let mut comp_settings = None;
+
+        while let Some(child) = it.next_header()? {
+            match child.element_type() {
+                MkvElement::ContentEncodingOrder => order = it.read_u64_default(0)?,
+                MkvElement::ContentEncodingScope => scope = it.read_u64_default(1)?,
+                MkvElement::ContentEncodingType => encrypted = it.read_u64_default(0)? == 1,
+                MkvElement::ContentEncryption => {
+                    // The key and algorithm are irrelevant: the contents cannot be recovered.
+                    encrypted = true;
+                }
+                MkvElement::ContentCompression => {
+                    let comp = it.read_master_element::<ContentCompressionElement>()?;
+                    comp_algo = comp.algo;
+                    comp_settings = comp.settings;
+                }
+                other => {
+                    log::debug!("ignored {:?} child {:?}", hdr.element_type(), other);
+                }
+            }
+        }
+
+        Ok(Self { order, scope, encrypted, comp_algo, comp_settings })
     }
 }
 

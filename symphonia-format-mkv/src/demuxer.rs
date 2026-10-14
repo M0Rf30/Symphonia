@@ -26,6 +26,7 @@ use symphonia_common::xiph::audio::opus;
 use symphonia_metadata::utils::images::try_get_image_info;
 
 use crate::codecs::make_track_codec_params;
+use crate::content::ContentDecoder;
 use crate::ebml::{
     EbmlElementInfo, EbmlError, EbmlIterator, EbmlSchema, ReadEbml, read_unsigned_vint,
 };
@@ -166,6 +167,8 @@ pub struct TrackState {
     is_opus: bool,
     /// `true` if an Opus track has been seen to contain SILK or Hybrid packets.
     silk_seen: bool,
+    /// The decoder of the `ContentEncodings` of the frames of the track.
+    pub(crate) content: ContentDecoder,
     /// The track's sample rate, if known (audio tracks only). Used to convert `codec_delay`
     /// and `DiscardPadding` into an exact sample count for gapless trimming.
     pub(crate) sample_rate: Option<u32>,
@@ -592,7 +595,19 @@ impl<'s> MkvReader<'s> {
         let mut tracks = Vec::new();
         let mut track_states = HashMap::new();
 
-        for track in segment_tracks.tracks {
+        for mut track in segment_tracks.tracks {
+            // Undo the `ContentEncodings` of the `CodecPrivate`.
+            let private_decoder = ContentDecoder::for_codec_private(&track.content_encodings);
+
+            if !private_decoder.is_identity() {
+                track.codec_private = match track.codec_private.take() {
+                    Some(private) if !private_decoder.is_unsupported() => {
+                        Some(private_decoder.decode(private)?)
+                    }
+                    _ => None,
+                };
+            }
+
             // Extract the sample rate (if this is an audio track) before `track` is consumed by
             // `make_track_codec_params` below. It is used to convert the mandatory `codec_delay`
             // and `DiscardPadding` gapless-trims into exact sample counts.
@@ -664,6 +679,7 @@ impl<'s> MkvReader<'s> {
                 else {
                     default_seek_pre_roll(&track.codec_id)
                 },
+                content: ContentDecoder::for_frames(&track.content_encodings),
                 is_opus: track.codec_id == "A_OPUS",
                 silk_seen: false,
                 pts_tolerance: nanos_to_ticks(
@@ -698,8 +714,12 @@ impl<'s> MkvReader<'s> {
                 tr.with_delay(u32::try_from(state.codec_delay_samples).unwrap_or(u32::MAX));
             }
 
-            if let Some(codec_params) = make_track_codec_params(track)? {
-                tr.with_codec_params(codec_params);
+            // The frames of a track whose contents cannot be recovered (e.g., encrypted) are
+            // dropped, and the track cannot be decoded.
+            if !state.content.is_unsupported() {
+                if let Some(codec_params) = make_track_codec_params(track)? {
+                    tr.with_codec_params(codec_params);
+                }
             }
 
             tracks.push(tr);

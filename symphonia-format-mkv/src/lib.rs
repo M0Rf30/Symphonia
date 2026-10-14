@@ -41,8 +41,10 @@
 #![allow(clippy::manual_range_contains)]
 
 mod codecs;
+mod content;
 mod demuxer;
 mod ebml;
+mod inflate;
 mod lacing;
 mod schema;
 mod segment;

@@ -118,6 +118,8 @@ struct Track {
     default_duration: Option<u64>,
     /// `CodecPrivate`.
     codec_private: Option<Vec<u8>>,
+    /// The `ContentEncodings` element of the track, if any.
+    content_encodings: Vec<u8>,
 }
 
 impl Track {
@@ -132,6 +134,7 @@ impl Track {
             seek_pre_roll: 0,
             default_duration: None,
             codec_private: None,
+            content_encodings: Vec::new(),
         }
     }
 
@@ -146,6 +149,7 @@ impl Track {
             seek_pre_roll: 80_000_000,
             default_duration: Some(20_000_000),
             codec_private: None,
+            content_encodings: Vec::new(),
         }
     }
 
@@ -173,6 +177,7 @@ impl Track {
             seek_pre_roll: 0,
             default_duration: None,
             codec_private: Some(private),
+            content_encodings: Vec::new(),
         }
     }
 
@@ -203,6 +208,9 @@ impl Track {
         }
         if let Some(private) = &self.codec_private {
             entry.push(el(&[0x63, 0xa2], private));
+        }
+        if !self.content_encodings.is_empty() {
+            entry.push(self.content_encodings.clone());
         }
 
         el(&[0xae], &entry.concat())
@@ -240,11 +248,23 @@ struct Block {
     fill: Option<u8>,
     /// The data of the block. If not set, `len` bytes of the index of the block.
     data: Option<Vec<u8>>,
+    /// The lacing bits of the block's flags (0x02: Xiph, 0x04: fixed size, 0x06: EBML). The data
+    /// of the block must include the lacing header.
+    lacing: u8,
 }
 
 impl Block {
     fn new(ts: i64, len: usize) -> Self {
-        Block { track: 1, ts, len, duration: None, padding: None, fill: None, data: None }
+        Block {
+            track: 1,
+            ts,
+            len,
+            duration: None,
+            padding: None,
+            fill: None,
+            data: None,
+            lacing: 0,
+        }
     }
 
     fn filled(ts: i64, len: usize, fill: u8) -> Self {
@@ -308,7 +328,7 @@ impl File {
                 let mut payload = vec![0x80 | blk.track, (rel >> 8) as u8, rel as u8];
 
                 if blk.duration.is_some() || blk.padding.is_some() {
-                    payload.push(0x00);
+                    payload.push(blk.lacing);
                     payload.extend(
                         blk.data
                             .clone()
@@ -325,7 +345,7 @@ impl File {
                     data.extend(el(&[0xa0], &group.concat()));
                 }
                 else {
-                    payload.push(0x80);
+                    payload.push(0x80 | blk.lacing);
                     payload.extend(
                         blk.data
                             .clone()
@@ -595,6 +615,7 @@ fn lossless_block_timestamps_are_sample_exact() {
                 padding: None,
                 fill: None,
                 data: None,
+                lacing: 0,
             }
         })
         .collect();
@@ -639,6 +660,7 @@ fn opus_file() -> File {
         padding: Some(13_500_000),
         fill: None,
         data: Some(opus_20ms_packet(5)),
+        lacing: 0,
     });
 
     file.clusters.push((0, blocks));
@@ -969,6 +991,7 @@ fn vorbis_track() -> Track {
         seek_pre_roll: 0,
         default_duration: None,
         codec_private: Some(vorbis_codec_private()),
+        content_encodings: Vec::new(),
     }
 }
 
@@ -1519,6 +1542,7 @@ fn discard_padding_is_trimmed_from_the_start_and_end_of_a_block() {
         padding: Some(padding),
         fill: None,
         data: None,
+        lacing: 0,
     };
 
     file.clusters
@@ -1530,4 +1554,278 @@ fn discard_padding_is_trimmed_from_the_start_and_end_of_a_block() {
     let trims: Vec<_> =
         packets.iter().map(|p| (p.trim_start.get(), p.trim_end.get(), p.dur.get())).collect();
     assert_eq!(trims, [(96, 0, 384), (0, 0, 480), (0, 96, 384)]);
+}
+
+// Lacing: the frames of a laced block are separate packets with consecutive timestamps. 16-bit
+// mono PCM has no duration other than that derived from the size of the frame.
+
+/// The packets of a block with `data` laced as `lacing`, at 10ms (480 frames).
+fn laced_packets(lacing: u8, data: Vec<u8>) -> Vec<Packet> {
+    let mut file = File::default();
+    file.clusters.push((0, vec![Block { lacing, ..Block::with_data(10, data) }]));
+    read_all(&mut open(file.to_bytes(&Track::pcm())))
+}
+
+fn summary(packets: &[Packet]) -> Vec<(i64, u64, usize)> {
+    packets.iter().map(|p| (p.pts.get(), p.dur.get(), p.data.len())).collect()
+}
+
+#[test]
+fn xiph_lacing() {
+    // Frames of 4, 300, 2, and 8 bytes. 300 is coded as 255 + 45.
+    let mut data = vec![3, 4, 255, 45, 2];
+    let mut expected = Vec::new();
+    for (i, len) in [4usize, 300, 2, 8].into_iter().enumerate() {
+        data.extend(vec![i as u8 + 1; len]);
+        expected.push(len);
+    }
+
+    let packets = laced_packets(0x02, data);
+    assert_eq!(summary(&packets), [(480, 2, 4), (482, 150, 300), (632, 1, 2), (633, 4, 8)]);
+    for (i, p) in packets.iter().enumerate() {
+        assert!(p.data.iter().all(|&b| b == i as u8 + 1));
+    }
+}
+
+#[test]
+fn xiph_lacing_with_a_size_that_is_a_multiple_of_255() {
+    // A size of 510 is coded as 255, 255, 0.
+    let mut data = vec![1, 255, 255, 0];
+    data.extend(vec![7u8; 510]);
+    data.extend(vec![8u8; 6]);
+
+    let packets = laced_packets(0x02, data);
+    assert_eq!(summary(&packets), [(480, 255, 510), (735, 3, 6)]);
+}
+
+#[test]
+fn ebml_lacing() {
+    // Frames of 4, 6, 2, and 8 bytes. The first size is an unsigned vint, then signed vint deltas:
+    // +2 is 63 + 2 = 65 as a 1-byte vint (0xc1), and -4 is 63 - 4 = 59 (0xbb).
+    let mut data = vec![3, 0x84, 0xc1, 0xbb];
+    for (i, len) in [4usize, 6, 2, 8].into_iter().enumerate() {
+        data.extend(vec![i as u8 + 1; len]);
+    }
+
+    let packets = laced_packets(0x06, data);
+    assert_eq!(summary(&packets), [(480, 2, 4), (482, 3, 6), (485, 1, 2), (486, 4, 8)]);
+    for (i, p) in packets.iter().enumerate() {
+        assert!(p.data.iter().all(|&b| b == i as u8 + 1));
+    }
+}
+
+#[test]
+fn ebml_lacing_with_multi_byte_sizes_and_deltas() {
+    // Frames of 1000, 1100, and 40 bytes. 1000 is a 2-byte vint (0x43e8), the delta +100 is a
+    // 2-byte signed vint: 8191 + 100 = 8291 = 0x2063 -> 0x6063, and the last frame is the rest.
+    let mut data = vec![2, 0x43, 0xe8, 0x60, 0x63];
+    for (i, len) in [1000usize, 1100, 40].into_iter().enumerate() {
+        data.extend(vec![i as u8 + 1; len]);
+    }
+
+    let packets = laced_packets(0x06, data);
+    assert_eq!(summary(&packets), [(480, 500, 1000), (980, 550, 1100), (1530, 20, 40)]);
+}
+
+#[test]
+fn fixed_size_lacing() {
+    // Three frames of 4 bytes.
+    let mut data = vec![2];
+    for i in 0..3u8 {
+        data.extend(vec![i + 1; 4]);
+    }
+
+    let packets = laced_packets(0x04, data);
+    assert_eq!(summary(&packets), [(480, 2, 4), (482, 2, 4), (484, 2, 4)]);
+    for (i, p) in packets.iter().enumerate() {
+        assert!(p.data.iter().all(|&b| b == i as u8 + 1));
+    }
+}
+
+#[test]
+fn lacing_uses_the_block_duration() {
+    // A fixed size laced block of three 20ms Opus packets (TOC 0x98) and a block duration of 60ms.
+    let mut file = File::default();
+    let data = [vec![2], opus_20ms_packet(1), opus_20ms_packet(2), opus_20ms_packet(3)].concat();
+    file.clusters
+        .push((0, vec![Block { lacing: 0x04, duration: Some(60), ..Block::with_data(0, data) }]));
+
+    let track = Track { codec_delay: 0, ..Track::opus() };
+    let packets = read_all(&mut open(file.to_bytes(&track)));
+    assert_eq!(summary(&packets), [(0, 960, 100), (960, 960, 100), (1920, 960, 100)]);
+    assert_eq!(packets.iter().map(|p| p.data[1]).collect::<Vec<_>>(), [1, 2, 3]);
+}
+
+#[test]
+fn malformed_lacing_is_an_error_and_not_a_panic() {
+    // Laced frames larger than the block.
+    let mut file = File::default();
+    file.clusters
+        .push((0, vec![Block { lacing: 0x02, ..Block::with_data(0, vec![1, 200, 1, 2, 3]) }]));
+    let mut reader = open(file.to_bytes(&Track::pcm()));
+    assert!(reader.next_packet().is_err());
+
+    // A fixed size block that is not a multiple of the number of frames.
+    let mut file = File::default();
+    file.clusters
+        .push((0, vec![Block { lacing: 0x04, ..Block::with_data(0, vec![2, 1, 2, 3, 4]) }]));
+    let mut reader = open(file.to_bytes(&Track::pcm()));
+    assert!(reader.next_packet().is_err());
+}
+
+// Content encodings (RFC 9559 section 5.1.4.1.31).
+
+/// A `ContentEncodings` element with a single compression encoding.
+fn compression(algo: u64, settings: Option<&[u8]>, scope: u64) -> Vec<u8> {
+    let mut comp = vec![uint(&[0x42, 0x54], algo)];
+    if let Some(settings) = settings {
+        comp.push(el(&[0x42, 0x55], settings));
+    }
+    el(
+        &[0x6d, 0x80],
+        &el(
+            &[0x62, 0x40],
+            &[
+                uint(&[0x50, 0x31], 0),
+                uint(&[0x50, 0x32], scope),
+                uint(&[0x50, 0x33], 0),
+                el(&[0x50, 0x34], &comp.concat()),
+            ]
+            .concat(),
+        ),
+    )
+}
+
+fn pcm_with_encodings(content_encodings: Vec<u8>) -> Track {
+    Track { content_encodings, ..Track::pcm() }
+}
+
+#[test]
+fn header_stripping_restores_the_stripped_bytes() {
+    let track = pcm_with_encodings(compression(3, Some(&[0xaa, 0xbb]), 1));
+
+    let mut file = File::default();
+    file.clusters.push((
+        0,
+        vec![
+            Block::with_data(0, vec![1, 2]),
+            // Laced frames are restored individually.
+            Block { lacing: 0x04, ..Block::with_data(10, vec![1, 3, 4, 5, 6]) },
+        ],
+    ));
+
+    let packets = read_all(&mut open(file.to_bytes(&track)));
+    let data: Vec<&[u8]> = packets.iter().map(|p| &p.data[..]).collect();
+    assert_eq!(data, [&[0xaa, 0xbb, 1, 2][..], &[0xaa, 0xbb, 3, 4][..], &[0xaa, 0xbb, 5, 6][..]]);
+    // Durations are those of the restored frames.
+    assert_eq!(packets[0].dur.get(), 2);
+}
+
+#[test]
+fn zlib_compressed_frames_are_inflated() {
+    let short = b"abcabcabcabc-the quick brown fox-abcabcabc";
+    let long: Vec<u8> =
+        (0..1500usize)
+            .map(|i| {
+                if i % 17 != 0 {
+                    b"etaoin shrdlu"[(i * i * 7 + i / 3) % 13]
+                }
+                else {
+                    (i * 31) as u8
+                }
+            })
+            .collect();
+
+    // A stored block, a fixed Huffman block, and a dynamic Huffman block (made with zlib).
+    let stored: &[u8] = &[
+        0x78, 0x01, 0x01, 0x2a, 0x00, 0xd5, 0xff, 0x61, 0x62, 0x63, 0x61, 0x62, 0x63, 0x61, 0x62,
+        0x63, 0x61, 0x62, 0x63, 0x2d, 0x74, 0x68, 0x65, 0x20, 0x71, 0x75, 0x69, 0x63, 0x6b, 0x20,
+        0x62, 0x72, 0x6f, 0x77, 0x6e, 0x20, 0x66, 0x6f, 0x78, 0x2d, 0x61, 0x62, 0x63, 0x61, 0x62,
+        0x63, 0x61, 0x62, 0x63, 0x4f, 0x92, 0x0f, 0x98,
+    ];
+    let fixed: &[u8] = &[
+        0x78, 0x01, 0x4b, 0x4c, 0x4a, 0x4e, 0x84, 0x21, 0xdd, 0x92, 0x8c, 0x54, 0x85, 0xc2, 0xd2,
+        0xcc, 0xe4, 0x6c, 0x85, 0xa4, 0xa2, 0xfc, 0xf2, 0x3c, 0x85, 0xb4, 0xfc, 0x0a, 0x5d, 0xb8,
+        0x2c, 0x00, 0x4f, 0x92, 0x0f, 0x98,
+    ];
+    let dynamic: &[u8] = &[
+        0x78, 0xda, 0x5d, 0xd2, 0x27, 0x4c, 0x04, 0x51, 0x14, 0x85, 0x61, 0x34, 0x55, 0x53, 0x33,
+        0x92, 0xea, 0x69, 0x9e, 0xe6, 0x69, 0xee, 0x25, 0xef, 0xc1, 0xbc, 0xe4, 0x66, 0x26, 0xd9,
+        0x3b, 0x03, 0x78, 0x9a, 0xa7, 0x79, 0x9a, 0xa7, 0x79, 0x9a, 0xa7, 0x79, 0x9a, 0xa7, 0x79,
+        0xfa, 0x26, 0x9b, 0xcd, 0xbe, 0xdf, 0x9f, 0xdc, 0x93, 0xdc, 0xf3, 0x55, 0xa9, 0xc9, 0x0b,
+        0xaa, 0x1a, 0x4b, 0x96, 0x88, 0x17, 0x4d, 0x1b, 0x72, 0x11, 0x67, 0x12, 0x6b, 0xe2, 0x54,
+        0x34, 0x49, 0x4d, 0xda, 0x16, 0xd9, 0x2c, 0x72, 0x15, 0xb1, 0x9e, 0x62, 0xcc, 0x55, 0xc4,
+        0x06, 0x8b, 0x31, 0x5f, 0x11, 0x1b, 0x2b, 0x5f, 0x2b, 0xc5, 0xa6, 0xcb, 0xd7, 0x4a, 0x31,
+        0x1f, 0x96, 0xba, 0x7c, 0x21, 0x2c, 0xf5, 0xd1, 0x6a, 0x58, 0x2a, 0x7e, 0x2b, 0x2c, 0xd5,
+        0x64, 0x3f, 0x2c, 0xd5, 0xf8, 0x24, 0x2c, 0xb5, 0xe6, 0x32, 0x2c, 0x35, 0xf9, 0x5d, 0x58,
+        0x2a, 0xf2, 0x1c, 0x96, 0xda, 0xec, 0xc3, 0xe1, 0x21, 0xbf, 0x0e, 0x0f, 0xa9, 0xf7, 0x78,
+        0x48, 0xab, 0xe0, 0x21, 0xdd, 0x8a, 0x87, 0x0c, 0x28, 0x1e, 0x32, 0x6a, 0xf1, 0x90, 0x29,
+        0xac, 0xe0, 0x62, 0xac, 0xe0, 0xe7, 0xb1, 0x82, 0xac, 0x60, 0x05, 0xdd, 0xc4, 0x0a, 0xba,
+        0x87, 0x15, 0xec, 0x31, 0x56, 0x30, 0x17, 0x58, 0x41, 0x6e, 0xb1, 0x82, 0x7d, 0xc2, 0x0a,
+        0xf2, 0x8e, 0x15, 0xd2, 0x1f, 0xac, 0x20, 0x75, 0x58, 0x21, 0x6e, 0xc1, 0x0a, 0x85, 0x2e,
+        0xac, 0xe0, 0xfa, 0xb1, 0x42, 0x34, 0x42, 0x96, 0x93, 0x64, 0x39, 0x4b, 0x96, 0x73, 0x64,
+        0xb9, 0x4c, 0x96, 0x1b, 0x64, 0xb9, 0x4b, 0x96, 0x47, 0x64, 0x79, 0x4e, 0x96, 0x37, 0x64,
+        0xf9, 0x48, 0x96, 0x6f, 0x64, 0xf9, 0x4d, 0x96, 0xb5, 0x64, 0xd9, 0x4c, 0x96, 0x9d, 0x64,
+        0xd9, 0x47, 0x96, 0xc3, 0x64, 0x39, 0x41, 0x96, 0x33, 0x64, 0x99, 0x93, 0xe5, 0x12, 0x59,
+        0xae, 0x93, 0xe5, 0x0e, 0x59, 0x1e, 0x92, 0xe5, 0x19, 0x59, 0x5e, 0x93, 0xe5, 0x03, 0x59,
+        0xbe, 0x92, 0xe5, 0x17, 0x59, 0xd6, 0x90, 0x65, 0x13, 0x59, 0x76, 0x90, 0x65, 0x2f, 0x59,
+        0x0e, 0x91, 0xe5, 0x38, 0x59, 0x3a, 0xb2, 0xcc, 0xc8, 0x72, 0x91, 0x2c, 0xd7, 0xc8, 0x72,
+        0x9b, 0x2c, 0x0f, 0xc8, 0xf2, 0x94, 0x2c, 0xaf, 0xc8, 0xf2, 0x9e, 0x2c, 0x5f, 0xc8, 0xf2,
+        0x93, 0x2c, 0xab, 0xc9, 0xb2, 0x91, 0x2c, 0xdb, 0xff, 0x63, 0x7f, 0xf1, 0x2b, 0x6b, 0x68,
+    ];
+
+    let mut file = File::default();
+    file.clusters.push((
+        0,
+        vec![
+            Block::with_data(0, stored.to_vec()),
+            Block::with_data(10, fixed.to_vec()),
+            Block::with_data(20, dynamic.to_vec()),
+        ],
+    ));
+
+    let track = pcm_with_encodings(compression(0, None, 1));
+    let packets = read_all(&mut open(file.to_bytes(&track)));
+    assert_eq!(packets.len(), 3);
+    assert_eq!(&packets[0].data[..], short);
+    assert_eq!(&packets[1].data[..], short);
+    assert_eq!(&packets[2].data[..], &long[..]);
+}
+
+#[test]
+fn corrupt_zlib_frames_are_an_error() {
+    let mut file = File::default();
+    file.clusters.push((0, vec![Block::with_data(0, vec![0x78, 0x01, 0xff, 0xff, 0xff])]));
+    let track = pcm_with_encodings(compression(0, None, 1));
+    assert!(open(file.to_bytes(&track)).next_packet().is_err());
+}
+
+#[test]
+fn frames_of_tracks_with_unrecoverable_contents_are_dropped() {
+    // bzlib (1) and lzo (2) are not supported.
+    for algo in [1, 2] {
+        let mut file = File::default();
+        file.clusters
+            .push((0, vec![Block::with_data(0, vec![1, 2]), Block::with_data(10, vec![3, 4])]));
+        let mut reader = open(file.to_bytes(&pcm_with_encodings(compression(algo, None, 1))));
+
+        assert!(reader.tracks()[0].codec_params.is_none());
+        assert!(reader.next_packet().unwrap().is_none());
+    }
+}
+
+#[test]
+fn codec_private_is_decoded() {
+    // Header stripping of the CodecPrivate (scope 2) only. The frames are untouched.
+    let mut track = Track::flac();
+    let private = track.codec_private.take().unwrap();
+    track.codec_private = Some(private[2..].to_vec());
+    track.content_encodings = compression(3, Some(&private[..2]), 2);
+
+    let mut file = File::default();
+    file.clusters.push((0, vec![Block::new(0, 100)]));
+    let mut reader = open(file.to_bytes(&track));
+
+    assert!(reader.tracks()[0].codec_params.is_some());
+    assert_eq!(reader.next_packet().unwrap().unwrap().data.len(), 100);
 }

@@ -189,6 +189,11 @@ pub(crate) fn extract_frames(
         Some(pts) => track.snap_pts(pts),
         _ => return Ok(false),
     };
+    // The frames of a track whose contents cannot be recovered are dropped.
+    if track.content.is_unsupported() {
+        return Ok(true);
+    }
+
     let first_frame = frames.len();
 
     // `DiscardPadding` is a duration (in nanoseconds) of padding at the end of the block (if
@@ -211,7 +216,7 @@ pub(crate) fn extract_frames(
             let header_len = reader.pos() as usize;
             let mut data = std::mem::take(&mut block).into_vec();
             data.drain(..header_len);
-            let data = data.into_boxed_slice();
+            let data = track.content.decode(data.into_boxed_slice())?;
 
             let mut dur = FrameDurationIter::new(block_duration, track, 1).next();
 
@@ -267,9 +272,17 @@ pub(crate) fn extract_frames(
         let last = sizes.len() - 1;
 
         for (i, size) in sizes.into_iter().enumerate() {
-            let data = Box::from(&block[offset..offset + size]);
+            let data = track.content.decode(Box::from(&block[offset..offset + size]))?;
             offset += size;
-            let dur = dur_it.next();
+            let mut dur = dur_it.next();
+
+            // PCM frames have a duration that can be calculated exactly from their size if it is
+            // not otherwise specified.
+            if dur.get() == 0 {
+                if let Some(pcm_dur) = track.pcm_duration(data.len()) {
+                    dur = pcm_dur;
+                }
+            }
 
             frames.push_back(Frame { track_num, pts, data, dur, trim_start: 0, trim_end: 0 });
 
