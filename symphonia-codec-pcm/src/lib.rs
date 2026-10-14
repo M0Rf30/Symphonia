@@ -39,7 +39,17 @@ use symphonia_core::codecs::audio::well_known::{CODEC_ID_PCM_U24LE, CODEC_ID_PCM
 // Floating point PCM codecs
 use symphonia_core::codecs::audio::well_known::{CODEC_ID_PCM_F32BE, CODEC_ID_PCM_F32LE};
 use symphonia_core::codecs::audio::well_known::{CODEC_ID_PCM_F64BE, CODEC_ID_PCM_F64LE};
+// Planar PCM codecs
+use symphonia_core::codecs::audio::well_known::{
+    CODEC_ID_PCM_F32BE_PLANAR, CODEC_ID_PCM_F32LE_PLANAR, CODEC_ID_PCM_F64BE_PLANAR,
+    CODEC_ID_PCM_F64LE_PLANAR, CODEC_ID_PCM_S8_PLANAR, CODEC_ID_PCM_S16BE_PLANAR,
+    CODEC_ID_PCM_S16LE_PLANAR, CODEC_ID_PCM_S24BE_PLANAR, CODEC_ID_PCM_S24LE_PLANAR,
+    CODEC_ID_PCM_S32BE_PLANAR, CODEC_ID_PCM_S32LE_PLANAR, CODEC_ID_PCM_U8_PLANAR,
+    CODEC_ID_PCM_U16BE_PLANAR, CODEC_ID_PCM_U16LE_PLANAR, CODEC_ID_PCM_U24BE_PLANAR,
+    CODEC_ID_PCM_U24LE_PLANAR, CODEC_ID_PCM_U32BE_PLANAR, CODEC_ID_PCM_U32LE_PLANAR,
+};
 // G711 ALaw and MuLaw PCM codecs
+use symphonia_core::audio::AudioMut;
 use symphonia_core::audio::conv::IntoSample;
 use symphonia_core::audio::sample::SampleFormat;
 use symphonia_core::codecs::audio::well_known::{CODEC_ID_PCM_ALAW, CODEC_ID_PCM_MULAW};
@@ -48,17 +58,30 @@ use symphonia_core::io::ReadBytes;
 use symphonia_core::packet::PacketRef;
 
 macro_rules! read_pcm {
-    ($buf:expr, $fmt:tt, $read:expr) => {
+    ($buf:expr, $planar:expr, $num_frames:expr, $fmt:tt, $read:expr) => {
         // Get buffer of the correct sample format.
         match &mut $buf {
             GenericAudioBuffer::$fmt(buf) => {
-                // Read samples.
-                buf.render_with(None, |idx, audio_planes| -> Result<()> {
-                    for plane in audio_planes.iter_mut() {
-                        plane[idx] = $read;
+                if $planar {
+                    // A planar packet holds every frame of the first channel, then every frame of
+                    // the second channel, and so on.
+                    buf.render_uninit(Some($num_frames));
+                    for plane in buf.iter_planes_mut() {
+                        for sample in plane.iter_mut() {
+                            *sample = $read;
+                        }
                     }
-                    Ok(())
-                })
+                    Ok($num_frames)
+                }
+                else {
+                    // Read samples.
+                    buf.render_with(None, |idx, audio_planes| -> Result<()> {
+                        for plane in audio_planes.iter_mut() {
+                            plane[idx] = $read;
+                        }
+                        Ok(())
+                    })
+                }
             }
             _ => unreachable!(),
         }
@@ -152,9 +175,39 @@ fn is_supported_pcm_codec(codec_id: AudioCodecId) -> bool {
     )
 }
 
+/// Map a planar PCM codec to the interleaved codec with the same sample coding.
+fn interleaved_codec(codec_id: AudioCodecId) -> Option<AudioCodecId> {
+    let interleaved = match codec_id {
+        CODEC_ID_PCM_S32LE_PLANAR => CODEC_ID_PCM_S32LE,
+        CODEC_ID_PCM_S32BE_PLANAR => CODEC_ID_PCM_S32BE,
+        CODEC_ID_PCM_S24LE_PLANAR => CODEC_ID_PCM_S24LE,
+        CODEC_ID_PCM_S24BE_PLANAR => CODEC_ID_PCM_S24BE,
+        CODEC_ID_PCM_S16LE_PLANAR => CODEC_ID_PCM_S16LE,
+        CODEC_ID_PCM_S16BE_PLANAR => CODEC_ID_PCM_S16BE,
+        CODEC_ID_PCM_S8_PLANAR => CODEC_ID_PCM_S8,
+        CODEC_ID_PCM_U32LE_PLANAR => CODEC_ID_PCM_U32LE,
+        CODEC_ID_PCM_U32BE_PLANAR => CODEC_ID_PCM_U32BE,
+        CODEC_ID_PCM_U24LE_PLANAR => CODEC_ID_PCM_U24LE,
+        CODEC_ID_PCM_U24BE_PLANAR => CODEC_ID_PCM_U24BE,
+        CODEC_ID_PCM_U16LE_PLANAR => CODEC_ID_PCM_U16LE,
+        CODEC_ID_PCM_U16BE_PLANAR => CODEC_ID_PCM_U16BE,
+        CODEC_ID_PCM_U8_PLANAR => CODEC_ID_PCM_U8,
+        CODEC_ID_PCM_F32LE_PLANAR => CODEC_ID_PCM_F32LE,
+        CODEC_ID_PCM_F32BE_PLANAR => CODEC_ID_PCM_F32BE,
+        CODEC_ID_PCM_F64LE_PLANAR => CODEC_ID_PCM_F64LE,
+        CODEC_ID_PCM_F64BE_PLANAR => CODEC_ID_PCM_F64BE,
+        _ => return None,
+    };
+    Some(interleaved)
+}
+
 /// Pulse Code Modulation (PCM) decoder for all raw PCM, and log-PCM codecs.
 pub struct PcmDecoder {
     params: AudioCodecParameters,
+    /// The interleaved codec whose sample coding is decoded.
+    codec: AudioCodecId,
+    /// True if the packets store each channel contiguously instead of interleaved.
+    planar: bool,
     /// The number of bits a coded sample should be shifted up to reach the decoded sample width.
     shift: u32,
     /// The number of bytes per coded frame.
@@ -164,8 +217,14 @@ pub struct PcmDecoder {
 
 impl PcmDecoder {
     pub fn try_new(params: &AudioCodecParameters, _opts: &AudioDecoderOptions) -> Result<Self> {
+        // Planar codecs code samples like their interleaved counterparts.
+        let (codec, planar) = match interleaved_codec(params.codec) {
+            Some(codec) => (codec, true),
+            None => (params.codec, false),
+        };
+
         // This decoder only supports certain PCM codecs.
-        if !is_supported_pcm_codec(params.codec) {
+        if !is_supported_pcm_codec(codec) {
             return unsupported_error("pcm: invalid codec");
         }
 
@@ -191,7 +250,7 @@ impl PcmDecoder {
         let capacity = params.max_frames_per_packet.unwrap_or(0) as usize;
 
         // Determine the sample format for the audio buffer based on the codec ID.
-        let (sample_format, sample_format_width, bytes_per_coded_sample) = match params.codec {
+        let (sample_format, sample_format_width, bytes_per_coded_sample) = match codec {
             CODEC_ID_PCM_S32LE | CODEC_ID_PCM_S32BE => (SampleFormat::S32, 32, 4),
             CODEC_ID_PCM_S24LE | CODEC_ID_PCM_S24BE => (SampleFormat::S24, 24, 3),
             CODEC_ID_PCM_S16LE | CODEC_ID_PCM_S16BE => (SampleFormat::S16, 16, 2),
@@ -235,7 +294,7 @@ impl PcmDecoder {
 
         // A-Law, Mu-Law, and floating point codecs have an implicit coded sample bit-width. Check
         // the decoded and coded widths are not illogical.
-        match params.codec {
+        match codec {
             CODEC_ID_PCM_F32LE | CODEC_ID_PCM_F32BE | CODEC_ID_PCM_F64LE | CODEC_ID_PCM_F64BE
             | CODEC_ID_PCM_ALAW | CODEC_ID_PCM_MULAW => {
                 if decoded_width != sample_format_width {
@@ -258,7 +317,7 @@ impl PcmDecoder {
         // Create an audio buffer of the correct sample format.
         let buf = GenericAudioBuffer::new(sample_format, spec, capacity);
 
-        Ok(PcmDecoder { params: params.clone(), shift, bytes_per_coded_frame, buf })
+        Ok(PcmDecoder { params: params.clone(), codec, planar, shift, bytes_per_coded_frame, buf })
     }
 
     fn decode_inner(&mut self, packet: &PacketRef<'_>) -> Result<()> {
@@ -271,85 +330,157 @@ impl PcmDecoder {
 
         let mut reader = packet.as_buf_reader();
 
-        let _ = match self.params.codec {
+        let _ = match self.codec {
             CODEC_ID_PCM_S32LE => {
-                read_pcm!(self.buf, S32, (reader.read_i32()? << self.shift).into_sample())
+                read_pcm!(
+                    self.buf,
+                    self.planar,
+                    num_frames,
+                    S32,
+                    (reader.read_i32()? << self.shift).into_sample()
+                )
             }
             CODEC_ID_PCM_S32BE => {
-                read_pcm!(self.buf, S32, (reader.read_be_i32()? << self.shift).into_sample())
+                read_pcm!(
+                    self.buf,
+                    self.planar,
+                    num_frames,
+                    S32,
+                    (reader.read_be_i32()? << self.shift).into_sample()
+                )
             }
             CODEC_ID_PCM_S24LE => {
-                read_pcm!(self.buf, S24, ((reader.read_i24()? << 8) << self.shift).into_sample())
+                read_pcm!(
+                    self.buf,
+                    self.planar,
+                    num_frames,
+                    S24,
+                    ((reader.read_i24()? << 8) << self.shift).into_sample()
+                )
             }
             CODEC_ID_PCM_S24BE => {
-                read_pcm!(self.buf, S24, ((reader.read_be_i24()? << 8) << self.shift).into_sample())
+                read_pcm!(
+                    self.buf,
+                    self.planar,
+                    num_frames,
+                    S24,
+                    ((reader.read_be_i24()? << 8) << self.shift).into_sample()
+                )
             }
             CODEC_ID_PCM_S16LE => {
-                read_pcm!(self.buf, S16, (reader.read_i16()? << self.shift).into_sample())
+                read_pcm!(
+                    self.buf,
+                    self.planar,
+                    num_frames,
+                    S16,
+                    (reader.read_i16()? << self.shift).into_sample()
+                )
             }
             CODEC_ID_PCM_S16BE => {
-                read_pcm!(self.buf, S16, (reader.read_be_i16()? << self.shift).into_sample())
+                read_pcm!(
+                    self.buf,
+                    self.planar,
+                    num_frames,
+                    S16,
+                    (reader.read_be_i16()? << self.shift).into_sample()
+                )
             }
             CODEC_ID_PCM_S8 => {
-                read_pcm!(self.buf, S8, (reader.read_i8()? << self.shift).into_sample())
+                read_pcm!(
+                    self.buf,
+                    self.planar,
+                    num_frames,
+                    S8,
+                    (reader.read_i8()? << self.shift).into_sample()
+                )
             }
             CODEC_ID_PCM_U32LE => {
-                read_pcm!(self.buf, U32, (reader.read_u32()? << self.shift).into_sample())
+                read_pcm!(
+                    self.buf,
+                    self.planar,
+                    num_frames,
+                    U32,
+                    (reader.read_u32()? << self.shift).into_sample()
+                )
             }
             CODEC_ID_PCM_U32BE => {
-                read_pcm!(self.buf, U32, (reader.read_be_u32()? << self.shift).into_sample())
+                read_pcm!(
+                    self.buf,
+                    self.planar,
+                    num_frames,
+                    U32,
+                    (reader.read_be_u32()? << self.shift).into_sample()
+                )
             }
             CODEC_ID_PCM_U24LE => {
-                read_pcm!(self.buf, U24, ((reader.read_u24()? << 8) << self.shift).into_sample())
+                read_pcm!(
+                    self.buf,
+                    self.planar,
+                    num_frames,
+                    U24,
+                    ((reader.read_u24()? << 8) << self.shift).into_sample()
+                )
             }
             CODEC_ID_PCM_U24BE => {
-                read_pcm!(self.buf, U24, ((reader.read_be_u24()? << 8) << self.shift).into_sample())
+                read_pcm!(
+                    self.buf,
+                    self.planar,
+                    num_frames,
+                    U24,
+                    ((reader.read_be_u24()? << 8) << self.shift).into_sample()
+                )
             }
             CODEC_ID_PCM_U16LE => {
-                read_pcm!(self.buf, U16, (reader.read_u16()? << self.shift).into_sample())
+                read_pcm!(
+                    self.buf,
+                    self.planar,
+                    num_frames,
+                    U16,
+                    (reader.read_u16()? << self.shift).into_sample()
+                )
             }
             CODEC_ID_PCM_U16BE => {
-                read_pcm!(self.buf, U16, (reader.read_be_u16()? << self.shift).into_sample())
+                read_pcm!(
+                    self.buf,
+                    self.planar,
+                    num_frames,
+                    U16,
+                    (reader.read_be_u16()? << self.shift).into_sample()
+                )
             }
             CODEC_ID_PCM_U8 => {
-                read_pcm!(self.buf, U8, (reader.read_u8()? << self.shift).into_sample())
+                read_pcm!(
+                    self.buf,
+                    self.planar,
+                    num_frames,
+                    U8,
+                    (reader.read_u8()? << self.shift).into_sample()
+                )
             }
             CODEC_ID_PCM_F32LE => {
-                read_pcm!(self.buf, F32, reader.read_f32()?)
+                read_pcm!(self.buf, self.planar, num_frames, F32, reader.read_f32()?)
             }
             CODEC_ID_PCM_F32BE => {
-                read_pcm!(self.buf, F32, reader.read_be_f32()?)
+                read_pcm!(self.buf, self.planar, num_frames, F32, reader.read_be_f32()?)
             }
             CODEC_ID_PCM_F64LE => {
-                read_pcm!(self.buf, F64, reader.read_f64()?)
+                read_pcm!(self.buf, self.planar, num_frames, F64, reader.read_f64()?)
             }
             CODEC_ID_PCM_F64BE => {
-                read_pcm!(self.buf, F64, reader.read_be_f64()?)
+                read_pcm!(self.buf, self.planar, num_frames, F64, reader.read_be_f64()?)
             }
             CODEC_ID_PCM_ALAW => {
-                read_pcm!(self.buf, S16, alaw_to_linear(reader.read_u8()?))
+                read_pcm!(self.buf, self.planar, num_frames, S16, alaw_to_linear(reader.read_u8()?))
             }
             CODEC_ID_PCM_MULAW => {
-                read_pcm!(self.buf, S16, mulaw_to_linear(reader.read_u8()?))
+                read_pcm!(
+                    self.buf,
+                    self.planar,
+                    num_frames,
+                    S16,
+                    mulaw_to_linear(reader.read_u8()?)
+                )
             }
-            // CODEC_ID_PCM_S32LE_PLANAR =>
-            // CODEC_ID_PCM_S32BE_PLANAR =>
-            // CODEC_ID_PCM_S24LE_PLANAR =>
-            // CODEC_ID_PCM_S24BE_PLANAR =>
-            // CODEC_ID_PCM_S16LE_PLANAR =>
-            // CODEC_ID_PCM_S16BE_PLANAR =>
-            // CODEC_ID_PCM_S8_PLANAR    =>
-            // CODEC_ID_PCM_U32LE_PLANAR =>
-            // CODEC_ID_PCM_U32BE_PLANAR =>
-            // CODEC_ID_PCM_U24LE_PLANAR =>
-            // CODEC_ID_PCM_U24BE_PLANAR =>
-            // CODEC_ID_PCM_U16LE_PLANAR =>
-            // CODEC_ID_PCM_U16BE_PLANAR =>
-            // CODEC_ID_PCM_U8_PLANAR    =>
-            // CODEC_ID_PCM_F32LE_PLANAR =>
-            // CODEC_ID_PCM_F32BE_PLANAR =>
-            // CODEC_ID_PCM_F64LE_PLANAR =>
-            // CODEC_ID_PCM_F64BE_PLANAR =>
             _ => unsupported_error("pcm: codec is unsupported"),
         };
 
@@ -491,96 +622,160 @@ impl RegisterableAudioDecoder for PcmDecoder {
             ),
             support_audio_codec!(CODEC_ID_PCM_ALAW, "pcm_alaw", "PCM A-law"),
             support_audio_codec!(CODEC_ID_PCM_MULAW, "pcm_mulaw", "PCM Mu-law"),
-            // support_audio_codec!(
-            //     CODEC_ID_PCM_S32LE_PLANAR,
-            //     "pcm_s32le_planar",
-            //     "PCM Signed 32-bit Little-Endian Planar"
-            // ),
-            // support_audio_codec!(
-            //     CODEC_ID_PCM_S32BE_PLANAR,
-            //     "pcm_s32be_planar",
-            //     "PCM Signed 32-bit Big-Endian Planar"
-            // ),
-            // support_audio_codec!(
-            //     CODEC_ID_PCM_S24LE_PLANAR,
-            //     "pcm_s24le_planar",
-            //     "PCM Signed 24-bit Little-Endian Planar"
-            // ),
-            // support_audio_codec!(
-            //     CODEC_ID_PCM_S24BE_PLANAR,
-            //     "pcm_s24be_planar",
-            //     "PCM Signed 24-bit Big-Endian Planar"
-            // ),
-            // support_audio_codec!(
-            //     CODEC_ID_PCM_S16LE_PLANAR,
-            //     "pcm_s16le_planar",
-            //     "PCM Signed 16-bit Little-Endian Planar"
-            // ),
-            // support_audio_codec!(
-            //     CODEC_ID_PCM_S16BE_PLANAR,
-            //     "pcm_s16be_planar",
-            //     "PCM Signed 16-bit Big-Endian Planar"
-            // ),
-            // support_audio_codec!(
-            //     CODEC_ID_PCM_S8_PLANAR   ,
-            //     "pcm_s8_planar"   ,
-            //     "PCM Signed 8-bit Planar"
-            // ),
-            // support_audio_codec!(
-            //     CODEC_ID_PCM_U32LE_PLANAR,
-            //     "pcm_u32le_planar",
-            //     "PCM Unsigned 32-bit Little-Endian Planar"
-            // ),
-            // support_audio_codec!(
-            //     CODEC_ID_PCM_U32BE_PLANAR,
-            //     "pcm_u32be_planar",
-            //     "PCM Unsigned 32-bit Big-Endian Planar"
-            // ),
-            // support_audio_codec!(
-            //     CODEC_ID_PCM_U24LE_PLANAR,
-            //     "pcm_u24le_planar",
-            //     "PCM Unsigned 24-bit Little-Endian Planar"
-            // ),
-            // support_audio_codec!(
-            //     CODEC_ID_PCM_U24BE_PLANAR,
-            //     "pcm_u24be_planar",
-            //     "PCM Unsigned 24-bit Big-Endian Planar"
-            // ),
-            // support_audio_codec!(
-            //     CODEC_ID_PCM_U16LE_PLANAR,
-            //     "pcm_u16le_planar",
-            //     "PCM Unsigned 16-bit Little-Endian Planar"
-            // ),
-            // support_audio_codec!(
-            //     CODEC_ID_PCM_U16BE_PLANAR,
-            //     "pcm_u16be_planar",
-            //     "PCM Unsigned 16-bit Big-Endian Planar"
-            // ),
-            // support_audio_codec!(
-            //     CODEC_ID_PCM_U8_PLANAR   ,
-            //     "pcm_u8_planar"   ,
-            //     "PCM Unsigned 8-bit Planar"
-            // ),
-            // support_audio_codec!(
-            //     CODEC_ID_PCM_F32LE_PLANAR,
-            //     "pcm_f32le_planar",
-            //     "PCM 32-bit Little-Endian Floating Point Planar"
-            // ),
-            // support_audio_codec!(
-            //     CODEC_ID_PCM_F32BE_PLANAR,
-            //     "pcm_f32be_planar",
-            //     "PCM 32-bit Big-Endian Floating Point Planar"
-            // ),
-            // support_audio_codec!(
-            //     CODEC_ID_PCM_F64LE_PLANAR,
-            //     "pcm_f64le_planar",
-            //     "PCM 64-bit Little-Endian Floating Point Planar"
-            // ),
-            // support_audio_codec!(
-            //     CODEC_ID_PCM_F64BE_PLANAR,
-            //     "pcm_f64be_planar",
-            //     "PCM 64-bit Big-Endian Floating Point Planar"
-            // ),
+            support_audio_codec!(
+                CODEC_ID_PCM_S32LE_PLANAR,
+                "pcm_s32le_planar",
+                "PCM Signed 32-bit Little-Endian Planar"
+            ),
+            support_audio_codec!(
+                CODEC_ID_PCM_S32BE_PLANAR,
+                "pcm_s32be_planar",
+                "PCM Signed 32-bit Big-Endian Planar"
+            ),
+            support_audio_codec!(
+                CODEC_ID_PCM_S24LE_PLANAR,
+                "pcm_s24le_planar",
+                "PCM Signed 24-bit Little-Endian Planar"
+            ),
+            support_audio_codec!(
+                CODEC_ID_PCM_S24BE_PLANAR,
+                "pcm_s24be_planar",
+                "PCM Signed 24-bit Big-Endian Planar"
+            ),
+            support_audio_codec!(
+                CODEC_ID_PCM_S16LE_PLANAR,
+                "pcm_s16le_planar",
+                "PCM Signed 16-bit Little-Endian Planar"
+            ),
+            support_audio_codec!(
+                CODEC_ID_PCM_S16BE_PLANAR,
+                "pcm_s16be_planar",
+                "PCM Signed 16-bit Big-Endian Planar"
+            ),
+            support_audio_codec!(
+                CODEC_ID_PCM_S8_PLANAR,
+                "pcm_s8_planar",
+                "PCM Signed 8-bit Planar"
+            ),
+            support_audio_codec!(
+                CODEC_ID_PCM_U32LE_PLANAR,
+                "pcm_u32le_planar",
+                "PCM Unsigned 32-bit Little-Endian Planar"
+            ),
+            support_audio_codec!(
+                CODEC_ID_PCM_U32BE_PLANAR,
+                "pcm_u32be_planar",
+                "PCM Unsigned 32-bit Big-Endian Planar"
+            ),
+            support_audio_codec!(
+                CODEC_ID_PCM_U24LE_PLANAR,
+                "pcm_u24le_planar",
+                "PCM Unsigned 24-bit Little-Endian Planar"
+            ),
+            support_audio_codec!(
+                CODEC_ID_PCM_U24BE_PLANAR,
+                "pcm_u24be_planar",
+                "PCM Unsigned 24-bit Big-Endian Planar"
+            ),
+            support_audio_codec!(
+                CODEC_ID_PCM_U16LE_PLANAR,
+                "pcm_u16le_planar",
+                "PCM Unsigned 16-bit Little-Endian Planar"
+            ),
+            support_audio_codec!(
+                CODEC_ID_PCM_U16BE_PLANAR,
+                "pcm_u16be_planar",
+                "PCM Unsigned 16-bit Big-Endian Planar"
+            ),
+            support_audio_codec!(
+                CODEC_ID_PCM_U8_PLANAR,
+                "pcm_u8_planar",
+                "PCM Unsigned 8-bit Planar"
+            ),
+            support_audio_codec!(
+                CODEC_ID_PCM_F32LE_PLANAR,
+                "pcm_f32le_planar",
+                "PCM 32-bit Little-Endian Floating Point Planar"
+            ),
+            support_audio_codec!(
+                CODEC_ID_PCM_F32BE_PLANAR,
+                "pcm_f32be_planar",
+                "PCM 32-bit Big-Endian Floating Point Planar"
+            ),
+            support_audio_codec!(
+                CODEC_ID_PCM_F64LE_PLANAR,
+                "pcm_f64le_planar",
+                "PCM 64-bit Little-Endian Floating Point Planar"
+            ),
+            support_audio_codec!(
+                CODEC_ID_PCM_F64BE_PLANAR,
+                "pcm_f64be_planar",
+                "PCM 64-bit Big-Endian Floating Point Planar"
+            ),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use symphonia_core::audio::{Audio, Channels};
+    use symphonia_core::units::{Duration, Timestamp};
+
+    /// Decodes one packet and returns each channel's samples.
+    fn decode_planes<S>(
+        codec: AudioCodecId,
+        channels: u16,
+        max_frames: Option<u64>,
+        data: &[u8],
+        get: fn(GenericAudioBufferRef<'_>) -> Vec<Vec<S>>,
+    ) -> Vec<Vec<S>> {
+        let mut params = AudioCodecParameters::new();
+        params.for_codec(codec).with_sample_rate(48000).with_channels(Channels::Discrete(channels));
+        if let Some(max_frames) = max_frames {
+            params.with_max_frames_per_packet(max_frames);
+        }
+        let mut decoder = PcmDecoder::try_new(&params, &AudioDecoderOptions::default()).unwrap();
+        let packet = PacketRef::new(0, Timestamp::new(0), Duration::new(0), data);
+        get(decoder.decode_ref(&packet).unwrap())
+    }
+
+    fn s16_planes(buf: GenericAudioBufferRef<'_>) -> Vec<Vec<i16>> {
+        match buf {
+            GenericAudioBufferRef::S16(b) => b.iter_planes().map(|p| p.to_vec()).collect(),
+            _ => unreachable!(),
+        }
+    }
+
+    fn f64_planes(buf: GenericAudioBufferRef<'_>) -> Vec<Vec<f64>> {
+        match buf {
+            GenericAudioBufferRef::F64(b) => b.iter_planes().map(|p| p.to_vec()).collect(),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn s16le_planar_reads_channels_contiguously() {
+        let left = [1i16, 2, 3];
+        let right = [-1i16, -2, -3];
+        let data: Vec<u8> = left.iter().chain(&right).flat_map(|s| s.to_le_bytes()).collect();
+        let expected = vec![left.to_vec(), right.to_vec()];
+
+        // The packet must decode to exactly its frames, also when the buffer is larger.
+        for max_frames in [None, Some(3), Some(64)] {
+            let planes = decode_planes(CODEC_ID_PCM_S16LE_PLANAR, 2, max_frames, &data, s16_planes);
+            assert_eq!(planes, expected);
+        }
+    }
+
+    #[test]
+    fn f64be_planar_reads_channels_contiguously() {
+        let left = [0.5f64, -0.25];
+        let right = [0.125f64, 1.0];
+        let data: Vec<u8> = left.iter().chain(&right).flat_map(|s| s.to_be_bytes()).collect();
+        let planes = decode_planes(CODEC_ID_PCM_F64BE_PLANAR, 2, None, &data, f64_planes);
+        assert_eq!(planes, vec![left.to_vec(), right.to_vec()]);
     }
 }

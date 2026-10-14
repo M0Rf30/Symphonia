@@ -49,7 +49,7 @@ pub fn try_get_image_info(buf: &[u8]) -> Option<ImageInfo> {
         Parser { marker: &[0x47, 0x49, 0x46, 0x38, 0x37, 0x61], parse: parse_gif },
         Parser { marker: &[0x47, 0x49, 0x46, 0x38, 0x39, 0x61], parse: parse_gif },
         Parser { marker: &[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], parse: parse_png },
-        // TODO: WebP
+        Parser { marker: b"RIFF", parse: parse_webp },
     ];
 
     debug!("detecting format of image starting with: {:02x?}", &buf[..8.min(buf.len())]);
@@ -316,6 +316,59 @@ fn parse_gif(mut reader: BufReader<'_>) -> Result<ImageInfo> {
     Ok(info)
 }
 
+/// Parse a WebP for image information. The layout is specified by RFC 9649.
+fn parse_webp(mut reader: BufReader<'_>) -> Result<ImageInfo> {
+    // The RIFF size, then the WEBP form type.
+    reader.ignore_bytes(4)?;
+    if reader.read_quad_bytes()? != *b"WEBP" {
+        return decode_error("meta (webp): not a webp image");
+    }
+
+    let chunk_id = reader.read_quad_bytes()?;
+    reader.ignore_bytes(4)?;
+
+    let (width, height, alpha) = match &chunk_id {
+        // Simple lossy: a VP8 frame tag (3 bytes), start code, then 14-bit width and height
+        // (RFC 6386 section 9.1). Lossy images without a VP8X header have no alpha.
+        b"VP8 " => {
+            reader.ignore_bytes(3)?;
+            if reader.read_triple_bytes()? != [0x9d, 0x01, 0x2a] {
+                return decode_error("meta (webp): invalid vp8 start code");
+            }
+            let width = reader.read_u16()? & 0x3fff;
+            let height = reader.read_u16()? & 0x3fff;
+            (u32::from(width), u32::from(height), false)
+        }
+        // Simple lossless: signature, then 14-bit width - 1, 14-bit height - 1, and alpha_is_used.
+        b"VP8L" => {
+            if reader.read_u8()? != 0x2f {
+                return decode_error("meta (webp): invalid vp8l signature");
+            }
+            let bits = reader.read_u32()?;
+            ((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1, bits & (1 << 28) != 0)
+        }
+        // Extended: flags (alpha is bit 4), 3 reserved bytes, then 24-bit canvas width - 1 and
+        // height - 1.
+        b"VP8X" => {
+            let flags = reader.read_u8()?;
+            reader.ignore_bytes(3)?;
+            let width = reader.read_u24()? + 1;
+            let height = reader.read_u24()? + 1;
+            (width, height, flags & 0x10 != 0)
+        }
+        _ => return decode_error("meta (webp): unknown first chunk"),
+    };
+
+    let color_model =
+        if alpha { ColorModel::RGBA(non_zero(8)) } else { ColorModel::RGB(non_zero(8)) };
+
+    Ok(ImageInfo {
+        media_type: "image/webp".to_string(),
+        dimensions: Size { width, height },
+        color_mode: ColorMode::Direct(color_model),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,5 +404,50 @@ mod tests {
 
         let info = try_get_image_info(&png).unwrap();
         assert_eq!(info.media_type, "image/png");
+    }
+
+    fn webp(chunk_id: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut webp = b"RIFF".to_vec();
+        webp.extend_from_slice(&(12 + payload.len() as u32).to_le_bytes());
+        webp.extend_from_slice(b"WEBP");
+        webp.extend_from_slice(chunk_id);
+        webp.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        webp.extend_from_slice(payload);
+        webp
+    }
+
+    fn webp_info(chunk_id: &[u8; 4], payload: &[u8]) -> (u32, u32, ColorMode) {
+        let info = try_get_image_info(&webp(chunk_id, payload)).unwrap();
+        assert_eq!(info.media_type, "image/webp");
+        (info.dimensions.width, info.dimensions.height, info.color_mode)
+    }
+
+    #[test]
+    fn verify_webp_dimensions_and_alpha() {
+        let rgb = ColorMode::Direct(ColorModel::RGB(non_zero(8)));
+        let rgba = ColorMode::Direct(ColorModel::RGBA(non_zero(8)));
+
+        // Lossy 320x240; the top two bits of each dimension are the scale and are ignored.
+        let vp8 = [0, 0, 0, 0x9d, 0x01, 0x2a, 0x40, 0x41, 0xf0, 0xc0];
+        assert_eq!(webp_info(b"VP8 ", &vp8), (320, 240, rgb));
+
+        // Lossless 16383x2 with alpha: width - 1 = 0x3ffe, height - 1 = 1, alpha bit 28.
+        let bits: u32 = 0x3ffe | (1 << 14) | (1 << 28);
+        let mut vp8l = vec![0x2f];
+        vp8l.extend_from_slice(&bits.to_le_bytes());
+        assert_eq!(webp_info(b"VP8L", &vp8l), (16383, 2, rgba));
+
+        // Extended 1x16777216 canvas, without and with the alpha flag.
+        let vp8x = [0x00, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff];
+        assert_eq!(webp_info(b"VP8X", &vp8x), (1, 16_777_216, rgb));
+        let vp8x = [0x10, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff];
+        assert_eq!(webp_info(b"VP8X", &vp8x), (1, 16_777_216, rgba));
+    }
+
+    #[test]
+    fn verify_riff_that_is_not_webp_is_rejected() {
+        let mut wav = webp(b"VP8X", &[0; 10]);
+        wav[8..12].copy_from_slice(b"WAVE");
+        assert!(try_get_image_info(&wav).is_none());
     }
 }
