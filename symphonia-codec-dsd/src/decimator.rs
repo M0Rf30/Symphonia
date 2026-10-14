@@ -1,31 +1,67 @@
 // DSD Decimation Orchestrator
-// Coordinates CIC and FIR filters for high-quality DSD-to-PCM conversion
+// Coordinates the CIC and FIR filters for DSD-to-PCM conversion
+
+//! DSD to PCM decimation.
+//!
+//! A 1-bit DSD stream is converted to PCM by a chain of linear phase low-pass filters that
+//! decimate:
+//!
+//! 1. A [CIC filter](crate::cic) of 5 to 8 stages, evaluated exactly with integer arithmetic
+//!    directly on the packed bits, decimates by `R / 2^h` to a rate of `2^h` times the PCM rate.
+//! 2. `h` FIR filters ([`Decimate2`]) of 1 to 3 stages decimate by 2 each. All but the last are
+//!    half-band filters. The last has a transition band from 0.4535 to 0.5465 times the PCM
+//!    rate (20.0 to 24.1 kHz at 44.1 kHz) and compensates the passband droop of the CIC filter.
+//!
+//! The overall response is flat to within 0.001 dB up to 0.4535 times the PCM rate, and every
+//! frequency that aliases into that band is attenuated by at least 100 dB, except at PCM rates
+//! of a quarter or an eighth of the DSD rate, where the CIC filter limits it to 85 and 50 dB.
+//!
+//! The filters have a combined delay of about 1 ms (43 frames at 44.1 kHz), which is
+//! compensated by dropping the output of the start of the stream, so that PCM frame `k` is
+//! aligned with DSD sample `k * R`. At the end of the stream, [`DsdDecimator::flush`] outputs the
+//! frames that the delay holds back.
 
 use crate::cic::CicFilter;
-use crate::fir::FirDecimator;
+use crate::fir::{self, Decimate2};
 
+use log::debug;
 use symphonia_core::codecs::audio::BitOrder;
 use symphonia_core::errors::{Result, decode_error};
 
-use log::debug;
+/// The edge of the passband, as a fraction of the PCM rate: 20 kHz at 44.1 kHz.
+const PASSBAND_FRACTION: f64 = 20_000.0 / 44_100.0;
+
+/// The smallest decimation ratio of the CIC filter, where it is evaluated on whole nibbles.
+const MIN_CIC_DECIMATION: usize = 4;
+
+/// The largest number of FIR stages.
+const MAX_FIR_STAGES: usize = 3;
+
+/// The DSD idle pattern (silence) with the earliest sample in the most significant bit.
+const DSD_IDLE: u8 = 0x69;
 
 /// DSD decimation configuration
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecimationConfig {
+    /// The DSD sample rate (Hz)
+    pub dsd_rate: u32,
+    /// The PCM sample rate (Hz)
+    pub pcm_rate: u32,
     /// Total decimation ratio
     pub total_decimation: usize,
     /// CIC decimation ratio (first stage)
     pub cic_decimation: usize,
-    /// FIR decimation ratio (second stage)
-    pub fir_decimation: usize,
     /// CIC filter stages
     pub cic_stages: usize,
-    /// FIR filter taps
-    pub fir_taps: usize,
+    /// The number of FIR stages that decimate by 2
+    pub fir_stages: usize,
 }
 
 impl DecimationConfig {
     /// Create decimation config for DSD to PCM conversion
+    ///
+    /// The ratio of the rates must be an integer `R` that is even and at least 8, so
+    /// that 44.1 kHz DSD converts to PCM at 352.8 kHz and below, but not 48 kHz.
     ///
     /// # Arguments
     /// * `dsd_rate` - DSD input rate (e.g., 2822400 for DSD64)
@@ -35,194 +71,277 @@ impl DecimationConfig {
             return decode_error("dsd: invalid sample rates");
         }
 
-        let total_decimation = (dsd_rate / pcm_rate) as usize;
-
-        if total_decimation == 0 || dsd_rate % pcm_rate != 0 {
+        if dsd_rate % pcm_rate != 0 {
             return decode_error("dsd: incompatible sample rates for decimation");
         }
 
-        // Choose CIC and FIR decimation ratios
-        // CIC handles the heavy lifting (high decimation ratios efficiently)
-        // FIR provides final polishing (lower decimation, better filtering)
-        let (cic_decimation, fir_decimation) = Self::choose_decimation_ratios(total_decimation);
+        let total_decimation = (dsd_rate / pcm_rate) as usize;
 
-        // CIC parameters
-        let cic_stages = 4; // 4 stages provides good stopband rejection
-
-        // FIR parameters
-        let fir_taps = if fir_decimation <= 4 {
-            63 // More taps for less decimation
+        if total_decimation < 2 * MIN_CIC_DECIMATION || total_decimation % 2 != 0 {
+            return decode_error(
+                "dsd: PCM rate is not an even divisor of at most 1/8 of the DSD rate",
+            );
         }
-        else {
-            31 // Fewer taps for more decimation
+
+        // As many FIR stages as possible: the CIC filter must decimate by at least 4, and a
+        // higher ratio aliases less into the passband when it is followed by FIR filters.
+        let mut fir_stages = (total_decimation.trailing_zeros() as usize).min(MAX_FIR_STAGES);
+        while total_decimation >> fir_stages < MIN_CIC_DECIMATION {
+            fir_stages -= 1;
+        }
+        let cic_decimation = total_decimation >> fir_stages;
+
+        // The less the CIC filter decimates the more stages it needs to reject what aliases into
+        // the passband when it decimates.
+        let cic_stages = match fir_stages {
+            3 => 5,
+            2 => 7,
+            _ => 8,
         };
 
         debug!(
-            "DSD decimation config: {} -> {} (total: {}, CIC: {}x{}, FIR: {}x{})",
+            "DSD decimation config: {} -> {} (total: {}, CIC: {}x{}, FIR: {} stages)",
+            dsd_rate, pcm_rate, total_decimation, cic_decimation, cic_stages, fir_stages
+        );
+
+        Ok(DecimationConfig {
             dsd_rate,
             pcm_rate,
             total_decimation,
             cic_decimation,
             cic_stages,
-            fir_decimation,
-            fir_taps
-        );
-
-        Ok(DecimationConfig {
-            total_decimation,
-            cic_decimation,
-            fir_decimation,
-            cic_stages,
-            fir_taps,
+            fir_stages,
         })
     }
 
-    /// Choose optimal CIC and FIR decimation ratios
-    fn choose_decimation_ratios(total: usize) -> (usize, usize) {
-        // Try to keep CIC decimation high (efficient) and FIR decimation moderate
-        // Always use at least 2x FIR to ensure proper filtering
-        match total {
-            8 => (4, 2),     // DSD64 -> 352.8k
-            16 => (8, 2),    // DSD64 -> 176.4k or DSD128 -> 352.8k
-            32 => (16, 2),   // DSD128 -> 176.4k or DSD64 -> 88.2k or DSD256 -> 352.8k
-            64 => (32, 2),   // DSD64 -> 44.1k or DSD256 -> 176.4k
-            128 => (64, 2),  // DSD128 -> 44.1k or DSD512 -> 176.4k
-            256 => (128, 2), // DSD256 -> 44.1k
-            512 => (128, 4), // DSD512 -> 44.1k
-            _ => {
-                // General case: try to balance, always use FIR >= 2
-                if total % 64 == 0 {
-                    (64, total / 64)
-                }
-                else if total % 32 == 0 {
-                    (32, total / 32)
-                }
-                else if total % 16 == 0 {
-                    (16, total / 16)
-                }
-                else if total % 8 == 0 {
-                    (8, total / 8)
-                }
-                else if total % 4 == 0 {
-                    (4, total / 4)
-                }
-                else if total % 2 == 0 {
-                    (2, total / 2)
+    /// The highest frequency (Hz) that is passed with a flat response.
+    pub fn passband(&self) -> f64 {
+        PASSBAND_FRACTION * f64::from(self.pcm_rate)
+    }
+
+    /// The sample rate (Hz) at the input of FIR stage `stage`.
+    fn stage_rate(&self, stage: usize) -> f64 {
+        f64::from(self.dsd_rate) / (self.cic_decimation << stage) as f64
+    }
+
+    /// The number of taps of each FIR stage.
+    pub fn fir_taps(&self) -> Vec<usize> {
+        let passband = self.passband();
+        (0..self.fir_stages)
+            .map(|stage| {
+                let rate = self.stage_rate(stage);
+                if stage + 1 < self.fir_stages {
+                    fir::halfband_length(rate, passband)
                 }
                 else {
-                    // Find best factorization
-                    let sqrt = (total as f64).sqrt() as usize;
-                    for i in (2..=sqrt).rev() {
-                        if total % i == 0 {
-                            return (i, total / i);
-                        }
-                    }
-                    (total, 1)
+                    fir::lowpass_length(rate, passband, rate / 2.0 - passband)
                 }
-            }
+            })
+            .collect()
+    }
+
+    /// The number of PCM frames that the delay of the filters shifts the output by.
+    pub fn delay_frames(&self) -> usize {
+        let r = self.cic_decimation as f64;
+        let stages = self.cic_stages as f64;
+
+        // The delay in DSD samples of the centre of the impulse response of the CIC filter at the
+        // end of its window, and of the FIR stages, which work at a lower rate each.
+        let mut delay = stages * (r - 1.0) / 2.0 - (r - 1.0);
+        for (stage, taps) in self.fir_taps().into_iter().enumerate() {
+            delay += (taps / 2) as f64 * (self.cic_decimation << stage) as f64;
         }
+        (delay / self.total_decimation as f64).round() as usize
+    }
+
+    /// Design the FIR stages.
+    fn design(&self) -> Vec<Decimate2> {
+        let passband = self.passband();
+        let dsd_rate = f64::from(self.dsd_rate);
+        let r = self.cic_decimation as f64;
+        let n = self.cic_stages as i32;
+
+        (0..self.fir_stages)
+            .map(|stage| {
+                let rate = self.stage_rate(stage);
+                let taps = if stage + 1 < self.fir_stages {
+                    fir::design_halfband(rate, passband)
+                }
+                else {
+                    // Compensate the droop of the CIC filter, whose response is
+                    // `(sin(pi f R / fs) / (R sin(pi f / fs)))^N`.
+                    let compensation = |f: f64| {
+                        let x = std::f64::consts::PI * f / dsd_rate;
+                        if x < 1e-12 { 1.0 } else { ((r * x.sin()) / (r * x).sin()).powi(n) }
+                    };
+                    fir::design_lowpass(rate, passband, rate / 2.0 - passband, compensation)
+                };
+                Decimate2::new(&taps)
+            })
+            .collect()
     }
 }
 
-/// Per-channel DSD decimator
-pub struct ChannelDecimator {
+/// The filter chain of a channel.
+struct ChannelDecimator {
     cic: CicFilter,
-    fir: FirDecimator,
-    intermediate_buffer: Vec<f32>,
+    stages: Vec<Decimate2>,
+    /// The intermediate results of the chain.
+    work: [Vec<f32>; 2],
+    /// The number of output frames that remain to be dropped to compensate the delay.
+    skip: usize,
+    /// The number of DSD samples that have been input.
+    input_samples: u64,
+    /// The number of frames that have been output.
+    output_frames: u64,
 }
 
 impl ChannelDecimator {
-    /// Create a new channel decimator
-    pub fn new(config: &DecimationConfig) -> Self {
-        log::debug!(
-            "Creating ChannelDecimator: CIC={}x, FIR={}x",
-            config.cic_decimation,
-            config.fir_decimation
-        );
-
-        let cic = CicFilter::new(config.cic_decimation, config.cic_stages);
-
-        // FIR cutoff: slightly below Nyquist of output rate to avoid aliasing
-        let fir_cutoff = 0.4 / config.fir_decimation as f64;
-        let fir = FirDecimator::new(config.fir_decimation, config.fir_taps, fir_cutoff);
-
-        log::debug!(
-            "FIR created with decimation={}, taps={}, cutoff={}",
-            config.fir_decimation,
-            config.fir_taps,
-            fir_cutoff
-        );
-
-        // Intermediate buffer between CIC and FIR
-        // Size enough for typical block processing
-        let intermediate_buffer = Vec::with_capacity(8192);
-
-        ChannelDecimator { cic, fir, intermediate_buffer }
-    }
-
-    /// Process DSD samples for this channel, producing PCM output
-    ///
-    /// # Arguments
-    /// * `dsd_input` - DSD sample bytes for this channel
-    /// * `bit_order` - Bit order of DSD data
-    /// * `pcm_output` - Output buffer for PCM samples
-    ///
-    /// # Returns
-    /// Number of PCM samples produced
-    pub fn process(
-        &mut self,
-        dsd_input: &[u8],
-        bit_order: BitOrder,
-        pcm_output: &mut [f32],
-    ) -> usize {
-        // Stage 1: CIC filter (high decimation), directly on the packed bits.
-        self.intermediate_buffer.clear();
-        let cic_output_size = self.cic.output_size_for_input(dsd_input.len());
-        if cic_output_size > 0 {
-            self.intermediate_buffer.resize(cic_output_size, 0.0);
-            let cic_produced =
-                self.cic.process_bytes(dsd_input, bit_order, &mut self.intermediate_buffer);
-            self.intermediate_buffer.truncate(cic_produced);
-        }
-        else {
-            // No output yet, but the filter state must still absorb the bits.
-            self.cic.process_bytes(dsd_input, bit_order, &mut []);
-        }
-
-        // Stage 2: FIR filter (moderate decimation + droop compensation)
-        if self.intermediate_buffer.is_empty() {
-            0
-        }
-        else {
-            self.fir.process_buffer(&self.intermediate_buffer, pcm_output)
+    fn new(config: &DecimationConfig, stages: Vec<Decimate2>, skip: usize) -> Self {
+        ChannelDecimator {
+            cic: CicFilter::new(config.cic_decimation, config.cic_stages),
+            stages,
+            work: [Vec::new(), Vec::new()],
+            skip,
+            input_samples: 0,
+            output_frames: 0,
         }
     }
 
-    /// Reset filter state
-    pub fn reset(&mut self) {
+    /// The number of frames that processing `bytes` bytes produces.
+    fn output_len(&self, bytes: usize) -> usize {
+        let mut n = self.cic.output_size_for_input(bytes);
+        for stage in &self.stages {
+            n = stage.output_len(n);
+        }
+        n.saturating_sub(self.skip)
+    }
+
+    /// Run `input` through the filters, and return the output, which includes the frames that
+    /// are to be dropped at the start of the stream.
+    fn run(&mut self, input: &[u8], bit_order: BitOrder) -> &[f32] {
+        let (mut src, mut dst) = {
+            let [a, b] = &mut self.work;
+            (a, b)
+        };
+
+        src.resize(self.cic.output_size_for_input(input.len()), 0.0);
+        self.cic.process_bytes(input, bit_order, src);
+
+        for stage in &mut self.stages {
+            dst.resize(stage.output_len(src.len()), 0.0);
+            stage.process(src, dst);
+            std::mem::swap(&mut src, &mut dst);
+        }
+
+        self.input_samples += 8 * input.len() as u64;
+        src
+    }
+
+    /// Filter `input` to `output`, which must be at least `output_len(input.len())` long, and
+    /// return the number of frames.
+    fn process(&mut self, input: &[u8], bit_order: BitOrder, output: &mut [f32]) -> usize {
+        let skip = self.skip;
+        let result = self.run(input, bit_order);
+
+        let dropped = skip.min(result.len());
+        let frames = result.len() - dropped;
+        output[..frames].copy_from_slice(&result[dropped..]);
+
+        self.skip -= dropped;
+        self.output_frames += frames as u64;
+        frames
+    }
+
+    fn reset(&mut self, skip: usize) {
         self.cic.reset();
-        self.fir.reset();
-        self.intermediate_buffer.clear();
+        self.stages.iter_mut().for_each(Decimate2::reset);
+        self.skip = skip;
+        self.input_samples = 0;
+        self.output_frames = 0;
     }
 }
 
 /// DSD to PCM decimator for multi-channel audio
 pub struct DsdDecimator {
+    config: DecimationConfig,
     channels: Vec<ChannelDecimator>,
     bit_order: BitOrder,
+    /// The number of output frames dropped at the start of the stream.
+    delay: usize,
+    /// Padding for the end of the stream.
+    padding: Vec<u8>,
 }
 
 impl DsdDecimator {
-    /// Create a new DSD decimator
+    /// Create a new DSD decimator, that drops the frames that the delay of its filters holds
+    /// back at the start of the stream.
     ///
     /// # Arguments
     /// * `config` - Decimation configuration
     /// * `num_channels` - Number of audio channels
     /// * `bit_order` - Bit order of DSD data
     pub fn new(config: DecimationConfig, num_channels: usize, bit_order: BitOrder) -> Self {
-        let channels = (0..num_channels).map(|_| ChannelDecimator::new(&config)).collect();
+        Self::with_delay_compensation(config, num_channels, bit_order, true)
+    }
 
-        DsdDecimator { channels, bit_order }
+    /// Like [`new`](Self::new), but the frames that the delay holds back are kept if
+    /// `compensate_delay` is false. The output is then delayed by [`DecimationConfig::delay_frames`]
+    /// frames and the first of them are the start-up of the filters.
+    pub fn with_delay_compensation(
+        config: DecimationConfig,
+        num_channels: usize,
+        bit_order: BitOrder,
+        compensate_delay: bool,
+    ) -> Self {
+        let delay = if compensate_delay { config.delay_frames() } else { 0 };
+
+        // The filters are the same for all channels.
+        let design = config.design();
+        let channels = (0..num_channels)
+            .map(|_| ChannelDecimator::new(&config, design.clone(), delay))
+            .collect();
+
+        DsdDecimator { config, channels, bit_order, delay, padding: Vec::new() }
+    }
+
+    /// The configuration of the decimator.
+    pub fn config(&self) -> &DecimationConfig {
+        &self.config
+    }
+
+    /// The number of channels.
+    pub fn num_channels(&self) -> usize {
+        self.channels.len()
+    }
+
+    /// The number of frames that processing `bytes` more bytes of each channel produces.
+    pub fn output_len(&self, bytes: usize) -> usize {
+        self.channels.first().map_or(0, |channel| channel.output_len(bytes))
+    }
+
+    /// Process the packed DSD bytes of one channel, `input`, to PCM, in `output`, which must be
+    /// at least [`output_len`](Self::output_len) frames long.
+    ///
+    /// All channels must be given the same number of bytes between calls to
+    /// [`reset`](Self::reset), and in the same order.
+    ///
+    /// # Returns
+    /// Number of PCM samples produced
+    pub fn process_channel(
+        &mut self,
+        channel: usize,
+        input: &[u8],
+        output: &mut [f32],
+    ) -> Result<usize> {
+        let Some(decimator) = self.channels.get_mut(channel)
+        else {
+            return decode_error("dsd: channel index out of range");
+        };
+        if output.len() < decimator.output_len(input.len()) {
+            return decode_error("dsd: PCM output buffer too small");
+        }
+        Ok(decimator.process(input, self.bit_order, output))
     }
 
     /// Process DSD data to PCM
@@ -248,11 +367,10 @@ impl DsdDecimator {
 
         let mut samples_produced = 0;
 
-        for (ch_idx, decimator) in self.channels.iter_mut().enumerate() {
-            let produced =
-                decimator.process(dsd_planes[ch_idx], self.bit_order, pcm_planes[ch_idx]);
+        for (ch, (input, output)) in dsd_planes.iter().zip(pcm_planes.iter_mut()).enumerate() {
+            let produced = self.process_channel(ch, input, output)?;
 
-            if ch_idx == 0 {
+            if ch == 0 {
                 samples_produced = produced;
             }
             else if produced != samples_produced {
@@ -263,11 +381,64 @@ impl DsdDecimator {
         Ok(samples_produced)
     }
 
-    /// Reset all channel decimators
-    pub fn reset(&mut self) {
-        for decimator in &mut self.channels {
-            decimator.reset();
+    /// The number of frames [`flush`](Self::flush) produces: the frames that the delay of the
+    /// filters has held back of the stream so far, a stream of `n` DSD samples being `n / R`
+    /// frames long.
+    pub fn pending_frames(&self) -> usize {
+        self.channels.first().map_or(0, |channel| self.pending(channel))
+    }
+
+    fn pending(&self, channel: &ChannelDecimator) -> usize {
+        let total = channel.input_samples / self.config.total_decimation as u64;
+        total.saturating_sub(channel.output_frames) as usize
+    }
+
+    /// Output the frames that [`pending_frames`](Self::pending_frames) counts of `channel`, by
+    /// running DSD silence through the filters, to `output`, which must be at least that long.
+    /// The channel then has no more pending frames until more input is processed.
+    ///
+    /// # Returns
+    /// Number of PCM samples produced
+    pub fn flush_channel(&mut self, channel: usize, output: &mut [f32]) -> Result<usize> {
+        let Some(pending) = self.channels.get(channel).map(|c| self.pending(c))
+        else {
+            return decode_error("dsd: channel index out of range");
+        };
+        let r = self.config.total_decimation;
+        let bit_order = self.bit_order;
+
+        let decimator = &mut self.channels[channel];
+        if output.len() < pending {
+            return decode_error("dsd: PCM output buffer too small");
         }
+
+        // The last frame needs the input up to a delay after its position.
+        let samples = (self.delay + 2) * r;
+        let idle = match bit_order {
+            BitOrder::MsbFirst => DSD_IDLE,
+            BitOrder::LsbFirst => DSD_IDLE.reverse_bits(),
+        };
+        self.padding.clear();
+        self.padding.resize(samples.div_ceil(8), idle);
+
+        let skip = decimator.skip;
+        let input_samples = decimator.input_samples;
+        let result = decimator.run(&self.padding, bit_order);
+        let dropped = skip.min(result.len());
+        let frames = (result.len() - dropped).min(pending);
+        output[..frames].copy_from_slice(&result[dropped..dropped + frames]);
+
+        // The padding is not part of the stream.
+        decimator.input_samples = input_samples;
+        decimator.output_frames += frames as u64;
+        decimator.skip = 0;
+        Ok(frames)
+    }
+
+    /// Reset filter state
+    pub fn reset(&mut self) {
+        let delay = self.delay;
+        self.channels.iter_mut().for_each(|channel| channel.reset(delay));
     }
 }
 
@@ -275,159 +446,258 @@ impl DsdDecimator {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_decimation_config_dsd64_to_44k() {
-        let config = DecimationConfig::new(2822400, 44100).unwrap();
-        assert_eq!(config.total_decimation, 64);
-        assert_eq!(config.cic_decimation * config.fir_decimation, 64);
-    }
+    use std::f64::consts::PI;
 
-    #[test]
-    fn test_decimation_config_dsd128_to_88k() {
-        let config = DecimationConfig::new(5644800, 88200).unwrap();
-        assert_eq!(config.total_decimation, 64);
-    }
+    const DSD64: u32 = 2_822_400;
 
-    #[test]
-    fn test_decimation_config_invalid_rates() {
-        assert!(DecimationConfig::new(0, 44100).is_err());
-        assert!(DecimationConfig::new(2822400, 0).is_err());
-        assert!(DecimationConfig::new(2822400, 45000).is_err()); // Not evenly divisible
-    }
-
-    #[test]
-    fn test_channel_decimator_creation() {
-        let config = DecimationConfig::new(2822400, 44100).unwrap();
-        let _decimator = ChannelDecimator::new(&config);
-    }
-
-    #[test]
-    fn test_dsd_decimator_creation() {
-        let config = DecimationConfig::new(2822400, 44100).unwrap();
-        let decimator = DsdDecimator::new(config, 2, BitOrder::LsbFirst);
-        assert_eq!(decimator.channels.len(), 2);
-    }
-
-    #[test]
-    fn test_choose_decimation_ratios() {
-        assert_eq!(DecimationConfig::choose_decimation_ratios(8), (4, 2));
-        assert_eq!(DecimationConfig::choose_decimation_ratios(16), (8, 2));
-        assert_eq!(DecimationConfig::choose_decimation_ratios(32), (16, 2));
-        assert_eq!(DecimationConfig::choose_decimation_ratios(64), (32, 2));
-        assert_eq!(DecimationConfig::choose_decimation_ratios(128), (64, 2));
-    }
-
-    /// The pipeline as it was before the table-driven CIC stage: unpack to `f32`, run the
-    /// integrator/comb cascade, then the FIR stage.
-    fn reference_pipeline(
-        config: &DecimationConfig,
-        chunks: &[&[u8]],
-        bit_order: BitOrder,
-    ) -> Vec<f32> {
-        use crate::cic::test_support::ReferenceCic;
-
-        let mut cic = ReferenceCic::new(config.cic_decimation, config.cic_stages);
-        let mut fir = FirDecimator::new(
-            config.fir_decimation,
-            config.fir_taps,
-            0.4 / config.fir_decimation as f64,
-        );
-        let mut out = Vec::new();
-
-        for chunk in chunks {
-            let mut intermediate = Vec::new();
-            cic.process_bytes(chunk, bit_order, &mut intermediate);
-            let mut pcm = vec![0.0; intermediate.len()];
-            let n = fir.process_buffer(&intermediate, &mut pcm);
-            out.extend_from_slice(&pcm[..n]);
+    /// Modulate a sine of `freq` Hz and `amplitude` with a second order 1-bit delta-sigma
+    /// modulator, to `seconds` of DSD64 packed with the first sample in the most significant bit.
+    fn modulate_sine(freq: f64, amplitude: f64, seconds: f64) -> Vec<u8> {
+        let samples = (f64::from(DSD64) * seconds) as usize / 8 * 8;
+        let (mut i1, mut i2) = (0.0f64, 0.0f64);
+        let mut bytes = vec![0u8; samples / 8];
+        for n in 0..samples {
+            let x = amplitude * (2.0 * PI * freq * n as f64 / f64::from(DSD64)).sin();
+            let v = if i2 >= 0.0 { 1.0 } else { -1.0 };
+            i1 += x - v;
+            i2 += i1 - v;
+            if v > 0.0 {
+                bytes[n / 8] |= 0x80 >> (n % 8);
+            }
         }
+        bytes
+    }
 
+    fn decimate(config: DecimationConfig, dsd: &[u8], bit_order: BitOrder) -> Vec<f32> {
+        let mut decimator = DsdDecimator::new(config, 1, bit_order);
+        let mut out = vec![0.0; decimator.output_len(dsd.len())];
+        let n = decimator.process_channel(0, dsd, &mut out).unwrap();
+        out.truncate(n);
         out
     }
 
+    /// The amplitude and phase (of a sine) of the component of `freq` Hz of `x` sampled at
+    /// `rate` Hz, from `skip` samples on, by least squares.
+    fn fit(x: &[f32], rate: f64, freq: f64, skip: usize) -> (f64, f64) {
+        let (mut ss, mut cc, mut sc, mut sx, mut cx) = (0.0, 0.0, 0.0, 0.0, 0.0);
+        for (n, &v) in x.iter().enumerate().skip(skip) {
+            let w = 2.0 * PI * freq * n as f64 / rate;
+            let (s, c) = w.sin_cos();
+            ss += s * s;
+            cc += c * c;
+            sc += s * c;
+            sx += s * f64::from(v);
+            cx += c * f64::from(v);
+        }
+        let det = ss * cc - sc * sc;
+        let a = (sx * cc - cx * sc) / det;
+        let b = (cx * ss - sx * sc) / det;
+        (a.hypot(b), b.atan2(a))
+    }
+
+    fn db(x: f64) -> f64 {
+        20.0 * x.log10()
+    }
+
     #[test]
-    fn test_pipeline_bit_exact_with_reference_cic() {
-        use crate::cic::test_support::Rng;
-
-        let rates = [
-            (2822400, 44100),
-            (2822400, 88200),
-            (2822400, 176400),
-            (2822400, 352800),
-            (5644800, 44100),
-            (5644800, 176400),
-            (11289600, 44100),
-            (11289600, 352800),
-            (22579200, 44100),
+    fn verify_config() {
+        // (DSD rate, PCM rate, CIC decimation, CIC stages, FIR stages)
+        let cases = [
+            (DSD64, 44_100, 8, 5, 3),
+            (DSD64, 88_200, 4, 5, 3),
+            (DSD64, 176_400, 4, 7, 2),
+            (DSD64, 352_800, 4, 8, 1),
+            (DSD64, 22_050, 16, 5, 3),
+            (DSD64 * 2, 44_100, 16, 5, 3),
+            (DSD64 * 4, 44_100, 32, 5, 3),
+            (DSD64 * 8, 44_100, 64, 5, 3),
+            (3_072_000, 48_000, 8, 5, 3),
+            (DSD64, 14_700, 24, 5, 3),
         ];
+        for (dsd, pcm, cic, stages, fir) in cases {
+            let c = DecimationConfig::new(dsd, pcm).unwrap();
+            assert_eq!(c.total_decimation, (dsd / pcm) as usize);
+            assert_eq!((c.cic_decimation, c.cic_stages, c.fir_stages), (cic, stages, fir));
+            assert_eq!(c.cic_decimation << c.fir_stages, c.total_decimation);
+            assert_eq!(c.fir_taps().len(), fir);
+        }
 
-        for &(dsd_rate, pcm_rate) in &rates {
-            for &bit_order in &[BitOrder::LsbFirst, BitOrder::MsbFirst] {
-                let config = DecimationConfig::new(dsd_rate, pcm_rate).unwrap();
-                let mut rng = Rng(dsd_rate as u64 * 7 + pcm_rate as u64);
+        // Rates that do not divide, ratios that are odd or less than 8, and zero.
+        for (dsd, pcm) in [
+            (DSD64, 48_000),
+            (DSD64, 705_600),
+            (DSD64, 1_411_200),
+            (DSD64, 313_600),
+            (DSD64, 0),
+            (0, 44_100),
+        ] {
+            assert!(DecimationConfig::new(dsd, pcm).is_err(), "{dsd} -> {pcm}");
+        }
 
-                // Packets of varying size, from a signal with a tone-like pattern plus noise.
-                let data: Vec<Vec<u8>> = (0..6)
-                    .map(|p| {
-                        let len = 1024 * (1 + p % 3) as usize;
-                        (0..len)
-                            .map(|i| {
-                                if (i / 40) % 2 == 0 {
-                                    0xf0 | (rng.next() as u8 & 0x0f)
-                                }
-                                else {
-                                    rng.next() as u8 & 0x1f
-                                }
-                            })
-                            .collect()
-                    })
-                    .collect();
-                let chunks: Vec<&[u8]> = data.iter().map(Vec::as_slice).collect();
+        // About a millisecond of delay.
+        let c = DecimationConfig::new(DSD64, 44_100).unwrap();
+        assert_eq!(c.fir_taps(), vec![19, 27, 153]);
+        assert_eq!(c.delay_frames(), 43);
+    }
 
-                let expected = reference_pipeline(&config, &chunks, bit_order);
+    #[test]
+    fn verify_passband_gain_and_phase() {
+        let config = DecimationConfig::new(DSD64, 44_100).unwrap();
+        let rate = 44_100.0;
 
-                let mut decimator = ChannelDecimator::new(&config);
-                let mut got = Vec::new();
-                for chunk in &chunks {
-                    let mut pcm = vec![0.0; chunk.len() * 8 / config.total_decimation + 2];
-                    let n = decimator.process(chunk, bit_order, &mut pcm);
-                    got.extend_from_slice(&pcm[..n]);
-                }
+        for freq in [1_000.0, 5_000.0, 10_000.0, 15_000.0, 18_000.0, 20_000.0] {
+            let dsd = modulate_sine(freq, 0.25, 0.2);
+            let pcm = decimate(config, &dsd, BitOrder::MsbFirst);
+            assert_eq!(pcm.len(), dsd.len() * 8 / 64 - config.delay_frames());
 
-                assert!(!expected.is_empty());
-                assert_eq!(got.len(), expected.len(), "{dsd_rate} -> {pcm_rate}");
-                for (i, (a, b)) in got.iter().zip(&expected).enumerate() {
-                    assert_eq!(
-                        a.to_bits(),
-                        b.to_bits(),
-                        "{dsd_rate} -> {pcm_rate} {bit_order:?} sample {i}"
-                    );
-                }
-            }
+            let (amplitude, phase) = fit(&pcm, rate, freq, 200);
+            assert!(db(amplitude / 0.25).abs() < 0.02, "{freq} Hz: {} dB", db(amplitude / 0.25));
+
+            // The output is aligned with the input to within a frame.
+            let delay_frames = -phase / (2.0 * PI * freq) * rate;
+            assert!(delay_frames.abs() < 0.75, "{freq} Hz: delay {delay_frames} frames");
         }
     }
 
     #[test]
-    fn test_small_packets_do_not_lose_bits() {
-        // Feeding a stream in tiny pieces must give the same result as feeding it at once, even
-        // when a piece alone does not complete a CIC block.
-        let config = DecimationConfig::new(2822400, 44100).unwrap();
-        let data: Vec<u8> =
-            (0..8192u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+    fn verify_delay_without_compensation() {
+        let config = DecimationConfig::new(DSD64, 44_100).unwrap();
+        // A frequency whose period is more than twice the delay.
+        let dsd = modulate_sine(400.0, 0.25, 0.1);
+        let mut decimator =
+            DsdDecimator::with_delay_compensation(config, 1, BitOrder::MsbFirst, false);
+        let mut pcm = vec![0.0; decimator.output_len(dsd.len())];
+        let n = decimator.process_channel(0, &dsd, &mut pcm).unwrap();
+        pcm.truncate(n);
+        assert_eq!(pcm.len(), dsd.len() * 8 / 64);
 
-        let mut whole = ChannelDecimator::new(&config);
-        let mut expected = vec![0.0; 1024];
-        let n = whole.process(&data, BitOrder::MsbFirst, &mut expected);
-        expected.truncate(n);
+        let (_, phase) = fit(&pcm, 44_100.0, 400.0, 200);
+        let delay_frames = -phase / (2.0 * PI * 400.0) * 44_100.0;
+        assert!((delay_frames - config.delay_frames() as f64).abs() < 0.75, "{delay_frames}");
+    }
 
-        let mut split = ChannelDecimator::new(&config);
-        let mut got = Vec::new();
-        for chunk in data.chunks(5) {
-            let mut pcm = vec![0.0; 8];
-            let n = split.process(chunk, BitOrder::MsbFirst, &mut pcm);
-            got.extend_from_slice(&pcm[..n]);
+    #[test]
+    fn verify_aliasing_is_rejected() {
+        let rate = 44_100.0;
+        let config = DecimationConfig::new(DSD64, 44_100).unwrap();
+
+        // Tones that the decimation aliases into the passband.
+        for freq in [26_000.0, 30_000.0, 40_000.0, 60_000.0, 100_000.0, 150_000.0, 350_000.0] {
+            let dsd = modulate_sine(freq, 0.25, 0.2);
+            let pcm = decimate(config, &dsd, BitOrder::MsbFirst);
+            let alias = (freq - rate * (freq / rate).round()).abs();
+            assert!(alias < 20_000.0);
+            let (amplitude, _) = fit(&pcm, rate, alias, 200);
+            assert!(
+                db(amplitude / 0.25) < -95.0,
+                "{freq} Hz -> {alias} Hz: {} dB",
+                db(amplitude / 0.25)
+            );
+        }
+    }
+
+    #[test]
+    fn verify_dc_gain_and_silence() {
+        let config = DecimationConfig::new(DSD64, 44_100).unwrap();
+
+        // Full scale: all ones. The output is 1.0 once the filters are full.
+        let pcm = decimate(config, &[0xFF; 5000], BitOrder::LsbFirst);
+        for &s in &pcm[200..] {
+            assert!((s - 1.0).abs() < 1e-5, "{s}");
+        }
+        let pcm = decimate(config, &[0x00; 5000], BitOrder::LsbFirst);
+        for &s in &pcm[200..] {
+            assert!((s + 1.0).abs() < 1e-5, "{s}");
         }
 
-        assert_eq!(got, expected);
+        // The idle pattern is silence.
+        let pcm = decimate(config, &[DSD_IDLE; 5000], BitOrder::MsbFirst);
+        for &s in &pcm[200..] {
+            assert!(s.abs() < 1e-6, "{s}");
+        }
+    }
+
+    #[test]
+    fn verify_chunking_and_bit_order() {
+        let config = DecimationConfig::new(DSD64, 88_200).unwrap();
+        let dsd = modulate_sine(3_000.0, 0.3, 0.05);
+        let whole = decimate(config, &dsd, BitOrder::MsbFirst);
+
+        // The same data with the bits of each byte reversed, and the other bit order.
+        let reversed: Vec<u8> = dsd.iter().map(|b| b.reverse_bits()).collect();
+        assert_eq!(decimate(config, &reversed, BitOrder::LsbFirst), whole);
+
+        // In chunks of every size.
+        for chunk in [1usize, 2, 3, 7, 64, 333, 4096] {
+            let mut decimator = DsdDecimator::new(config, 1, BitOrder::MsbFirst);
+            let mut got = Vec::new();
+            for part in dsd.chunks(chunk) {
+                let mut out = vec![0.0; decimator.output_len(part.len())];
+                let n = decimator.process_channel(0, part, &mut out).unwrap();
+                assert_eq!(n, out.len());
+                got.extend_from_slice(&out);
+            }
+            assert_eq!(got, whole, "chunks of {chunk}");
+        }
+
+        // After a reset the output starts again.
+        let mut decimator = DsdDecimator::new(config, 1, BitOrder::MsbFirst);
+        let mut out = vec![0.0; decimator.output_len(dsd.len())];
+        decimator.process_channel(0, &dsd, &mut out).unwrap();
+        decimator.reset();
+        let mut again = vec![0.0; decimator.output_len(dsd.len())];
+        decimator.process_channel(0, &dsd, &mut again).unwrap();
+        assert_eq!(out, again);
+    }
+
+    #[test]
+    fn verify_channels_are_independent() {
+        let config = DecimationConfig::new(DSD64, 44_100).unwrap();
+        let a = modulate_sine(1_000.0, 0.25, 0.02);
+        let b = modulate_sine(7_000.0, 0.4, 0.02);
+
+        let mut decimator = DsdDecimator::new(config, 2, BitOrder::MsbFirst);
+        let frames = decimator.output_len(a.len());
+        let (mut pa, mut pb) = (vec![0.0; frames], vec![0.0; frames]);
+        let n = decimator.process_planar(&[&a, &b], &mut [&mut pa, &mut pb]).unwrap();
+        assert_eq!(n, frames);
+        assert_eq!(pa, decimate(config, &a, BitOrder::MsbFirst));
+        assert_eq!(pb, decimate(config, &b, BitOrder::MsbFirst));
+
+        // The channels must have the same length and the buffers be large enough.
+        assert!(decimator.process_planar(&[&a], &mut [&mut pa]).is_err());
+        assert!(decimator.process_channel(0, &a, &mut [0.0; 1]).is_err());
+    }
+
+    #[test]
+    fn verify_flush_completes_the_stream() {
+        let config = DecimationConfig::new(DSD64, 44_100).unwrap();
+        let dsd = modulate_sine(2_000.0, 0.25, 0.1);
+        let samples = dsd.len() * 8;
+
+        let mut decimator = DsdDecimator::new(config, 1, BitOrder::MsbFirst);
+        let mut pcm = Vec::new();
+        for part in dsd.chunks(1000) {
+            let mut out = vec![0.0; decimator.output_len(part.len())];
+            decimator.process_channel(0, part, &mut out).unwrap();
+            pcm.extend_from_slice(&out);
+        }
+        assert_eq!(decimator.pending_frames(), config.delay_frames());
+
+        let mut tail = vec![0.0; decimator.pending_frames()];
+        assert_eq!(decimator.flush_channel(0, &mut tail).unwrap(), tail.len());
+        assert_eq!(decimator.pending_frames(), 0);
+        pcm.extend_from_slice(&tail);
+        assert_eq!(pcm.len(), samples / 64);
+
+        // The result is that of the stream followed by DSD silence.
+        let mut padded = dsd.clone();
+        padded.resize(dsd.len() + 400, DSD_IDLE);
+        let whole = decimate(config, &padded, BitOrder::MsbFirst);
+        assert_eq!(pcm, whole[..pcm.len()]);
+
+        // The tone continues to its end.
+        let (amplitude, _) = fit(&pcm[..pcm.len() - 50], 44_100.0, 2_000.0, 200);
+        assert!(db(amplitude / 0.25).abs() < 0.02);
     }
 }

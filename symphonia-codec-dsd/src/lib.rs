@@ -12,14 +12,17 @@
 pub mod bitstream;
 pub mod cic;
 pub mod decimator;
+pub mod dst;
 pub mod fir;
 
 use decimator::{DecimationConfig, DsdDecimator};
+use dst::{DST_MAX_CHANNELS, DstDecoder, dst_frame_crc};
 
 use log::debug;
 use symphonia_core::audio::sample::SampleFormat;
 use symphonia_core::audio::{
-    AsGenericAudioBufferRef, AudioMut, AudioSpec, GenericAudioBuffer, GenericAudioBufferRef,
+    AsGenericAudioBufferRef, AudioBuffer, AudioMut, AudioSpec, GenericAudioBuffer,
+    GenericAudioBufferRef,
 };
 use symphonia_core::codecs::CodecInfo;
 use symphonia_core::codecs::audio::{
@@ -34,6 +37,15 @@ use symphonia_core::support_audio_codec;
 
 /// DSD codec ID
 pub const CODEC_ID_DSD: AudioCodecId = AudioCodecId::new(FourCc::new(*b"DSD\0"));
+
+/// DST (Direct Stream Transfer) codec ID: DSD compressed losslessly, as in compressed DSDIFF.
+pub const CODEC_ID_DST: AudioCodecId = AudioCodecId::new(FourCc::new(*b"DST\0"));
+
+/// The number of bytes before the DST frame in a DST packet: a flags byte and a 32-bit CRC.
+const DST_PACKET_HEADER_LEN: usize = 5;
+
+/// Bit 0 of the flags of a DST packet: the packet has the CRC of the decoded frame.
+const DST_PACKET_HAS_CRC: u8 = 1;
 
 /// Decoder output mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,39 +73,165 @@ enum DecoderMode {
 ///    parameters returned by [`AudioDecoder::codec_params`] are not altered in pass-through mode:
 ///    `sample_rate` remains the DSD rate (needed, e.g., to encode DSD over PCM).
 ///
-/// 2. **PCM mode**: Converts DSD to PCM F32 samples using high-quality
-///    decimation filters (CIC + FIR). Enable by setting extra_data in
-///    CodecParameters with PCM output rate.
+/// 2. **PCM mode**: Converts DSD to PCM F32 samples using linear phase decimation filters
+///    (a CIC filter followed by half-band FIR filters, see the [`decimator`] module). Enable by
+///    setting `extra_data` in the codec parameters to the PCM output rate as a little-endian
+///    `u32`. The PCM rate must be the DSD rate divided by an even number of at least 8, e.g.
+///    DSD64 (2.8224 MHz) to 44.1, 88.2, 176.4 or 352.8 kHz, but not to 48 kHz, and DSD at 48 kHz
+///    times 64 (3.072 MHz) to 48 kHz and its multiples.
 ///
-/// # PCM Conversion
-/// The PCM mode uses a two-stage decimation:
-/// - Stage 1: CIC (Cascaded Integrator-Comb) filter for efficient high-ratio decimation
-/// - Stage 2: FIR filter for passband droop compensation and anti-aliasing
+///    The output is flat to 0.4535 times the PCM rate (20 kHz at 44.1 kHz) within 0.001 dB,
+///    and aliasing into that band is below -100 dB. The delay of the filters (about 1 ms) is
+///    compensated by dropping the first frames of the stream (unless the decoder is created
+///    with the option `gapless` disabled), so that frame `k` of the output is the audio at DSD
+///    sample `k * R` for a decimation by `R`. The last frames are held back by that delay:
+///    [`flush`](DsdDecoder::flush) outputs them at the end of the stream.
 ///
-/// Supported conversions:
-/// - DSD64 (2.8224 MHz) -> 44.1kHz, 88.2kHz
-/// - DSD128 (5.6448 MHz) -> 44.1kHz, 88.2kHz, 176.4kHz
-/// - DSD256 (11.2896 MHz) -> 44.1kHz, 88.2kHz, 176.4kHz
-/// - DSD512 (22.5792 MHz) -> 44.1kHz, 88.2kHz, 176.4kHz
+/// # DST
+/// Streams of the codec [`CODEC_ID_DST`], DSD that is compressed by Direct Stream Transfer, are
+/// first decompressed to DSD with [`DstDecoder`], and then output like DSD. A packet consists of
+/// the following, as produced by the DSDIFF reader of `symphonia-format-dsd`:
+///
+/// | bytes | |
+/// |-------|-|
+/// | 1     | flags: bit 0 is set if the CRC of the decoded frame follows |
+/// | 4     | CRC of the decoded frame, big-endian, 0 if not present |
+/// | rest  | the DST frame |
+///
+/// `max_frames_per_packet` of the codec parameters is the number of DSD samples of a frame. The
+/// frame data is interleaved by byte, with the most significant bit first. With
+/// [`AudioDecoderOptions::verify`] each frame is also verified: against the CRC, if present, and
+/// the arithmetic code of the frame for the end that the specification demands. A frame that does
+/// not verify is an error.
 pub struct DsdDecoder {
     params: AudioCodecParameters,
-    mode: DecoderMode,
-    // Pass-through mode buffer
+    channels: usize,
+    layout: ChannelDataLayout,
+    // Native DSD output buffer (pass-through mode)
     dsd_buf: GenericAudioBuffer,
-    // PCM mode state
-    pcm_buf: Option<GenericAudioBuffer>,
-    decimator: Option<DsdDecimator>,
-    scratch_dsd: Vec<Vec<u8>>,
-    scratch_pcm: Vec<Vec<f32>>,
+    // The state of the DST decompression, if the stream is DST.
+    dst: Option<DstStage>,
+    // The state of the conversion to PCM, if the output is PCM.
+    pcm: Option<PcmStage>,
 }
+
+/// DST decompression of the packets to DSD.
+struct DstStage {
+    decoder: DstDecoder,
+    /// The DSD of the last decoded frame, interleaved, most significant bit first.
+    frame: Vec<u8>,
+    verify: bool,
+    /// `Some(false)` if a frame did not verify.
+    verify_ok: Option<bool>,
+}
+
+impl DstStage {
+    fn decode(&mut self, packet: &[u8]) -> Result<()> {
+        if packet.len() <= DST_PACKET_HEADER_LEN {
+            return decode_error("dst: packet too short");
+        }
+
+        let result =
+            self.decoder.decode(&packet[DST_PACKET_HEADER_LEN..], &mut self.frame, self.verify);
+
+        // Verify against the CRC of the frame.
+        let result = match result {
+            Ok(()) if self.verify && packet[0] & DST_PACKET_HAS_CRC != 0 => {
+                let crc = u32::from_be_bytes([packet[1], packet[2], packet[3], packet[4]]);
+                if crc == dst_frame_crc(&self.frame) {
+                    Ok(())
+                }
+                else {
+                    decode_error("dst: frame CRC mismatch")
+                }
+            }
+            other => other,
+        };
+
+        if self.verify {
+            self.verify_ok = Some(self.verify_ok != Some(false) && result.is_ok());
+        }
+        result
+    }
+}
+
+/// Conversion of DSD to PCM.
+struct PcmStage {
+    decimator: DsdDecimator,
+    buf: GenericAudioBuffer,
+    /// The bytes of a channel of a packet.
+    scratch: Vec<u8>,
+}
+
+/// Make the PCM buffer hold `frames` frames to overwrite, and return it.
+fn prepare_pcm(buf: &mut GenericAudioBuffer, frames: usize) -> &mut AudioBuffer<f32> {
+    let GenericAudioBuffer::F32(buf) = buf
+    else {
+        unreachable!("the PCM buffer has the sample format F32")
+    };
+    buf.clear();
+    buf.grow_capacity(frames);
+    buf.render_uninit(Some(frames));
+    buf
+}
+
+impl PcmStage {
+    fn decode(
+        &mut self,
+        data: &[u8],
+        channels: usize,
+        layout: ChannelDataLayout,
+    ) -> Result<GenericAudioBufferRef<'_>> {
+        let spc = data.len() / channels;
+
+        if spc == 0 {
+            return decode_error("dsd: invalid packet");
+        }
+
+        let frames = self.decimator.output_len(spc);
+        let buf = prepare_pcm(&mut self.buf, frames);
+
+        for ch in 0..channels {
+            self.scratch.clear();
+            self.scratch.resize(spc, 0);
+            copy_channel(data, channels, spc, ch, layout, &mut self.scratch);
+
+            let Some(plane) = buf.plane_mut(ch)
+            else {
+                return decode_error("dsd: missing audio plane");
+            };
+            if self.decimator.process_channel(ch, &self.scratch, plane)? != frames {
+                return decode_error("dsd: decimator produced an unexpected length");
+            }
+        }
+
+        Ok(self.buf.as_generic_audio_buffer_ref())
+    }
+
+    fn flush(&mut self, channels: usize) -> Result<Option<GenericAudioBufferRef<'_>>> {
+        let frames = self.decimator.pending_frames();
+        if frames == 0 {
+            return Ok(None);
+        }
+
+        let buf = prepare_pcm(&mut self.buf, frames);
+        for ch in 0..channels {
+            let Some(plane) = buf.plane_mut(ch)
+            else {
+                return decode_error("dsd: missing audio plane");
+            };
+            self.decimator.flush_channel(ch, plane)?;
+        }
+        Ok(Some(self.buf.as_generic_audio_buffer_ref()))
+    }
+}
+
 impl AudioDecoder for DsdDecoder {
     fn reset(&mut self) {
         self.dsd_buf.clear();
-        if let Some(ref mut pcm_buf) = self.pcm_buf {
-            pcm_buf.clear();
-        }
-        if let Some(ref mut decimator) = self.decimator {
-            decimator.reset();
+        if let Some(pcm) = self.pcm.as_mut() {
+            pcm.buf.clear();
+            pcm.decimator.reset();
         }
     }
 
@@ -110,27 +248,30 @@ impl AudioDecoder for DsdDecoder {
     }
 
     fn decode_ref(&mut self, packet: &PacketRef<'_>) -> Result<GenericAudioBufferRef<'_>> {
-        match self.mode {
-            DecoderMode::PassThrough => self.decode_passthrough(packet),
-            DecoderMode::Pcm { .. } => self.decode_pcm(packet),
+        // The DSD of the packet, which is the data of the packet itself, or the decompressed
+        // frame of a DST packet.
+        let data = match self.dst.as_mut() {
+            Some(dst) => {
+                dst.decode(packet.data)?;
+                dst.frame.as_slice()
+            }
+            None => packet.data,
+        };
+
+        match self.pcm.as_mut() {
+            Some(pcm) => pcm.decode(data, self.channels, self.layout),
+            None => passthrough(&mut self.dsd_buf, data, self.channels, self.layout),
         }
     }
 
     fn finalize(&mut self) -> FinalizeResult {
-        Default::default()
+        FinalizeResult { verify_ok: self.dst.as_ref().and_then(|dst| dst.verify_ok) }
     }
 
     fn last_decoded(&self) -> GenericAudioBufferRef<'_> {
-        match self.mode {
-            DecoderMode::PassThrough => self.dsd_buf.as_generic_audio_buffer_ref(),
-            DecoderMode::Pcm { .. } => {
-                if let Some(ref pcm_buf) = self.pcm_buf {
-                    pcm_buf.as_generic_audio_buffer_ref()
-                }
-                else {
-                    self.dsd_buf.as_generic_audio_buffer_ref()
-                }
-            }
+        match self.pcm.as_ref() {
+            Some(pcm) => pcm.buf.as_generic_audio_buffer_ref(),
+            None => self.dsd_buf.as_generic_audio_buffer_ref(),
         }
     }
 }
@@ -147,7 +288,10 @@ impl RegisterableAudioDecoder for DsdDecoder {
     }
 
     fn supported_codecs() -> &'static [SupportedAudioCodec] {
-        &[support_audio_codec!(CODEC_ID_DSD, "dsd", "Direct Stream Digital")]
+        &[
+            support_audio_codec!(CODEC_ID_DSD, "dsd", "Direct Stream Digital"),
+            support_audio_codec!(CODEC_ID_DST, "dst", "Direct Stream Transfer"),
+        ]
     }
 }
 
@@ -180,11 +324,45 @@ fn copy_channel(
     }
 }
 
+/// Output the DSD `data` unchanged, as U8 samples of `buf`.
+fn passthrough<'a>(
+    buf: &'a mut GenericAudioBuffer,
+    data: &[u8],
+    channels: usize,
+    layout: ChannelDataLayout,
+) -> Result<GenericAudioBufferRef<'a>> {
+    let spc = data.len() / channels;
+
+    if spc == 0 {
+        return decode_error("dsd: invalid packet");
+    }
+
+    buf.clear();
+
+    match buf {
+        GenericAudioBuffer::U8(buf) => {
+            buf.grow_capacity(spc);
+            buf.render_uninit(Some(spc));
+            for ch in 0..channels {
+                let Some(plane) = buf.plane_mut(ch)
+                else {
+                    return decode_error("dsd: missing audio plane");
+                };
+                copy_channel(data, channels, spc, ch, layout, plane);
+            }
+            Ok(buf.as_generic_audio_buffer_ref())
+        }
+        _ => unreachable!("the DSD buffer has the sample format U8"),
+    }
+}
+
 impl DsdDecoder {
-    pub fn try_new(params: &AudioCodecParameters, _options: &AudioDecoderOptions) -> Result<Self> {
-        // Verify this is a DSD codec
-        if params.codec != CODEC_ID_DSD {
-            return unsupported_error("dsd: codec type is not DSD");
+    pub fn try_new(params: &AudioCodecParameters, options: &AudioDecoderOptions) -> Result<Self> {
+        let is_dst = params.codec == CODEC_ID_DST;
+
+        // Verify this is a DSD or DST codec
+        if params.codec != CODEC_ID_DSD && !is_dst {
+            return unsupported_error("dsd: codec type is not DSD or DST");
         }
 
         // Get the signal specification
@@ -200,14 +378,53 @@ impl DsdDecoder {
 
         let channels_count = channels.count();
 
+        if channels_count == 0 {
+            return decode_error("dsd: no channels");
+        }
+
+        let mut params = params.clone();
+
+        // The DSD of DST is always channel-interleaved and most significant bit first.
+        if is_dst {
+            params.bit_order = Some(BitOrder::MsbFirst);
+            params.channel_data_layout = Some(ChannelDataLayout::Interleaved);
+        }
+
         let bit_order = params.bit_order.unwrap_or(BitOrder::LsbFirst);
+        let layout = params.channel_data_layout.unwrap_or(ChannelDataLayout::Interleaved);
 
         log::info!("DSD decoder: bit_order={:?}", bit_order);
 
+        // The number of bytes of a channel in a packet.
+        let max_bytes = match (is_dst, params.max_frames_per_packet) {
+            (true, None) | (true, Some(0)) => return decode_error("dst: missing frame length"),
+            (true, Some(samples)) if samples % 8 != 0 => {
+                return decode_error("dst: frame length is not a multiple of 8 samples");
+            }
+            (_, Some(samples)) => samples.div_ceil(8) as usize,
+            (false, None) => 4096,
+        };
+
+        let dst = if is_dst {
+            if channels_count > DST_MAX_CHANNELS {
+                return unsupported_error("dst: more than 6 channels");
+            }
+            let decoder = DstDecoder::new(channels_count, max_bytes)?;
+            Some(DstStage {
+                frame: vec![0; decoder.frame_bytes()],
+                decoder,
+                verify: options.verify,
+                verify_ok: None,
+            })
+        }
+        else {
+            None
+        };
+
         // Determine mode: check if PCM output rate is requested in extra_data
         // Format: first 4 bytes = u32 PCM output rate (little-endian)
-        let mode = if let Some(extra) = params.extra_data.as_ref() {
-            if extra.len() >= 4 {
+        let mode = match params.extra_data.as_ref() {
+            Some(extra) if extra.len() >= 4 => {
                 let pcm_rate = u32::from_le_bytes([extra[0], extra[1], extra[2], extra[3]]);
                 if pcm_rate > 0 {
                     DecoderMode::Pcm { output_rate: pcm_rate }
@@ -216,193 +433,66 @@ impl DsdDecoder {
                     DecoderMode::PassThrough
                 }
             }
-            else {
-                DecoderMode::PassThrough
-            }
-        }
-        else {
-            DecoderMode::PassThrough
+            _ => DecoderMode::PassThrough,
         };
 
-        let (pcm_buf, decimator, output_params) = match mode {
+        let pcm = match mode {
             DecoderMode::PassThrough => {
-                // Pass-through mode
-                let spec = AudioSpec::new(dsd_byte_rate(input_sample_rate), channels.clone());
-                let duration = params.max_frames_per_packet.unwrap_or(4096);
-
                 debug!(
-                    "DSD decoder (pass-through): rate={}, channels={}, duration={}",
-                    spec.rate(),
-                    spec.channels().count(),
-                    duration
+                    "DSD decoder (pass-through): rate={}, channels={}, bytes={}",
+                    input_sample_rate, channels_count, max_bytes
                 );
-
-                (None, None, params.clone())
+                None
             }
             DecoderMode::Pcm { output_rate } => {
-                // PCM mode
                 let config = DecimationConfig::new(input_sample_rate, output_rate)?;
                 log::info!(
-                    "DSD decimation: {}x total (CIC={}x, FIR={}x), {} stages, {} taps",
+                    "DSD decimation: {}x total (CIC={}x{} stages, {} FIR stages, {} frames delay)",
                     config.total_decimation,
                     config.cic_decimation,
-                    config.fir_decimation,
                     config.cic_stages,
-                    config.fir_taps
+                    config.fir_stages,
+                    config.delay_frames()
                 );
-                let decimator = DsdDecimator::new(config, channels_count, bit_order);
-
-                // Calculate PCM buffer size
-                let input_duration = params.max_frames_per_packet.unwrap_or(4096);
-                let pcm_duration = ((input_duration * 8) / config.total_decimation as u64).max(512);
-
-                let pcm_spec = AudioSpec::new(output_rate, channels.clone());
-                let pcm_buffer =
-                    GenericAudioBuffer::new(SampleFormat::F32, pcm_spec, pcm_duration as usize);
-
-                debug!(
-                    "DSD decoder (PCM mode): {} Hz -> {} Hz, decimation {}x, channels={}, pcm_duration={}",
-                    input_sample_rate,
-                    output_rate,
-                    config.total_decimation,
+                let decimator = DsdDecimator::with_delay_compensation(
+                    config,
                     channels_count,
-                    pcm_duration
+                    bit_order,
+                    options.gapless,
                 );
+
+                // The buffer grows if a packet is larger than the maximum.
+                let capacity = (max_bytes * 8).div_ceil(config.total_decimation) + 2;
+                let pcm_spec = AudioSpec::new(output_rate, channels.clone());
+                let buf = GenericAudioBuffer::new(SampleFormat::F32, pcm_spec, capacity);
 
                 // Update codec params for PCM output
-                let mut output_params = params.clone();
-                output_params.sample_rate = Some(output_rate);
-                output_params.bits_per_sample = Some(32); // f32
+                params.sample_rate = Some(output_rate);
+                params.bits_per_sample = Some(32); // f32
 
-                (Some(pcm_buffer), Some(decimator), output_params)
+                Some(PcmStage { decimator, buf, scratch: Vec::new() })
             }
         };
 
-        // DSD buffer always needed for input
-        let dsd_spec = AudioSpec::new(dsd_byte_rate(input_sample_rate), channels.clone());
-        let dsd_duration = params.max_frames_per_packet.unwrap_or(4096);
-        let dsd_buf = GenericAudioBuffer::new(SampleFormat::U8, dsd_spec, dsd_duration as usize);
+        // The DSD buffer is the output in pass-through mode. Its capacity is in bytes of a channel,
+        // it grows if a packet is larger than the maximum.
+        let dsd_spec = AudioSpec::new(dsd_byte_rate(input_sample_rate), channels);
+        let dsd_buf = GenericAudioBuffer::new(SampleFormat::U8, dsd_spec, max_bytes);
 
-        Ok(DsdDecoder {
-            params: output_params,
-            mode,
-            dsd_buf,
-            pcm_buf,
-            decimator,
-            scratch_dsd: Vec::new(),
-            scratch_pcm: Vec::new(),
-        })
+        Ok(DsdDecoder { params, channels: channels_count, layout, dsd_buf, dst, pcm })
     }
 
-    /// Decode in pass-through mode (native DSD output)
-    fn decode_passthrough(&mut self, packet: &PacketRef<'_>) -> Result<GenericAudioBufferRef<'_>> {
-        let data = packet.data;
-        let channels = self.dsd_buf.spec().channels().count();
-
-        if data.is_empty() || channels == 0 {
-            return decode_error("dsd: invalid packet or channel count");
-        }
-
-        let samples_per_channel = data.len() / channels;
-
-        if samples_per_channel > self.dsd_buf.capacity() {
-            return decode_error("dsd: packet too large for buffer");
-        }
-
-        debug_assert!(samples_per_channel > 0, "samples_per_channel must be > 0");
-        debug_assert!(
-            samples_per_channel <= self.dsd_buf.capacity(),
-            "samples_per_channel exceeds buffer capacity"
-        );
-
-        let spc = samples_per_channel;
-        let layout = self.params.channel_data_layout.unwrap_or(ChannelDataLayout::Interleaved);
-
-        self.dsd_buf.clear();
-
-        match &mut self.dsd_buf {
-            GenericAudioBuffer::U8(buf) => {
-                buf.render_uninit(Some(spc));
-                for ch in 0..channels {
-                    let Some(plane) = buf.plane_mut(ch)
-                    else {
-                        return decode_error("dsd: missing audio plane");
-                    };
-                    copy_channel(data, channels, spc, ch, layout, plane);
-                }
-                Ok(buf.as_generic_audio_buffer_ref())
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    /// Decode in PCM mode (convert DSD to PCM)
-    fn decode_pcm(&mut self, packet: &PacketRef<'_>) -> Result<GenericAudioBufferRef<'_>> {
-        let data = packet.data;
-        let channels = self.dsd_buf.spec().channels().count();
-
-        if data.is_empty() || channels == 0 {
-            return decode_error("dsd: invalid packet or channel count");
-        }
-
-        let spc = data.len() / channels;
-        let layout = self.params.channel_data_layout.unwrap_or(ChannelDataLayout::Interleaved);
-
-        // Obtain pcm_capacity before taking any other borrows
-        let pcm_capacity = match self.pcm_buf.as_ref() {
-            Some(b) => b.capacity(),
-            None => return decode_error("dsd: no PCM buffer"),
-        };
-
-        // Build per-channel DSD planes in scratch_dsd (inner vecs reused; no hot-path allocation)
-        self.scratch_dsd.resize_with(channels, Vec::new);
-        for (ch, scratch) in self.scratch_dsd.iter_mut().enumerate() {
-            scratch.clear();
-            scratch.resize(spc, 0);
-            copy_channel(data, channels, spc, ch, layout, scratch);
-        }
-
-        // Resize PCM scratch vecs (reuses inner vec capacity after first packet)
-        self.scratch_pcm.resize_with(channels, Vec::new);
-        for ch in 0..channels {
-            self.scratch_pcm[ch].resize(pcm_capacity, 0.0);
-        }
-
-        let decimator = match self.decimator.as_mut() {
-            Some(d) => d,
-            None => return decode_error("dsd: no decimator"),
-        };
-
-        let dsd_plane_refs: Vec<&[u8]> = self.scratch_dsd.iter().map(|v| v.as_slice()).collect();
-        let mut pcm_plane_refs: Vec<&mut [f32]> =
-            self.scratch_pcm.iter_mut().map(|v| v.as_mut_slice()).collect();
-        let samples_produced = decimator.process_planar(&dsd_plane_refs, &mut pcm_plane_refs)?;
-        drop(pcm_plane_refs);
-
-        if samples_produced == 0 {
-            return decode_error("dsd: decimator produced no output");
-        }
-
-        // Read-only snapshot refs into scratch_pcm for the render closure (small Vec-of-refs; acceptable per-call alloc)
-        let pcm_snapshot: Vec<&[f32]> = self.scratch_pcm.iter().map(|v| v.as_slice()).collect();
-
-        let pcm_buf = match self.pcm_buf.as_mut() {
-            Some(b) => b,
-            None => return decode_error("dsd: no PCM buffer"),
-        };
-        pcm_buf.clear();
-
-        match pcm_buf {
-            GenericAudioBuffer::F32(buf) => {
-                buf.render_with(Some(samples_produced), |idx, audio_planes| -> Result<()> {
-                    for (ch, plane) in audio_planes.iter_mut().enumerate() {
-                        plane[idx] = pcm_snapshot[ch][idx];
-                    }
-                    Ok(())
-                })?;
-                Ok(buf.as_generic_audio_buffer_ref())
-            }
-            _ => unreachable!(),
+    /// Output the PCM that the delay of the filters has held back at the end of the stream, if
+    /// the output is PCM, so that the PCM has as many frames as the DSD has samples divided by
+    /// the decimation ratio.
+    ///
+    /// Call this after the last packet. It returns `None` if there is nothing more, and always
+    /// for DSD output. The decoder must be [reset](AudioDecoder::reset) before it decodes more
+    /// packets.
+    pub fn flush(&mut self) -> Result<Option<GenericAudioBufferRef<'_>>> {
+        match self.pcm.as_mut() {
+            Some(pcm) => pcm.flush(self.channels),
+            None => Ok(None),
         }
     }
 }

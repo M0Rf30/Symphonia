@@ -70,21 +70,24 @@ fn decode_hash(name: &str, pcm_rate: u32, max_packets: usize) -> Option<(u64, us
 }
 
 /// Pinned output hashes. The decimation chain uses exact integer arithmetic in the CIC stage and
-/// unfused, fixed-order floating point in the FIR stage, so the output is identical on every
-/// target and build configuration; any change to these hashes is a change of decoder output.
-/// (The CIC stage itself was verified bit-identical to the former integrator/comb
-/// implementation on all sample files.)
+/// unfused, fixed-order floating point in the FIR stages, so the output is identical in every
+/// build configuration; any change to these hashes is a change of decoder output. (The taps of
+/// the FIR stages are computed with the `sin` and `cos` of the platform, so a platform with a
+/// different libm might differ in the last bit of some samples.)
+/// (The CIC stage itself was verified bit-identical to an integrator/comb implementation on all
+/// sample files.) Each case is a whole number of frames short of the frames of the packets by the
+/// delay of the filters, which is dropped from the start of the stream.
 #[test]
 fn test_pinned_pcm_output_hashes() {
     let cases: &[(&str, u32, usize, u64, usize)] = &[
         // (file, rate, packets, hash, samples)
-        ("dsd64_dsf.dsf", 44100, 200, 0x8d5fd572354a1cc3, 204800),
-        ("dsd64_dff.dff", 352800, 200, 0x0152fb40068f7bef, 819200),
-        ("dsd128_dsf.dsf", 44100, 200, 0x7fd76d730f30c06a, 102400),
-        ("dsd128_dff.dff", 88200, 200, 0xa16ba6ed6fdb2937, 102400),
-        ("dsd256_dsf.dsf", 176400, 200, 0x8eb01c6d56e2f271, 204800),
-        ("dsd256_dff.dff", 352800, 200, 0x3acb551cf804ce24, 204800),
-        ("dsd64_dsf_6ch.dsf", 88200, 200, 0x5cf57176d5f1e098, 1228800),
+        ("dsd64_dsf.dsf", 44100, 200, 0x5ff94f4fb733dd25, 204714),
+        ("dsd64_dff.dff", 352800, 200, 0x87e024623e1b7268, 819122),
+        ("dsd128_dsf.dsf", 44100, 200, 0x4ecd33f30c391e5f, 102314),
+        ("dsd128_dff.dff", 88200, 200, 0x50f9d93082880147, 102314),
+        ("dsd256_dsf.dsf", 176400, 200, 0x12f6daf0d2a3c503, 204714),
+        ("dsd256_dff.dff", 352800, 200, 0x45b187c259c5d958, 204714),
+        ("dsd64_dsf_6ch.dsf", 88200, 200, 0xf75b770c47d7b2dc, 1228542),
     ];
 
     for &(name, rate, packets, hash, samples) in cases {
@@ -93,4 +96,51 @@ fn test_pinned_pcm_output_hashes() {
             assert_eq!(got_hash, hash, "{name} @ {rate}: hash {got_hash:016x}");
         }
     }
+}
+
+/// A DST compressed DSDIFF file (FFmpeg FATE `dst/dst-64fs44-2ch.dff`: 10 frames of 2 channels
+/// of DSD64) decodes with the frame CRC and arithmetic code checks enabled to exactly the DSD that
+/// the DST reference decoder (the MPEG-4 reference software, `dstcnv`) produces.
+#[test]
+fn test_dst_decodes_to_reference_dsd() {
+    let Some(path) = std::env::var_os("RMPD_SAMPLES")
+        .map(|dir| PathBuf::from(dir).join("dsd").join("dst-64fs44-2ch.dff"))
+        .filter(|path| path.exists())
+    else {
+        eprintln!("skipping: dst-64fs44-2ch.dff not found");
+        return;
+    };
+
+    let mss = MediaSourceStream::new(Box::new(File::open(path).unwrap()), Default::default());
+    let mut reader =
+        symphonia_format_dsd::DffReader::try_new(mss, FormatOptions::default()).unwrap();
+    let params = match reader.tracks()[0].codec_params.as_ref() {
+        Some(CodecParameters::Audio(a)) => a.clone(),
+        _ => panic!("expected an audio track"),
+    };
+    assert_eq!(params.codec, symphonia_codec_dsd::CODEC_ID_DST);
+
+    let options = AudioDecoderOptions::default().verify(true);
+    let mut decoder = DsdDecoder::try_new(&params, &options).unwrap();
+
+    // FNV-1a of the DSD, interleaved by channel.
+    let mut hash: u64 = 0xcbf29ce484222325;
+    let mut bytes = 0;
+    while let Some(packet) = reader.next_packet().unwrap() {
+        let GenericAudioBufferRef::U8(buf) = decoder.decode_ref(&packet.as_packet_ref()).unwrap()
+        else {
+            panic!("expected U8 output");
+        };
+        let planes = [buf.plane(0).unwrap(), buf.plane(1).unwrap()];
+        for i in 0..buf.frames() {
+            for plane in planes {
+                hash = (hash ^ u64::from(plane[i])).wrapping_mul(0x100000001b3);
+                bytes += 1;
+            }
+        }
+    }
+
+    assert_eq!(bytes, 94080);
+    assert_eq!(hash, 0x21312de594ef8567);
+    assert_eq!(decoder.finalize().verify_ok, Some(true));
 }

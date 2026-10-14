@@ -1,179 +1,72 @@
 # Symphonia DSD Codec
 
-Pure Rust decoder for DSD (Direct Stream Digital) audio with dual-mode operation.
+Pure Rust decoder for DSD (Direct Stream Digital) audio, and for DST (Direct Stream Transfer, the
+lossless compression of SACD and compressed DSDIFF).
 
-## Features
+## Modes
 
-### Dual-Mode Decoder
-- **Pass-through mode** (default): Native DSD output as U8 samples for hardware that supports DSD
-- **PCM conversion mode**: High-quality DSD-to-PCM conversion using multi-stage decimation filters
+### Pass-through (default)
 
-### Supported Formats
-- **DSD sample rates**: DSD64 (2.8224 MHz), DSD128 (5.6448 MHz), DSD256 (11.2896 MHz), DSD512 (22.5792 MHz)
-- **PCM output rates**: 44.1kHz, 48kHz, 88.2kHz, 96kHz, 176.4kHz, 192kHz (any evenly divisible rate)
-- **Multi-channel support**: Mono, stereo, and multi-channel up to 6 channels (5.1)
+Native DSD output as `U8` samples (1 byte = 8 consecutive 1-bit samples of a channel). A frame of
+the output buffer is one byte per channel and the buffer's rate is `dsd_rate / 8`, so
+`frames() / rate()` is the duration. The codec parameters keep the 1-bit sample rate.
 
-## Decoder Modes
+### PCM
 
-### Pass-Through Mode (Default)
+Set `extra_data` of the codec parameters to the PCM rate as a little-endian `u32`; the output is
+`f32`. The DSD rate divided by the PCM rate must be an even integer of at least 8, e.g. DSD64
+(2.8224 MHz) to 44.1, 88.2, 176.4 or 352.8 kHz, but not to 48 kHz (and 3.072 MHz DSD to 48 kHz).
+Anything else is rejected when the decoder is created.
 
-Outputs native DSD as U8 samples (1 byte = 8 DSD bits). Use this mode for:
-- Audio hardware with native DSD support (e.g., USB DACs)
-- Minimal latency applications
-- Preserving the original DSD signal
+The decimation chain (module `decimator`) is
 
-**Output**: `AudioBuffer<u8>` with DSD sample rate
+1. a CIC filter, exact in integer arithmetic on the packed bits (a nibble lookup table), decimating
+   by `R / 2^h`, with 5 to 8 stages;
+2. `h` (at most 3) FIR stages that halve the rate: Kaiser half-band filters, and a last
+   Kaiser-windowed low-pass that also compensates the droop of the CIC filter.
 
-### PCM Conversion Mode
+All filters are linear phase. Measured with second order 1-bit delta-sigma encoded tones
+(amplitude 0.25) through the decoder:
 
-Converts DSD to high-quality PCM using a two-stage decimation pipeline:
+| output rate | passband (up to 20 kHz) | worst alias into the passband |
+|-------------|-------------------------|-------------------------------|
+| 44.1 kHz    | +-0.001 dB              | -104 dB                       |
+| 88.2 kHz    | +-0.001 dB              | -104 dB                       |
+| 176.4 kHz   | +-0.001 dB              | -105 dB                       |
+| 352.8 kHz   | +-0.001 dB              | -81 dB                        |
 
-1. **CIC Filter** (Cascaded Integrator-Comb)
-   - Efficient high-ratio decimation (32-128x)
-   - No multiplications required
-   - i64 accumulators prevent overflow
-   - Evaluated exactly (integer arithmetic) directly on the packed DSD bits with a nibble
-     lookup table, so no per-bit floating point work is needed
-   - Configurable stages (typically 4)
+The in-band signal-to-noise ratio of a 1 kHz tone is 96.7 dB at all four rates (97.5 dB for an
+ideal filter). The 44.1 kHz filters have 19, 27 and 153 taps.
 
-2. **FIR Filter** (Finite Impulse Response)
-   - Kaiser window design for excellent frequency response
-   - Compensates for CIC passband droop
-   - Provides anti-aliasing filtering
-   - Polyphase implementation for efficiency
+#### Delay and flushing
 
-**Output**: `AudioBuffer<f32>` with chosen PCM sample rate
+The filters delay the signal by about 1 ms (43 frames at 44.1 kHz). With the decoder option
+`gapless` (the default) the delay is dropped from the start of the stream, so that frame `k` is the
+audio at DSD sample `k * R`; the last frames are held back, and `DsdDecoder::flush()` returns them
+after the last packet. A decoder that does not call `flush()` loses the last millisecond. After
+`reset()` (a seek) the filters restart with no history, which gives a transient of about a
+millisecond.
 
-**Example conversions**:
-- DSD64 (2.8224 MHz) → 44.1kHz: 64x decimation (32x CIC + 2x FIR)
-- DSD128 (5.6448 MHz) → 88.2kHz: 64x decimation (32x CIC + 2x FIR)
-- DSD256 (11.2896 MHz) → 44.1kHz: 256x decimation (128x CIC + 2x FIR)
+## DST
 
-## Usage
-
-### Pass-Through Mode
-
-```rust
-use symphonia_codec_dsd::DsdDecoder;
-use symphonia_core::codecs::{CodecParameters, Decoder, DecoderOptions};
-
-let mut params = CodecParameters::new();
-params
-    .for_codec(CODEC_TYPE_DSD)
-    .with_sample_rate(2822400)  // DSD64
-    .with_channels(Layout::Stereo.into_channels());
-
-let options = DecoderOptions::default();
-let mut decoder = DsdDecoder::try_new(&params, &options)?;
-
-// Decode packets - outputs AudioBuffer<u8>
-let buffer = decoder.decode(&packet)?;
-```
-
-### PCM Conversion Mode
-
-Enable PCM mode by providing the desired output rate in `CodecParameters.extra_data`:
-
-```rust
-use symphonia_codec_dsd::DsdDecoder;
-use symphonia_core::codecs::{CodecParameters, Decoder, DecoderOptions};
-
-let mut params = CodecParameters::new();
-params
-    .for_codec(CODEC_TYPE_DSD)
-    .with_sample_rate(2822400)  // DSD64 input
-    .with_channels(Layout::Stereo.into_channels());
-
-// Enable PCM mode: first 4 bytes = output sample rate (little-endian)
-let output_rate = 44100u32;
-let extra_data = output_rate.to_le_bytes().to_vec().into_boxed_slice();
-params.extra_data = Some(extra_data);
-
-let options = DecoderOptions::default();
-let mut decoder = DsdDecoder::try_new(&params, &options)?;
-
-// Decode packets - outputs AudioBuffer<f32> at 44.1kHz
-let buffer = decoder.decode(&packet)?;
-```
-
-## Filter Architecture
-
-### CIC Filter Characteristics
-- **Type**: Cascaded Integrator-Comb (multi-stage)
-- **Decimation**: Handles the bulk of sample rate reduction (32-128x typical)
-- **Complexity**: O(1) per sample (no multiplications)
-- **Trade-off**: Simple but has passband droop
-
-### FIR Filter Characteristics
-- **Type**: Kaiser window low-pass filter
-- **Decimation**: Final stage (2-4x typical)
-- **Purpose**: Compensates for CIC droop, provides anti-aliasing
-- **Complexity**: O(N) per output sample where N = number of taps
-- **Taps**: 31-63 depending on decimation ratio
-- **Phase**: Linear (symmetric coefficients)
-
-### Performance
-- **DSD64 → 44.1kHz**: Real-time capable on modern CPUs
-- **DSD256 → 44.1kHz**: Higher CPU usage but still practical for streaming
-- **Memory**: ~50KB per channel for intermediate buffers
-
-## Validation & Error Handling
-
-- Validates sample rate compatibility (output rate must evenly divide input rate)
-- Checks for buffer overflows and invalid channel counts
-- Proper state management across packet boundaries
-- Reset support for seeking operations
+Streams of the codec `CODEC_ID_DST` are decompressed (module `dst`, an implementation of
+ISO/IEC 14496-3 Subpart 10: segmented filters and probability tables, mappings, Rice coded
+tables, half-probability start, arithmetic decoding, uncompressed frames) and then handled like DSD.
+The packet layout is described in the docs of `DsdDecoder`. With the decoder option `verify` the
+CRC of the decoded frame (the `DSTC` chunk) and the end of the arithmetic code are checked, and
+`finalize()` reports the result. Up to 6 channels.
 
 ## Testing
 
-Comprehensive test suite with 41 tests:
-- 29 unit tests (bitstream unpacking, CIC filter, FIR filter, decimation config)
-- 12 integration tests (decoder creation, pass-through mode, PCM mode, error handling)
+`cargo test -p symphonia-codec-dsd`: unit tests of the CIC (against an integrator/comb
+implementation), FIR, decimator (response, alias, delay, chunking) and DST modules, decoder
+tests, and, with `RMPD_SAMPLES` set, hashes of the PCM output of real DSF and DFF files and the
+decoding of a DST file to the DSD of the MPEG-4 reference decoder.
 
-Run tests with:
-```bash
-cargo test --package symphonia-codec-dsd
-```
-
-## Quality Metrics
-
-The PCM conversion achieves:
-- **Frequency response**: Flat passband (±0.1dB to 20kHz for 44.1k output)
-- **Stopband attenuation**: >90dB at Nyquist frequency
-- **THD+N**: <0.001% for typical signals
-- **Latency**: ~1ms for typical block sizes
-
-## Playback Recommendations
-
-### For DSD64 and DSD128
-**Recommended**: Use **PCM conversion mode** with high output rates:
-- DSD64 → 88.2kHz or 176.4kHz PCM
-- DSD128 → 176.4kHz or 192kHz PCM
-
-This provides excellent audio quality and works with all audio hardware.
-
-### For DSD256 and Higher
-**Required**: Use **PCM conversion mode** as native DSD playback support is limited:
-- DSD256 → 88.2kHz, 176.4kHz, or 192kHz PCM
-- DSD512 → 176.4kHz or 192kHz PCM
-
-The high-quality FIR decimator preserves all audible information while properly handling DSD's noise shaping.
-
-### Native DSD Playback (Pass-Through)
-Native DSD output has limited hardware support:
-- Works with select USB DACs that support proprietary DSD formats
-- Linux ALSA support is device-specific and often requires kernel quirks
-- DoP (DSD over PCM) requires specific PCM rates (176.4kHz for DSD64, 352.8kHz for DSD128)
-- For most use cases, **PCM conversion is the better choice**
-
-## Technical Notes
-
-- **DSD silence**: Uses correct 0x55 pattern (alternating bits)
-- **Bit order**: Supports both LSB-first (DSF) and MSB-first (DFF)
-- **Overflow protection**: i64 accumulators in CIC prevent numeric overflow
-- **Filter state**: Maintained across packets for continuous playback
-- **Channel independence**: Each channel processed separately with its own filter state
+DST output was also compared to that reference decoder (`dstcnv`) on DSDIFF files compressed by
+a third party encoder (mono, stereo and 6 channel DSD64, prediction orders 16 and 128): identical,
+and the CRCs of all 1200 frames match. DSD128 and DSD256 files decode to the source.
 
 ## License
 
-This project is licensed under the Mozilla Public License 2.0.
+Mozilla Public License 2.0.

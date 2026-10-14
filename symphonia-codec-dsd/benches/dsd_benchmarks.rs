@@ -49,28 +49,31 @@ fn bench_cic_filter(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark FIR filter processing (tests SIMD optimization)
+/// Benchmark the FIR decimation filters that follow the CIC filter: a half-band filter and the
+/// long filter of the last stage, for 44.1 kHz output.
 fn bench_fir_filter(c: &mut Criterion) {
-    use symphonia_codec_dsd::fir::FirDecimator;
+    use symphonia_codec_dsd::fir::{Decimate2, design_halfband, design_lowpass};
 
     let mut group = c.benchmark_group("fir_filter");
 
-    for (decimation, taps) in [(2, 63), (4, 31), (8, 31)].iter() {
-        group.throughput(Throughput::Elements(8192));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(format!("dec{}_taps{}", decimation, taps)),
-            &(*decimation, *taps),
-            |b, &(decimation, taps)| {
-                let mut filter = FirDecimator::new(decimation, taps, 0.4);
-                let input = vec![0.5f32; 8192];
-                let mut output = vec![0.0f32; 8192 / decimation];
+    let filters = [
+        ("halfband_176k", design_halfband(176_400.0, 20_000.0)),
+        ("lowpass_88k", design_lowpass(88_200.0, 20_000.0, 24_100.0, |_| 1.0)),
+    ];
 
-                b.iter(|| {
-                    filter.reset();
-                    black_box(filter.process_buffer(&input, &mut output))
-                });
-            },
-        );
+    for (name, taps) in filters.iter() {
+        group.throughput(Throughput::Elements(8192));
+        group.bench_with_input(BenchmarkId::from_parameter(name), taps, |b, taps| {
+            let mut filter = Decimate2::new(taps);
+            let input = vec![0.5f32; 8192];
+            let mut output = vec![0.0f32; 4096];
+
+            b.iter(|| {
+                filter.reset();
+                filter.process(&input, &mut output[..filter.output_len(input.len())]);
+                black_box(output[0])
+            });
+        });
     }
 
     group.finish();

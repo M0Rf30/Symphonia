@@ -1,80 +1,43 @@
 # Symphonia DSD Format Demuxer
 
-Pure Rust demuxer for DSD (Direct Stream Digital) audio formats.
+Pure Rust demuxers for DSD (Direct Stream Digital) files.
 
-## Supported Formats
+## Supported formats
 
-- **DSF** (DSD Stream File) - Sony's DSD format ✅ Fully Implemented
-- **DFF** (DSDIFF - DSD Interchange File Format) - Philips/Sony IFF-based format ✅ Fully Implemented
+- **DSF** (DSD Stream File, Sony v1.01): DSD64 to DSD512 and beyond, 1 to 64 channels, LSB-first
+  and MSB-first data, ID3v2 metadata, gapless (the sample count of the `fmt` chunk is exact).
+- **DFF** (DSDIFF 1.5, Philips/Sony): uncompressed `DSD ` and DST compressed `DST ` sound data.
+  Properties (`FS`, `CHNL`, `CMPR`, `ABSS`, `LSCO`), `DIIN` (`EMID`, `MARK`, `DIAR`, `DITI`),
+  `COMT`, `MANF` and `ID3 ` chunks are read to tags and chapters (markers as chapters), and
+  metadata may precede or follow the sound data.
 
-## Features
+## Behaviour
 
-### Format Support
-- **DSD sample rates**: DSD64 (2.8224 MHz), DSD128 (5.6448 MHz), DSD256 (11.2896 MHz), DSD512 (22.5792 MHz)
-- **Multi-channel audio**: Mono, stereo, 2.1, 5.1, and custom channel configurations (up to 6 channels)
-- **Native DSD output**: U8 format (1 byte = 8 DSD bits) for native DSD playback
-- **Seeking support**: Sample-accurate seeking in both DSF and DFF formats
+- Packets are 4096 bytes per channel (DSF: one block group); pass-through timestamps and durations
+  count 1-bit samples per channel.
+- DST packets are one DST frame each (`DSTF`, with the CRC of the `DSTC` chunk if there is one);
+  the layout is in the crate documentation. The decoder is in `symphonia-codec-dsd`.
+- Seeking is exact to the packet; in DST files the frames are indexed on demand, and the `DSTI`
+  chunk is not used.
+- Damaged input never panics: sizes are checked against the stream, truncated data delivers the
+  complete samples that are present, bad chunk sizes and channel counts are errors, and a stream
+  that cannot seek reads up to the sound data.
 
-### Metadata Extraction
-- **DSF**: ID3v2 tag parsing (artist, title, album, genre, comments, cover art, etc.)
-- **DFF**: INFO chunk parsing (DITI/title, DIAR/artist, DISP/album, DIGE/genre, COMT/comments)
+## Not supported
 
-### Validation & Error Handling
-- Comprehensive format validation (magic numbers, chunk sizes, channel counts)
-- Channel ID validation for DFF files (SLFT, SRGT, MLFT, MRGT, C, LFE, LS, RS)
-- Descriptive error messages with actionable suggestions
-- Graceful handling of malformed files
-
-### Known Limitations
-- **DST compression not supported**: DFF files using DST (Direct Stream Transfer) compression will be rejected with a helpful error message suggesting conversion tools
-- **Maximum 6 channels**: Channel counts beyond 6 are not currently supported
-
-## Usage
-
-This crate is part of the Symphonia project and is designed to be used with the `symphonia` meta-crate or standalone with `symphonia-core`.
-
-### Example
-
-```rust
-use symphonia_core::formats::FormatReader;
-use symphonia_core::io::MediaSourceStream;
-use symphonia_format_dsd::DsfReader;
-use std::fs::File;
-
-// Open a DSF file
-let file = File::open("audio.dsf")?;
-let mss = MediaSourceStream::new(Box::new(file), Default::default());
-
-// Create format reader
-let mut reader = DsfReader::try_new(mss, &Default::default())?;
-
-// Access metadata
-let metadata = reader.metadata();
-
-// Read packets
-while let Ok(packet) = reader.next_packet() {
-    // Process DSD audio data
-}
-```
-
-## Format Specifications
-
-This implementation is based on:
-- DSF v1.01 specification
-- DSDIFF v1.5 specification (Philips/Sony)
+- DST in DSF (the DSF specification has none).
+- The `DSTI` index of DSDIFF is skipped, not used.
 
 ## Testing
 
-Comprehensive test coverage includes:
-- Unit tests for individual components (text decoding, validation)
-- Integration tests for format parsing (valid/invalid files, edge cases)
-- Error handling tests (truncated files, invalid headers, unsupported features)
+`cargo test -p symphonia-format-dsd`: unit tests and integration tests that build DSF and DFF
+files (valid and damaged, DST, metadata, channel layouts, seeking).
 
-Run tests with:
-```bash
-cargo test --package symphonia-format-dsd
-```
+## Specifications
+
+- DSF File Format Specification v1.01 (Sony)
+- DSDIFF File Format Specification v1.5 (Philips)
 
 ## License
 
-This project is licensed under the Mozilla Public License 2.0.
+Mozilla Public License 2.0.

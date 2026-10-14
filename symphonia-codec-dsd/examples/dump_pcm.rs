@@ -58,20 +58,11 @@ fn main() {
     let mut total = 0usize;
     let mut packets = 0usize;
 
-    while packets < max_packets {
-        let packet = match reader.next_packet() {
-            Ok(Some(p)) => p,
-            _ => break,
-        };
-        if packet.track_id != track_id {
-            continue;
-        }
-        let GenericAudioBufferRef::F32(buf) =
-            decoder.decode_ref(&packet.as_packet_ref()).expect("decode")
+    let mut consume = |buf: GenericAudioBufferRef<'_>| {
+        let GenericAudioBufferRef::F32(buf) = buf
         else {
             panic!("expected F32 output");
         };
-        packets += 1;
         for ch in 0..buf.spec().channels().count() {
             for &s in buf.plane(ch).expect("plane") {
                 for b in s.to_bits().to_le_bytes() {
@@ -82,6 +73,29 @@ fn main() {
                 }
                 total += 1;
             }
+        }
+    };
+
+    let mut at_end = false;
+    while packets < max_packets {
+        let packet = match reader.next_packet() {
+            Ok(Some(p)) => p,
+            _ => {
+                at_end = true;
+                break;
+            }
+        };
+        if packet.track_id != track_id {
+            continue;
+        }
+        consume(decoder.decode_ref(&packet.as_packet_ref()).expect("decode"));
+        packets += 1;
+    }
+
+    // The frames that the delay of the filters holds back, at the end of the stream.
+    if at_end {
+        if let Some(tail) = decoder.flush().expect("flush") {
+            consume(tail);
         }
     }
 

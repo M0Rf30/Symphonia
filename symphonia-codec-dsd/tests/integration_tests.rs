@@ -1,6 +1,8 @@
 // Integration tests for DSD codec decoder
+#![allow(clippy::unwrap_used)]
 
-use symphonia_codec_dsd::{CODEC_ID_DSD, DsdDecoder};
+use symphonia_codec_dsd::decimator::DecimationConfig;
+use symphonia_codec_dsd::{CODEC_ID_DSD, CODEC_ID_DST, DsdDecoder, dst};
 use symphonia_core::audio::{Audio, Channels, GenericAudioBufferRef};
 use symphonia_core::codecs::audio::{
     AudioCodecParameters, AudioDecoder, AudioDecoderOptions, ChannelDataLayout,
@@ -113,10 +115,12 @@ fn test_decoder_oversized_packet() {
     let options = AudioDecoderOptions::default();
     let mut decoder = DsdDecoder::try_new(&params, &options).unwrap();
 
-    // Packet larger than buffer capacity.
+    // A packet larger than the declared maximum is decoded: the buffer grows.
     let data: Vec<u8> = vec![0x55; 1000];
-    let result = decoder.decode_ref(&packet(&data));
-    assert!(result.is_err()); // Should error on oversized packet
+    match decoder.decode_ref(&packet(&data)).unwrap() {
+        GenericAudioBufferRef::U8(buf) => assert_eq!(buf.frames(), 500),
+        _ => panic!("Expected U8 buffer for pass-through mode"),
+    }
 }
 
 #[test]
@@ -352,14 +356,16 @@ fn test_pcm_produces_decimated_signal() {
     let mut d = ch.clone();
     d.extend_from_slice(&ch);
 
+    // The delay of the decimation filters is dropped from the start of the stream.
+    let delay = DecimationConfig::new(2822400, 352800).unwrap().delay_frames();
+
     let result = decoder.decode_ref(&packet(&d));
     assert!(result.is_ok(), "decode_ref failed: {:?}", result.err());
 
     match result.unwrap() {
         GenericAudioBufferRef::F32(buf) => {
-            // 1024 bytes/ch * 8 bits / 8 (decimation) = 1024 PCM frames
-            assert_eq!(buf.frames(), 1024, "expected 1024 PCM frames after 8x decimation");
-
+            // 1024 bytes/ch * 8 bits / 8 (decimation) = 1024 PCM frames, less the delay.
+            assert_eq!(buf.frames(), 1024 - delay, "unexpected PCM frames after 8x decimation");
             let samples = buf.plane(0).unwrap();
 
             assert!(!samples.is_empty(), "PCM output must not be empty");
@@ -375,6 +381,172 @@ fn test_pcm_produces_decimated_signal() {
             assert!((max - min) > 0.1, "decimated output appears silent: min={}, max={}", min, max);
         }
         _ => panic!("Expected F32 buffer for PCM mode"),
+    }
+}
+
+/// The frames of the PCM output of a stream: those of the packets, then the flush.
+fn pcm_frames(decoder: &mut DsdDecoder, packets: &[Vec<u8>]) -> (usize, usize) {
+    let mut decoded = 0;
+    for data in packets {
+        match decoder.decode_ref(&packet(data)).unwrap() {
+            GenericAudioBufferRef::F32(buf) => decoded += buf.frames(),
+            _ => panic!("Expected F32 buffer for PCM mode"),
+        }
+    }
+    let flushed = match decoder.flush().unwrap() {
+        Some(GenericAudioBufferRef::F32(buf)) => buf.frames(),
+        Some(_) => panic!("Expected F32 buffer for PCM mode"),
+        None => 0,
+    };
+    (decoded, flushed)
+}
+
+fn pcm_params(pcm_rate: u32) -> AudioCodecParameters {
+    let mut params = AudioCodecParameters::new();
+    params
+        .for_codec(CODEC_ID_DSD)
+        .with_sample_rate(2822400)
+        .with_channels(Channels::Discrete(2))
+        .with_max_frames_per_packet(1024 * 8)
+        .with_channel_data_layout(ChannelDataLayout::Interleaved);
+    params.extra_data = Some(pcm_rate.to_le_bytes().to_vec().into_boxed_slice());
+    params
+}
+
+/// With gapless playback the filter delay is dropped from the start, and `flush` returns the
+/// frames at the end, so that a stream has one PCM frame per decimation ratio DSD samples. Without
+/// it the delay is kept, and there is nothing to flush.
+#[test]
+fn test_pcm_gapless_frame_counts() {
+    let packets: Vec<Vec<u8>> = (0..5).map(|n| vec![0x35 ^ n as u8; 1024 * 2]).collect();
+    let total = 5 * 1024 * 8 / 64;
+
+    let mut decoder =
+        DsdDecoder::try_new(&pcm_params(44100), &AudioDecoderOptions::default()).unwrap();
+    let delay = DecimationConfig::new(2822400, 44100).unwrap().delay_frames();
+    assert_eq!(pcm_frames(&mut decoder, &packets), (total - delay, delay));
+    // Nothing is left.
+    assert!(decoder.flush().unwrap().is_none());
+
+    // After a reset the stream starts over, as after a seek.
+    decoder.reset();
+    assert_eq!(pcm_frames(&mut decoder, &packets), (total - delay, delay));
+
+    let mut options = AudioDecoderOptions::default();
+    options.gapless = false;
+    let mut decoder = DsdDecoder::try_new(&pcm_params(44100), &options).unwrap();
+    assert_eq!(pcm_frames(&mut decoder, &packets), (total, 0));
+}
+
+/// The PCM of a stream does not depend on how the stream is divided into packets.
+#[test]
+fn test_pcm_independent_of_packet_size() {
+    // Pseudo-random DSD, 2048 bytes for each of the 2 channels.
+    let dsd: Vec<u8> = (0..4096u32).map(|n| (n.wrapping_mul(2654435761) >> 13) as u8).collect();
+
+    let decode = |size: usize| -> [Vec<u32>; 2] {
+        let mut decoder =
+            DsdDecoder::try_new(&pcm_params(88200), &AudioDecoderOptions::default()).unwrap();
+        let mut out = [Vec::new(), Vec::new()];
+        for part in dsd.chunks(size * 2) {
+            match decoder.decode_ref(&packet(part)).unwrap() {
+                GenericAudioBufferRef::F32(buf) => {
+                    for (ch, out) in out.iter_mut().enumerate() {
+                        out.extend(buf.plane(ch).unwrap().iter().map(|s| s.to_bits()));
+                    }
+                }
+                _ => panic!("Expected F32 buffer for PCM mode"),
+            }
+        }
+        out
+    };
+
+    let reference = decode(2048);
+    let delay = DecimationConfig::new(2822400, 88200).unwrap().delay_frames();
+    assert_eq!(reference[0].len(), 2048 * 8 / 32 - delay);
+    assert_ne!(reference[0], reference[1]);
+
+    for size in [1, 7, 100, 512] {
+        assert!(decode(size) == reference, "packets of {size} bytes per channel");
+    }
+}
+
+fn dst_params(channels: u16, samples_per_frame: u64) -> AudioCodecParameters {
+    let mut params = AudioCodecParameters::new();
+    params
+        .for_codec(CODEC_ID_DST)
+        .with_sample_rate(2822400)
+        .with_channels(Channels::Discrete(channels))
+        .with_max_frames_per_packet(samples_per_frame);
+    params
+}
+
+/// A DST packet of an uncompressed frame (DSTCoded = 0) of `dsd`, with a CRC if `crc` is some.
+fn raw_dst_packet(dsd: &[u8], crc: Option<u32>) -> Vec<u8> {
+    let mut data = vec![crc.is_some() as u8];
+    data.extend_from_slice(&crc.unwrap_or(0).to_be_bytes());
+    data.push(0); // DSTCoded = 0, a dummy bit, and 6 zero stuffing bits.
+    data.extend_from_slice(dsd);
+    data
+}
+
+/// DST: an uncompressed frame is the DSD itself. The frame CRC is checked with `verify`.
+#[test]
+fn test_dst_raw_frame_and_crc() {
+    // 2 channels of 4 bytes, interleaved.
+    let dsd = [0x01, 0x80, 0x02, 0x40, 0x04, 0x20, 0x08, 0x10];
+    let crc = dst::dst_frame_crc(&dsd);
+
+    let mut decoder =
+        DsdDecoder::try_new(&dst_params(2, 32), &AudioDecoderOptions::default()).unwrap();
+    for packet_data in [raw_dst_packet(&dsd, None), raw_dst_packet(&dsd, Some(crc))] {
+        match decoder.decode_ref(&packet(&packet_data)).unwrap() {
+            GenericAudioBufferRef::U8(buf) => {
+                assert_eq!(buf.frames(), 4);
+                assert_eq!(buf.plane(0).unwrap(), &[0x01, 0x02, 0x04, 0x08]);
+                assert_eq!(buf.plane(1).unwrap(), &[0x80, 0x40, 0x20, 0x10]);
+            }
+            _ => panic!("Expected U8 buffer for pass-through mode"),
+        }
+    }
+    // Without verification the CRC is not checked and there is no verification result.
+    assert!(decoder.decode_ref(&packet(&raw_dst_packet(&dsd, Some(crc ^ 1)))).is_ok());
+    assert_eq!(decoder.finalize().verify_ok, None);
+
+    let options = AudioDecoderOptions::default().verify(true);
+    let mut decoder = DsdDecoder::try_new(&dst_params(2, 32), &options).unwrap();
+    assert!(decoder.decode_ref(&packet(&raw_dst_packet(&dsd, Some(crc)))).is_ok());
+    assert_eq!(decoder.finalize().verify_ok, Some(true));
+    assert!(decoder.decode_ref(&packet(&raw_dst_packet(&dsd, Some(crc ^ 1)))).is_err());
+    assert_eq!(decoder.finalize().verify_ok, Some(false));
+}
+
+/// DST: invalid parameters and packets are errors, never panics.
+#[test]
+fn test_dst_invalid_input() {
+    let options = AudioDecoderOptions::default();
+
+    // The number of samples of a frame is required, a multiple of 8, and the channels at most 6.
+    let mut params = dst_params(2, 32);
+    params.max_frames_per_packet = None;
+    assert!(DsdDecoder::try_new(&params, &options).is_err());
+    assert!(DsdDecoder::try_new(&dst_params(2, 36), &options).is_err());
+    assert!(DsdDecoder::try_new(&dst_params(7, 32), &options).is_err());
+
+    let mut decoder = DsdDecoder::try_new(&dst_params(2, 32), &options).unwrap();
+    // No frame, an invalid stuffing pattern, and arithmetic code data that is cut short.
+    assert!(decoder.decode_ref(&packet(&[0, 0, 0, 0, 0])).is_err());
+    assert!(decoder.decode_ref(&packet(&[0, 0, 0, 0, 0, 0x01, 0, 0, 0, 0])).is_err());
+    assert!(decoder.decode_ref(&packet(&[0, 0, 0, 0, 0, 0xff, 0xff, 0xff])).is_err());
+    assert!(decoder.decode_ref(&packet(&[0, 0, 0, 0])).is_err());
+
+    // A frame that is too short is padded with DSD silence.
+    match decoder.decode_ref(&packet(&[0, 0, 0, 0, 0, 0x00, 0x01, 0x02])).unwrap() {
+        GenericAudioBufferRef::U8(buf) => {
+            assert_eq!(buf.plane(0).unwrap(), &[0x01, 0x69, 0x69, 0x69]);
+            assert_eq!(buf.plane(1).unwrap(), &[0x02, 0x69, 0x69, 0x69]);
+        }
+        _ => panic!("Expected U8 buffer for pass-through mode"),
     }
 }
 
