@@ -757,6 +757,33 @@ pub fn read_trailing_id3v2(
     }
 }
 
+/// Read an ID3v2 tag that begins at the current position of a stream, if one does.
+///
+/// This is for tags found while reading a stream sequentially, such as a tag appended to the
+/// audio of a stream that cannot seek to find it in advance. Only a structurally valid tag header
+/// is accepted (as when probing). If there is no tag, the stream is rewound to where it was.
+pub fn read_id3v2_at(mss: &mut MediaSourceStream<'_>) -> Result<Option<MetadataBuffer>> {
+    let mut hdr = [0u8; ID3V2_HEADER_LEN as usize];
+
+    // Less than a header remains: the stream is ending, and there is no tag.
+    if mss.read_buf_exact(&mut hdr).is_err() {
+        return Ok(None);
+    }
+
+    mss.seek_buffered_rev(hdr.len());
+
+    if !parse_header_bytes(&hdr).is_some_and(|hdr| hdr.is_supported()) {
+        return Ok(None);
+    }
+
+    let mut builder = MetadataBuilder::new(ID3V2_METADATA_INFO);
+    let mut side_data = Vec::new();
+
+    read_id3v2(mss, &mut builder, &mut side_data)?;
+
+    Ok(Some(MetadataBuffer { revision: builder.build(), side_data }))
+}
+
 fn read_located_trailing_id3v2(
     mss: &mut MediaSourceStream<'_>,
     stream_len: u64,

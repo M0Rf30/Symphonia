@@ -441,6 +441,16 @@ impl FormatReader for MpaReader<'_> {
                 return Ok(None);
             }
 
+            // A stream that is not seekable cannot be searched for an appended ID3v2 tag in
+            // advance, so read one when it is reached. It ends the audio data.
+            if self.data_end.is_none() && !self.reader.is_seekable() {
+                if let Some(tag) = id3v2::read_id3v2_at(&mut self.reader)? {
+                    self.metadata.push(tag.revision);
+                    self.data_end = Some(self.reader.pos());
+                    return Ok(None);
+                }
+            }
+
             // Read the next MPEG frame.
             let (header, data) = match read_mpeg_frame(&mut self.reader, self.free_len) {
                 Ok(frame) => frame,
@@ -2020,6 +2030,47 @@ mod tests {
         // A history of 1 frame.
         let history: VecDeque<_> = [frame(100)].into_iter().collect();
         assert_eq!(find_preroll_start(&history), 0);
+    }
+
+    #[test]
+    fn verify_unseekable_trailing_id3v2_is_read() {
+        let n = 20;
+        let mut data = build_stream(&plain_frames(n), 9, FRAME_LEN);
+
+        // An ID3v2.3 tag whose private frame contains what looks like audio frames.
+        let mut body = Vec::new();
+        body.extend_from_slice(b"TIT2");
+        body.extend_from_slice(&6u32.to_be_bytes());
+        body.extend_from_slice(&[0, 0, 0]);
+        body.extend_from_slice(b"Title");
+        let private = build_stream(&plain_frames(5), 9, FRAME_LEN);
+        body.extend_from_slice(b"PRIV");
+        body.extend_from_slice(&(private.len() as u32 + 2).to_be_bytes());
+        body.extend_from_slice(&[0, 0, b'x', 0]);
+        body.extend_from_slice(&private);
+
+        let size = body.len() as u32;
+        data.extend_from_slice(b"ID3\x03\x00\x00");
+        data.extend([21, 14, 7, 0].map(|shift| ((size >> shift) & 0x7f) as u8));
+        data.extend_from_slice(&body);
+
+        let mut reader = open_stream(data, false, FormatOptions::default());
+
+        let mut n_packets = 0;
+
+        while let Some(packet) = reader.next_packet().unwrap() {
+            assert_eq!(frame_idx(&packet), n_packets);
+            n_packets += 1;
+        }
+
+        assert_eq!(n_packets as usize, n);
+
+        let mut metadata = reader.metadata();
+        let Some(rev) = metadata.skip_to_latest()
+        else {
+            panic!("no metadata");
+        };
+        assert!(rev.media.tags.iter().any(|tag| tag.raw.value.to_string() == "Title"));
     }
 
     #[test]
