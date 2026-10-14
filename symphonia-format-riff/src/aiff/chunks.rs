@@ -193,16 +193,10 @@ impl CommonChunk {
             FormatData::ALaw(alaw) => alaw.make_packet_info(),
             FormatData::MuLaw(mulaw) => mulaw.make_packet_info(),
             FormatData::IeeeFloat(ieee) => ieee.make_packet_info(),
-            FormatData::Extensible(_) => {
-                unsupported_error("aiff: packet info not implemented for format Extensible")
-            }
+            FormatData::Extensible(ext) => ext.make_packet_info(),
             FormatData::Adpcm(adpcm) => adpcm.make_packet_info(),
-            FormatData::Mpeg(_) => {
-                unsupported_error("aiff: packet info not implemented for format Mpeg")
-            }
-            FormatData::Es(_) => {
-                unsupported_error("aiff: packet info not implemented for format Es")
-            }
+            FormatData::Mpeg(mpeg) => mpeg.make_packet_info(),
+            FormatData::Es(es) => es.make_packet_info(),
         }
     }
 }
