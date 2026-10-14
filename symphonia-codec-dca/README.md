@@ -17,6 +17,8 @@ fixed-point core decoder, which is therefore also implemented (and used for any 
 carries an XLL component). The low bit rate (LBR, DTS Express) component is not decoded; such
 streams are decoded from their core if they have one.
 
+With the `downmix` decoder option, core streams are mixed down to stereo with the primary channel downmix coefficients embedded in the stream (Lo/Ro or Lt/Rt), as the reference decoder does; without embedded coefficients, and for mono, the ITU-R BS.775 equations are used. Streams with an XLL component are always output with their native channels.
+
 > [!NOTE]
 > This crate is part of Symphonia. Please use the [`symphonia`](https://crates.io/crates/symphonia) crate instead of this one directly.
 

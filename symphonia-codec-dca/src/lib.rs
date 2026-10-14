@@ -39,13 +39,13 @@ mod tables_dct;
 mod xll;
 
 use symphonia_core::audio::{
-    AsGenericAudioBufferRef, AudioBuffer, AudioMut, AudioSpec, Channels, GenericAudioBufferRef,
-    Position,
+    AsGenericAudioBufferRef, Audio, AudioBuffer, AudioMut, AudioSpec, Channels,
+    GenericAudioBufferRef, Position,
 };
 use symphonia_core::codecs::CodecInfo;
 use symphonia_core::codecs::audio::well_known::CODEC_ID_DCA;
 use symphonia_core::codecs::audio::{
-    AudioCodecParameters, AudioDecoder, AudioDecoderOptions, FinalizeResult,
+    AudioCodecParameters, AudioDecoder, AudioDecoderOptions, Downmix, FinalizeResult,
 };
 use symphonia_core::codecs::registry::{RegisterableAudioDecoder, SupportedAudioCodec};
 use symphonia_core::errors::{Result, decode_error, unsupported_error};
@@ -347,11 +347,18 @@ impl DcaDecoder {
         }
 
         // Parse the core extensions, X96 is not decoded when it is replaced by XLL.
+        // Like the reference decoder, a stereo downmix with the coefficients embedded in the core
+        // is made from the primary channel set: the extension channels are not decoded.
+        let stereo = matches!(self.opts.downmix, Downmix::StereoLoRo | Downmix::StereoLtRt);
+        let embedded_dmix =
+            stereo && have_core && packet & PACKET_XLL == 0 && { self.core.has_stereo_downmix() };
+
         if have_core {
             self.core.parse_extensions(
                 input,
                 asset.as_ref().map(|a| (rest, a)),
                 packet & PACKET_XLL != 0,
+                embedded_dmix,
             )?;
         }
 
@@ -405,7 +412,13 @@ impl DcaDecoder {
         }
         else {
             let info = self.core.filter_frame()?;
-            (info.nsamples, info.sample_rate, info.ch_mask, Source::CoreFloat)
+            let ch_mask = if embedded_dmix {
+                self.core.downmix_to_stereo(info.nsamples)
+            }
+            else {
+                info.ch_mask
+            };
+            (info.nsamples, info.sample_rate, ch_mask, Source::CoreFloat)
         };
 
         self.packet = packet;
@@ -437,12 +450,107 @@ impl DcaDecoder {
             }
         }
 
+        // Downmix with the standard equations if the stream did not provide the coefficients.
+        if self.opts.downmix != Downmix::None && !embedded_dmix {
+            self.downmix(sample_rate, ch_mask, nsamples);
+        }
+
         // Trim gaps.
         if self.opts.gapless && (pkt.trim_start.get() != 0 || pkt.trim_end.get() != 0) {
             self.buf.trim(pkt.trim_start.get() as usize, pkt.trim_end.get() as usize);
         }
 
         Ok(())
+    }
+}
+
+/// The weights of the channels of a downmix input: the front channels, the center channel and
+/// the left and right surround channels.
+#[derive(Copy, Clone, Default)]
+struct Roles {
+    l: f32,
+    r: f32,
+    c: f32,
+    ls: f32,
+    rs: f32,
+}
+
+/// The downmix equations of ITU-R BS.775-4 Annex 4 Table 2 (mono 1/0 and stereo 2/0 formats),
+/// with the surround coefficient of 1/sqrt(2). The Lt/Rt downmix mixes the surround channels in
+/// anti-phase as is done for Dolby Surround matrix encoding. The low frequency effects channel and
+/// the height and wide channels are not mixed.
+fn downmix_rows(mode: Downmix) -> Vec<Roles> {
+    const K: f32 = std::f32::consts::FRAC_1_SQRT_2;
+
+    match mode {
+        Downmix::StereoLoRo => vec![
+            Roles { l: 1.0, c: K, ls: K, ..Default::default() },
+            Roles { r: 1.0, c: K, rs: K, ..Default::default() },
+        ],
+        Downmix::StereoLtRt => vec![
+            Roles { l: 1.0, c: K, ls: -K, rs: -K, ..Default::default() },
+            Roles { r: 1.0, c: K, ls: K, rs: K, ..Default::default() },
+        ],
+        _ => vec![Roles { l: K, r: K, c: 1.0, ls: 0.5, rs: 0.5 }],
+    }
+}
+
+impl DcaDecoder {
+    /// Mix the planes of `self.buf` with the standard downmix equations and make the result the
+    /// content of the buffer.
+    fn downmix(&mut self, sample_rate: u32, ch_mask: u32, nsamples: usize) {
+        let rows = downmix_rows(self.opts.downmix);
+
+        // The number of speakers feeding each surround role: they are averaged.
+        let left_surr = [spkr::LS, spkr::LSR, spkr::LSS];
+        let right_surr = [spkr::RS, spkr::RSR, spkr::RSS];
+        let count = |set: &[usize]| set.iter().filter(|&&s| ch_mask & (1 << s) != 0).count().max(1);
+        let nl = count(&left_surr) as f32;
+        let nr = count(&right_surr) as f32;
+
+        // The gain of each source plane in each output channel.
+        let gains: Vec<Vec<f32>> = rows
+            .iter()
+            .map(|row| {
+                self.plane_spkr
+                    .iter()
+                    .map(|&s| match s {
+                        spkr::C => row.c,
+                        spkr::L => row.l,
+                        spkr::R => row.r,
+                        spkr::LS | spkr::LSR | spkr::LSS => row.ls / nl,
+                        spkr::RS | spkr::RSR | spkr::RSS => row.rs / nr,
+                        // A mono surround channel is fed to both surround channels.
+                        spkr::CS => (row.ls + row.rs) * 0.5,
+                        _ => 0.0,
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let src: Vec<Vec<f32>> = (0..self.plane_spkr.len())
+            .map(|i| self.buf.plane(i).map_or_else(Vec::new, |p| p[..nsamples].to_vec()))
+            .collect();
+
+        let out_mask = if rows.len() == 2 { 1 << spkr::L | 1 << spkr::R } else { 1 << spkr::C };
+
+        self.prepare_buffer(sample_rate, out_mask, nsamples);
+        self.buf.clear();
+        self.buf.render_uninit(Some(nsamples));
+
+        // The output planes are ordered by position: left, right for stereo.
+        for (idx, row) in gains.iter().enumerate() {
+            let plane = self.buf.plane_mut(idx).expect("plane index in range");
+            let plane = &mut plane[..nsamples];
+            plane.fill(0.0);
+            for (gain, input) in row.iter().zip(&src) {
+                if *gain != 0.0 {
+                    for (o, &i) in plane.iter_mut().zip(input) {
+                        *o += gain * i;
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -91,6 +91,14 @@ const MASK_CS: u32 = 1 << spkr::CS;
 const MASK_LSS: u32 = 1 << spkr::LSS;
 const MASK_RSS: u32 = 1 << spkr::RSS;
 
+/// Downmix type of a Lo/Ro stereo downmix.
+const DMIX_TYPE_LORO: usize = 1;
+/// Downmix type of an Lt/Rt stereo downmix.
+const DMIX_TYPE_LTRT: usize = 2;
+/// The most coefficients of a primary channel downmix: four rows (largest downmix type) of the
+/// six speakers (five channels and LFE) of the primary channel set.
+const PRIM_DMIX_COEFF_MAX: usize = 4 * 6;
+
 const AMODE_MONO: usize = 0;
 const AMODE_STEREO_SUMDIFF: usize = 3;
 const AMODE_2F2R: usize = 8;
@@ -257,6 +265,13 @@ pub struct CoreDecoder {
     xxch_mask_nbits: usize,
     xxch_core_mask: u32,
     xxch_spkr_mask: u32,
+    /// The core carries primary channel downmix coefficients.
+    prim_dmix_embedded: bool,
+    /// The type of the primary channel downmix.
+    prim_dmix_type: usize,
+    /// Downmix coefficients: one row per downmix channel, one column per speaker of the primary
+    /// channel set in ascending speaker order.
+    prim_dmix_coeff: [i32; PRIM_DMIX_COEFF_MAX],
     xxch_dmix_embedded: bool,
     xxch_dmix_scale_inv: i32,
     xxch_dmix_mask: [u32; XXCH_CHANNELS_MAX],
@@ -351,6 +366,9 @@ impl CoreDecoder {
             xxch_mask_nbits: 0,
             xxch_core_mask: 0,
             xxch_spkr_mask: 0,
+            prim_dmix_embedded: false,
+            prim_dmix_type: 0,
+            prim_dmix_coeff: [0; PRIM_DMIX_COEFF_MAX],
             xxch_dmix_embedded: false,
             xxch_dmix_scale_inv: 0,
             xxch_dmix_mask: [0; XXCH_CHANNELS_MAX],
@@ -384,6 +402,53 @@ impl CoreDecoder {
             self.erase_x96_adpcm_history();
         }
         self.erase_dsp_history();
+    }
+
+    /// True if the core of the current frame carries primary channel downmix coefficients for a
+    /// stereo (Lo/Ro or Lt/Rt) downmix.
+    pub fn has_stereo_downmix(&self) -> bool {
+        self.audio_mode > AMODE_MONO
+            && self.prim_dmix_embedded
+            && matches!(self.prim_dmix_type, DMIX_TYPE_LORO | DMIX_TYPE_LTRT)
+    }
+
+    /// Mix the primary channel set of the last frame filtered by [`CoreDecoder::filter_frame`]
+    /// down to stereo in `out[L]` and `out[R]` with the embedded downmix coefficients. Port of
+    /// upstream `ff_dca_downmix_to_stereo_float`. Returns the speaker mask of the output.
+    pub fn downmix_to_stereo(&mut self, nsamples: usize) -> u32 {
+        const SCALE: f32 = 1.0 / 32768.0;
+
+        let ch_mask = self.ch_mask;
+        let nspkr = ch_mask.count_ones() as usize;
+        let coeffs = self.prim_dmix_coeff;
+        let (coeff_l, coeff_r) = coeffs.split_at(nspkr);
+        let coeff_r = &coeff_r[..nspkr];
+
+        // The coefficients are in ascending speaker order, which puts the left and right
+        // channels after the optional center channel.
+        let pos = (ch_mask & MASK_C) as usize;
+        for v in &mut self.out[spkr::L][..nsamples] {
+            *v *= coeff_l[pos] as f32 * SCALE;
+        }
+        for v in &mut self.out[spkr::R][..nsamples] {
+            *v *= coeff_r[pos + 1] as f32 * SCALE;
+        }
+
+        let mut idx = 0;
+        for spkr in 0..spkr::COUNT {
+            if ch_mask & (1 << spkr) == 0 {
+                continue;
+            }
+            if coeff_l[idx] != 0 && spkr != spkr::L {
+                self.fmac(spkr::L, spkr, coeff_l[idx] as f32 * SCALE, nsamples);
+            }
+            if coeff_r[idx] != 0 && spkr != spkr::R {
+                self.fmac(spkr::R, spkr, coeff_r[idx] as f32 * SCALE, nsamples);
+            }
+            idx += 1;
+        }
+
+        MASK_L | MASK_R
     }
 
     /// True if the core of the current frame carries an X96 extension that was decoded.
@@ -2035,8 +2100,8 @@ impl CoreDecoder {
             gb.skip(47);
         }
 
-        // Auxiliary dynamic downmix flag. The embedded primary downmix coefficients are not used
-        // by this decoder (it never downmixes), but must be consumed.
+        // Auxiliary dynamic downmix flag.
+        self.prim_dmix_embedded = false;
         if gb.get1() {
             // Auxiliary primary channel downmix type.
             let dmix_type = gb.get(3) as usize;
@@ -2050,12 +2115,21 @@ impl CoreDecoder {
                 + usize::from(self.lfe_present != 0);
 
             // Dynamic downmix code coefficients.
-            for _ in 0..m * n {
+            for i in 0..m * n {
                 let code = gb.get(9);
-                if (code & 0xff) as usize >= DMIXTABLE.len() {
+                let sign = (code >> 8) as i32 - 1;
+                let index = (code & 0xff) as usize;
+                if index >= DMIXTABLE.len() {
                     return decode_error("dca: invalid downmix coefficient index");
                 }
+                let Some(dst) = self.prim_dmix_coeff.get_mut(i)
+                else {
+                    return decode_error("dca: too many downmix coefficients");
+                };
+                *dst = (i32::from(DMIXTABLE[index]) ^ sign) - sign;
             }
+            self.prim_dmix_type = dmix_type;
+            self.prim_dmix_embedded = true;
         }
 
         // Byte align.
@@ -2182,6 +2256,7 @@ impl CoreDecoder {
         self.xch_pos = 0;
         self.xxch_pos = 0;
         self.x96_pos = 0;
+        self.prim_dmix_embedded = false;
 
         let mut gb = BitReader::new(data);
 
@@ -2205,12 +2280,14 @@ impl CoreDecoder {
     /// Parse core extensions (`ff_dca_core_parse_exss`).
     ///
     /// `core_data` is the data passed to [`CoreDecoder::parse`]. `exss` is the EXSS substream data
-    /// and the asset descriptor, when present. If `skip_x96` is set, X96 is not decoded.
+    /// and the asset descriptor, when present. If `skip_x96` is set, X96 is not decoded, and if
+    /// `skip_xch` is set, neither are XCH and XXCH.
     pub fn parse_extensions(
         &mut self,
         core_data: &[u8],
         exss: Option<(&[u8], &ExssAsset)>,
         skip_x96: bool,
+        skip_xch: bool,
     ) -> Result<()> {
         // The EXSS asset, if it carries the given extension.
         let with_ext = |mask: u32| exss.filter(|(_, a)| a.extension_mask & mask != 0);
@@ -2219,7 +2296,10 @@ impl CoreDecoder {
         let mut ret = Ok(());
         let mut ext = 0;
 
-        if let Some((data, asset)) = with_ext(EXSS_XXCH) {
+        if skip_xch {
+            // The extension channels are not decoded when downmixing.
+        }
+        else if let Some((data, asset)) = with_ext(EXSS_XXCH) {
             ret = match data.get(asset.xxch_offset..asset.xxch_offset + asset.xxch_size) {
                 Some(d) => self.parse_xxch_frame(&mut BitReader::new(d)),
                 None => decode_error("dca: invalid xxch asset range"),
@@ -2789,11 +2869,11 @@ mod tests {
 
         for frame in STREAM.chunks(FRAME_SIZE) {
             float.parse(frame).unwrap();
-            float.parse_extensions(frame, None, false).unwrap();
+            float.parse_extensions(frame, None, false, false).unwrap();
             let info = float.filter_frame().unwrap();
 
             fixed.parse(frame).unwrap();
-            fixed.parse_extensions(frame, None, false).unwrap();
+            fixed.parse_extensions(frame, None, false, false).unwrap();
             let info_fixed = fixed.filter_frame_fixed(false).unwrap();
 
             assert_eq!(info.nsamples, info_fixed.nsamples);
