@@ -1,65 +1,28 @@
 #![allow(clippy::unwrap_used)]
 
-//! Golden hashes of the decoded output of streams with SBR (HE-AAC v1/v2, AAC-ELD with SBR) and of
-//! the LC core. The hash is FNV-1a over the bit patterns of the interleaved f32 samples, so it pins
-//! the output of the decoder bit for bit: optimisations of the SBR filter banks, the envelope
-//! decoding, etc. must not change it.
+//! The decoded output of ADTS streams with SBR (HE-AAC v1/v2) and of the LC core, compared with the
+//! output of ffmpeg. The references (`.s16`) are the first 8192 frames of ffmpeg's 16-bit output,
+//! preceded by a 32-bit big-endian index of the first frame they hold.
 //!
-//! The in-tree fixtures are always checked. The generated format-coverage samples are checked if
-//! `RMPD_SAMPLES` points at them. Set `SBR_GOLDEN_PRINT` to print the table instead of comparing.
-//!
-//! The `sbr-fft-qmf` feature computes the QMF banks with an FFT, which differs from the pinned output
-//! by rounding errors, so the hashes are only checked without it.
+//! The comparison has a tolerance because the f32 output is not bit-for-bit portable: the FFT
+//! backend (`rustfft` with or without SIMD, or `sbr-fft-qmf`) and the target round differently.
+//! The LD/ELD fixtures (with and without SBR) are compared in `ld_eld.rs`.
 
-#![cfg(not(feature = "sbr-fft-qmf"))]
-
-use symphonia_codec_aac::{AacDecoder, AdtsReader, LoasReader};
-use symphonia_common::mpeg::audio::AudioSpecificConfig;
+use symphonia_codec_aac::{AacDecoder, AdtsReader};
 use symphonia_core::audio::{Audio, GenericAudioBufferRef};
 use symphonia_core::codecs::CodecParameters;
-use symphonia_core::codecs::audio::well_known::CODEC_ID_AAC;
-use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
+use symphonia_core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
+use symphonia_core::formats::TrackType;
 use symphonia_core::formats::probe::ProbeableFormat;
-use symphonia_core::formats::{FormatReader, TrackType};
 use symphonia_core::io::MediaSourceStream;
-use symphonia_core::packet::Packet;
-use symphonia_core::units::{Duration, Timestamp};
-use symphonia_format_isomp4::IsoMp4Reader;
-use symphonia_testutil::Fnv;
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 
-fn hash_buffer(h: &mut Fnv, buf: &GenericAudioBufferRef<'_>) {
-    let GenericAudioBufferRef::F32(buf) = buf
-    else {
-        panic!("expected f32 samples");
-    };
-
-    let n_ch = buf.spec().channels().count();
-    h.add_u32(buf.frames() as u32);
-    h.add_u32(n_ch as u32);
-    h.add_u32(buf.spec().rate());
-
-    for f in 0..buf.frames() {
-        for c in 0..n_ch {
-            h.add_u32(buf.plane(c).unwrap()[f].to_bits());
-        }
-    }
-}
-
-fn open(path: &std::path::Path, kind: &str) -> Option<Box<dyn FormatReader>> {
-    let file = std::fs::File::open(path).ok()?;
+/// Decodes an ADTS fixture to interleaved samples, returning them and the channel count.
+fn decode(name: &str) -> (Vec<f32>, usize) {
+    let file = std::fs::File::open(std::path::Path::new(FIXTURES).join(name)).unwrap();
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
-
-    Some(match kind {
-        "adts" => AdtsReader::try_probe_new(mss, Default::default()).unwrap(),
-        "loas" => LoasReader::try_probe_new(mss, Default::default()).unwrap(),
-        _ => IsoMp4Reader::try_probe_new(mss, Default::default()).unwrap(),
-    })
-}
-
-fn hash_stream(path: &std::path::Path, kind: &str) -> Option<u64> {
-    let mut reader = open(path, kind)?;
+    let mut reader = AdtsReader::try_probe_new(mss, Default::default()).unwrap();
 
     let track = reader.default_track(TrackType::Audio).unwrap();
     let id = track.id;
@@ -69,120 +32,72 @@ fn hash_stream(path: &std::path::Path, kind: &str) -> Option<u64> {
     };
 
     let mut decoder = AacDecoder::try_new(&params, &AudioDecoderOptions::default()).unwrap();
-    let mut h = Fnv::new();
+    let mut samples = vec![];
+    let mut channels = 0;
 
     while let Some(packet) = reader.next_packet().unwrap() {
-        if packet.track_id == id {
-            hash_buffer(&mut h, &decoder.decode(&packet).unwrap());
-        }
-    }
-
-    Some(h.0)
-}
-
-fn hash_bin(path: &std::path::Path, frame_len: usize) -> u64 {
-    let data = std::fs::read(path).unwrap();
-    let mut records = vec![];
-    let mut pos = 0;
-
-    while pos < data.len() {
-        let len = usize::from(u16::from_be_bytes([data[pos], data[pos + 1]]));
-        records.push(data[pos + 2..pos + 2 + len].to_vec());
-        pos += 2 + len;
-    }
-
-    let asc_bytes = records.remove(0);
-    let asc = AudioSpecificConfig::read(&asc_bytes).unwrap();
-    let mut params = AudioCodecParameters::new();
-
-    params
-        .for_codec(CODEC_ID_AAC)
-        .with_sample_rate(asc.output_sample_rate())
-        .with_extra_data(asc_bytes.as_slice().into());
-
-    if let Some(channels) = asc.output_channels() {
-        params.with_channels(channels);
-    }
-
-    let mut decoder = AacDecoder::try_new(&params, &AudioDecoderOptions::default()).unwrap();
-    let mut h = Fnv::new();
-
-    for (i, au) in records.into_iter().enumerate() {
-        let packet = Packet::new(
-            0,
-            Timestamp::new((i * frame_len) as i64),
-            Duration::new(frame_len as u64),
-            au.into_boxed_slice(),
-        );
-        hash_buffer(&mut h, &decoder.decode(&packet).unwrap());
-    }
-
-    h.0
-}
-
-/// (label, kind, file, golden hash). A kind of `bin` is a fixture of access units.
-const FIXTURE_CASES: &[(&str, &str, u64)] = &[
-    ("he_aac_v1_mono.aac", "adts", 0xac21fb661844d3f8),
-    ("he_aac_v1_stereo.aac", "adts", 0xa7fd2ca7eeceff4c),
-    ("he_aac_v2.aac", "adts", 0xdc6c8e9e8a37a029),
-    ("aac_lc_22k_mono.aac", "adts", 0xf0625fcda47da9b5),
-    ("aac_eld_sbr_480_mono.bin", "bin480", 0xfde3ef2cee24301e),
-    ("aac_eld_sbr_512_dual_stereo.bin", "bin512", 0xa02a510eaa36b0bb),
-    ("aac_eld_sbr_512_mono.bin", "bin512", 0xbf02fb6a6b4a2e16),
-    ("aac_eld_sbr_512_mono_22k.bin", "bin512", 0x97d573c16d85c765),
-    ("aac_eld_480_mono.bin", "bin480", 0x97af8904025a5aba),
-    ("aac_ld_512_mono.bin", "bin512", 0xb07fcdceb41d7081),
-];
-
-const SAMPLE_CASES: &[(&str, &str, u64)] = &[
-    ("heaac_v1_fdk_adts.aac", "adts", 0xb0fda23d1ada3601),
-    ("heaac_v2_fdk_adts.aac", "adts", 0x098255cb724b3aa8),
-    ("heaac_v1_fdk_m4a.m4a", "mp4", 0xc2ce160a433304f6),
-    ("heaac_v1_fdk_mono.m4a", "mp4", 0x9eb47d4a1875f935),
-    ("heaac_v1_fdk_5_1.m4a", "mp4", 0x69849d87c8a98587),
-    ("heaac_v1_fdk_downsampled_sbr.m4a", "mp4", 0xcddc68950b6dcf3e),
-    ("heaac_v2_fdk_m4a.m4a", "mp4", 0x14890b5f9872d5cf),
-    ("heaac_nero_sample.mp4", "mp4", 0x69cb203791622fa0),
-    ("aac_eld_sbr_fdk.m4a", "mp4", 0x2081fb9411d892b6),
-    ("aac_eld_sbr_dual_fdk.m4a", "mp4", 0x8ff1cae748a8bfc8),
-    ("aac_eld_sbr_480_latm.aac", "loas", 0x1708ec866d46ee44),
-    ("aac_lc_fdk_48k.m4a", "mp4", 0x9b78e17eee82f309),
-];
-
-fn run(cases: &[(&str, &str, u64)], dir: &std::path::Path) {
-    let print = std::env::var_os("SBR_GOLDEN_PRINT").is_some();
-
-    for &(name, kind, golden) in cases {
-        let path = dir.join(name);
-        if !path.exists() {
+        if packet.track_id != id {
             continue;
         }
 
-        let got = match kind {
-            "bin480" => hash_bin(&path, 480),
-            "bin512" => hash_bin(&path, 512),
-            _ => hash_stream(&path, kind).unwrap(),
+        let GenericAudioBufferRef::F32(buf) = decoder.decode(&packet).unwrap()
+        else {
+            panic!("expected f32 samples");
         };
 
-        if print {
-            println!("    (\"{name}\", \"{kind}\", 0x{got:016x}),");
-        }
-        else {
-            assert_eq!(got, golden, "{name}: decoded output changed");
+        channels = buf.spec().channels().count();
+
+        for f in 0..buf.frames() {
+            for c in 0..channels {
+                samples.push(buf.plane(c).unwrap()[f]);
+            }
         }
     }
+
+    (samples, channels)
+}
+
+/// Checks a fixture against its reference: the SNR (dB) and the largest difference (LSBs).
+fn check(name: &str, min_snr: f64, max_diff: f32) {
+    let s16 =
+        std::fs::read(std::path::Path::new(FIXTURES).join(name.replace(".aac", ".s16"))).unwrap();
+    let first = u32::from_be_bytes([s16[0], s16[1], s16[2], s16[3]]) as usize;
+    let reference: Vec<i16> =
+        s16[4..].chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+
+    let (samples, channels) = decode(name);
+    let samples = &samples[first * channels..];
+    assert!(samples.len() >= reference.len(), "{name}: the output is shorter than the reference");
+
+    let mut signal = 0.0f64;
+    let mut noise = 0.0f64;
+    let mut diff = 0.0f32;
+
+    for (&s, &r) in samples.iter().zip(&reference) {
+        let expected = f32::from(r);
+        let got = (s * 32768.0).clamp(-32768.0, 32767.0);
+        signal += f64::from(expected).powi(2);
+        noise += f64::from(got - expected).powi(2);
+        diff = diff.max((got - expected).abs());
+    }
+
+    let snr = 10.0 * (signal / noise.max(1e-9)).log10();
+    assert!(snr >= min_snr, "{name}: SNR {snr} dB, expected at least {min_snr} dB");
+    assert!(diff <= max_diff, "{name}: maximum difference {diff} LSB, expected at most {max_diff}");
 }
 
 #[test]
-fn fixtures_decode_to_the_golden_output() {
-    run(FIXTURE_CASES, std::path::Path::new(FIXTURES));
+fn he_aac_v1_matches_ffmpeg() {
+    check("he_aac_v1_mono.aac", 75.0, 2.0);
+    check("he_aac_v1_stereo.aac", 75.0, 2.0);
 }
 
 #[test]
-fn samples_decode_to_the_golden_output() {
-    let Some(dir) = std::env::var_os("RMPD_SAMPLES")
-    else {
-        return;
-    };
-    run(SAMPLE_CASES, &std::path::Path::new(&dir).join("aac"));
+fn he_aac_v2_matches_ffmpeg() {
+    check("he_aac_v2.aac", 75.0, 2.0);
+}
+
+#[test]
+fn aac_lc_matches_ffmpeg() {
+    check("aac_lc_22k_mono.aac", 75.0, 2.0);
 }
