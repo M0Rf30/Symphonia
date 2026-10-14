@@ -138,12 +138,11 @@ lazy_static! {
         m.insert("totaltracks"                 , parse_track_total);
         m.insert("writer"                      , parse_writer);
         m.insert("year"                        , parse_release_date);
-        // TODO: Debut Album
-        // TODO: Publicationright
-        // TODO: Abstract
-        // TODO: Bibliography
 
-        // No mappings for: Index, Introplay, Dummy
+        // No mappings for: Index, Introplay, Dummy. Also unmapped, since no standard tag has the
+        // same meaning (APE key list, Frank Klemm): Debut Album (the artist's debut album),
+        // Publicationright (publication right holder, not the copyright holder), Abstract and
+        // Bibliography (links). Unmapped items are kept as raw tags.
         m
     };
 }

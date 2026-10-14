@@ -27,19 +27,22 @@ mod info {
     use symphonia_core::meta::{StandardTag, Tag};
 
     lazy_static! {
+        // The meaning of the non-standard identifiers follows ExifTool's RIFF tag table
+        // (lib/Image/ExifTool/RIFF.pm): CMNT, COMM and ICMT are comments, TITL is the title, and
+        // IDIT is the original date/time (as DTIM), not the date of the last edit.
         static ref RIFF_INFO_MAP: RawTagParserMap = {
             let mut m: RawTagParserMap = HashMap::new();
             m.insert("ages", parse_rating);
             m.insert("cmnt", parse_comment);
-            m.insert("comm", parse_comment); // TODO: Same as "cmnt"
+            m.insert("comm", parse_comment);
             m.insert("dtim", parse_recording_time);
             m.insert("genr", parse_genre);
             m.insert("iart", parse_artist);
-            m.insert("icmt", parse_comment); // TODO: Same as "cmnt"?
+            m.insert("icmt", parse_comment);
             m.insert("icnt", parse_release_country);
             m.insert("icop", parse_copyright);
             m.insert("icrd", parse_recording_date);
-            m.insert("idit", parse_recording_date); // TODO: Actually date of last edit?
+            m.insert("idit", parse_recording_date);
             m.insert("ienc", parse_encoded_by);
             m.insert("ieng", parse_engineer);
             m.insert("ifrm", parse_track_total);
@@ -62,7 +65,7 @@ mod info {
             m.insert("lang", parse_language);
             m.insert("prt1", parse_part_number_exclusive);
             m.insert("prt2", parse_part_total);
-            m.insert("titl", parse_track_title); // TODO: Same as "inam"?
+            m.insert("titl", parse_track_title);
             m.insert("torg", parse_label);
             m.insert("trck", parse_track_number_exclusive);
             m.insert("tver", parse_version);
