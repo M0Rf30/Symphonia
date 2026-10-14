@@ -823,7 +823,8 @@ impl Probe {
         // Re-align the stream to the start of the marker for scoring.
         mss.seek_buffered_rel(-(win_len as isize));
 
-        // TODO: Only pass &win[..win_len].
+        // Only the bytes actually read are candidates for a marker match.
+        let win = &win[..win_len];
 
         // Try to find a descriptor in the preferred tier.
         if let Some(inst) =
@@ -896,7 +897,7 @@ fn read_and_append_metadata<'s>(
 fn find_reader(
     mss: &mut MediaSourceStream,
     descs: &[GenericProbeMatch],
-    win: [u8; 16],
+    win: &[u8],
     max_depth: u16,
     is_trailing: bool,
 ) -> Result<Option<ProbeMatch>> {
@@ -907,10 +908,11 @@ fn find_reader(
     for desc in descs.iter().filter(|d| d.should_test(is_trailing)) {
         // If any format descriptor marker matches, then the format should be scored.
         let should_score = desc.spec.markers.iter().any(|marker| {
-            let is_match = win[0..marker.len()] == **marker;
+            // A marker longer than the bytes read (end of stream) cannot match.
+            let is_match = win.starts_with(marker);
 
             if is_match {
-                trace!("found the marker {:x?} @ {} bytes", &win[0..marker.len()], mss.pos());
+                trace!("found the marker {:x?} @ {} bytes", marker, mss.pos());
             }
 
             is_match
@@ -964,8 +966,9 @@ fn score(
             // entire probe operation.
             Err(Error::IoError(err))
         }
-        Err(_) => {
+        Err(err) => {
             // All other errors are caught and return unsupported.
+            trace!("score function failed: {err}");
             Ok(Score::Unsupported)
         }
         result => result,
@@ -1027,6 +1030,7 @@ macro_rules! support_metadata {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::formats::{FormatId, Metadata, Packet, SeekMode, SeekTo, SeekedTo, Track};
@@ -1114,6 +1118,97 @@ mod tests {
             RegisteredFormatInfo::Format(info) => assert_eq!(info.short_name, "dummy"),
             RegisteredFormatInfo::Metadata(_) => panic!("expected a format registration"),
         }
+    }
+
+    /// A format whose marker ends in zero bytes, which is what zero padding past the end of the
+    /// stream looks like to a marker comparison.
+    struct ZeroTailFormatReader;
+
+    impl Scoreable for ZeroTailFormatReader {
+        fn score(_src: ScopedStream<&mut MediaSourceStream<'_>>) -> Result<Score> {
+            Ok(Score::Supported(255))
+        }
+    }
+
+    impl<'s> ProbeableFormat<'s> for ZeroTailFormatReader {
+        fn try_probe_new(
+            _mss: MediaSourceStream<'s>,
+            _opts: FormatOptions,
+        ) -> Result<Box<dyn FormatReader + 's>> {
+            unimplemented!("not exercised by the marker test")
+        }
+
+        fn probe_data() -> &'static [ProbeFormatData] {
+            &[ProbeFormatData {
+                spec: ProbeDataMatchSpec {
+                    extensions: &[],
+                    mime_types: &[],
+                    markers: &[b"AB\0\0"],
+                },
+                info: FormatInfo { format: FormatId(0x4321), short_name: "zt", long_name: "ZT" },
+            }]
+        }
+    }
+
+    impl FormatReader for ZeroTailFormatReader {
+        fn format_info(&self) -> &FormatInfo {
+            unimplemented!()
+        }
+
+        fn media_info(&self) -> &crate::formats::MediaInfo {
+            unimplemented!()
+        }
+
+        fn metadata(&mut self) -> Metadata<'_> {
+            unimplemented!()
+        }
+
+        fn seek(&mut self, _mode: SeekMode, _to: SeekTo) -> Result<SeekedTo> {
+            unimplemented!()
+        }
+
+        fn tracks(&self) -> &[Track] {
+            &[]
+        }
+
+        fn next_packet(&mut self) -> Result<Option<Packet>> {
+            unimplemented!()
+        }
+
+        fn into_inner<'s>(self: Box<Self>) -> MediaSourceStream<'s>
+        where
+            Self: 's,
+        {
+            unimplemented!()
+        }
+    }
+
+    fn best_reader_short_name(bytes: &'static [u8]) -> Option<&'static str> {
+        let mut probe = Probe::default();
+        probe.register_format::<ZeroTailFormatReader>();
+
+        let source = std::io::Cursor::new(bytes);
+        let mut mss = MediaSourceStream::new(Box::new(source), Default::default());
+
+        match probe.find_best_reader(&mut mss, false).unwrap() {
+            Some(ProbeMatch::Format { info, .. }) => Some(info.short_name),
+            Some(ProbeMatch::Metadata { .. }) => panic!("unexpected metadata match"),
+            None => None,
+        }
+    }
+
+    #[test]
+    fn find_best_reader_matches_full_marker() {
+        assert_eq!(best_reader_short_name(b"AB\0\0rest of the stream"), Some("zt"));
+        assert_eq!(best_reader_short_name(b"AB\0\0"), Some("zt"));
+    }
+
+    #[test]
+    fn find_best_reader_does_not_match_marker_past_end_of_stream() {
+        // The stream ends inside the marker. The unread tail of the window must not be mistaken
+        // for the marker's zero bytes.
+        assert_eq!(best_reader_short_name(b"AB"), None);
+        assert_eq!(best_reader_short_name(b"AB\0"), None);
     }
 
     // Silence unused-import warnings for items only referenced through the dummy impl.
