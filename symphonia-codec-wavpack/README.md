@@ -50,6 +50,35 @@ corrupt, truncated, or from another file) is decoded lossy, the others stay loss
 `WavPackReader::has_correction()` reports whether a correction stream is attached. Seeking
 needs both streams to be seekable.
 
+### Integrity checks and MD5
+
+The reader hands raw blocks to the decoder, which checks every block's checksum
+(`ID_BLOCK_CHECKSUM`, as `WavpackVerifySingleBlock()`) and the CRC of the decoded samples. A
+failure is a `DecodeError` for that packet. A stream whose first block is bad is not opened.
+With `AudioDecoderOptions::verify` the decoder hashes the audio in the format of the source
+file (big-endian/unsigned/reordered samples, DSD in 4096-byte blocks; the `qmode` of
+`ID_CONFIG_BLOCK`/`ID_NEW_CONFIG_BLOCK`) and `finalize()` compares it to the stored MD5
+(`ID_MD5_CHECKSUM` or `ID_ALT_MD5_CHECKSUM`). `verify_ok` is `None` when there is no MD5 or a
+hybrid block was decoded without its correction block.
+
+### DSD
+
+WavPack DSD (raw, fast and high modes of `unpack_dsd.c`) is decoded to the DSD bit stream, not
+to PCM: the sample format is `U8` with one byte (8 DSD samples, most significant bit first) per
+channel per frame, and the `AudioSpec` rate is the DSD rate divided by 8. The track parameters
+give the native DSD rate (e.g. 2.8224 MHz) with 1 bit per sample, and the timestamps, durations
+and seeks count DSD bits. There is no DSD to PCM decimation.
+
+### Other notes
+
+* Sample rates that are not in the standard table are read from `ID_SAMPLE_RATE`; headers are
+  found with the same plausibility scan as `read_next_header()`; the total length is found at
+  the end of the file for streams that do not say it (and for streams that do not start at
+  block index 0).
+* Output is in the order of the file (the speaker mask), `ID_CHANNEL_IDENTITIES` is not used.
+* The v1-v3 decoder is checked only with synthetic streams: the reference tools can no longer
+  decode those versions.
+
 IEEE float and hybrid-lossy int/float decoding were ported from the reference WavPack
 library (BSD-3-Clause, see `LICENSE`/`NOTICE`); the ported functions are documented at
 each call site with the corresponding upstream C source file.

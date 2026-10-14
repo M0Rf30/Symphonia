@@ -35,6 +35,7 @@ fn feed(h: &mut Fnv, buf: &GenericAudioBufferRef<'_>) {
         };
     }
     match buf {
+        GenericAudioBufferRef::U8(b) => planes!(b, |v: u8| [v]),
         GenericAudioBufferRef::S8(b) => planes!(b, |v: i8| v.to_le_bytes()),
         GenericAudioBufferRef::S16(b) => planes!(b, |v: i16| v.to_le_bytes()),
         GenericAudioBufferRef::S24(b) => {
@@ -217,6 +218,10 @@ fn seeks_match_sequential_decode() {
 
 // Generated with `GOLDEN_PRINT=1`.
 const GOLDEN: &[(&str, u64, u64)] = &[
+    ("fixtures/aiff_be_md5.wv", 0x77c0f1e691584884, 882),
+    ("fixtures/dsd_stereo_fast_md5.wv", 0x969546c7e71c90b2, 2048),
+    ("fixtures/dsd_stereo_high_md5.wv", 0x079ab28b5e90e643, 4096),
+    ("fixtures/false_stereo_16.wv", 0x59c4c5d7677bf28d, 4410),
     ("fixtures/float_hybrid_lossy.wv", 0x0294ec9d0e017807, 2205),
     ("fixtures/float_lossless.wv", 0xb68d7c356f3bae1c, 2205),
     ("fixtures/float_mono_lossless.wv", 0xe0ba3f7b0b7b54e0, 2205),
@@ -226,6 +231,7 @@ const GOLDEN: &[(&str, u64, u64)] = &[
     ("fixtures/multi4ch_int16_hybrid_lossy.wv", 0x7a0d9e0960d1e9db, 2205),
     ("fixtures/multi4ch_int16_lossless.wv", 0xd4aa97d959bc3bdd, 2205),
     ("fixtures/multi6ch_51_int16_lossless.wv", 0x54ab581bf56d9be5, 2205),
+    ("fixtures/rate_1mhz_md5.wv", 0x60f9ea76342924f7, 2000),
     ("fixtures/test_ramp_mono_fast.wv", 0x36b57055316de9db, 100),
     ("fixtures/test_ramp_mono_high.wv", 0x36b57055316de9db, 100),
     ("fixtures/test_silence_mono_fast.wv", 0x37027190f725c8c5, 100),

@@ -12,51 +12,25 @@
 use super::bits::{Bits, count_bits};
 use super::crc_accumulate;
 
-// ---------------------------------------------------------------------------
-// Block flag bits (wavpack.h)
-// ---------------------------------------------------------------------------
+pub(crate) use crate::block::{
+    CROSS_DECORR, FLOAT_DATA, HYBRID_BALANCE, HYBRID_BITRATE, HYBRID_FLAG, HYBRID_SHAPE,
+    INT32_DATA, JOINT_STEREO, MAG_LSB, MAG_MASK, MONO_DATA, NEW_SHAPING, SHIFT_LSB, SHIFT_MASK,
+};
 
-pub const MONO_FLAG: u32 = 0x0000_0004;
-pub const HYBRID_FLAG: u32 = 0x0000_0008;
-pub const JOINT_STEREO: u32 = 0x0000_0010;
-pub const CROSS_DECORR: u32 = 0x0000_0020;
-pub const HYBRID_SHAPE: u32 = 0x0000_0040;
-pub const FLOAT_DATA: u32 = 0x0000_0080;
-pub const INT32_DATA: u32 = 0x0000_0100;
-pub const HYBRID_BITRATE: u32 = 0x0000_0200;
-pub const HYBRID_BALANCE: u32 = 0x0000_0400;
-pub const SHIFT_LSB: u32 = 13;
-pub const SHIFT_MASK: u32 = 0x1f << 13;
-pub const MAG_LSB: u32 = 18;
-pub const MAG_MASK: u32 = 0x1f << 18;
-pub const NEW_SHAPING: u32 = 0x2000_0000;
-pub const FALSE_STEREO: u32 = 0x4000_0000;
-pub const MONO_DATA: u32 = MONO_FLAG | FALSE_STEREO;
+/// Why a block could not be unpacked.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum UnpackError {
+    /// The block is malformed (or uses something unsupported).
+    Malformed,
+    /// The samples decoded from the block do not match the CRC of its header.
+    Crc,
+}
 
-// ---------------------------------------------------------------------------
-// Packet magic — 4 bytes that distinguish a v4/v5 packet from a v3 prefix
-// ---------------------------------------------------------------------------
-
-pub const PACKET_MAGIC: &[u8; 4] = b"WV45";
-
-// Header size of one stream's mini-block within a (possibly multi-stream) packet, not
-// counting the packet-level magic/stream-count or this stream's own length prefix
-// (both added by the reader when assembling the packet; see
-// `WavPackReader::read_v4v5_stream_block`):
-//   flags(4) + block_samples(4) + crc(4)
-//   + terms_len(4) + weights_len(4) + samples_len(4) + entropy_len(4)
-//   + hybrid_profile_len(4) + float_info_len(4) + int32_len(4) + wvx_len(4)
-//   + shaping_len(4) + wvc_len(4) + wvc_wvx_len(4) + wvc_crc(4) + ext_flags(4) = 64 bytes
-//
-// `shaping`, `wvc` and `wvc_wvx` come from the matching block of the `.wvc` correction file
-// (all empty without one). `ext_flags` bit 0: `wvx` is an `ID_WVX_NEW_BITSTREAM`; bit 1:
-// `wvc_wvx` is.
-pub const STREAM_HDR: usize = 64;
-
-/// `ext_flags` bit: the main block's extension bitstream is the "new" kind.
-pub const EXT_WVX_NEW: u32 = 1 << 0;
-/// `ext_flags` bit: the correction block's extension bitstream is the "new" kind.
-pub const EXT_WVC_WVX_NEW: u32 = 1 << 1;
+/// The running checksum of the decorrelated samples of a block (`crc` in `unpack_samples()` of
+/// unpack.c): this is the value the header of the block carries.
+fn samples_crc(buf: &[i32]) -> u32 {
+    buf.iter().fold(u32::MAX, |crc, &v| crc_accumulate(crc, v as u32))
+}
 
 // ---------------------------------------------------------------------------
 // Sub-block size limits to guard against malformed streams
@@ -214,7 +188,12 @@ fn restore_weight(b: i8) -> i32 {
     if r > 0 { r + ((r + 64) >> 7) } else { r }
 }
 
-pub fn parse_decorr_terms(data: &[u8], passes: &mut Vec<DecorrPass>) {
+/// Returns `false` if the sub-block is invalid (`read_decorr_terms()` in decorr_utils.c).
+pub fn parse_decorr_terms(data: &[u8], passes: &mut Vec<DecorrPass>) -> bool {
+    if data.len() > MAX_NTERMS {
+        return false;
+    }
+
     // ID_DECORR_TERMS stores terms in REVERSE order relative to dpp[]:
     // bytes are written by the encoder iterating dpp from last to first.
     // Mirror the C reference (decorr_utils.c read_decorr_terms) and place
@@ -226,9 +205,14 @@ pub fn parse_decorr_terms(data: &[u8], passes: &mut Vec<DecorrPass>) {
         let byte = data[i];
         let term = ((byte & 0x1f) as i32) - 5;
         let delta = ((byte >> 5) & 0x7) as i32;
+        // Valid terms are -3..=-1, 1..=8, 17 and 18.
+        if term < -3 || term == 0 || (term > MAX_TERM as i32 && term < 17) || term > 18 {
+            return false;
+        }
         passes[num - 1 - i].term = term;
         passes[num - 1 - i].delta = delta;
     }
+    true
 }
 
 pub fn parse_decorr_weights(data: &[u8], passes: &mut [DecorrPass], is_mono: bool) {
@@ -1733,16 +1717,18 @@ fn unpack_with_correction(
 // Main entry point: decode one v4/v5 block
 // ---------------------------------------------------------------------------
 
-/// Decode one v4/v5 block.
+/// Decode one v4/v5 block. `crc` is the CRC of the block header.
 ///
 /// If `wvc` (the matching block of the `.wvc` correction file) is given and the block is a
 /// hybrid block, the lossless samples are reconstructed and verified against the CRC of the
 /// correction block. Should that fail, the block is decoded from the main bitstream alone
-/// (i.e. the lossy approximation) rather than being muted.
+/// (i.e. the lossy approximation) rather than being muted. Port of `unpack_samples()` and
+/// `fixup_samples()` in unpack.c.
 #[allow(clippy::too_many_arguments)]
 pub fn unpack_samples_v4v5(
     flags: u32,
     block_samples: u32,
+    crc: u32,
     passes: &mut [DecorrPass],
     ws: &mut WordsState,
     i32info: &Int32Info,
@@ -1750,13 +1736,13 @@ pub fn unpack_samples_v4v5(
     wvx: Option<WvxInput<'_>>,
     wvc: Option<&WvcInput<'_>>,
     audio: &[u8],
-) -> Option<Vec<i32>> {
+) -> Result<(Vec<i32>, bool), UnpackError> {
     // WavPack's own encoder caps block size at 131072 samples (`--blocksize`); reject
     // anything wildly larger up front rather than risk an unbounded allocation or an
     // arithmetic overflow further down from a malformed/mutated `block_samples` field
     // (this decoder must never panic on untrusted network-stream input).
     if block_samples > MAX_BLOCK_SAMPLES {
-        return None;
+        return Err(UnpackError::Malformed);
     }
 
     if let Some(wvc) = wvc.filter(|_| (flags & HYBRID_FLAG) != 0) {
@@ -1774,7 +1760,7 @@ pub fn unpack_samples_v4v5(
             audio,
             wvc,
         ) {
-            return Some(buf);
+            return Ok((buf, true));
         }
 
         log::warn!("wavpack: correction block does not match, decoding the lossy block only");
@@ -1786,10 +1772,12 @@ pub fn unpack_samples_v4v5(
     let mut bs = Bits::new(audio);
 
     let mut buf = if (flags & HYBRID_FLAG) != 0 {
-        get_words_hybrid(&mut bs, ws, flags, block_samples, None)?.samples
+        get_words_hybrid(&mut bs, ws, flags, block_samples, None)
+            .ok_or(UnpackError::Malformed)?
+            .samples
     }
     else {
-        get_words_lossless(&mut bs, ws, flags, block_samples)?
+        get_words_lossless(&mut bs, ws, flags, block_samples).ok_or(UnpackError::Malformed)?
     };
 
     // Apply the decorrelation passes in forward order, then undo the joint stereo.
@@ -1800,7 +1788,12 @@ pub fn unpack_samples_v4v5(
         decorr_stereo_passes(passes, &mut buf, (flags & JOINT_STEREO) != 0);
     }
 
-    if (flags & FLOAT_DATA) != 0 {
+    if samples_crc(&buf) != crc {
+        wp_trace!("[crc] mismatch: header {:08x}", crc);
+        return Err(UnpackError::Crc);
+    }
+
+    let crc_x = if (flags & FLOAT_DATA) != 0 {
         wp_trace!(
             "[float] wvx_present={} float_info_present={}",
             wvx.is_some(),
@@ -1815,16 +1808,24 @@ pub fn unpack_samples_v4v5(
                     max_shifted_ones: max_ones,
                     ..info
                 };
-                super::floats::float_values(&mut buf, &info, Some(&mut bits));
+                super::floats::float_values(&mut buf, &info, Some(&mut bits))
             }
             None => {
                 super::floats::float_values(&mut buf, &info, None);
+                None
             }
         }
     }
     else {
-        fixup_samples(&mut buf, flags, i32info, (flags & HYBRID_FLAG) != 0, wvx.as_ref());
+        fixup_samples(&mut buf, flags, i32info, (flags & HYBRID_FLAG) != 0, wvx.as_ref())
+    };
+
+    if let (Some(crc_x), Some(wvx)) = (crc_x, &wvx) {
+        if crc_x != wvx.crc {
+            wp_trace!("[crc] extension mismatch: computed {:08x}, header {:08x}", crc_x, wvx.crc);
+            return Err(UnpackError::Crc);
+        }
     }
 
-    Some(buf)
+    Ok((buf, (flags & HYBRID_FLAG) == 0))
 }

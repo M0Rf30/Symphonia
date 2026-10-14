@@ -6,6 +6,10 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 mod bits;
+mod dsd;
+pub(crate) mod md5;
+pub(crate) use dsd::dsd_rate_shift;
+use md5::Md5Source;
 mod floats;
 mod v3;
 mod v4v5;
@@ -24,13 +28,20 @@ use symphonia_core::audio::{
 use symphonia_core::codecs::CodecInfo;
 use symphonia_core::codecs::audio::well_known::CODEC_ID_WAVPACK;
 use symphonia_core::codecs::audio::{
-    AudioCodecParameters, AudioDecoder, AudioDecoderOptions, FinalizeResult,
+    AudioCodecParameters, AudioDecoder, AudioDecoderOptions, FinalizeResult, VerificationCheck,
 };
 use symphonia_core::codecs::registry::{RegisterableAudioDecoder, SupportedAudioCodec};
 use symphonia_core::errors::{Result, decode_error, unsupported_error};
 use symphonia_core::packet::PacketRef;
 use symphonia_core::support_audio_codec;
 
+use crate::block::{
+    BlockHeader, DSD_FLAG, FALSE_STEREO, FLOAT_DATA, HEADER_LEN, HYBRID_FLAG, ID_DECORR_SAMPLES,
+    ID_DECORR_TERMS, ID_DECORR_WEIGHTS, ID_DSD_BLOCK, ID_ENTROPY_VARS, ID_FLOAT_INFO,
+    ID_HYBRID_PROFILE, ID_INT32_INFO, ID_SHAPING_WEIGHTS, ID_WV_BITSTREAM, ID_WVC_BITSTREAM,
+    ID_WVX_BITSTREAM, ID_WVX_NEW_BITSTREAM, MONO_DATA, MONO_FLAG as MONO_FLAG45, SubBlocks,
+    verify_block,
+};
 use crate::reader::matroska_block_to_packet;
 
 use v3::{
@@ -38,14 +49,15 @@ use v3::{
     unpack_samples_v3,
 };
 use v4v5::{
-    DecorrPass as DecorrPass45, PACKET_MAGIC, WordsState as WordsState45, WvcInput, WvxInput,
+    DecorrPass as DecorrPass45, UnpackError, WordsState as WordsState45, WvcInput, WvxInput,
     parse_decorr_samples, parse_decorr_terms, parse_decorr_weights, parse_entropy_vars,
     parse_int32_info, unpack_samples_v4v5,
 };
 use words::WordState;
 
-// The layout of the per-stream mini-blocks the reader builds (see `STREAM_HDR`).
-pub(crate) use v4v5::{EXT_WVC_WVX_NEW, EXT_WVX_NEW, STREAM_HDR};
+/// The magic number at the start of a v4/v5 packet (see `WavPackReader::next_packet_v4v5`), which
+/// tells it from a v3 packet.
+pub(crate) const PACKET_MAGIC: &[u8; 4] = b"WV45";
 
 /// One physical wvpk block's decoded samples: a stream is a mono or stereo pair of
 /// output channels; a multichannel "block group" is made of several of these (see
@@ -62,6 +74,65 @@ struct StreamDecode {
     is_false_stereo: bool,
     /// Per-channel frame count for this stream's block, as declared by its header.
     block_samples: u32,
+    /// The block header flags.
+    flags: u32,
+    /// The samples are the exact original ones: the block is not a hybrid block decoded without
+    /// its correction data.
+    lossless: bool,
+}
+
+/// The sub-blocks of a main block or of a correction block that the decoder uses.
+#[derive(Default)]
+struct BlockParts<'a> {
+    terms: &'a [u8],
+    weights: &'a [u8],
+    samples: &'a [u8],
+    entropy: &'a [u8],
+    hybrid: &'a [u8],
+    float: &'a [u8],
+    int32: &'a [u8],
+    /// `ID_WVX_BITSTREAM` or `ID_WVX_NEW_BITSTREAM`, and whether it is the new kind.
+    wvx: &'a [u8],
+    wvx_new: bool,
+    shaping: &'a [u8],
+    /// `ID_WVC_BITSTREAM`: only in blocks of a `.wvc` file.
+    wvc: &'a [u8],
+    dsd: Option<&'a [u8]>,
+    audio: &'a [u8],
+}
+
+impl<'a> BlockParts<'a> {
+    fn new(body: &'a [u8]) -> Self {
+        let mut parts = BlockParts::default();
+
+        for sub_block in SubBlocks::new(body) {
+            let data = sub_block.data;
+            match sub_block.id {
+                ID_DECORR_TERMS => parts.terms = data,
+                ID_DECORR_WEIGHTS => parts.weights = data,
+                ID_DECORR_SAMPLES => parts.samples = data,
+                ID_ENTROPY_VARS => parts.entropy = data,
+                ID_HYBRID_PROFILE => parts.hybrid = data,
+                ID_FLOAT_INFO => parts.float = data,
+                ID_INT32_INFO => parts.int32 = data,
+                ID_SHAPING_WEIGHTS => parts.shaping = data,
+                ID_WV_BITSTREAM => parts.audio = data,
+                ID_WVC_BITSTREAM => parts.wvc = data,
+                ID_WVX_BITSTREAM => {
+                    parts.wvx = data;
+                    parts.wvx_new = false;
+                }
+                ID_WVX_NEW_BITSTREAM => {
+                    parts.wvx = data;
+                    parts.wvx_new = true;
+                }
+                ID_DSD_BLOCK => parts.dsd = Some(data),
+                _ => (),
+            }
+        }
+
+        parts
+    }
 }
 
 // Packet-prefix layout (32 bytes) — written by the format reader:
@@ -81,7 +152,7 @@ struct StreamDecode {
 const PREFIX_LEN: usize = 32;
 
 #[derive(Debug)]
-struct BlockHeader {
+struct V3Header {
     version: i16,
     bits: i16,
     flags: i16,
@@ -95,11 +166,11 @@ struct BlockHeader {
     bytes_per_sample: u16,
 }
 
-fn parse_prefix(data: &[u8]) -> Option<(BlockHeader, &[u8])> {
+fn parse_prefix(data: &[u8]) -> Option<(V3Header, &[u8])> {
     if data.len() < PREFIX_LEN {
         return None;
     }
-    let hdr = BlockHeader {
+    let hdr = V3Header {
         version: i16::from_le_bytes([data[0], data[1]]),
         bits: i16::from_le_bytes([data[2], data[3]]),
         flags: i16::from_le_bytes([data[4], data[5]]),
@@ -130,22 +201,33 @@ pub struct WavPackDecoder {
     /// The stream comes from Matroska/WebM (`A_WAVPACK4`): packets are bare WavPack frames
     /// without block headers (see `matroska_block_to_packet`).
     matroska: bool,
+    /// The running MD5 of the decoded audio, if the stream's MD5 is to be verified.
+    md5: Option<Md5Source>,
+    /// The audio hashed by `md5` is the exact original (no lossy hybrid block was decoded).
+    md5_valid: bool,
     // Output buffer
     buf: GenericAudioBuffer,
 }
 
 impl WavPackDecoder {
-    pub fn try_new(params: &AudioCodecParameters, _opts: &AudioDecoderOptions) -> Result<Self> {
+    pub fn try_new(params: &AudioCodecParameters, opts: &AudioDecoderOptions) -> Result<Self> {
         if params.codec != CODEC_ID_WAVPACK {
             return unsupported_error("wavpack decoder: wrong codec id");
         }
 
-        let rate = params.sample_rate.unwrap_or(44100);
+        let sample_format = params.sample_format.unwrap_or(SampleFormat::S32);
+
+        // DSD is decoded to the DSD bytes (8 one-bit samples each, most significant bit first), so
+        // the output rate is the rate of the bytes.
+        let rate = match (params.sample_rate, sample_format) {
+            (Some(rate), SampleFormat::U8) => (rate / 8).max(1),
+            (rate, _) => rate.unwrap_or(44100),
+        };
         let channels = match &params.channels {
             Some(ch) => ch.clone(),
             None => return unsupported_error("wavpack decoder: no channel info"),
         };
-        let sample_format = params.sample_format.unwrap_or(SampleFormat::S32);
+        let num_channels = channels.count();
         let spec = AudioSpec::new(rate, channels);
         let buf = GenericAudioBuffer::new(sample_format, spec, 0);
 
@@ -162,6 +244,10 @@ impl WavPackDecoder {
             initialized: false,
             last_flags: 0,
             matroska,
+            md5: (opts.verify
+                && matches!(params.verification_check, Some(VerificationCheck::Md5(_))))
+            .then(|| Md5Source::new(params.extra_data.as_deref(), num_channels)),
+            md5_valid: true,
             buf,
         })
     }
@@ -293,132 +379,124 @@ impl WavPackDecoder {
     }
 
     /// Decode one physical wvpk block (one stream within a possibly-multichannel "block
-    /// group") from its bounded, self-contained slice (see `StreamBlock` layout in
-    /// reader/mod.rs's `read_v4v5_stream_block`). Per-block decorrelation/entropy state
-    /// (`decorr`/`words`) is local: v4/v5 blocks always resend their coefficients and
-    /// medians from scratch, so there is nothing to persist across calls.
-    fn decode_v4v5_stream(stream_data: &[u8]) -> Result<StreamDecode> {
-        if stream_data.len() < STREAM_HDR {
+    /// group"): `main` is the whole block of the `.wv` stream (header and sub-blocks) and
+    /// `wvc` the whole matching block of the `.wvc` correction stream, if there is one.
+    /// Per-block decorrelation/entropy state (`decorr`/`words`) is local: v4/v5 blocks always
+    /// resend their coefficients and medians from scratch, so there is nothing to persist across
+    /// calls.
+    fn decode_v4v5_stream(main: &[u8], wvc_block: &[u8]) -> Result<StreamDecode> {
+        let Some(header) = BlockHeader::parse(main)
+        else {
             return decode_error("wavpack v4/v5: stream block too short");
+        };
+
+        // `WavpackVerifySingleBlock()`: the block must be well formed and its checksum (if it
+        // has one) must match.
+        if !verify_block(main) {
+            return decode_error("wavpack v4/v5: corrupt block (block checksum mismatch)");
         }
 
-        let flags =
-            u32::from_le_bytes([stream_data[0], stream_data[1], stream_data[2], stream_data[3]]);
-        let block_samples =
-            u32::from_le_bytes([stream_data[4], stream_data[5], stream_data[6], stream_data[7]]);
-        let read_u32 = |off: usize| {
-            u32::from_le_bytes([
-                stream_data[off],
-                stream_data[off + 1],
-                stream_data[off + 2],
-                stream_data[off + 3],
-            ]) as usize
-        };
-        let tl = read_u32(12);
-        let wl = read_u32(16);
-        let sl = read_u32(20);
-        let el = read_u32(24);
-        let hpl = read_u32(28); // hybrid profile
-        let fil = read_u32(32); // float info
-        let il = read_u32(36); // int32 info
-        let wxl = read_u32(40); // wvx (float/int32 extension) bitstream
-        let shl = read_u32(44); // shaping weights (from the .wvc block)
-        let wcl = read_u32(48); // wvc correction bitstream
-        let wcxl = read_u32(52); // wvx bitstream from the .wvc block
-        let wvc_crc = read_u32(56) as u32; // CRC of the lossless data, from the .wvc block
-        let ext_flags = read_u32(60) as u32;
-
-        let mut pos = STREAM_HDR;
-        let end = stream_data.len();
-
-        let terms_raw = &stream_data[pos..pos.saturating_add(tl).min(end)];
-        pos = pos.saturating_add(tl);
-        let weights_raw = &stream_data[pos.min(end)..pos.saturating_add(wl).min(end)];
-        pos = pos.saturating_add(wl);
-        let samples_raw = &stream_data[pos.min(end)..pos.saturating_add(sl).min(end)];
-        pos = pos.saturating_add(sl);
-        let entropy_raw = &stream_data[pos.min(end)..pos.saturating_add(el).min(end)];
-        pos = pos.saturating_add(el);
-        let hybrid_raw = &stream_data[pos.min(end)..pos.saturating_add(hpl).min(end)];
-        pos = pos.saturating_add(hpl);
-        let float_raw = &stream_data[pos.min(end)..pos.saturating_add(fil).min(end)];
-        pos = pos.saturating_add(fil);
-        let int32_raw = &stream_data[pos.min(end)..pos.saturating_add(il).min(end)];
-        pos = pos.saturating_add(il);
-        let wvx_raw = &stream_data[pos.min(end)..pos.saturating_add(wxl).min(end)];
-        pos = pos.saturating_add(wxl);
-        let shaping_raw = &stream_data[pos.min(end)..pos.saturating_add(shl).min(end)];
-        pos = pos.saturating_add(shl);
-        let wvc_raw = &stream_data[pos.min(end)..pos.saturating_add(wcl).min(end)];
-        pos = pos.saturating_add(wcl);
-        let wvc_wvx_raw = &stream_data[pos.min(end)..pos.saturating_add(wcxl).min(end)];
-        pos = pos.saturating_add(wcxl);
-        let audio = &stream_data[pos.min(end)..];
-
-        let is_mono = (flags & v4v5::MONO_DATA) != 0;
+        let flags = header.flags;
+        let block_samples = header.block_samples;
+        let is_dsd = flags & DSD_FLAG != 0;
+        let is_mono = (flags & MONO_DATA) != 0;
         // WavPack's "false stereo" optimization: both channels are identical, so the encoder
         // stores a single decoded channel (FALSE_STEREO set, MONO_FLAG clear) but the track is
         // still reported with two output channels; duplicate the decoded channel into both
         // planes so silence isn't produced on the second channel.
-        let is_true_mono = (flags & v4v5::MONO_FLAG) != 0;
-        let is_false_stereo = is_mono && !is_true_mono;
-        let is_float = (flags & v4v5::FLOAT_DATA) != 0;
+        let is_true_mono = (flags & MONO_FLAG45) != 0;
+        let is_false_stereo = flags & FALSE_STEREO != 0 && !is_true_mono;
+        let channel_count = if is_true_mono { 1 } else { 2 };
+
+        if block_samples == 0 {
+            return Ok(StreamDecode {
+                samples: Vec::new(),
+                channel_count,
+                is_false_stereo,
+                block_samples,
+                flags,
+                lossless: true,
+            });
+        }
+
+        let parts = BlockParts::new(&main[HEADER_LEN..]);
+
+        if is_dsd {
+            let Some(dsd_block) = parts.dsd
+            else {
+                return decode_error("wavpack v4/v5: DSD block without DSD data");
+            };
+
+            let samples = dsd::unpack_dsd(flags, block_samples, dsd_block, header.crc)
+                .map_err(Self::unpack_error)?;
+
+            return Ok(StreamDecode {
+                samples,
+                channel_count,
+                is_false_stereo,
+                block_samples,
+                flags,
+                lossless: true,
+            });
+        }
+
+        // The correction block, if it is usable: a correction block that is corrupt or has no
+        // correction bitstream is of no use (and the lossy block is decoded).
+        let wvc_header = BlockHeader::parse(wvc_block).filter(|_| verify_block(wvc_block));
+        let wvc_parts = wvc_header.map(|_| BlockParts::new(&wvc_block[HEADER_LEN..]));
 
         let mut decorr: Vec<DecorrPass45> = Vec::new();
         let mut words = WordsState45::default();
 
-        parse_decorr_terms(terms_raw, &mut decorr);
-        parse_decorr_weights(weights_raw, &mut decorr, is_mono);
-        parse_decorr_samples(samples_raw, &mut decorr, is_mono);
-        parse_entropy_vars(entropy_raw, &mut words, is_mono);
-        if (flags & v4v5::HYBRID_FLAG) != 0 {
-            v4v5::parse_hybrid_profile(hybrid_raw, &mut words, is_mono, flags);
+        if !parse_decorr_terms(parts.terms, &mut decorr) {
+            return decode_error("wavpack v4/v5: invalid decorrelation terms");
         }
-        let i32info = parse_int32_info(int32_raw);
-        let float_info = if is_float { floats::parse_float_info(float_raw) } else { None };
+        parse_decorr_weights(parts.weights, &mut decorr, is_mono);
+        parse_decorr_samples(parts.samples, &mut decorr, is_mono);
+        parse_entropy_vars(parts.entropy, &mut words, is_mono);
+        if (flags & HYBRID_FLAG) != 0 {
+            v4v5::parse_hybrid_profile(parts.hybrid, &mut words, is_mono, flags);
+        }
+        let i32info = parse_int32_info(parts.int32);
+        let float_info =
+            if (flags & FLOAT_DATA) != 0 { floats::parse_float_info(parts.float) } else { None };
 
-        let main_wvx = WvxInput::parse(wvx_raw, ext_flags & EXT_WVX_NEW != 0);
-        let wvc = if wvc_raw.is_empty() {
-            None
-        }
-        else {
-            Some(WvcInput {
-                bits: wvc_raw,
-                crc: wvc_crc,
-                shaping: shaping_raw,
-                wvx: WvxInput::parse(wvc_wvx_raw, ext_flags & EXT_WVC_WVX_NEW != 0),
-            })
+        let main_wvx = WvxInput::parse(parts.wvx, parts.wvx_new);
+        let wvc = match (&wvc_header, &wvc_parts) {
+            (Some(h), Some(p)) if !p.wvc.is_empty() => Some(WvcInput {
+                bits: p.wvc,
+                crc: h.crc,
+                shaping: p.shaping,
+                wvx: WvxInput::parse(p.wvx, p.wvx_new),
+            }),
+            _ => None,
         };
 
-        let samples = if block_samples == 0 {
-            Vec::new()
-        }
-        else {
-            unpack_samples_v4v5(
-                flags,
-                block_samples,
-                &mut decorr,
-                &mut words,
-                &i32info,
-                float_info.as_ref(),
-                main_wvx,
-                wvc.as_ref(),
-                audio,
-            )
-            .ok_or(symphonia_core::errors::Error::DecodeError(
-                "wavpack v4/v5: unsupported encoding",
-            ))?
-        };
+        let (samples, lossless) = unpack_samples_v4v5(
+            flags,
+            block_samples,
+            header.crc,
+            &mut decorr,
+            &mut words,
+            &i32info,
+            float_info.as_ref(),
+            main_wvx,
+            wvc.as_ref(),
+            parts.audio,
+        )
+        .map_err(Self::unpack_error)?;
 
-        if samples.is_empty() && block_samples > 0 {
+        if samples.is_empty() {
             return decode_error("wavpack v4/v5: no samples decoded");
         }
 
-        Ok(StreamDecode {
-            samples,
-            channel_count: if is_true_mono { 1 } else { 2 },
-            is_false_stereo,
-            block_samples,
+        Ok(StreamDecode { samples, channel_count, is_false_stereo, block_samples, flags, lossless })
+    }
+
+    fn unpack_error(err: UnpackError) -> symphonia_core::errors::Error {
+        symphonia_core::errors::Error::DecodeError(match err {
+            UnpackError::Malformed => "wavpack v4/v5: malformed or unsupported block",
+            UnpackError::Crc => "wavpack v4/v5: CRC mismatch",
         })
     }
 
@@ -428,27 +506,36 @@ impl WavPackDecoder {
     /// stream; multichannel files (>2 channels) interleave several streams' worth of
     /// samples into the final output exactly like WavPack's own
     /// `unpack_samples_interleave()` does.
+    ///
+    /// The packet is `"WV45"`, the number of streams (u32 LE), then for each stream the length
+    /// (u32 LE) and bytes of its block of the `.wv` stream, and the length and bytes of its block
+    /// of the `.wvc` stream (empty if there is none).
     fn decode_inner_v4v5(&mut self, data: &[u8]) -> Result<()> {
         if data.len() < 8 {
             return decode_error("wavpack v4/v5: packet too short");
         }
         let stream_count = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
         let mut pos = 8usize;
-        let end = data.len();
+
+        // Take the next length-prefixed slice of the packet.
+        let mut take = || -> Result<&[u8]> {
+            let len_bytes = data.get(pos..pos + 4);
+            let len =
+                len_bytes.map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize).ok_or(
+                    symphonia_core::errors::Error::DecodeError("wavpack v4/v5: truncated packet"),
+                )?;
+            let slice = data.get(pos + 4..pos + 4 + len).ok_or(
+                symphonia_core::errors::Error::DecodeError("wavpack v4/v5: truncated packet"),
+            )?;
+            pos += 4 + len;
+            Ok(slice)
+        };
 
         let mut streams: Vec<StreamDecode> = Vec::with_capacity(stream_count.min(64));
         for _ in 0..stream_count {
-            if pos + 4 > end {
-                break; // truncated packet: decode whatever complete streams remain
-            }
-            let slen = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
-                as usize;
-            pos += 4;
-            let stream_end = pos.saturating_add(slen).min(end);
-            let stream_data = &data[pos..stream_end];
-            pos = stream_end;
-
-            streams.push(Self::decode_v4v5_stream(stream_data)?);
+            let main = take()?;
+            let wvc = take()?;
+            streams.push(Self::decode_v4v5_stream(main, wvc)?);
         }
 
         if streams.is_empty() || streams[0].block_samples == 0 {
@@ -474,7 +561,13 @@ impl WavPackDecoder {
         // rather than panicking on an out-of-bounds index.
         let sample_at = |stream_idx: usize, local_ch: usize, frame: usize| -> i32 {
             let s = &streams[stream_idx];
-            let idx = if s.channel_count == 1 { frame } else { frame * 2 + local_ch };
+            // A false-stereo stream decodes a single data channel (see `StreamDecode`).
+            let idx = if s.channel_count == 1 || s.is_false_stereo {
+                frame
+            }
+            else {
+                frame * 2 + local_ch
+            };
             s.samples.get(idx).copied().unwrap_or(0)
         };
 
@@ -536,7 +629,36 @@ impl WavPackDecoder {
                     Ok(())
                 })?;
             }
+            GenericAudioBuffer::U8(b) => {
+                // DSD bytes.
+                b.grow_capacity(decoded_frames);
+                b.render_with(Some(decoded_frames), |idx, planes| {
+                    for (plane, &(si, ch)) in plane_source.iter().enumerate() {
+                        if let Some(p) = planes.get_mut(plane) {
+                            p[idx] = sample_at(si, ch, idx) as u8;
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
             _ => return unsupported_error("wavpack v4/v5: unsupported output sample format"),
+        }
+
+        if let Some(md5) = self.md5.as_mut() {
+            if streams.iter().all(|s| s.lossless) {
+                // The samples as the file has them, then as the source had them.
+                let flags = streams[0].flags;
+                md5.samples.clear();
+                for idx in 0..decoded_frames {
+                    for &(si, ch) in &plane_source {
+                        md5.samples.push(sample_at(si, ch, idx));
+                    }
+                }
+                md5.update(plane_source.len(), (flags & 3) as usize + 1, flags & DSD_FLAG != 0);
+            }
+            else {
+                self.md5_valid = false;
+            }
         }
 
         Ok(())
@@ -574,7 +696,21 @@ impl AudioDecoder for WavPackDecoder {
     }
 
     fn finalize(&mut self) -> FinalizeResult {
-        Default::default()
+        let mut result = FinalizeResult::default();
+
+        // Only the exact original samples have the MD5 of the original.
+        if let (Some(md5), Some(VerificationCheck::Md5(expected))) =
+            (self.md5.as_mut(), self.params.verification_check)
+        {
+            if self.md5_valid {
+                result.verify_ok = Some(
+                    md5.finalize(self.params.channels.as_ref().map_or(0, |c| c.count()))
+                        == expected,
+                );
+            }
+        }
+
+        result
     }
 
     fn last_decoded(&self) -> GenericAudioBufferRef<'_> {
@@ -594,7 +730,11 @@ impl RegisterableAudioDecoder for WavPackDecoder {
     }
 
     fn supported_codecs() -> &'static [SupportedAudioCodec] {
-        &[support_audio_codec!(CODEC_ID_WAVPACK, "wavpack", "WavPack Lossless Audio (v1–v3)")]
+        &[support_audio_codec!(
+            CODEC_ID_WAVPACK,
+            "wavpack",
+            "WavPack (v1–v5, lossless, hybrid and DSD)"
+        )]
     }
 }
 

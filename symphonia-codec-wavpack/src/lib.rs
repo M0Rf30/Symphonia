@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use symphonia_core::formats::FormatOptions;
 
+mod block;
 mod decoder;
 mod reader;
 
