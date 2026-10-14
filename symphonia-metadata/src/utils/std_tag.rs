@@ -97,6 +97,7 @@ noop_parser!(parse_album, StandardTag::Album);
 noop_parser!(parse_album_artist, StandardTag::AlbumArtist);
 noop_parser!(parse_arranger, StandardTag::Arranger);
 noop_parser!(parse_artist, StandardTag::Artist);
+noop_parser!(parse_author, StandardTag::Author);
 
 pub fn parse_bpm(v: Arc<String>) -> StandardTagPair {
     [v.parse::<u64>().ok().map(StandardTag::Bpm), None]

@@ -61,8 +61,9 @@ lazy_static! {
         m.insert("artist"                       , parse_artist);
         m.insert("artistsort"                   , parse_sort_artist);
         m.insert("asin"                         , parse_ident_asin);
-        // TODO: Is Author a synonym for Writer?
-        m.insert("author"                       , parse_writer);
+        // AUTHOR is not a synonym for WRITER (the writer of a musical work); it is the author of
+        // spoken-word content, as the MP4 `©aut` atom and QuickTime `author` key it is mapped like.
+        m.insert("author"                       , parse_author);
         m.insert("barcode"                      , parse_ident_barcode);
         m.insert("bpm"                          , parse_bpm);
         m.insert("catalog #"                    , parse_ident_catalog_number);
@@ -134,7 +135,8 @@ lazy_static! {
         m.insert("performer"                    , parse_performer);
         m.insert("producer"                     , parse_producer);
         m.insert("productnumber"                , parse_ident_pn);
-        // TODO: Is Publisher a synonym for Label?
+        // PUBLISHER is taken as the record label, as ID3v2 TPUB (publisher) is by MusicBrainz
+        // Picard, which writes "Record Label" to Vorbis LABEL and ID3v2 TPUB.
         m.insert("publisher"                    , parse_label);
         m.insert("rating"                       , parse_vorbis_rating);
         m.insert("releasecountry"               , parse_release_country);

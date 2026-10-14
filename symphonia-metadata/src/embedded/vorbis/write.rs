@@ -278,6 +278,7 @@ fn std_field(std: &StandardTag) -> Option<(&'static str, Cow<'_, str>)> {
         AlbumArtist(v) => text("ALBUMARTIST", v),
         Arranger(v) => text("ARRANGER", v),
         Artist(v) => text("ARTIST", v),
+        Author(v) => text("AUTHOR", v),
         Bpm(v) => num("BPM", *v),
         CdToc(v) => text("CDTOC", v),
         Comment(v) => text("COMMENT", v),
