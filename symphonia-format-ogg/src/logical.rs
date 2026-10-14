@@ -501,20 +501,26 @@ impl LogicalStream {
         }
 
         // Map the absolute granule position to a timestamp.
-        let page_end_ts = self.mapper.absgp_to_ts(page.header.absgp, page.header.is_last_page);
+        let stated_end_ts = self.mapper.absgp_to_ts(page.header.absgp, page.header.is_last_page);
 
         // The end delay can only be determined if this is the last page, and the timestamp of the
         // second last page is known, or this is the only page of the stream.
-        let end_delay = if page.header.is_last_page && !partial_first {
+        let (page_end_ts, end_delay) = if page.header.is_last_page && !partial_first {
             if let Some(last_bound) = &state.bound {
                 // The actual ending timestamp of the decoded data is the timestamp of the previous
-                // page plus the decoded duration of this page. Subtract the stated page end
-                // timestamp to determine the padding. On overflow, it'll be impossible to determine
-                // the end delay, so force it to be 0.
-                last_bound
-                    .ts
-                    .checked_add(total_pkt_dur)
-                    .map(|actual_page_end_ts| actual_page_end_ts.abs_delta(page_end_ts))
+                // page plus the decoded duration of this page. The excess over the stated page end
+                // timestamp is padding. A stated end beyond the decoded data (e.g. a Speex stream
+                // whose muxer did not flush the encoder) cannot be reached: the stream ends with
+                // its data. On overflow, it'll be impossible to determine the end delay.
+                match last_bound.ts.checked_add(total_pkt_dur) {
+                    Some(actual_end_ts) if actual_end_ts < stated_end_ts => {
+                        (actual_end_ts, Some(Duration::ZERO))
+                    }
+                    Some(actual_end_ts) => {
+                        (stated_end_ts, Some(actual_end_ts.abs_delta(stated_end_ts)))
+                    }
+                    None => (stated_end_ts, None),
+                }
             }
             else if self.start_bound.is_some_and(|b| b.seq == page.header.sequence) {
                 // The start and end page is the same page. The end delay is the amount of excess
@@ -525,26 +531,28 @@ impl LogicalStream {
 
                 // The page end timestamp does not include delay or padding. Therefore, it is also
                 // the duration of valid content assuming it is non-negative.
-                let valid = page_end_ts.duration_from(Timestamp::ZERO);
+                let valid = stated_end_ts.duration_from(Timestamp::ZERO);
 
                 // The amount of valid content plus padding.
                 let valid_and_padding = total_pkt_dur.checked_sub(delay);
 
                 // Take the valid duration from the valid and padding duration to yield the end
                 // padding.
-                valid_and_padding
+                let padding = valid_and_padding
                     .zip(valid)
-                    .and_then(|(valid_and_padding, valid)| valid_and_padding.checked_sub(valid))
+                    .and_then(|(valid_and_padding, valid)| valid_and_padding.checked_sub(valid));
+
+                (stated_end_ts, padding)
             }
             else {
                 // Don't have the timestamp of the previous page so it is not possible to
                 // calculate the end delay.
-                None
+                (stated_end_ts, None)
             }
         }
         else {
             // Only the last page can have an end delay.
-            None
+            (stated_end_ts, None)
         };
 
         let bound = Bound {

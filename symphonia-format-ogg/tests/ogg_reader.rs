@@ -352,7 +352,7 @@ fn speex_mapping_timing_and_seek() {
 
 /// The decoded samples that are output are the same, however many frames a packet carries, and
 /// the last page of a stream not written by `speexenc` (libavformat does not clamp the granule
-/// position to the source length) does not trim anything.
+/// position to the source length) does not trim anything. The track length is the output length.
 #[test]
 fn speex_total_duration_by_muxer() {
     const DELAY: u64 = (SPEEX_NB_ENCODER_LOOKAHEAD + SPEEX_NB_DECODER_LOOKAHEAD) as u64;
@@ -367,10 +367,17 @@ fn speex_total_duration_by_muxer() {
             decoded - SPEEX_NB_ENCODER_LOOKAHEAD as u64 - SPEEX_NB_DECODER_LOOKAHEAD as u64 - 100;
         let mut reader =
             open(speex_link(1, frames_per_packet, n_packets, 0, SpeexEnd::Source(source as i64)));
+        assert_eq!(reader.tracks()[0].num_frames, Some(source), "speexenc, {frames_per_packet}");
         assert_eq!(total_packet_dur(&mut reader), source, "speexenc, {frames_per_packet} frames");
 
-        // libavformat: everything after the chain delay is output.
+        // libavformat: everything after the chain delay is output. Its last granule position is
+        // past the end of the decoded data, so the track ends with the data.
         let mut reader = open(speex_link(1, frames_per_packet, n_packets, 0, SpeexEnd::Unclamped));
+        assert_eq!(
+            reader.tracks()[0].num_frames,
+            Some(decoded - DELAY),
+            "libavformat, {frames_per_packet}"
+        );
         assert_eq!(
             total_packet_dur(&mut reader),
             decoded - DELAY,

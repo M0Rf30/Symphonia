@@ -444,7 +444,8 @@ impl AlacDecoder {
                     bs.ignore_bits(8 * count)?;
                 }
                 ALAC_ELEM_TAG_CCE | ALAC_ELEM_TAG_PCE => {
-                    // These elements are unsupported in ALAC version 0.
+                    // These elements are unsupported in ALAC version 0. Apple's reference decoder
+                    // (ALACDecoder.cpp) also rejects them with kALAC_ParamError.
                     return decode_error("alac: unsupported element");
                 }
                 ALAC_ELEM_TAG_END => break,
@@ -616,8 +617,8 @@ fn decode_sce_or_cpe<B: ReadBitsLtr>(
             elem1.predict(&mut out1[..num_samples])?;
 
             if mid_side_weight != 0 {
-                // mid_side_shift should not be bigger than 31 bits as we are shifting i32 to the right
-                // TODO Validate whether it should also not be greater than config.bit_depth.
+                // mid_side_shift should not be bigger than 31 bits as we are shifting i32 to the
+                // right. Neither Apple's reference decoder nor FFmpeg limits it by the bit depth.
                 if mid_side_shift > 31 {
                     return decode_error("alac: mid_side_shift is greater than 31 bit");
                 }
