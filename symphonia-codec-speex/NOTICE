@@ -1,0 +1,50 @@
+This crate (`symphonia-codec-speex`) is a pure-Rust Speex audio decoder. It is licensed under the
+Mozilla Public License, v. 2.0, like the rest of Project Symphonia (see `LICENSE`).
+
+The decoder is ported, function-by-function, from the floating-point decoder of the reference
+`libspeex` 1.2.1 implementation (https://github.com/xiph/speex): the narrow-band CELP decoder
+(`nb_celp.c`), the sub-band CELP decoder (`sb_celp.c`), the intensity stereo expansion
+(`stereo.c`), the LSP, LPC and filter helpers (`lsp.c`, `filters.c`, `ltp.c`, `lpc.c`,
+`misc.c`, `math_approx.c`), the sub-mode descriptions (`modes.c`), the bit reader (`bits.c`), and
+the header layout (`speex_header.c`). All the codebook tables (`tables.rs`) are extracted
+programmatically from the `libspeex` tables (`gain_table*.c`, `lsp_tables_nb.c`,
+`high_lsp_tables.c`, `exc_*_table.c`, `hexc*_table.c`, `quant_lsp.c`, `filters.c`). `libspeex` is
+distributed under the following BSD-3-Clause license:
+
+---
+
+Copyright 2002-2008 	Xiph.org Foundation
+Copyright 2002-2008 	Jean-Marc Valin
+Copyright 2005-2007	Analog Devices Inc.
+Copyright 2005-2008	Commonwealth Scientific and Industrial Research
+                        Organisation (CSIRO)
+Copyright 1993, 2002, 2006 David Rowe
+Copyright 2003 		EpicGames
+Copyright 1992-1994	Jutta Degener, Carsten Bormann
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+- Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+
+- Redistributions in binary form must reproduce the above copyright
+notice, this list of conditions and the following disclaimer in the
+documentation and/or other materials provided with the distribution.
+
+- Neither the name of the Xiph.org Foundation nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE FOUNDATION OR
+CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
