@@ -181,6 +181,18 @@ For metadata formats that are standalone and not part of the media container, a 
 > [!TIP]
 > All metadata formats can be enabled with the `all-meta` feature flag.
 
+### Known Unsupported Codecs and Containers
+
+Codecs and containers without a row in the tables above are not implemented. Known gaps:
+
+* Video and subtitle codecs: no video or subtitle decoder exists in this repository.
+* ATRAC, WMA, RealAudio Cook and AMR: codec IDs are reserved in `symphonia-core` (`CODEC_ID_ATRAC*`, `CODEC_ID_WMA`, `CODEC_ID_COOK`), but no decoder crate implements them.
+* ASF/WMA, RealMedia and AVI containers: no demuxer crate exists.
+* AAC: error resilience tools (Huffman codeword reordering, RVLC, virtual codebooks), LTP in AAC-LD, SBR with AAC-LD, and Parametric Stereo with anything other than a single mono `SCE` core element are rejected as unsupported (see `symphonia-codec-aac`).
+* mp3PRO SBR decoding is not in the default codec registry (opt-in via the `mp3pro` feature).
+
+Please open an issue to request a missing format.
+
 ### Third-party Demuxers and Decoders
 
 Symphonia is a designed around a modular framework that allows the registration of third-party demuxers and decoders. This table provides a list of crates that implement such components.
