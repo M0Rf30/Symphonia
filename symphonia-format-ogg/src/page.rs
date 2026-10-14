@@ -148,6 +148,8 @@ pub struct PageReader {
     packet_lens: Vec<u16>,
     page_buf: Vec<u8>,
     page_buf_len: usize,
+    /// The buffer a page body is read into before the page is verified and committed.
+    scratch_buf: Vec<u8>,
     /// Set if the last attempt to read a page ended at the end of the stream inside the header of
     /// a page, or inside a first page.
     truncated: bool,
@@ -163,6 +165,7 @@ impl PageReader {
             packet_lens: Vec::new(),
             page_buf: Vec::new(),
             page_buf_len: 0,
+            scratch_buf: Vec::new(),
             truncated: false,
         };
 
@@ -239,29 +242,16 @@ impl PageReader {
         // The remainder of the page will be checksummed as it is read.
         let mut crc32_reader = MonitorStream::new(reader, crc32);
 
-        // Read segment table.
-        let mut page_body_len = 0;
-        let mut packet_len = 0;
+        // Read the segment table and the page body into scratch space. The state of the reader
+        // only changes once the page is verified, so a corrupt or cut short page leaves the
+        // current page intact (`probe_stream_start` relies on this).
+        let mut seg_table = [0u8; 255];
+        let seg_table = &mut seg_table[..usize::from(header.n_segments)];
+        crc32_reader.read_buf_exact(seg_table)?;
 
-        // TODO: Can this be transactional? A corrupt page causes the PageReader's state not
-        // to change.
-        self.packet_lens.clear();
+        let page_body_len = seg_table.iter().map(|&len| usize::from(len)).sum();
 
-        for _ in 0..header.n_segments {
-            let seg_len = crc32_reader.read_byte()?;
-
-            page_body_len += usize::from(seg_len);
-            packet_len += u16::from(seg_len);
-
-            // A segment with a length < 255 indicates that the segment is the end of a packet.
-            // Push the packet length into the packet queue for the stream.
-            if seg_len < 255 {
-                self.packet_lens.push(packet_len);
-                packet_len = 0;
-            }
-        }
-
-        self.read_page_body(&mut crc32_reader, page_body_len)?;
+        Self::read_page_body(&mut self.scratch_buf, &mut crc32_reader, page_body_len)?;
 
         let calculated_crc = crc32_reader.monitor().crc();
 
@@ -269,14 +259,25 @@ impl PageReader {
         if header.crc != calculated_crc {
             warn!("crc mismatch: expected {:#x}, got {:#x}", header.crc, calculated_crc);
 
-            // Clear packet buffer.
-            self.packet_lens.clear();
-            self.page_buf_len = 0;
-
             // Seek back to the immediately after the previous sync position.
             crc32_reader.into_inner().seek_buffered(sync_pos);
 
             return decode_error("ogg: crc mismatch");
+        }
+
+        // Commit the page.
+        std::mem::swap(&mut self.page_buf, &mut self.scratch_buf);
+        self.page_buf_len = page_body_len;
+
+        // A segment with a length < 255 ends a packet.
+        self.packet_lens.clear();
+        let mut packet_len = 0;
+        for &seg_len in seg_table.iter() {
+            packet_len += u16::from(seg_len);
+            if seg_len < 255 {
+                self.packet_lens.push(packet_len);
+                packet_len = 0;
+            }
         }
 
         self.header = header;
@@ -356,22 +357,63 @@ impl PageReader {
         }
     }
 
-    fn read_page_body<B: ReadBytes>(&mut self, reader: &mut B, len: usize) -> Result<()> {
+    /// Reads a page body of `len` bytes into the start of `buf`, growing it if required.
+    fn read_page_body<B: ReadBytes>(buf: &mut Vec<u8>, reader: &mut B, len: usize) -> Result<()> {
         // This is precondition.
         assert!(len <= 255 * 255);
 
-        if len > self.page_buf.len() {
+        if len > buf.len() {
             // New page buffer size, rounded up to the nearest 8K block.
             let new_buf_len = (len + (8 * 1024 - 1)) & !(8 * 1024 - 1);
             debug!("grow page buffer to {new_buf_len} bytes");
 
-            self.page_buf.resize(new_buf_len, Default::default());
+            buf.resize(new_buf_len, Default::default());
         }
 
-        self.page_buf_len = len;
-
-        reader.read_buf_exact(&mut self.page_buf[..len])?;
+        reader.read_buf_exact(&mut buf[..len])?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::io::Cursor;
+
+    use symphonia_core::io::MediaSourceStream;
+
+    use super::*;
+    use crate::writer::build_page;
+
+    fn stream(data: Vec<u8>) -> MediaSourceStream<'static> {
+        MediaSourceStream::new(Box::new(Cursor::new(data)), Default::default())
+    }
+
+    fn packets(pages: &PageReader) -> Vec<Vec<u8>> {
+        pages.page().packets().map(|p| p.to_vec()).collect()
+    }
+
+    /// A page that fails to read (bad CRC, or cut short) leaves the current page untouched.
+    #[test]
+    fn failed_page_read_keeps_current_page() {
+        let first = build_page(0, 0, 1, 0, &[3, 2], b"abcde");
+        let mut corrupt = build_page(0, 0, 1, 1, &[4], b"wxyz");
+        *corrupt.last_mut().unwrap() ^= 0xff;
+        let truncated = build_page(0, 0, 1, 2, &[200], &[7; 200])[..60].to_vec();
+
+        for bad in [corrupt, truncated] {
+            let mut data = first.clone();
+            data.extend_from_slice(&bad);
+            let mut reader = stream(data);
+
+            let mut pages = PageReader::try_new(&mut reader).unwrap();
+            assert_eq!(packets(&pages), [b"abc".to_vec(), b"de".to_vec()]);
+
+            assert!(pages.try_next_page(&mut reader).is_err());
+            assert_eq!(pages.header().sequence, 0);
+            assert_eq!(packets(&pages), [b"abc".to_vec(), b"de".to_vec()]);
+        }
     }
 }

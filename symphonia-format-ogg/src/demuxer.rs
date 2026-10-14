@@ -322,8 +322,10 @@ impl<'s> OggReader<'s> {
         }
 
         if let Some(stream) = self.streams.get_mut(&page.header.serial) {
-            // TODO: Process side data.
-            let _side_data = stream.read_page(&page)?;
+            // A metadata packet read after the headers (e.g. an updated comment packet) updates
+            // the metadata of the stream.
+            let side_data = stream.read_page(&page)?;
+            self.consume_side_data(side_data);
         }
         else {
             // If there is no associated logical stream with this page, then this is a
@@ -331,6 +333,23 @@ impl<'s> OggReader<'s> {
         }
 
         Ok(())
+    }
+
+    /// Adds the metadata revisions and chapters found by the mappers.
+    fn consume_side_data(&mut self, side_data: Vec<SideData>) {
+        for data in side_data {
+            match data {
+                SideData::Metadata { rev, side_data } => {
+                    self.metadata.push(rev);
+
+                    for data in side_data {
+                        if let MetadataSideData::Chapters(chapters) = data {
+                            self.chapters = Some(chapters);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn have_all_streams_read_last_page(&self) -> bool {
@@ -712,23 +731,8 @@ impl<'s> OggReader<'s> {
                 }
 
                 // Consume each piece of side data.
-                for data in side_data {
-                    if !update_side_data {
-                        break;
-                    }
-
-                    match data {
-                        SideData::Metadata { rev, side_data } => {
-                            self.metadata.push(rev);
-
-                            // Process side data.
-                            for data in side_data {
-                                if let MetadataSideData::Chapters(chapters) = data {
-                                    self.chapters = Some(chapters);
-                                }
-                            }
-                        }
-                    }
+                if update_side_data {
+                    self.consume_side_data(side_data);
                 }
 
                 if stream.has_packets() {

@@ -564,8 +564,8 @@ impl LogicalStream {
 
         // If this is the last page, update the codec parameters.
         if page.header.is_last_page {
-            // TODO: Bounds are in timestamp units, not number of frames. Fix this up because it
-            // only works for audio codecs.
+            // Bounds are timestamps in granule units. Every mapper is an audio mapper whose
+            // granule position counts samples at the track's sample rate, so they are frames.
             let num_frames = u64::try_from(bound.ts.get()).ok();
             let num_padding_frames = bound.discard.get() as u32;
 
