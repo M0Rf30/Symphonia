@@ -7,7 +7,12 @@
 
 use crate::atoms::{Atom, AtomHeader, AtomIterator, ReadAtom, Result, decode_error};
 
-#[derive(Debug)]
+/// Greatest common divisor.
+pub(crate) fn gcd(a: u32, b: u32) -> u32 {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
+#[derive(Clone, Debug)]
 pub struct SampleDurationEntry {
     pub sample_count: u32,
     pub sample_delta: u32,
@@ -33,13 +38,36 @@ impl SampleDurationEntry {
 
 /// Time-to-sample atom.
 #[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SttsAtom {
     pub entries: Vec<SampleDurationEntry>,
     pub total_duration: u64,
 }
 
 impl SttsAtom {
+    /// Gets the greatest common divisor of the sample counts of all entries.
+    pub fn sample_count_gcd(&self) -> u32 {
+        self.entries.iter().fold(0, |g, e| gcd(g, e.sample_count))
+    }
+
+    /// Group every `group` samples of one tick each into one sample. Returns `false`, and leaves
+    /// the table unchanged, if the table is not made only of whole groups of one tick samples.
+    pub fn regroup(&mut self, group: u32) -> bool {
+        if group == 0
+            || self.entries.iter().any(|e| e.sample_delta != 1 || e.sample_count % group != 0)
+        {
+            return false;
+        }
+
+        for entry in &mut self.entries {
+            entry.sample_count /= group;
+            entry.sample_delta = group;
+            entry.first_sample /= group;
+        }
+
+        true
+    }
+
     /// Get the timestamp and duration for the sample indicated by `sample_num`. Note, `sample_num`
     /// is indexed relative to the `SttsAtom`. Complexity of this function in O(log2 N).
     pub fn find_timing_for_sample(&self, sample_num: u32) -> Option<(u64, u32)> {

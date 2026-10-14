@@ -35,7 +35,7 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
 use symphonia_core::meta::{Tag, Visual};
-use symphonia_format_isomp4::writer::{build_ilst, mdir_hdlr_box};
+use symphonia_format_isomp4::writer::{build_ilst, is_udta_tag_box, mdir_hdlr_box};
 
 use crate::{Error, Result, WriteOptions, copy_range, read_at, read_up_to, replace_file};
 
@@ -48,6 +48,7 @@ const UDTA: [u8; 4] = *b"udta";
 const META: [u8; 4] = *b"meta";
 const HDLR: [u8; 4] = *b"hdlr";
 const ILST: [u8; 4] = *b"ilst";
+const KEYS: [u8; 4] = *b"keys";
 const ID32: [u8; 4] = *b"ID32";
 const FREE: [u8; 4] = *b"free";
 const SKIP: [u8; 4] = *b"skip";
@@ -391,7 +392,20 @@ fn strip_udta(children: &mut Vec<Node>, removed: &mut Removed) -> Result<Option<
             (ID32, _) => {
                 first.get_or_insert(kept.len());
             }
+            // QuickTime text atoms and 3GPP asset boxes hold tags the reader returns.
+            (kind, Body::Leaf(_)) if is_udta_tag_box(kind) => {
+                first.get_or_insert(kept.len());
+            }
             (META, Body::Container { prefix, children: kids }) => match meta_handler(&kids) {
+                // Keyed (`mdta`) metadata: the tags are removed, and the new tags are written as
+                // `ilst` items.
+                _ if kids.iter().any(|child| child.kind == KEYS) => {
+                    first.get_or_insert(kept.len());
+
+                    if let Some(rest) = strip_keyed(kids) {
+                        kept.push(Node::container(META, prefix, rest));
+                    }
+                }
                 Handler::Mdir => {
                     first.get_or_insert(kept.len());
                     removed.take_mdir_meta(prefix, kids);
@@ -412,6 +426,59 @@ fn strip_udta(children: &mut Vec<Node>, removed: &mut Removed) -> Result<Option<
 
     *children = kept;
     Ok(first)
+}
+
+/// Takes the tags out of a `meta` box that is a direct child of `moov`. Returns `None` if the box
+/// holds no tags and stays as it is, otherwise the box that replaces it (`Some(None)`: the box is
+/// removed).
+///
+/// QuickTime does not put the version and flags in front of the children of this box: the first
+/// four bytes are those of a child's size unless they are zero. The tags are `ilst` items of the
+/// `mdir` handler, which are rewritten, or keyed (`mdta`) items and their `keys`, which are removed
+/// since the new tags are written as `ilst` items.
+fn strip_moov_meta(payload: &[u8], removed: &mut Removed) -> Result<Option<Option<Node>>> {
+    let has_header = payload.len() >= 4 && payload[..4] == [0; 4];
+    let (prefix, body) = payload.split_at(if has_header { 4 } else { 0 });
+
+    let children = parse_children(body, &META)?;
+
+    if !children.iter().any(|child| matches!(child.kind, ILST | ID32 | KEYS)) {
+        return Ok(None);
+    }
+
+    if is_keyed(&children) {
+        return Ok(Some(
+            strip_keyed(children).map(|rest| Node::container(META, prefix.to_vec(), rest)),
+        ));
+    }
+
+    match meta_handler(&children) {
+        Handler::Mdir => {
+            removed.take_mdir_meta(vec![0; 4], children);
+            Ok(Some(None))
+        }
+        Handler::Id32 => Ok(Some(None)),
+        // A handler whose items are not known: the box stays as it is.
+        Handler::Other(_) => Ok(None),
+    }
+}
+
+/// Gets if the children of a `meta` box are QuickTime keyed metadata: items are indexes into the
+/// `keys` list, whatever the handler says.
+fn is_keyed(children: &[Node]) -> bool {
+    children.iter().any(|child| child.kind == KEYS)
+        || matches!(meta_handler(children), Handler::Other(h) if &h == b"mdta")
+}
+
+/// Removes the tags (`keys`, `ilst`) and padding from the children of a keyed `meta` box. Returns
+/// what is left, or `None` if that is only the handler: the box carries nothing.
+fn strip_keyed(children: Vec<Node>) -> Option<Vec<Node>> {
+    let kept: Vec<Node> = children
+        .into_iter()
+        .filter(|child| !matches!(child.kind, ILST | ID32 | KEYS | FREE | SKIP))
+        .collect();
+
+    if kept.iter().all(|child| child.kind == HDLR) { None } else { Some(kept) }
 }
 
 /// Builds the `meta` box that holds the new `ilst`, or `None` if there is nothing to store.
@@ -795,6 +862,28 @@ fn rewrite(
     let mut moov_nodes = parse_children(&read_payload(src, &moov)?, &MOOV)?;
     let mut removed = Removed::default();
     let mut target = None;
+
+    // Take the tags out of a `meta` box directly in the movie box (QuickTime and Apple devices
+    // write keyed metadata there).
+    let mut i = 0;
+
+    while i < moov_nodes.len() {
+        let removed_node = match (moov_nodes[i].kind, &mut moov_nodes[i].body) {
+            (META, Body::Leaf(payload)) => strip_moov_meta(payload, &mut removed)?,
+            _ => None,
+        };
+
+        match removed_node {
+            Some(Some(replacement)) => moov_nodes[i] = replacement,
+            Some(None) => {
+                moov_nodes.remove(i);
+                continue;
+            }
+            None => (),
+        }
+
+        i += 1;
+    }
 
     for (i, node) in moov_nodes.iter_mut().enumerate() {
         if let (UDTA, Body::Container { children, .. }) = (node.kind, &mut node.body) {
@@ -1422,9 +1511,27 @@ mod tests {
         assert_eq!(strip_udta(&mut children, &mut removed).unwrap(), Some(0));
         assert!(children.is_empty() && removed.ilst.is_empty() && removed.hdlr.is_none());
 
+        // Keyed items (a `keys` list) are tags the reader returns: they are removed.
+        let mdta = Node::container(
+            META,
+            vec![0; 4],
+            vec![hdlr(b"mdta"), Node::leaf(KEYS, vec![0; 8]), Node::leaf(ILST, vec![1])],
+        );
+        let mut children = vec![mdta];
+        assert_eq!(strip_udta(&mut children, &mut Removed::default()).unwrap(), Some(0));
+        assert!(children.is_empty());
+
+        // An `mdta` handler without keys is not understood.
         let mdta =
             Node::container(META, vec![0; 4], vec![hdlr(b"mdta"), Node::leaf(ILST, vec![1])]);
-        let mut children = vec![mdta];
+        assert!(matches!(
+            strip_udta(&mut vec![mdta], &mut Removed::default()),
+            Err(Error::Unsupported(_))
+        ));
+
+        let other =
+            Node::container(META, vec![0; 4], vec![hdlr(b"xxxx"), Node::leaf(ILST, vec![1])]);
+        let mut children = vec![other];
         assert!(matches!(
             strip_udta(&mut children, &mut Removed::default()),
             Err(Error::Unsupported(_))

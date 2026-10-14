@@ -9,7 +9,12 @@ use core::str;
 
 use log::debug;
 use symphonia_core::audio::{Channels, Position};
-use symphonia_core::codecs::audio::well_known::CODEC_ID_MP3;
+use symphonia_core::codecs::audio::well_known::{
+    CODEC_ID_ADPCM_IMA_QT, CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_MS,
+};
+use symphonia_core::codecs::audio::well_known::{
+    CODEC_ID_MP3, CODEC_ID_PCM_ALAW, CODEC_ID_PCM_MULAW,
+};
 use symphonia_core::codecs::audio::well_known::{CODEC_ID_PCM_F32BE, CODEC_ID_PCM_F32LE};
 use symphonia_core::codecs::audio::well_known::{CODEC_ID_PCM_F64BE, CODEC_ID_PCM_F64LE};
 use symphonia_core::codecs::audio::well_known::{CODEC_ID_PCM_S8, CODEC_ID_PCM_U8};
@@ -27,6 +32,7 @@ use symphonia_core::codecs::subtitle::well_known::CODEC_ID_MOV_TEXT;
 use symphonia_core::codecs::video::{VideoCodecId, VideoCodecParameters, VideoExtraData};
 use symphonia_core::codecs::{CodecParameters, CodecProfile};
 
+use crate::atoms::qt_meta::PayloadAtom;
 use crate::atoms::{
     AlacAtom, Atom, AtomHeader, AtomIterator, AtomType, AvcCAtom, Dac3Atom, Dec3Atom, DoviAtom,
     EsdsAtom, FlacAtom, HvcCAtom, OpusAtom, ReadAtom, Result, WaveAtom, decode_error,
@@ -84,7 +90,12 @@ impl Atom for StsdAtom {
             | AtomType::AudioSampleEntryS24
             | AtomType::AudioSampleEntryS32
             | AtomType::AudioSampleEntryF32
-            | AtomType::AudioSampleEntryF64 => {
+            | AtomType::AudioSampleEntryF64
+            | AtomType::AudioSampleEntryIma4
+            | AtomType::AudioSampleEntryIpcm
+            | AtomType::AudioSampleEntryFpcm
+            | AtomType::AudioSampleEntryMsAdpcm
+            | AtomType::AudioSampleEntryImaWav => {
                 let entry = it.read_atom::<AudioSampleEntry>()?;
                 SampleEntry::Audio(entry)
             }
@@ -117,6 +128,25 @@ impl Atom for StsdAtom {
 }
 
 impl StsdAtom {
+    /// Gets if the samples of the track are single PCM frames (QuickTime and ISO PCM entries).
+    pub(crate) fn is_pcm_frames(&self) -> bool {
+        matches!(&self.sample_entry, SampleEntry::Audio(entry) if entry.is_pcm_frames)
+    }
+
+    /// Gets the block size in bytes and the number of frames of the blocks of QuickTime ADPCM
+    /// (Microsoft, IMA WAV) data, if this is such a track.
+    pub(crate) fn adpcm_block(&self) -> Option<(u32, u32)> {
+        match &self.sample_entry {
+            SampleEntry::Audio(entry) => {
+                let frames = u32::try_from(entry.frames_per_block?).ok()?;
+                Some((entry.block_align?, frames)).filter(|(bytes, frames)| {
+                    *bytes > 0 && *frames > 0 && entry.codec_id != CODEC_ID_ADPCM_IMA_QT
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// Fill the provided `CodecParameters` using the sample entry.
     pub fn make_codec_params(&self) -> Option<CodecParameters> {
         // Audio sample entry.
@@ -152,6 +182,13 @@ pub struct AudioSampleEntry {
     pub bits_per_sample: Option<u32>,
     pub bits_per_coded_sample: Option<u32>,
     pub frames_per_packet: Option<u64>,
+    pub frames_per_block: Option<u64>,
+    /// If the samples of the track are single PCM frames.
+    pub is_pcm_frames: bool,
+    /// The size in bytes of a block of block-based codecs.
+    pub block_align: Option<u32>,
+    /// For QuickTime PCM entries, the value of the `enda` atom, if present.
+    pub little_endian: Option<bool>,
     pub channels: Option<Channels>,
     pub verification_check: Option<VerificationCheck>,
     pub extra_data: Option<Box<[u8]>>,
@@ -167,6 +204,7 @@ impl AudioSampleEntry {
             bits_per_coded_sample: self.bits_per_coded_sample,
             channels: self.channels.clone(),
             max_frames_per_packet: self.frames_per_packet,
+            frames_per_block: self.frames_per_block,
             verification_check: self.verification_check,
             extra_data: self.extra_data.clone(),
             ..Default::default()
@@ -225,17 +263,29 @@ impl Atom for AudioSampleEntry {
                         return decode_error("isomp4: lpcm audio sample entry must be version 2");
                     }
 
+                    // QuickTime `twos` and `sowt` are also used for signed 8-bit samples.
+                    if matches!(entry.codec_id, CODEC_ID_PCM_S16BE | CODEC_ID_PCM_S16LE)
+                        && entry.sample_size == 8
+                    {
+                        entry.codec_id = CODEC_ID_PCM_S8;
+                    }
+
                     let bits_per_sample = 8 * bytes_per_pcm_sample(entry.codec_id);
 
                     // Validate the codec-derived bytes-per-sample equals the declared
-                    // bytes-per-sample.
-                    if u32::from(entry.sample_size) != bits_per_sample {
+                    // bytes-per-sample. The sample size of G.711 data is not meaningful.
+                    if !is_companded(entry.codec_id)
+                        && u32::from(entry.sample_size) != bits_per_sample
+                    {
                         return decode_error("isomp4: invalid pcm sample size");
                     }
-                    entry.bits_per_sample = Some(bits_per_sample);
-                    entry.bits_per_coded_sample = Some(bits_per_sample);
+                    // The width of G.711 samples is implicit.
+                    if !is_companded(entry.codec_id) {
+                        entry.bits_per_sample = Some(bits_per_sample);
+                        entry.bits_per_coded_sample = Some(bits_per_sample);
+                    }
                     entry.frames_per_packet = Some(1);
-                    entry.channels = Some(pcm_channels(entry.num_channels)?);
+                    entry.channels = Some(lpcm_channels(entry.num_channels)?);
                 }
             }
             1 => {
@@ -265,20 +315,30 @@ impl Atom for AudioSampleEntry {
                         return decode_error("isomp4: lpcm audio sample entry must be version 2");
                     }
 
+                    if matches!(entry.codec_id, CODEC_ID_PCM_S16BE | CODEC_ID_PCM_S16LE)
+                        && bytes_per_audio_sample == 1
+                    {
+                        entry.codec_id = CODEC_ID_PCM_S8;
+                    }
+
                     let codec_bytes_per_sample = bytes_per_pcm_sample(entry.codec_id);
 
                     // Validate the codec-derived bytes-per-sample equals the declared
                     // bytes-per-sample.
-                    if bytes_per_audio_sample != codec_bytes_per_sample {
+                    if !is_companded(entry.codec_id)
+                        && bytes_per_audio_sample != codec_bytes_per_sample
+                    {
                         return decode_error("isomp4: invalid pcm bytes per sample");
                     }
 
                     // The new fields describe the PCM sample format and supersede the original
                     // version 0 fields.
-                    entry.bits_per_sample = Some(8 * codec_bytes_per_sample);
-                    entry.bits_per_coded_sample = Some(8 * codec_bytes_per_sample);
+                    if !is_companded(entry.codec_id) {
+                        entry.bits_per_sample = Some(8 * codec_bytes_per_sample);
+                        entry.bits_per_coded_sample = Some(8 * codec_bytes_per_sample);
+                    }
                     entry.frames_per_packet = Some(1);
-                    entry.channels = Some(pcm_channels(entry.num_channels)?);
+                    entry.channels = Some(lpcm_channels(entry.num_channels)?);
                 }
             }
             2 => {
@@ -317,8 +377,56 @@ impl Atom for AudioSampleEntry {
             }
         };
 
+        let is_iso_pcm = matches!(
+            header.atom_type,
+            AtomType::AudioSampleEntryIpcm | AtomType::AudioSampleEntryFpcm
+        );
+
+        match header.atom_type {
+            // QuickTime IMA 4:1 ADPCM: packets of 64 frames, 34 bytes per channel.
+            AtomType::AudioSampleEntryIma4 => {
+                entry.codec_id = CODEC_ID_ADPCM_IMA_QT;
+                entry.bits_per_coded_sample = Some(4);
+                entry.frames_per_block = Some(64);
+                entry.frames_per_packet = Some(64);
+                entry.channels = Some(lpcm_channels(entry.num_channels)?);
+            }
+            // The codec is determined by the WAVEFORMATEX in the `wave` atom.
+            AtomType::AudioSampleEntryMsAdpcm | AtomType::AudioSampleEntryImaWav => {
+                entry.codec_id = CODEC_ID_NULL_AUDIO;
+            }
+            _ => (),
+        }
+
         while let Some(entry_header) = it.next_header()? {
             match entry_header.atom_type {
+                AtomType::PcmConfiguration if is_iso_pcm => {
+                    // ISO/IEC 23003-5: format flags (bit 0: little-endian) and the sample size.
+                    let config = it.read_atom::<PayloadAtom>()?;
+
+                    if let [_, _, _, _, format_flags, sample_size, ..] = *config.data {
+                        let little_endian = format_flags & 1 != 0;
+                        let bits = u32::from(sample_size);
+
+                        // Integer samples are signed, except for 8 bits.
+                        let flags = if header.atom_type == AtomType::AudioSampleEntryFpcm {
+                            0x1
+                        }
+                        else {
+                            0x4
+                        } | if little_endian { 0 } else { 0x2 };
+
+                        entry.codec_id = lpcm_codec_id(bits, flags);
+                        entry.bits_per_sample = Some(bits);
+                        entry.bits_per_coded_sample = Some(bits);
+                        entry.frames_per_packet = Some(1);
+                        entry.channels = Some(lpcm_channels(entry.num_channels)?);
+                    }
+                }
+                AtomType::Enda => {
+                    let flag = it.read_atom::<PayloadAtom>()?;
+                    entry.little_endian = Some(flag.data.iter().any(|&b| b != 0));
+                }
                 AtomType::Esds => {
                     let atom = it.read_atom::<EsdsAtom>()?;
                     atom.fill_audio_sample_entry(&mut entry)?;
@@ -355,6 +463,16 @@ impl Atom for AudioSampleEntry {
             }
         }
 
+        entry.is_pcm_frames = entry.frames_per_packet == Some(1)
+            && entry.codec_id != CODEC_ID_NULL_AUDIO
+            && (is_pcm_codec || is_iso_pcm);
+
+        // QuickTime PCM is big-endian unless the `enda` atom (in the sample entry or `wave` atom)
+        // says otherwise.
+        if is_pcm_codec && entry.little_endian == Some(true) && version < 2 {
+            entry.codec_id = to_little_endian(entry.codec_id);
+        }
+
         // A MP3 sample entry has no codec-specific atom.
         if header.atom_type == AtomType::AudioSampleEntryMp3 {
             entry.codec_id = CODEC_ID_MP3;
@@ -362,6 +480,11 @@ impl Atom for AudioSampleEntry {
 
         Ok(entry)
     }
+}
+
+/// Gets if the PCM codec is G.711 companded.
+fn is_companded(codec: AudioCodecId) -> bool {
+    codec == CODEC_ID_PCM_ALAW || codec == CODEC_ID_PCM_MULAW
 }
 
 /// Gets if the sample entry atom is for a PCM codec.
@@ -377,10 +500,12 @@ fn pcm_codec_id(atype: AtomType) -> AudioCodecId {
         AtomType::AudioSampleEntryU8 => CODEC_ID_PCM_U8,
         AtomType::AudioSampleEntryS16Le => CODEC_ID_PCM_S16LE,
         AtomType::AudioSampleEntryS16Be => CODEC_ID_PCM_S16BE,
-        AtomType::AudioSampleEntryS24 => CODEC_ID_PCM_S24LE,
-        AtomType::AudioSampleEntryS32 => CODEC_ID_PCM_S32LE,
-        AtomType::AudioSampleEntryF32 => CODEC_ID_PCM_F32LE,
-        AtomType::AudioSampleEntryF64 => CODEC_ID_PCM_F64LE,
+        AtomType::AudioSampleEntryS24 => CODEC_ID_PCM_S24BE,
+        AtomType::AudioSampleEntryS32 => CODEC_ID_PCM_S32BE,
+        AtomType::AudioSampleEntryF32 => CODEC_ID_PCM_F32BE,
+        AtomType::AudioSampleEntryF64 => CODEC_ID_PCM_F64BE,
+        AtomType::AudioSampleEntryALaw => CODEC_ID_PCM_ALAW,
+        AtomType::AudioSampleEntryMuLaw => CODEC_ID_PCM_MULAW,
         _ => CODEC_ID_NULL_AUDIO,
     }
 }
@@ -388,7 +513,7 @@ fn pcm_codec_id(atype: AtomType) -> AudioCodecId {
 /// Determines the number of bytes per PCM sample for a PCM codec ID.
 fn bytes_per_pcm_sample(pcm_codec_id: AudioCodecId) -> u32 {
     match pcm_codec_id {
-        CODEC_ID_PCM_S8 | CODEC_ID_PCM_U8 => 1,
+        CODEC_ID_PCM_S8 | CODEC_ID_PCM_U8 | CODEC_ID_PCM_ALAW | CODEC_ID_PCM_MULAW => 1,
         CODEC_ID_PCM_S16BE | CODEC_ID_PCM_S16LE => 2,
         CODEC_ID_PCM_U16BE | CODEC_ID_PCM_U16LE => 2,
         CODEC_ID_PCM_S24BE | CODEC_ID_PCM_S24LE => 3,
@@ -398,6 +523,104 @@ fn bytes_per_pcm_sample(pcm_codec_id: AudioCodecId) -> u32 {
         CODEC_ID_PCM_F32BE | CODEC_ID_PCM_F32LE => 4,
         CODEC_ID_PCM_F64BE | CODEC_ID_PCM_F64LE => 8,
         _ => unreachable!(),
+    }
+}
+
+/// Gets the PCM codec for QuickTime little-endian PCM (`enda` = 1) from the default big-endian
+/// codec of the sample entry type.
+fn to_little_endian(codec: AudioCodecId) -> AudioCodecId {
+    match codec {
+        CODEC_ID_PCM_S16BE => CODEC_ID_PCM_S16LE,
+        CODEC_ID_PCM_S24BE => CODEC_ID_PCM_S24LE,
+        CODEC_ID_PCM_S32BE => CODEC_ID_PCM_S32LE,
+        CODEC_ID_PCM_F32BE => CODEC_ID_PCM_F32LE,
+        CODEC_ID_PCM_F64BE => CODEC_ID_PCM_F64LE,
+        other => other,
+    }
+}
+
+/// Gets the number of frames in one block of Microsoft ADPCM (`ms\0\x02`) or IMA ADPCM
+/// (`ms\0\x11`) data of `block_align` bytes, as in `fmt ` chunks of WAVE files.
+fn adpcm_frames_per_block(codec: AudioCodecId, block_align: u32, channels: u32, bits: u32) -> u64 {
+    let (block_align, channels, bits) =
+        (u64::from(block_align), u64::from(channels), u64::from(bits));
+
+    if channels == 0 || bits == 0 {
+        return 0;
+    }
+
+    match codec {
+        CODEC_ID_ADPCM_MS if block_align >= 7 * channels => {
+            (8 * (block_align - 7 * channels)) / (bits * channels) + 2
+        }
+        CODEC_ID_ADPCM_IMA_WAV if block_align >= 4 * channels => {
+            // Per channel, the samples are coded in chunks of (bytes, samples).
+            let (chunk_bytes, chunk_samples) = match bits {
+                2 => (4, 16),
+                3 => (12, 32),
+                4 => (4, 8),
+                5 => (20, 32),
+                _ => return 0,
+            };
+            ((block_align - 4 * channels) / (chunk_bytes * channels)) * chunk_samples + 1
+        }
+        _ => 0,
+    }
+}
+
+impl AudioSampleEntry {
+    /// Fill the parameters of a Microsoft ADPCM or IMA ADPCM (WAV) track from the WAVEFORMATEX
+    /// structure QuickTime stores in the `wave` atom (ISO/IEC 14496-12 does not define these).
+    pub(crate) fn fill_from_waveformatex(&mut self, atom_type: AtomType, format: &[u8]) {
+        // wFormatTag, nChannels, nSamplesPerSec, nAvgBytesPerSec, nBlockAlign, wBitsPerSample,
+        // cbSize.
+        if format.len() < 18 {
+            return;
+        }
+
+        let u16_at = |i: usize| u32::from(u16::from_le_bytes([format[i], format[i + 1]]));
+
+        let channels = u16_at(2);
+        let block_align = u16_at(12);
+        let bits = u16_at(14);
+        let extra_len = (u16_at(16) as usize).min(format.len() - 18);
+        let extra = &format[18..18 + extra_len];
+
+        self.codec_id = if atom_type == AtomType::AudioSampleEntryMsAdpcm {
+            CODEC_ID_ADPCM_MS
+        }
+        else {
+            CODEC_ID_ADPCM_IMA_WAV
+        };
+
+        // The samples per block is the first field of the extra data for both codecs.
+        let mut frames_per_block = match extra {
+            [a, b, ..] => u64::from(u16::from_le_bytes([*a, *b])),
+            _ => 0,
+        };
+
+        if frames_per_block == 0 {
+            frames_per_block = adpcm_frames_per_block(self.codec_id, block_align, channels, bits);
+        }
+
+        if frames_per_block == 0 {
+            // Unusable: leave the codec unknown.
+            self.codec_id = CODEC_ID_NULL_AUDIO;
+            return;
+        }
+
+        if let Ok(channels) = lpcm_channels(channels) {
+            self.channels = Some(channels);
+        }
+
+        self.block_align = Some(block_align);
+        self.bits_per_coded_sample = Some(bits);
+        self.frames_per_block = Some(frames_per_block);
+        self.frames_per_packet = Some(frames_per_block);
+
+        if !extra.is_empty() {
+            self.extra_data = Some(extra.into());
+        }
     }
 }
 
@@ -448,16 +671,7 @@ fn lpcm_codec_id(bits_per_sample: u32, lpcm_flags: u32) -> AudioCodecId {
     }
 }
 
-/// Gets the audio channels for a version 0 or 1 sample entry.
-fn pcm_channels(num_channels: u32) -> Result<Channels> {
-    match num_channels {
-        1 => Ok(Channels::Positioned(Position::FRONT_LEFT)),
-        2 => Ok(Channels::Positioned(Position::FRONT_LEFT | Position::FRONT_RIGHT)),
-        _ => decode_error("isomp4: invalid number of channels"),
-    }
-}
-
-/// Gets the audio channels for a version 2 LPCM sample entry.
+/// Gets the audio channels for a sample entry with a channel count.
 fn lpcm_channels(num_channels: u32) -> Result<Channels> {
     if num_channels < 1 {
         return decode_error("isomp4: invalid number of channels");
@@ -1157,5 +1371,84 @@ mod tests {
         assert_eq!(&extra_data[..9], b"OpusHead\x01");
         assert_eq!(&extra_data[19..], &[4, 2, 0, 4, 1, 2, 3, 5]);
         assert_eq!(params.channels.map(|c| c.count()), Some(6));
+    }
+
+    /// A version 1 QuickTime sound entry extension.
+    fn v1_fields(bytes_per_sample: u32) -> Vec<u8> {
+        let mut f = Vec::new();
+        for v in [1u32, bytes_per_sample, 2 * bytes_per_sample, 2] {
+            f.extend_from_slice(&v.to_be_bytes());
+        }
+        f
+    }
+
+    #[test]
+    fn quicktime_pcm_is_big_endian_unless_enda() {
+        use symphonia_core::codecs::audio::well_known::{CODEC_ID_PCM_S24BE, CODEC_ID_PCM_S24LE};
+
+        let be = stsd_audio_entry(b"in24", 1, 2, 44_100 << 16, &v1_fields(3));
+        assert_eq!(audio_params(be).codec, CODEC_ID_PCM_S24BE);
+
+        let wave = atom(b"wave", &[atom(b"frma", b"in24"), atom(b"enda", &[0, 1])].concat());
+        let le = stsd_audio_entry(b"in24", 1, 2, 44_100 << 16, &[v1_fields(3), wave].concat());
+        assert_eq!(audio_params(le).codec, CODEC_ID_PCM_S24LE);
+    }
+
+    #[test]
+    fn g711_and_ima4_entries_are_mapped() {
+        use symphonia_core::codecs::audio::well_known::{
+            CODEC_ID_ADPCM_IMA_QT, CODEC_ID_PCM_ALAW, CODEC_ID_PCM_MULAW,
+        };
+
+        let alaw = audio_params(stsd_audio_entry(b"alaw", 0, 1, 8_000 << 16, &[]));
+        assert_eq!(alaw.codec, CODEC_ID_PCM_ALAW);
+        let ulaw = audio_params(stsd_audio_entry(b"ulaw", 0, 1, 8_000 << 16, &[]));
+        assert_eq!(ulaw.codec, CODEC_ID_PCM_MULAW);
+
+        let ima4 = audio_params(stsd_audio_entry(b"ima4", 0, 2, 44_100 << 16, &[]));
+        assert_eq!(ima4.codec, CODEC_ID_ADPCM_IMA_QT);
+        assert_eq!(ima4.frames_per_block, Some(64));
+        assert_eq!(ima4.max_frames_per_packet, Some(64));
+    }
+
+    #[test]
+    fn microsoft_adpcm_waveformatex_in_wave_atom() {
+        use symphonia_core::codecs::audio::well_known::CODEC_ID_ADPCM_MS;
+
+        // WAVEFORMATEX: tag 2, 2 channels, 44100 Hz, avg bytes, block align 1024, 4 bits, cbSize 4
+        // with 1012 samples per block and 0 coefficients.
+        let mut wfx = vec![2, 0, 2, 0];
+        wfx.extend_from_slice(&44_100u32.to_le_bytes());
+        wfx.extend_from_slice(&[0; 4]);
+        wfx.extend_from_slice(&[0, 4, 4, 0, 4, 0]);
+        wfx.extend_from_slice(&[0xf4, 3, 0, 0]);
+
+        let wave = atom(b"wave", &[atom(b"frma", b"ms\0\x02"), atom(b"ms\0\x02", &wfx)].concat());
+        let params = audio_params(stsd_audio_entry(
+            b"ms\0\x02",
+            1,
+            2,
+            44_100 << 16,
+            &[v1_fields(2), wave].concat(),
+        ));
+
+        assert_eq!(params.codec, CODEC_ID_ADPCM_MS);
+        assert_eq!(params.frames_per_block, Some(1012));
+        assert_eq!(params.max_frames_per_packet, Some(1012));
+        assert_eq!(params.bits_per_coded_sample, Some(4));
+    }
+
+    #[test]
+    fn iso_pcm_sample_entries_use_pcmc() {
+        use symphonia_core::codecs::audio::well_known::{CODEC_ID_PCM_F32LE, CODEC_ID_PCM_S24LE};
+
+        // FullBox header, format flags (little-endian), sample size.
+        let ipcm =
+            stsd_audio_entry(b"ipcm", 0, 2, 44_100 << 16, &atom(b"pcmC", &[0, 0, 0, 0, 1, 24]));
+        assert_eq!(audio_params(ipcm).codec, CODEC_ID_PCM_S24LE);
+
+        let fpcm =
+            stsd_audio_entry(b"fpcm", 0, 2, 44_100 << 16, &atom(b"pcmC", &[0, 0, 0, 0, 1, 32]));
+        assert_eq!(audio_params(fpcm).codec, CODEC_ID_PCM_F32LE);
     }
 }

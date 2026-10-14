@@ -19,11 +19,12 @@ use symphonia_core::util::{bits, text};
 use symphonia_metadata::utils::images::{try_get_image_info, visual_from_image_data};
 use symphonia_metadata::utils::{id3v1, itunes};
 
+use crate::atoms::qt_meta::{KeysAtom, mdta_std_tags};
 use crate::atoms::{Atom, AtomHeader, AtomIterator, AtomType, ReadAtom, Result, decode_error};
 
 use log::{debug, warn};
 
-const ISOMP4_METADATA_INFO: MetadataInfo = MetadataInfo {
+pub(crate) const ISOMP4_METADATA_INFO: MetadataInfo = MetadataInfo {
     metadata: METADATA_ID_ISOMP4,
     short_name: "isomp4",
     long_name: "ISO Base Media File Format",
@@ -782,12 +783,68 @@ pub struct IlstAtom {
     pub metadata: MetadataRevision,
     /// Gapless playback information from an iTunes `iTunSMPB` freeform tag, if present.
     pub gapless: Option<GaplessInfo>,
+    /// Items that are not part of the well-known iTunes set. These are either items of a
+    /// QuickTime metadata item keys (`keys`) list, where the item type is an index into the list,
+    /// or unknown items. See [`IlstAtom::add_unmapped_tags`].
+    unmapped: Vec<MetaTagAtom>,
+}
+
+impl IlstAtom {
+    /// Add the items that are not part of the well-known iTunes set to the metadata.
+    ///
+    /// If `keys` is provided, an item whose type is a valid (1-based) index of the list is a
+    /// QuickTime keyed metadata item. All other items are opaque, and are not tags.
+    pub fn add_unmapped_tags(&mut self, keys: Option<&KeysAtom>) {
+        for item in std::mem::take(&mut self.unmapped) {
+            let AtomType::Other(fourcc) = item.atom_type
+            else {
+                continue;
+            };
+
+            let Some(key) = keys
+                .and_then(|keys| {
+                    let index = usize::try_from(u32::from_be_bytes(fourcc)).ok()?.checked_sub(1)?;
+                    keys.keys.get(index)
+                })
+                .cloned()
+            else {
+                continue;
+            };
+
+            for value_atom in item.values.iter() {
+                let Some(value) = parse_tag_value(value_atom.data_type, &value_atom.data)
+                else {
+                    warn!("unsupported data type {:?} for unmapped tag", value_atom.data_type);
+                    continue;
+                };
+
+                let std = match &value {
+                    RawValue::String(text) => {
+                        let [first, second] = mdta_std_tags(&key, text);
+                        // Tags yielding two standard tags are added as two tags.
+                        if let Some(second) = second {
+                            self.metadata.media.tags.push(Tag::new_std(
+                                RawTag::new(key.clone(), value.clone()),
+                                second,
+                            ));
+                        }
+                        first
+                    }
+                    _ => None,
+                };
+                let tag = Tag::new_from_parts(key.clone(), value, std);
+
+                self.metadata.media.tags.push(tag);
+            }
+        }
+    }
 }
 
 impl Atom for IlstAtom {
     fn read<R: ReadAtom>(it: &mut AtomIterator<R>, _header: &AtomHeader) -> Result<Self> {
         let mut mb = MetadataBuilder::new(ISOMP4_METADATA_INFO);
         let mut gapless = None;
+        let mut unmapped = Vec::new();
 
         while let Some(header) = it.next_header()? {
             // Ignore standard atoms, check if other is a metadata atom.
@@ -977,7 +1034,8 @@ impl Atom for IlstAtom {
                 AtomType::FreeFormTag => add_freeform_tag(it, &mut mb, &mut gapless)?,
                 // Completely unknown tag atom.
                 AtomType::Other(atom_type) => {
-                    debug!("unknown metadata sub-atom {atom_type:x?}");
+                    debug!("unmapped metadata sub-atom {atom_type:x?}");
+                    unmapped.push(it.read_atom::<MetaTagAtom>()?);
                 }
                 // Known tag atom, but has no standard tag or special handling.
                 _ => {
@@ -986,7 +1044,7 @@ impl Atom for IlstAtom {
             }
         }
 
-        Ok(IlstAtom { metadata: mb.build(), gapless })
+        Ok(IlstAtom { metadata: mb.build(), gapless, unmapped })
     }
 }
 

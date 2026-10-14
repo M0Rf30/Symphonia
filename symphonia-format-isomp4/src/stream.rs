@@ -630,6 +630,7 @@ mod tests {
                 }],
             }),
             udta: None,
+            meta: None,
         };
 
         MoofSegment::new(moof, Arc::new(moov), prev)

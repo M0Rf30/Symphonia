@@ -5,6 +5,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+use crate::atoms::stsz::SampleSize;
 use crate::atoms::{
     Atom, AtomHeader, AtomIterator, AtomType, Co64Atom, ReadAtom, Result, StcoAtom, StscAtom,
     StsdAtom, StszAtom, SttsAtom, decode_error,
@@ -22,6 +23,78 @@ pub struct StblAtom {
     pub stsz: StszAtom,
     pub stco: Option<StcoAtom>,
     pub co64: Option<Co64Atom>,
+}
+
+impl StblAtom {
+    /// QuickTime may describe block-based audio (Microsoft ADPCM, IMA ADPCM WAV) with one sample
+    /// per frame, with the samples of a constant size that is not the size of the blocks. Group
+    /// the samples such that one sample is one block.
+    /// Group the single frame samples of QuickTime and ISO PCM tracks (as many as 1 packet per
+    /// frame) into packets of up to `MAX_PCM_PACKET_FRAMES` frames.
+    fn regroup_pcm_frames(&mut self) {
+        // The number of frames at which the cost of packets is negligible.
+        const MAX_PCM_PACKET_FRAMES: u32 = 4096;
+
+        if !self.stsd.is_pcm_frames() {
+            return;
+        }
+
+        let SampleSize::Constant(size) = self.stsz.sample_sizes
+        else {
+            return;
+        };
+
+        // Chunks and timing must be made of whole groups.
+        let g = crate::atoms::stts::gcd(
+            self.stts.sample_count_gcd(),
+            self.stsc.chunk_sample_count_gcd(self.stsz.sample_count),
+        );
+
+        // The largest divisor of the common divisor that is not too large.
+        let Some(group) = (1..=g.min(MAX_PCM_PACKET_FRAMES)).rev().find(|d| g % d == 0)
+        else {
+            return;
+        };
+
+        let Some(group_size) = size.checked_mul(group)
+        else {
+            return;
+        };
+
+        if group > 1 && self.stsz.sample_count % group == 0 {
+            let mut stts = self.stts.clone();
+            if stts.regroup(group) && self.stsc.regroup(group) {
+                self.stts = stts;
+                self.stsz.sample_count /= group;
+                self.stsz.sample_sizes = SampleSize::Constant(group_size);
+            }
+        }
+    }
+
+    fn regroup_adpcm_blocks(&mut self) {
+        let Some((block_align, frames)) = self.stsd.adpcm_block()
+        else {
+            return;
+        };
+
+        let SampleSize::Constant(size) = self.stsz.sample_sizes
+        else {
+            return;
+        };
+
+        // Samples that are already blocks.
+        if size == block_align || self.stsz.sample_count % frames != 0 {
+            return;
+        }
+
+        // Validate before the first change.
+        let mut stts = self.stts.clone();
+        if stts.regroup(frames) && self.stsc.regroup(frames) {
+            self.stts = stts;
+            self.stsz.sample_count /= frames;
+            self.stsz.sample_sizes = SampleSize::Constant(block_align);
+        }
+    }
 }
 
 impl Atom for StblAtom {
@@ -87,6 +160,9 @@ impl Atom for StblAtom {
             return decode_error("isomp4 (stbl): missing stsz atom");
         };
 
-        Ok(StblAtom { stsd, stts, stsc, stsz, stco, co64 })
+        let mut stbl = StblAtom { stsd, stts, stsc, stsz, stco, co64 };
+        stbl.regroup_adpcm_blocks();
+        stbl.regroup_pcm_frames();
+        Ok(stbl)
     }
 }

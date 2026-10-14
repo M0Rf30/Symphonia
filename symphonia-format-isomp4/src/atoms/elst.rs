@@ -14,9 +14,7 @@ use crate::atoms::{Atom, AtomHeader, AtomIterator, ReadAtom, Result, decode_erro
 pub struct ElstEntry {
     pub segment_duration: u64,
     pub media_time: i64,
-    #[allow(dead_code)]
     pub media_rate_int: i16,
-    #[allow(dead_code)]
     pub media_rate_frac: i16,
 }
 

@@ -27,4 +27,5 @@ pub use demuxer::IsoMp4Reader;
 #[cfg(feature = "writer")]
 pub mod writer {
     pub use crate::atoms::ilst_write::{build_ilst, mdir_hdlr_box};
+    pub use crate::atoms::qt_meta::is_udta_tag_box;
 }

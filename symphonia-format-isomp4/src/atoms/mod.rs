@@ -48,6 +48,7 @@ pub(crate) mod moov;
 pub(crate) mod mvex;
 pub(crate) mod mvhd;
 pub(crate) mod opus;
+pub(crate) mod qt_meta;
 pub(crate) mod sidx;
 pub(crate) mod smhd;
 pub(crate) mod stbl;
@@ -60,6 +61,7 @@ pub(crate) mod tfhd;
 pub(crate) mod tkhd;
 pub(crate) mod traf;
 pub(crate) mod trak;
+pub(crate) mod tref;
 pub(crate) mod trex;
 pub(crate) mod trun;
 pub(crate) mod udta;
@@ -96,6 +98,7 @@ pub use moov::MoovAtom;
 pub use mvex::MvexAtom;
 pub use mvhd::MvhdAtom;
 pub use opus::OpusAtom;
+pub use qt_meta::KeysAtom;
 pub use sidx::SidxAtom;
 pub use smhd::SmhdAtom;
 pub use stbl::StblAtom;
@@ -108,6 +111,7 @@ pub use tfhd::TfhdAtom;
 pub use tkhd::TkhdAtom;
 pub use traf::TrafAtom;
 pub use trak::TrakAtom;
+pub use tref::TrefAtom;
 pub use trex::TrexAtom;
 pub use trun::TrunAtom;
 pub use udta::UdtaAtom;
@@ -129,6 +133,12 @@ pub enum AtomType {
     AudioSampleEntryF32,
     AudioSampleEntryF64,
     AudioSampleEntryFlac,
+    AudioSampleEntryFpcm,
+    AudioSampleEntryIma4,
+    AudioSampleEntryIpcm,
+    PcmConfiguration,
+    AudioSampleEntryImaWav,
+    AudioSampleEntryMsAdpcm,
     AudioSampleEntryLpcm,
     AudioSampleEntryMp3,
     AudioSampleEntryMp4a,
@@ -144,6 +154,8 @@ pub enum AtomType {
     AvcConfiguration,
     BitRate,
     ChapterList,
+    ChapterReference,
+    TrackReference,
     Id3v2Metadata,
     ChunkOffset,
     ChunkOffset64,
@@ -165,6 +177,7 @@ pub enum AtomType {
     EditList,
     EncodedByTag,
     EncoderTag,
+    Enda,
     Esds,
     FileCreatorUrlTag,
     FileType,
@@ -200,6 +213,7 @@ pub enum AtomType {
     MetaList,
     MetaTagData,
     MetaTagMeaning,
+    MetadataKeys,
     MetaTagName,
     MovementCountTag,
     MovementIndexTag,
@@ -304,7 +318,14 @@ impl From<[u8; 4]> for AtomType {
             b"dvvC" => AtomType::DolbyVisionConfiguration,
             b"edts" => AtomType::Edit,
             b"elst" => AtomType::EditList,
+            b"enda" => AtomType::Enda,
             b"esds" => AtomType::Esds,
+            b"fpcm" => AtomType::AudioSampleEntryFpcm,
+            b"ipcm" => AtomType::AudioSampleEntryIpcm,
+            b"pcmC" => AtomType::PcmConfiguration,
+            b"ima4" => AtomType::AudioSampleEntryIma4,
+            b"ms\x00\x02" => AtomType::AudioSampleEntryMsAdpcm,
+            b"ms\x00\x11" => AtomType::AudioSampleEntryImaWav,
             b"fl32" => AtomType::AudioSampleEntryF32,
             b"fl64" => AtomType::AudioSampleEntryF64,
             b"fLaC" => AtomType::AudioSampleEntryFlac,
@@ -323,6 +344,7 @@ impl From<[u8; 4]> for AtomType {
             b"mdhd" => AtomType::MediaHeader,
             b"mdia" => AtomType::Media,
             b"mean" => AtomType::MetaTagMeaning,
+            b"keys" => AtomType::MetadataKeys,
             b"mehd" => AtomType::MovieExtendsHeader,
             b"meta" => AtomType::Meta,
             b"mfhd" => AtomType::MovieFragmentHeader,
@@ -354,6 +376,8 @@ impl From<[u8; 4]> for AtomType {
             b"tkhd" => AtomType::TrackHeader,
             b"traf" => AtomType::TrackFragment,
             b"trak" => AtomType::Track,
+            b"tref" => AtomType::TrackReference,
+            b"chap" => AtomType::ChapterReference,
             b"trex" => AtomType::TrackExtends,
             b"trun" => AtomType::TrackFragmentRun,
             b"twos" => AtomType::AudioSampleEntryS16Be,
@@ -467,8 +491,6 @@ pub enum AtomError {
     UnexpectedPosition,
     /// Unexpected primitive operation.
     UnexpectedReadOperation,
-    /// An unknown size atom was nested within a parent atom with a size.
-    UnexpectedUnknownSizeAtom,
     /// The size of the atom is unknown,
     UnknownAtomSize,
     /// Other Symphonia errors encountered during atom parsing.
@@ -540,6 +562,11 @@ pub struct AtomHeader {
 }
 
 impl AtomHeader {
+    /// Give an atom of unknown size an end position.
+    fn clamp_end(&mut self, end: u64) {
+        self.atom_len = end.checked_sub(self.atom_pos).and_then(NonZeroU64::new);
+    }
+
     /// Size of a standard atom header.
     pub const HEADER_SIZE: u8 = 8;
     /// Size of a standard atom header with a 64-bit size.
@@ -697,13 +724,17 @@ impl<R: ReadAtom> AtomIterator<R> {
         //     header.end().unwrap_or(u64::MAX),
         // );
 
-        // If the atom has an unknown size (it extends to the end of the file), then all parent
-        // atoms must also have an unknown size. In practice, only top-level atoms should have an
-        // unknown size.
-        if atom.size().is_none() && self.stack.iter().rev().any(|parent| parent.size().is_some()) {
-            // Seek back to the start of the atom since it is impossible to proceed past this.
-            self.reader.seek_buffered(atom.pos());
-            return Err(AtomError::UnexpectedUnknownSizeAtom);
+        // An atom with an unknown size extends to the end of the file, so any parent atom must
+        // also have an unknown size. In practice, only top-level atoms should have an unknown
+        // size. Be lenient with writers that violate this: clamp the atom to the end of the
+        // nearest parent with a size.
+        let mut atom = atom;
+
+        if atom.size().is_none() {
+            if let Some(ancestor_end) = self.stack.iter().rev().find_map(|parent| parent.end()) {
+                log::debug!("unknown size atom has a sized parent, clamping to its end");
+                atom.clamp_end(ancestor_end);
+            }
         }
 
         // Perform checks after header parsing.
@@ -927,6 +958,34 @@ impl<R: ReadAtom> AtomIterator<R> {
     pub(crate) fn read_extended_header(&mut self) -> Result<(u8, u32)> {
         self.ensure_parent_atom_data(4)?;
         Ok((self.reader.read_u8()?, self.reader.read_be_u24()?))
+    }
+
+    /// Gets the current position of the inner reader.
+    pub(crate) fn pos(&self) -> u64 {
+        self.reader.pos()
+    }
+
+    /// Repositions the inner reader to a position previously returned by `pos`, after reading
+    /// raw data.
+    pub(crate) fn restore_pos(&mut self, pos: u64) -> Result<()>
+    where
+        R: MediaSource,
+    {
+        self.seek_reader(pos)
+    }
+
+    /// Reads the header of a `meta` atom. In ISO files the atom is a full box, but in QuickTime
+    /// files it is a plain box whose first child immediately follows the atom header. The two are
+    /// distinguished by the first four bytes: they are zero (version and flags) for a full box,
+    /// and the non-zero size of the first child otherwise.
+    pub(crate) fn read_meta_header(&mut self) -> Result<()> {
+        self.ensure_parent_atom_data(4)?;
+
+        if self.reader.read_be_u32()? != 0 {
+            self.reader.seek_buffered_rel(-4);
+        }
+
+        Ok(())
     }
 
     /// Reads a time or duration field of a version 0 (32-bit) or version 1 (64-bit) header. The

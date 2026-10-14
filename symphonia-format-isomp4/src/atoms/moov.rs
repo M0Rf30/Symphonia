@@ -9,8 +9,8 @@ use symphonia_core::meta::{ChapterGroup, MetadataRevision};
 use symphonia_core::units::{Duration, TimeBase};
 
 use crate::atoms::{
-    Atom, AtomHeader, AtomIterator, AtomType, GaplessInfo, MvexAtom, MvhdAtom, ReadAtom, Result,
-    TrakAtom, UdtaAtom, decode_error,
+    Atom, AtomHeader, AtomIterator, AtomType, GaplessInfo, MetaAtom, MvexAtom, MvhdAtom, ReadAtom,
+    Result, TrakAtom, UdtaAtom, decode_error,
 };
 
 use log::warn;
@@ -27,17 +27,29 @@ pub struct MoovAtom {
     pub mvex: Option<MvexAtom>,
     /// User data (usually metadata).
     pub udta: Option<UdtaAtom>,
+    /// Metadata directly within the movie atom, instead of the user data atom (e.g., the
+    /// QuickTime keyed metadata written by Apple devices).
+    pub meta: Option<MetaAtom>,
 }
 
 impl MoovAtom {
     /// If metadata was read, consumes the metadata and returns it.
+    ///
+    /// If the movie atom has metadata directly in it, and in its user data atom, then the former
+    /// is returned first.
     pub fn take_metadata(&mut self) -> Option<MetadataRevision> {
-        self.udta.as_mut().and_then(|udta| udta.take_metadata())
+        self.meta
+            .as_mut()
+            .and_then(|meta| meta.take_metadata())
+            .or_else(|| self.udta.as_mut().and_then(|udta| udta.take_metadata()))
     }
 
     /// If ID3v2 metadata (`ID32` box) was read, consumes the metadata and returns it.
     pub fn take_id3v2(&mut self) -> Option<MetadataRevision> {
-        self.udta.as_mut().and_then(|udta| udta.take_id3v2())
+        self.meta
+            .as_mut()
+            .and_then(|meta| meta.take_id3v2())
+            .or_else(|| self.udta.as_mut().and_then(|udta| udta.take_id3v2()))
     }
 
     /// Get the chapters from the Nero chapter list (`chpl`) atom, if present.
@@ -56,7 +68,10 @@ impl MoovAtom {
 
     /// Get the gapless playback information from the iTunes `iTunSMPB` tag, if present.
     pub fn gapless(&self) -> Option<GaplessInfo> {
-        self.udta.as_ref().and_then(|udta| udta.gapless())
+        self.meta
+            .as_ref()
+            .and_then(|meta| meta.gapless)
+            .or_else(|| self.udta.as_ref().and_then(|udta| udta.gapless()))
     }
 }
 
@@ -66,6 +81,7 @@ impl Atom for MoovAtom {
         let mut traks = Vec::new();
         let mut mvex = None;
         let mut udta = None;
+        let mut meta = None;
 
         while let Some(header) = it.next_header()? {
             match header.atom_type {
@@ -81,6 +97,9 @@ impl Atom for MoovAtom {
                 }
                 AtomType::UserData => {
                     udta = Some(it.read_atom::<UdtaAtom>()?);
+                }
+                AtomType::Meta => {
+                    meta = Some(it.read_atom::<MetaAtom>()?);
                 }
                 _ => (),
             }
@@ -103,6 +122,6 @@ impl Atom for MoovAtom {
             }
         }
 
-        Ok(MoovAtom { mvhd, traks, mvex, udta })
+        Ok(MoovAtom { mvhd, traks, mvex, udta, meta })
     }
 }

@@ -59,39 +59,54 @@ impl ChplAtom {
     /// Convert the chapter list into a chapter group. `end` is the end time of the last chapter,
     /// if known.
     pub fn make_chapters(&self, end: Option<Time>) -> Option<ChapterGroup> {
-        if self.entries.is_empty() {
-            return None;
-        }
-
-        let start_time = |entry: &ChplEntry| Time::from_nanos_u64(entry.start.saturating_mul(100));
-
-        let items = self
+        let chapters = self
             .entries
             .iter()
-            .enumerate()
-            .map(|(i, entry)| {
-                let end_time = match self.entries.get(i + 1) {
-                    Some(next) => Some(start_time(next)),
-                    None => end,
-                };
-
-                let title = Arc::new(entry.title.clone());
-                let raw = RawTag::new("chpl", title.clone());
-                let tag = Tag::new_std(raw, StandardTag::ChapterTitle(title));
-
-                ChapterGroupItem::Chapter(Chapter {
-                    start_time: start_time(entry),
-                    end_time,
-                    start_byte: None,
-                    end_byte: None,
-                    tags: vec![tag],
-                    visuals: vec![],
-                })
+            .map(|entry| {
+                (Time::from_nanos_u64(entry.start.saturating_mul(100)), entry.title.clone())
             })
             .collect();
 
-        Some(ChapterGroup { items, tags: vec![], visuals: vec![] })
+        make_chapter_group("chpl", chapters, end)
     }
+}
+
+/// Make a chapter group from a list of chapter start times and titles, in order of start time.
+/// `end` is the end time of the last chapter, if known. Returns `None` if there are no chapters.
+pub(crate) fn make_chapter_group(
+    raw_key: &'static str,
+    chapters: Vec<(Time, String)>,
+    end: Option<Time>,
+) -> Option<ChapterGroup> {
+    if chapters.is_empty() {
+        return None;
+    }
+
+    let items = chapters
+        .iter()
+        .enumerate()
+        .map(|(i, (start_time, title))| {
+            let end_time = match chapters.get(i + 1) {
+                Some((next_start, _)) => Some(*next_start),
+                None => end,
+            };
+
+            let title = Arc::new(title.clone());
+            let raw = RawTag::new(raw_key, title.clone());
+            let tag = Tag::new_std(raw, StandardTag::ChapterTitle(title));
+
+            ChapterGroupItem::Chapter(Chapter {
+                start_time: *start_time,
+                end_time,
+                start_byte: None,
+                end_byte: None,
+                tags: vec![tag],
+                visuals: vec![],
+            })
+        })
+        .collect();
+
+    Some(ChapterGroup { items, tags: vec![], visuals: vec![] })
 }
 
 #[cfg(test)]

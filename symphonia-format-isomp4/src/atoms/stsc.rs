@@ -25,6 +25,24 @@ pub struct StscAtom {
 }
 
 impl StscAtom {
+    /// Gets the greatest common divisor of the number of samples of every chunk, given the total
+    /// number of samples. 0 if there are no chunks.
+    pub fn chunk_sample_count_gcd(&self, total_samples: u32) -> u32 {
+        let mut g = 0;
+
+        for (i, e) in self.entries.iter().enumerate() {
+            g = crate::atoms::stts::gcd(g, e.samples_per_chunk);
+
+            // The last entry may end with a shorter chunk.
+            if i + 1 == self.entries.len() && e.samples_per_chunk > 0 {
+                let rest = total_samples.saturating_sub(e.first_sample) % e.samples_per_chunk;
+                g = crate::atoms::stts::gcd(g, rest);
+            }
+        }
+
+        g
+    }
+
     /// Finds the `StscEntry` for the sample indicated by `sample_num`. Note, `sample_num` is indexed
     /// relative to the `StscAtom`. Complexity is O(log2 N).
     pub fn find_entry_for_sample(&self, sample_num: u32) -> Option<&StscEntry> {
@@ -49,6 +67,28 @@ impl StscAtom {
         // index will never equal 0 so this is safe. If the table were empty, left == 1, thus calling
         // get with an index of 0, and safely returning None.
         self.entries.get(left - 1)
+    }
+}
+
+impl StscAtom {
+    /// Group every `group` samples into one sample. Returns `false`, and leaves the table
+    /// unchanged, if the chunks are not made of whole groups.
+    pub fn regroup(&mut self, group: u32) -> bool {
+        if group == 0
+            || self
+                .entries
+                .iter()
+                .any(|e| e.samples_per_chunk % group != 0 || e.first_sample % group != 0)
+        {
+            return false;
+        }
+
+        for entry in &mut self.entries {
+            entry.samples_per_chunk /= group;
+            entry.first_sample /= group;
+        }
+
+        true
     }
 }
 

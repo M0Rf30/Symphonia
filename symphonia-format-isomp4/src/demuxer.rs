@@ -18,7 +18,7 @@ use symphonia_core::formats::prelude::*;
 use symphonia_core::formats::probe::{ProbeFormatData, ProbeableFormat, Score, Scoreable};
 use symphonia_core::formats::well_known::FORMAT_ID_ISOMP4;
 use symphonia_core::io::*;
-use symphonia_core::meta::{ChapterGroup, Metadata, MetadataLog};
+use symphonia_core::meta::{ChapterGroup, Metadata, MetadataBuilder, MetadataLog};
 use symphonia_core::units::Time;
 
 use std::collections::HashMap;
@@ -26,6 +26,9 @@ use std::io::{Seek, SeekFrom};
 use std::num::NonZero;
 use std::sync::Arc;
 
+use crate::atoms::chpl::make_chapter_group;
+use crate::atoms::ilst::ISOMP4_METADATA_INFO;
+use crate::atoms::qt_meta::decode_text;
 use crate::atoms::{AtomError, AtomIterator, AtomType, ReadAtom};
 use crate::atoms::{FtypAtom, GaplessInfo, MetaAtom, MoofAtom, MoovAtom, SidxAtom, TrakAtom};
 use symphonia_common::mpeg::audio::{
@@ -64,6 +67,9 @@ pub struct TrackState {
     /// all audio tracks. For HE-AAC (SBR), the timescale of a track may be the core codec rate
     /// while the decoded output has twice the sample rate.
     frames_per_tick: u64,
+    /// The number of decoded frames at the start of the timeline of the track that are silent
+    /// because of an initial empty edit of the edit list.
+    start_offset: u64,
     /// The time base of the media (sample table) timestamps, which differs from the time base of
     /// the track if `frames_per_tick` is not 1.
     media_time_base: TimeBase,
@@ -78,7 +84,8 @@ impl TrackState {
     pub fn make(
         track_num: usize,
         trak: &TrakAtom,
-        timespan: &TimeSpan,
+        timescale: NonZero<u32>,
+        duration: Option<Duration>,
         movie_timescale: NonZero<u32>,
         itunes_gapless: Option<GaplessInfo>,
     ) -> (Self, Track) {
@@ -91,9 +98,11 @@ impl TrackState {
 
         // Populate timing information. This is revised below if the number of decoded frames per
         // tick of the media timescale is not 1.
-        track
-            .with_time_base(TimeBase::from_recip(timespan.timescale))
-            .with_duration(timespan.duration);
+        track.with_time_base(TimeBase::from_recip(timescale));
+
+        if let Some(duration) = duration {
+            track.with_duration(duration);
+        }
 
         // If the track is an audio track, and the timescale is equal to the sample rate, then the
         // number of frames is equal to the duration. This is the case for almost all audio tracks.
@@ -105,20 +114,21 @@ impl TrackState {
         // tick of the timescale is that many decoded frames.
         let frames_per_tick = match &track.codec_params {
             Some(CodecParameters::Audio(audio)) => match audio.sample_rate {
-                Some(rate) if rate == timespan.timescale.get() => Some(1),
-                Some(rate)
-                    if audio.codec == CODEC_ID_AAC && rate % timespan.timescale.get() == 0 =>
-                {
-                    Some(u64::from(rate / timespan.timescale.get()))
+                Some(rate) if rate == timescale.get() => Some(1),
+                Some(rate) if audio.codec == CODEC_ID_AAC && rate % timescale.get() == 0 => {
+                    Some(u64::from(rate / timescale.get()))
                 }
                 _ => None,
             },
             _ => None,
         };
 
+        let mut start_offset = 0;
+
         if let Some(frames_per_tick) = frames_per_tick {
-            // The total number of frames, including any delay and padding.
-            let total_frames = timespan.duration.get().saturating_mul(frames_per_tick);
+            // The total number of frames, including any delay and padding, if the duration of the
+            // track is known. The duration of a fragmented stream may be unknown.
+            let total_frames = duration.map(|dur| dur.get().saturating_mul(frames_per_tick));
 
             // If a tick of the media timescale is more than one decoded frame (e.g., HE-AAC, where
             // the media timescale is the sample rate of the core codec), express the timeline of
@@ -127,39 +137,45 @@ impl TrackState {
             if frames_per_tick > 1 {
                 if let Some(timescale) = u32::try_from(frames_per_tick)
                     .ok()
-                    .and_then(|ratio| timespan.timescale.get().checked_mul(ratio))
+                    .and_then(|ratio| timescale.get().checked_mul(ratio))
                     .and_then(NonZero::new)
                 {
-                    track
-                        .with_time_base(TimeBase::from_recip(timescale))
-                        .with_duration(Duration::new(total_frames));
+                    track.with_time_base(TimeBase::from_recip(timescale));
+
+                    if let Some(total_frames) = total_frames {
+                        track.with_duration(Duration::new(total_frames));
+                    }
                 }
             }
 
-            track.with_num_frames(total_frames);
+            if let Some(total_frames) = total_frames {
+                track.with_num_frames(total_frames);
+            }
 
-            // Derive gapless (encoder delay/padding) information for the track. An iTunes
-            // `iTunSMPB` freeform tag, if present, takes precedence over the edit list since it is
-            // the more explicit and widely honoured source (matching common player behaviour).
-            // Both are expressed in media timescale ticks, whereas the delay and padding of a
-            // track are decoded frames.
-            let elst_gapless =
+            // Derive the timing of the edit list, if any: the initial empty edit (the offset of
+            // the start of the track), and the encoder delay and padding.
+            let elst_timing =
                 trak.edts.as_ref().and_then(|edts| edts.elst.as_ref()).and_then(|elst| {
-                    derive_gapless_from_elst(
+                    derive_timing_from_elst(
                         elst,
-                        timespan.duration.get(),
-                        timespan.timescale,
+                        duration.map(Duration::get),
+                        timescale,
                         movie_timescale,
                     )
                 });
 
-            let gapless = itunes_gapless.or(elst_gapless).and_then(|gapless| {
-                let ratio = u32::try_from(frames_per_tick).ok()?;
-                Some(GaplessInfo {
-                    delay: gapless.delay.checked_mul(ratio)?,
-                    padding: gapless.padding.checked_mul(ratio)?,
-                })
-            });
+            // An iTunes `iTunSMPB` freeform tag, if present, takes precedence over the edit list
+            // for the delay and padding since it is the more explicit and widely honoured source
+            // (matching common player behaviour). Both are expressed in media timescale ticks,
+            // whereas the delay and padding of a track are decoded frames.
+            let gapless = itunes_gapless
+                .map(|gapless| (u64::from(gapless.delay), u64::from(gapless.padding)))
+                .or(elst_timing.map(|timing| (timing.delay, timing.padding)))
+                .and_then(|(delay, padding)| {
+                    let delay = u32::try_from(delay.checked_mul(frames_per_tick)?).ok()?;
+                    let padding = u32::try_from(padding.checked_mul(frames_per_tick)?).ok()?;
+                    Some(GaplessInfo { delay, padding })
+                });
 
             if let Some(gapless) = gapless {
                 if gapless.delay > 0 {
@@ -171,9 +187,18 @@ impl TrackState {
 
                 // Reduce the reported number of frames to exclude delay/padding, matching the
                 // convention used by other demuxers (e.g., mp3, caf).
-                let discard = u64::from(gapless.delay) + u64::from(gapless.padding);
-                let valid_frames = total_frames.saturating_sub(discard);
-                track.with_num_frames(valid_frames);
+                if let Some(total_frames) = total_frames {
+                    let discard = u64::from(gapless.delay) + u64::from(gapless.padding);
+                    track.with_num_frames(total_frames.saturating_sub(discard));
+                }
+            }
+
+            if let Some(timing) = elst_timing {
+                start_offset = timing.start_offset.saturating_mul(frames_per_tick);
+
+                if let Some(start_ts) = i64::try_from(start_offset).ok().map(Timestamp::new) {
+                    track.with_start_ts(start_ts);
+                }
             }
         }
 
@@ -184,9 +209,10 @@ impl TrackState {
             next_sample: 0,
             next_sample_pos: 0,
             frames_per_tick: frames_per_tick.unwrap_or(1),
-            media_time_base: TimeBase::from_recip(timespan.timescale),
+            start_offset,
+            media_time_base: TimeBase::from_recip(timescale),
             stts_nominal: nominal_sample_delta(trak),
-            seek_preroll: SeekPreroll::new(&track, nominal_sample_delta(trak), timespan.timescale),
+            seek_preroll: SeekPreroll::new(&track, nominal_sample_delta(trak), timescale),
         };
 
         (state, track)
@@ -270,40 +296,88 @@ impl SeekPreroll {
     }
 }
 
-/// Derive gapless delay/padding from a single-entry edit list. Returns `None` for edit lists that
-/// are empty, have more than one entry, or whose single entry is an "empty edit" (`media_time ==
-/// -1`), none of which are handled generically here.
-fn derive_gapless_from_elst(
+/// The timing of a track derived from its edit list, in ticks of the media timescale.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct ElstTiming {
+    /// The duration of the initial empty edit: the offset of the start of the track on the
+    /// presentation timeline.
+    start_offset: u64,
+    /// The media time of the start of the first edit: the number of leading (encoder delay)
+    /// ticks that are not presented.
+    delay: u64,
+    /// The number of trailing (encoder padding) ticks that are not presented. Zero if the total
+    /// duration of the media is not known.
+    padding: u64,
+}
+
+/// Derive the timing of an audio track from its edit list (ISO/IEC 14496-12, 8.6.6).
+///
+/// The edit list is interpreted as an optional initial empty edit (`media_time == -1`),
+/// followed by one or more edits at the normal rate, that together present a contiguous range of
+/// the media. A trailing empty edit is ignored. Returns `None` for edit lists that do not have
+/// this form (e.g., edits that skip or repeat parts of the media, or play at another rate), which
+/// are not handled.
+///
+/// `segment_duration` is in the movie timescale, whereas the media time is in the media timescale.
+/// If `total_media_ticks`, the duration of the media, is not known, no padding is derived. An edit
+/// with a segment duration of 0 extends to the end of the media.
+fn derive_timing_from_elst(
     elst: &crate::atoms::ElstAtom,
-    total_media_frames: u64,
+    total_media_ticks: Option<u64>,
     media_timescale: NonZero<u32>,
     movie_timescale: NonZero<u32>,
-) -> Option<GaplessInfo> {
-    if elst.entries.len() != 1 {
-        return None;
+) -> Option<ElstTiming> {
+    let to_media = |segment_duration: u64| {
+        let ticks = (u128::from(segment_duration) * u128::from(media_timescale.get()))
+            / u128::from(movie_timescale.get());
+        u64::try_from(ticks).ok()
+    };
+
+    let mut entries = elst.entries.iter().peekable();
+
+    // Leading empty edits.
+    let mut start_offset = 0u64;
+
+    while let Some(entry) = entries.next_if(|entry| entry.media_time == -1) {
+        start_offset = start_offset.checked_add(to_media(entry.segment_duration)?)?;
     }
 
-    let entry = &elst.entries[0];
+    let first = entries.peek()?;
+    let delay = u64::try_from(first.media_time).ok()?;
 
-    if entry.media_time < 0 {
-        // An empty edit (or otherwise unsupported edit); ignore.
-        return None;
+    // The media time of the end of the presented range, if bounded.
+    let mut end = Some(delay);
+
+    for entry in entries {
+        // Ignore trailing empty edits.
+        if entry.media_time == -1 {
+            break;
+        }
+
+        // Only the normal rate is supported.
+        if entry.media_rate_int != 1 || entry.media_rate_frac != 0 {
+            return None;
+        }
+
+        // Edits must be contiguous.
+        let end_time = end?;
+
+        if u64::try_from(entry.media_time).ok()? != end_time {
+            return None;
+        }
+
+        end = match entry.segment_duration {
+            0 => None,
+            dur => end_time.checked_add(to_media(dur)?),
+        };
     }
 
-    let delay = entry.media_time as u64;
+    let padding = match (end, total_media_ticks) {
+        (Some(end), Some(total)) => total.saturating_sub(end),
+        _ => 0,
+    };
 
-    // `segment_duration` is expressed in the *movie* timescale; convert it to the *media*
-    // timescale (sample frames) to compute the padding.
-    let seg_dur_media = (u128::from(entry.segment_duration) * u128::from(media_timescale.get()))
-        / u128::from(movie_timescale.get());
-    let seg_dur_media = u64::try_from(seg_dur_media).ok()?;
-
-    let padding = total_media_frames.saturating_sub(delay).saturating_sub(seg_dur_media);
-
-    let delay = u32::try_from(delay).ok()?;
-    let padding = u32::try_from(padding).ok()?;
-
-    Some(GaplessInfo { delay, padding })
+    Some(ElstTiming { start_offset, delay, padding })
 }
 
 /// Gets the nominal duration of a sample in the sample table of a track: the most common one.
@@ -430,7 +504,7 @@ mod packet_dur_tests {
 
 #[cfg(test)]
 mod gapless_tests {
-    use super::derive_gapless_from_elst;
+    use super::{ElstTiming, derive_timing_from_elst};
     use crate::atoms::{ElstAtom, ElstEntry};
     use std::num::NonZero;
 
@@ -438,102 +512,162 @@ mod gapless_tests {
         NonZero::new(hz).unwrap()
     }
 
+    fn entry(segment_duration: u64, media_time: i64) -> ElstEntry {
+        ElstEntry { segment_duration, media_time, media_rate_int: 1, media_rate_frac: 0 }
+    }
+
+    fn derive(
+        entries: Vec<ElstEntry>,
+        total: Option<u64>,
+        media_hz: u32,
+        movie_hz: u32,
+    ) -> Option<ElstTiming> {
+        derive_timing_from_elst(&ElstAtom { entries }, total, ts(media_hz), ts(movie_hz))
+    }
+
     #[test]
     fn single_entry_delay_and_padding() {
-        // media_timescale == movie_timescale (common case): no conversion needed.
-        let elst = ElstAtom {
-            entries: vec![ElstEntry {
-                segment_duration: 100_000,
-                media_time: 1024,
-                media_rate_int: 1,
-                media_rate_frac: 0,
-            }],
-        };
-
         // Total media frames = delay + segment_duration + padding.
-        let total_media_frames = 1024 + 100_000 + 512;
+        let timing = derive(vec![entry(10_000, 1024)], Some(1024 + 10_000 + 512), 44_100, 44_100);
 
-        let info =
-            derive_gapless_from_elst(&elst, total_media_frames, ts(44_100), ts(44_100)).unwrap();
-
-        assert_eq!(info.delay, 1024);
-        assert_eq!(info.padding, 512);
+        assert_eq!(timing, Some(ElstTiming { start_offset: 0, delay: 1024, padding: 512 }));
     }
 
     #[test]
     fn converts_segment_duration_across_timescales() {
-        // Movie timescale of 600, media timescale of 44100 (a common combination).
-        let movie_timescale = 600u32;
-        let media_timescale = 44_100u32;
+        // The movie timescale is 1000 Hz and the media timescale 44.1 kHz: 2 s is 88200 frames.
+        let timing = derive(vec![entry(2_000, 1024)], Some(1024 + 88_200 + 256), 44_100, 1_000);
 
-        let delay = 1024u64;
-        let valid_media_frames = 44_100u64;
-        let padding = 256u64;
-        let total_media_frames = delay + valid_media_frames + padding;
-
-        // segment_duration expressed in the movie timescale.
-        let segment_duration =
-            valid_media_frames * u64::from(movie_timescale) / u64::from(media_timescale);
-
-        let elst = ElstAtom {
-            entries: vec![ElstEntry {
-                segment_duration,
-                media_time: delay as i64,
-                media_rate_int: 1,
-                media_rate_frac: 0,
-            }],
-        };
-
-        let info = derive_gapless_from_elst(
-            &elst,
-            total_media_frames,
-            ts(media_timescale),
-            ts(movie_timescale),
-        )
-        .unwrap();
-
-        assert_eq!(info.delay, 1024);
-        assert_eq!(info.padding, 256);
+        assert_eq!(timing, Some(ElstTiming { start_offset: 0, delay: 1024, padding: 256 }));
     }
 
     #[test]
-    fn empty_edit_is_ignored() {
-        let elst = ElstAtom {
-            entries: vec![ElstEntry {
-                segment_duration: 100,
-                media_time: -1,
-                media_rate_int: 1,
-                media_rate_frac: 0,
-            }],
-        };
+    fn initial_empty_edit_offsets_the_start() {
+        // 0.5 s of silence (in the 1 kHz movie timescale), then the media from its start.
+        let timing =
+            derive(vec![entry(500, -1), entry(1_000, 0)], Some(44_100 + 100), 44_100, 1_000);
 
-        assert!(derive_gapless_from_elst(&elst, 1000, ts(44_100), ts(44_100)).is_none());
+        assert_eq!(timing, Some(ElstTiming { start_offset: 22_050, delay: 0, padding: 100 }));
     }
 
     #[test]
-    fn multi_entry_edit_list_is_ignored() {
-        let entry = ElstEntry {
-            segment_duration: 100,
-            media_time: 0,
-            media_rate_int: 1,
-            media_rate_frac: 0,
-        };
-
-        let elst = ElstAtom { entries: vec![entry.clone_for_test(), entry] };
-
-        assert!(derive_gapless_from_elst(&elst, 1000, ts(44_100), ts(44_100)).is_none());
+    fn only_an_empty_edit_is_ignored() {
+        assert_eq!(derive(vec![entry(100, -1)], Some(1000), 44_100, 44_100), None);
     }
 
-    impl ElstEntry {
-        fn clone_for_test(&self) -> Self {
-            ElstEntry {
-                segment_duration: self.segment_duration,
-                media_time: self.media_time,
-                media_rate_int: self.media_rate_int,
-                media_rate_frac: self.media_rate_frac,
-            }
+    #[test]
+    fn contiguous_edits_are_merged() {
+        let timing = derive(
+            vec![entry(1_000, 1024), entry(2_000, 2_024)],
+            Some(1024 + 3_000 + 7),
+            44_100,
+            44_100,
+        );
+
+        assert_eq!(timing, Some(ElstTiming { start_offset: 0, delay: 1024, padding: 7 }));
+    }
+
+    #[test]
+    fn discontiguous_edits_are_ignored() {
+        let edits = vec![entry(100, 0), entry(100, 500)];
+        assert_eq!(derive(edits, Some(1000), 44_100, 44_100), None);
+    }
+
+    #[test]
+    fn non_unity_rate_is_ignored() {
+        let mut slow = entry(100, 0);
+        slow.media_rate_int = 0;
+        assert_eq!(derive(vec![slow], Some(1000), 44_100, 44_100), None);
+    }
+
+    #[test]
+    fn unknown_total_and_unbounded_edit_have_no_padding() {
+        // A fragmented stream with an unknown duration: the edit list has a segment duration of 0.
+        let timing = derive(vec![entry(0, 1024)], None, 44_100, 44_100);
+        assert_eq!(timing, Some(ElstTiming { start_offset: 0, delay: 1024, padding: 0 }));
+
+        let timing = derive(vec![entry(1_000, 1024)], None, 44_100, 44_100);
+        assert_eq!(timing, Some(ElstTiming { start_offset: 0, delay: 1024, padding: 0 }));
+    }
+}
+
+/// Read the chapters from a QuickTime chapter track: a text track (`text`, or `tx3g` for 3GPP)
+/// referenced by the `chap` track reference of another track. Each sample is a chapter whose
+/// start time is the timestamp of the sample, and whose title is the text of the sample: a 16-bit
+/// length followed by UTF-8 or UTF-16 (with a byte order mark) text.
+///
+/// Reads sample data, but leaves the position of the iterator unchanged. The stream must be
+/// seekable.
+fn read_chapter_track(
+    it: &mut AtomIterator<MediaSourceStream<'_>>,
+    seg: &dyn StreamSegment,
+    moov: &MoovAtom,
+) -> Result<Option<ChapterGroup>> {
+    // The maximum number of chapters read, and the maximum size of a chapter sample.
+    const MAX_CHAPTERS: u32 = 65_536;
+    const MAX_SAMPLE_LEN: u32 = 1 << 16;
+
+    let chapter_track_id = moov
+        .traks
+        .iter()
+        .filter_map(|trak| trak.tref.as_ref())
+        .find_map(|tref| tref.chapter_tracks.first().copied());
+
+    let Some((track_num, trak)) = chapter_track_id
+        .and_then(|id| moov.traks.iter().enumerate().find(|(_, t)| t.tkhd.id == id))
+    else {
+        return Ok(None);
+    };
+
+    let time_base = TimeBase::from_recip(trak.mdia.mdhd.timescale);
+
+    let saved_pos = it.pos();
+    let mut chapters = Vec::new();
+
+    for sample_num in 0..MAX_CHAPTERS {
+        let Ok(Some(timing)) = seg.sample_timing(track_num, sample_num)
+        else {
+            break;
+        };
+
+        let Ok(desc) = seg.sample_data(track_num, sample_num, true)
+        else {
+            break;
+        };
+
+        let Some(pos) = desc.offset.and_then(|offset| desc.base_pos.checked_add(offset))
+        else {
+            break;
+        };
+
+        let Some(start) =
+            i64::try_from(timing.ts).ok().and_then(|ts| time_base.calc_time(Timestamp::new(ts)))
+        else {
+            break;
+        };
+
+        if desc.size < 2 || desc.size > MAX_SAMPLE_LEN {
+            continue;
         }
+
+        let Ok(data) = it.read_raw_boxed_slice_exact(pos, desc.size as usize)
+        else {
+            break;
+        };
+
+        let len = usize::from(u16::from_be_bytes([data[0], data[1]]));
+        let text = &data[2..(2 + len).min(data.len())];
+
+        chapters.push((start, decode_text(text)));
     }
+
+    it.restore_pos(saved_pos)?;
+
+    // The last chapter ends at the end of the movie.
+    let end =
+        TimeBase::from_recip(moov.mvhd.timescale).calc_duration(Duration::new(moov.mvhd.duration));
+
+    Ok(make_chapter_group("chap", chapters, end))
 }
 
 /// Information regarding the next sample.
@@ -742,11 +876,31 @@ impl<'s> IsoMp4Reader<'s> {
         }
 
         // ID3v2 metadata is pushed first so the preferred ilst metadata is current.
-        if let Some(rev) = moov.take_id3v2() {
-            metadata.push(rev);
+        let mut revisions = Vec::new();
+
+        while let Some(rev) = moov.take_id3v2() {
+            revisions.push(rev);
         }
 
-        if let Some(rev) = moov.take_metadata() {
+        while let Some(rev) = moov.take_metadata() {
+            revisions.push(rev);
+        }
+
+        // Track-level metadata is attached to the preferred (last) revision.
+        let per_track: Vec<_> =
+            moov.traks.iter_mut().filter_map(|trak| trak.take_metadata()).collect();
+
+        if !per_track.is_empty() {
+            if revisions.is_empty() {
+                revisions.push(MetadataBuilder::new(ISOMP4_METADATA_INFO).build());
+            }
+
+            if let Some(rev) = revisions.last_mut() {
+                rev.per_track.extend(per_track);
+            }
+        }
+
+        for rev in revisions {
             metadata.push(rev);
         }
 
@@ -756,30 +910,47 @@ impl<'s> IsoMp4Reader<'s> {
 
         let itunes_gapless = moov.gapless();
         for (t, trak) in moov.traks.iter().enumerate() {
-            // Determine the timespan of the track.
-            let timespan = if moov.is_fragmented() {
+            // Determine the duration of the track in ticks of the media timescale, if known.
+            let timescale = trak.mdia.mdhd.timescale;
+
+            let (timescale, duration) = if moov.is_fragmented() {
                 // If fragmented, prefer the duration from the sidx, if it is provided. Otherwise,
-                // fallback to the mdhd.
-                sidx_timespans
-                    .get(&trak.tkhd.id)
-                    .map(|sidx_tspan| TimeSpan::new(sidx_tspan.timescale, sidx_tspan.duration))
-                    .unwrap_or_else(|| {
-                        TimeSpan::new(trak.mdia.mdhd.timescale, trak.mdia.mdhd.duration.into())
-                    })
+                // fallback to the mdhd, and the fragment duration of the mvex. These durations are
+                // usually 0 (unknown) for a stream that is written as it is produced.
+                match sidx_timespans.get(&trak.tkhd.id) {
+                    Some(sidx_tspan) => (sidx_tspan.timescale, Some(sidx_tspan.duration)),
+                    None => {
+                        let mehd_duration = moov
+                            .mvex
+                            .as_ref()
+                            .and_then(|mvex| mvex.mehd.as_ref())
+                            .map(|mehd| mehd.fragment_duration)
+                            .and_then(|dur| {
+                                // The fragment duration is in the movie timescale.
+                                let dur = u128::from(dur) * u128::from(timescale.get())
+                                    / u128::from(moov.mvhd.timescale.get());
+                                u64::try_from(dur).ok()
+                            });
+
+                        let duration = Some(trak.mdia.mdhd.duration)
+                            .filter(|&dur| dur != 0)
+                            .or(mehd_duration)
+                            .filter(|&dur| dur != 0)
+                            .map(Duration::from);
+
+                        (timescale, duration)
+                    }
+                }
             }
             else {
                 // If non-fragmented, use the total duration (media timescale) from the track's
-                // stts atom. Since edits are not currently supported, this is the duration of all
-                // samples that will be yielded.
-                //
-                // TODO: Support edits. Once supported, prefer the tkhd duration.
-                let duration = Duration::from(trak.mdia.minf.stbl.stts.total_duration);
-
-                TimeSpan::new(trak.mdia.mdhd.timescale, duration)
+                // stts atom: the duration of all samples that will be yielded, including any
+                // delay and padding trimmed by the edit list.
+                (timescale, Some(Duration::from(trak.mdia.minf.stbl.stts.total_duration)))
             };
 
             let (track_state, track) =
-                TrackState::make(t, trak, &timespan, moov.mvhd.timescale, itunes_gapless);
+                TrackState::make(t, trak, timescale, duration, moov.mvhd.timescale, itunes_gapless);
 
             tracks.push(track);
             track_states.push(track_state);
@@ -800,9 +971,19 @@ impl<'s> IsoMp4Reader<'s> {
         // Populate media information.
         let mut media_info = MediaInfo::new();
         media_info.with_time_base(TimeBase::from_recip(moov.mvhd.timescale));
-        media_info.with_duration(Duration::new(moov.mvhd.duration));
 
-        let chapters = moov.chapters().or(opts.external_data.chapters);
+        // The duration of a fragmented stream that is written as it is produced is unknown (0).
+        if moov.mvhd.duration != 0 || !moov.is_fragmented() {
+            media_info.with_duration(Duration::new(moov.mvhd.duration));
+        }
+
+        // Prefer the Nero chapter list, then a QuickTime chapter track.
+        let chapters = match moov.chapters() {
+            Some(chapters) => Some(chapters),
+            None if is_seekable => read_chapter_track(&mut it, segs[0].as_ref(), &moov)?,
+            None => None,
+        }
+        .or(opts.external_data.chapters);
 
         Ok(IsoMp4Reader {
             iter: it,
@@ -1003,7 +1184,11 @@ impl<'s> IsoMp4Reader<'s> {
         let delay = u64::from(self.tracks[track_num].delay.unwrap_or(0));
         let frames_per_tick = self.track_states[track_num].frames_per_tick;
 
-        let media_ts = (ts.get() as u64).saturating_add(delay) / frames_per_tick;
+        let start_offset = self.track_states[track_num].start_offset;
+
+        // A target within the initial empty edit is the start of the media.
+        let media_ts =
+            (ts.get() as u64).saturating_sub(start_offset).saturating_add(delay) / frames_per_tick;
 
         let mut seg_skip = 0;
 
@@ -1048,6 +1233,7 @@ impl<'s> IsoMp4Reader<'s> {
             .ok()
             .and_then(|ts| ts.checked_mul(i64::try_from(frames_per_tick).ok()?))
             .and_then(|ts| ts.checked_sub(i64::try_from(delay).ok()?))
+            .and_then(|ts| ts.checked_add(i64::try_from(start_offset).ok()?))
         {
             Some(ts) => Timestamp::new(ts),
             _ => return seek_error(SeekErrorKind::OutOfRange),
@@ -1199,10 +1385,16 @@ impl FormatReader for IsoMp4Reader<'_> {
                 end < dur.get()
             });
 
+        // The offset of the start of the track due to an initial empty edit.
+        let start_offset =
+            Duration::new(self.track_states[next_sample_info.track_num].start_offset);
+
+        let offset_pts = |pts: Timestamp| pts.checked_add(start_offset).unwrap_or(pts);
+
         if delay == 0 && track.padding.unwrap_or(0) == 0 && !is_shortened {
             return Ok(Some(Packet::new(
                 next_sample_info.track_id,
-                media_pts,
+                offset_pts(media_pts),
                 Duration::new(next_sample_info.dur.get().saturating_mul(frames_per_tick)),
                 data,
             )));
@@ -1225,12 +1417,16 @@ impl FormatReader for IsoMp4Reader<'_> {
             .map(Duration::from)
             .and_then(|dur| dur.timestamp_from(Timestamp::ZERO));
 
-        let packet = PacketBuilder::new()
+        let mut packet = PacketBuilder::new()
             .track_id(next_sample_info.track_id)
             .pts(pts)
             .trimmed_dur(block_dur, end_pts)
             .data(data)
             .build();
+
+        // The trim was calculated relative to the start of the media, so the offset of the start
+        // of the track is applied last.
+        packet.pts = offset_pts(packet.pts);
 
         Ok(Some(packet))
     }
@@ -1330,7 +1526,6 @@ impl From<AtomError> for Error {
             AtomError::SeekOutOfRange => "isomp4: out-of-bounds seek for a non-seekable stream",
             AtomError::UnexpectedEndOfAtom => "isomp4: unexpected end of atom",
             AtomError::UnexpectedPosition => "isomp4: unexpected position",
-            AtomError::UnexpectedUnknownSizeAtom => "isomp4: unknown size atom has sized parent",
             AtomError::UnexpectedReadOperation => "isomp4: unexpected read operation",
             AtomError::UnknownAtomSize => "isomp4: unknown atom size",
             AtomError::Other(err) => return err,
@@ -1391,7 +1586,8 @@ mod aac_timeline_tests {
     /// byte. `stts` is a list of (count, delta) and `elst` an optional (media_time,
     /// segment_duration) edit, both in ticks of `timescale`.
     fn mp4(asc: &[u8], timescale: u32, stts: &[(u32, u32)], elst: Option<(i32, u32)>) -> Vec<u8> {
-        mp4_with_moov_extra(asc, timescale, stts, elst, &[])
+        let edits: Vec<_> = elst.into_iter().collect();
+        mp4_with_edits(asc, timescale, stts, &edits, &[])
     }
 
     /// As `mp4`, with extra atoms (e.g. `udta`) appended to the `moov` atom.
@@ -1400,6 +1596,19 @@ mod aac_timeline_tests {
         timescale: u32,
         stts: &[(u32, u32)],
         elst: Option<(i32, u32)>,
+        moov_extra: &[u8],
+    ) -> Vec<u8> {
+        let edits: Vec<_> = elst.into_iter().collect();
+        mp4_with_edits(asc, timescale, stts, &edits, moov_extra)
+    }
+
+    /// As `mp4`, with a list of (media_time, segment_duration) edits, and extra atoms (e.g.
+    /// `udta`) appended to the `moov` atom.
+    fn mp4_with_edits(
+        asc: &[u8],
+        timescale: u32,
+        stts: &[(u32, u32)],
+        edits: &[(i32, u32)],
         moov_extra: &[u8],
     ) -> Vec<u8> {
         let n_samples: u32 = stts.iter().map(|(count, _)| count).sum();
@@ -1474,12 +1683,14 @@ mod aac_timeline_tests {
 
             let mut trak = vec![atom(b"tkhd", &tkhd)];
 
-            if let Some((media_time, segment_duration)) = elst {
+            if !edits.is_empty() {
                 let mut elst = vec![0; 4];
-                elst.extend_from_slice(&1u32.to_be_bytes());
-                elst.extend_from_slice(&segment_duration.to_be_bytes());
-                elst.extend_from_slice(&media_time.to_be_bytes());
-                elst.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+                elst.extend_from_slice(&(edits.len() as u32).to_be_bytes());
+                for (media_time, segment_duration) in edits {
+                    elst.extend_from_slice(&segment_duration.to_be_bytes());
+                    elst.extend_from_slice(&media_time.to_be_bytes());
+                    elst.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+                }
                 trak.push(atom(b"edts", &atom(b"elst", &elst)));
             }
 
@@ -1577,6 +1788,72 @@ mod aac_timeline_tests {
         assert_eq!(reader.tracks().len(), 1);
     }
 
+    fn data_atom(text: &str) -> Vec<u8> {
+        let mut body = vec![0, 0, 0, 1, 0, 0, 0, 0];
+        body.extend_from_slice(text.as_bytes());
+        atom(b"data", &body)
+    }
+
+    #[test]
+    fn quicktime_keyed_metadata_in_moov_meta_is_read() {
+        use symphonia_core::meta::StandardTag;
+
+        let key = b"com.apple.quicktime.title";
+        let mut keys = vec![0; 4];
+        keys.extend_from_slice(&2u32.to_be_bytes());
+        keys.extend_from_slice(&(8 + key.len() as u32).to_be_bytes());
+        keys.extend_from_slice(b"mdta");
+        keys.extend_from_slice(key);
+        keys.extend_from_slice(&(8 + 4u32).to_be_bytes());
+        keys.extend_from_slice(b"mdta");
+        keys.extend_from_slice(b"mood");
+
+        let ilst = [
+            atom(&1u32.to_be_bytes(), &data_atom("Keyed title")),
+            atom(&2u32.to_be_bytes(), &data_atom("Calm")),
+        ]
+        .concat();
+
+        // A QuickTime meta atom is not a full box: its first child follows the atom header.
+        let hdlr = atom(b"hdlr", &[vec![0; 8], b"mdta".to_vec(), vec![0; 12]].concat());
+        let meta = atom(b"meta", &[hdlr, atom(b"keys", &keys), atom(b"ilst", &ilst)].concat());
+
+        let mut reader = open(mp4_with_moov_extra(&LC_ASC, 44_100, &[(10, 1024)], None, &meta));
+        assert_eq!(titles(&mut reader), ["Keyed title"]);
+
+        let rev = reader.metadata().current().expect("revision").media.tags.clone();
+        assert!(rev.iter().any(|t| t.raw.key == "mood" && t.std.is_none()));
+        assert!(rev.iter().any(|t| matches!(&t.std, Some(StandardTag::TrackTitle(_)))));
+    }
+
+    #[test]
+    fn quicktime_and_3gpp_user_data_text_is_read() {
+        let mut qt = vec![0, 8, 0x55, 0xc4];
+        qt.extend_from_slice(b"QT title");
+
+        let mut gpp = vec![0; 4];
+        gpp.extend_from_slice(&0x55c4u16.to_be_bytes());
+        gpp.extend_from_slice(b"3GPP title\0");
+
+        let udta = atom(b"udta", &[atom(b"\xa9nam", &qt), atom(b"titl", &gpp)].concat());
+
+        let mut reader = open(mp4_with_moov_extra(&LC_ASC, 44_100, &[(10, 1024)], None, &udta));
+        assert_eq!(titles(&mut reader), ["QT title", "3GPP title"]);
+    }
+
+    #[test]
+    fn unknown_size_atom_in_sized_parent_is_clamped() {
+        // A zero size means "to the end of the file", which writers sometimes (wrongly) use within
+        // the moov atom.
+        let mut extra = vec![0, 0, 0, 0];
+        extra.extend_from_slice(b"free");
+        extra.extend_from_slice(&[0xaa; 16]);
+
+        let mut reader = open(mp4_with_moov_extra(&LC_ASC, 44_100, &[(10, 1024)], None, &extra));
+        assert_eq!(reader.tracks().len(), 1);
+        assert_eq!(reader.next_packet().unwrap().unwrap().data.len(), 4);
+    }
+
     #[test]
     fn id32_box_in_udta_is_read() {
         let udta = atom(b"udta", &id32("In udta"));
@@ -1627,6 +1904,35 @@ mod aac_timeline_tests {
         assert_eq!((p.pts.get(), p.dur.get(), p.trim_start.get()), (-2048, 0, 2048));
         let p = reader.next_packet().unwrap().unwrap();
         assert_eq!((p.pts.get(), p.dur.get(), p.trim_start.get()), (0, 2048, 0));
+    }
+
+    #[test]
+    fn initial_empty_edit_offsets_the_timeline_and_seeks() {
+        // 100 samples of 1024 frames at 44.1 kHz, preceded by 21026 frames of silence.
+        let data =
+            mp4_with_edits(&LC_ASC, 44_100, &[(100, 1024)], &[(-1, 21_026), (0, 100 * 1024)], &[]);
+        let mut reader = open(data);
+
+        assert_eq!(reader.tracks()[0].start_ts.get(), 21_026);
+
+        let p = reader.next_packet().unwrap().unwrap();
+        assert_eq!(p.pts.get(), 21_026);
+        assert_eq!(p.trim_start.get(), 0);
+
+        // A seek into the silence is the start of the media.
+        let seeked = reader
+            .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(100), track_id: 1 })
+            .unwrap();
+        assert_eq!(seeked.actual_ts.get(), 21_026);
+
+        // A seek into the media.
+        let ts = Timestamp::new(21_026 + 10 * 1024 + 5);
+        let seeked =
+            reader.seek(SeekMode::Accurate, SeekTo::Timestamp { ts, track_id: 1 }).unwrap();
+        let p = reader.next_packet().unwrap().unwrap();
+        assert_eq!(p.pts, seeked.actual_ts);
+        assert!(seeked.actual_ts <= ts);
+        assert!(seeked.actual_ts.get() > 21_026);
     }
 
     #[test]
