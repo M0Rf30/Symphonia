@@ -7,7 +7,7 @@
 
 use core::str;
 
-use log::debug;
+use log::{debug, warn};
 use symphonia_core::audio::{Channels, Position};
 use symphonia_core::codecs::audio::well_known::{
     CODEC_ID_AC3, CODEC_ID_ADPCM_IMA_QT, CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_MS, CODEC_ID_DCA,
@@ -123,8 +123,35 @@ impl Atom for StsdAtom {
                 let entry = it.read_atom::<SubtitleSampleEntry>()?;
                 SampleEntry::Subtitle(entry)
             }
-            _ => {
-                // Potentially subtitles, metadata, hints, etc.
+            other => {
+                // Potentially subtitles, metadata, hints, etc. Name the audio sample entries that
+                // are known but unsupported, since their track will have no codec.
+                match other {
+                    AtomType::Other(fourcc) if matches!(&fourcc, b"enca" | b"encv") => warn!(
+                        "isomp4 (stsd): encrypted sample entry '{}' is unsupported",
+                        String::from_utf8_lossy(&fourcc)
+                    ),
+                    AtomType::Other(fourcc)
+                        if matches!(
+                            &fourcc,
+                            b"ac-4"
+                                | b"mha1"
+                                | b"mha2"
+                                | b"mhm1"
+                                | b"mhm2"
+                                | b"samr"
+                                | b"sawb"
+                                | b"QDM2"
+                                | b"QDMC"
+                        ) =>
+                    {
+                        warn!(
+                            "isomp4 (stsd): audio sample entry '{}' is unsupported",
+                            String::from_utf8_lossy(&fourcc)
+                        )
+                    }
+                    _ => debug!("isomp4 (stsd): ignoring sample entry {other:?}"),
+                }
                 SampleEntry::Other
             }
         };
