@@ -1,0 +1,29 @@
+This crate (`symphonia-codec-truehd`) is a pure-Rust decoder for Dolby TrueHD and Meridian
+Lossless Packing (MLP). Its bitstream parsing and decoding algorithms are a function-by-function
+port of the MLP/TrueHD decoder in FFmpeg (release n9.0.2, https://github.com/FFmpeg/FFmpeg):
+
+  libavcodec/mlpdec.c     (major sync / restart header / decoding parameter / block parsing,
+                           FIR+IIR filtering, rematrixing, noise generation, output packing)
+  libavcodec/mlp_parse.c  (major sync header parsing, channel layout selection)
+  libavcodec/mlp.c        (CRC and parity helpers, Huffman codebooks, noise table)
+  libavcodec/mlpdsp.c     (filter and rematrix reference behaviour)
+  libavutil/crc.c         (CRC-8/CRC-16 polynomial conventions)
+
+The Huffman code tables (`HUFFMAN_CODES`) and the noise table (`NOISE_TABLE`) in `src/tables.rs`
+were extracted programmatically from `libavcodec/mlp.c` / `libavcodec/mlpdec.c`; they are not
+retyped.
+
+FFmpeg's MLP/TrueHD code is
+
+  Copyright (c) 2007-2008 Ian Caulfield
+  Copyright (c) 2007 Ramiro Polla
+
+and is distributed under the GNU Lesser General Public License, version 2.1 or (at your option)
+any later version. The portions of this crate derived from it (everything under `src/mlp.rs`,
+`src/huffman.rs`, `src/crc.rs`, `src/layout.rs` and `src/tables.rs`) remain subject to those
+terms in addition to the Mozilla Public License, v. 2.0 that covers the rest of Project
+Symphonia. A copy of the LGPL-2.1 is available at
+https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html.
+
+FFmpeg itself was used, unmodified and unlinked, as the decode oracle (and its `truehd` / `mlp`
+encoders as stream generators) to verify that this decoder's output is bit-exact.
