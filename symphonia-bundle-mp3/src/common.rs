@@ -104,7 +104,12 @@ pub enum Emphasis {
 pub struct FrameHeader {
     pub version: MpegVersion,
     pub layer: MpegLayer,
+    /// The bit-rate in bits per second. For a free-format frame, this is derived from the length
+    /// of the frame.
     pub bitrate: u32,
+    /// True if the frame uses the "free" bit-rate (bit-rate index 0): the bit-rate is not one of
+    /// the standard values and is not stated by the header.
+    pub is_free_format: bool,
     pub sample_rate: u32,
     pub sample_rate_idx: usize,
     pub channel_mode: ChannelMode,

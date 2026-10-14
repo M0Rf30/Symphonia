@@ -232,6 +232,7 @@ pub fn parse_frame_header_free(header: u32, free_len: Option<usize>) -> Result<F
         version,
         layer,
         bitrate,
+        is_free_format: is_free,
         sample_rate,
         sample_rate_idx,
         channel_mode,

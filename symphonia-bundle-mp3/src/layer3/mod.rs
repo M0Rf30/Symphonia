@@ -619,6 +619,7 @@ mod tests {
             version: MpegVersion::Mpeg1,
             layer: MpegLayer::Layer3,
             bitrate: 128000,
+            is_free_format: false,
             sample_rate: 44100,
             sample_rate_idx: 0,
             channel_mode: ChannelMode::Stereo,

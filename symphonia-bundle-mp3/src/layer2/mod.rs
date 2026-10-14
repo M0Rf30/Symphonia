@@ -139,7 +139,14 @@ fn find_sb_info(header: &FrameHeader) -> &'static SbInfo {
 
         let bitrate_per_channel = header.bitrate / num_channels;
 
-        if bitrate_per_channel <= 48_000 {
+        if header.is_free_format {
+            // The headers of ISO/IEC 11172-3 Tables 3-B.2a and 3-B.2b list "free format" next to
+            // the highest bitrates: table 3-B.2a is used at 48 kHz and table 3-B.2b at 44.1 and
+            // 32 kHz, whatever bitrate the frame length implies. The TwoLAME encoder
+            // (`--freeformat`, `encode.c`) selects the same tables.
+            usize::from(header.sample_rate != 48_000)
+        }
+        else if bitrate_per_channel <= 48_000 {
             // Table 3-B.2c and 3-B.2d are only used for bitrates <= 48 kbit/s.
             if header.sample_rate == 32_000 { 3 } else { 2 }
         }
@@ -149,7 +156,6 @@ fn find_sb_info(header: &FrameHeader) -> &'static SbInfo {
         }
         else {
             // Table 3-B.2a and 3-B.2b as always used for bitrates > 80 kbit/s.
-            // TODO: Free format also used this case, but we don't support it.
             usize::from(header.sample_rate != 48_000)
         }
     }
