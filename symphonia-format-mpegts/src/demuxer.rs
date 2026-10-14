@@ -372,11 +372,35 @@ fn make_parser_from_descriptors(d: &StreamDescriptors) -> Option<Box<dyn EsParse
     }
 }
 
+/// Returns why an audio stream that is recognised cannot be demuxed, if it cannot.
+fn unsupported_stream(stream: &PmtStream) -> Option<&'static str> {
+    match stream.stream_type {
+        // HLS SAMPLE-AES (Apple, "MPEG-2 Stream Encryption Format for HTTP Live Streaming"): the
+        // audio frames are AES-128 encrypted, and the key is not part of the stream. 0xc1 is
+        // AC-3, 0xc2 is E-AC-3, and 0xcf is AAC (ADTS).
+        0xc1 | 0xc2 | 0xcf => {
+            Some("HLS SAMPLE-AES encrypted audio, the frames cannot be decrypted")
+        }
+        _ if stream.descriptors.has_ac4 => {
+            Some("Dolby AC-4 is recognised (DVB AC-4 descriptor) but there is no AC-4 decoder")
+        }
+        _ => None,
+    }
+}
+
 /// Create the elementary stream parsers for a PMT stream, if the stream is a supported audio
 /// stream. A Blu-ray TrueHD stream has two: TrueHD, and the AC-3 stream embedded in the PID.
 /// `hdmv` is true if the program is a Blu-ray program.
 fn make_parsers(stream: &PmtStream, hdmv: bool) -> Vec<(PesFilter, Box<dyn EsParser>)> {
     let d = &stream.descriptors;
+
+    if let Some(reason) = unsupported_stream(stream) {
+        warn!(
+            "mpegts: PID {:#x} (stream type {:#04x}) is ignored: {reason}",
+            stream.pid, stream.stream_type
+        );
+        return vec![];
+    }
 
     let parser: Box<dyn EsParser> = match stream.stream_type {
         // MPEG-1 and MPEG-2 audio.
@@ -1076,5 +1100,31 @@ mod tests {
 
         assert!(!out.is_empty());
         assert!(out.iter().all(|pes| pes.len() <= MAX_PES_LEN));
+    }
+
+    fn pmt_stream(stream_type: u8, descriptors: StreamDescriptors) -> PmtStream {
+        PmtStream { stream_type, pid: 0x101, descriptors, descriptor_len: 0 }
+    }
+
+    #[test]
+    fn verify_encrypted_and_ac4_streams_are_reported_unsupported() {
+        // HLS SAMPLE-AES streams are dropped even if their descriptors identify AC-3 or E-AC-3.
+        for stream_type in [0xc1, 0xc2, 0xcf] {
+            let d = StreamDescriptors { has_ac3: true, ..Default::default() };
+            let stream = pmt_stream(stream_type, d);
+            assert!(unsupported_stream(&stream).unwrap().contains("SAMPLE-AES"));
+            assert!(make_parsers(&stream, false).is_empty());
+        }
+
+        // AC-4 in PES private data.
+        let d = StreamDescriptors { has_ac4: true, ..Default::default() };
+        let stream = pmt_stream(0x06, d);
+        assert!(unsupported_stream(&stream).unwrap().contains("AC-4"));
+        assert!(make_parsers(&stream, false).is_empty());
+
+        // Streams that are supported are unaffected.
+        let stream = pmt_stream(0x81, StreamDescriptors::default());
+        assert!(unsupported_stream(&stream).is_none());
+        assert_eq!(make_parsers(&stream, false).len(), 1);
     }
 }

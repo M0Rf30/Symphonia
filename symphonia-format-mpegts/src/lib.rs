@@ -41,8 +41,10 @@
 //! | `0x06`                 | AAC (ADTS, LATM), MPEG audio         | Only without descriptors; identified from the data |
 //!
 //! A user private stream type (`0x80` or above) that is not listed is identified by the same
-//! descriptors as PES private data. The HLS sample encryption stream types (`0xc1`, `0xc2`) are
-//! not supported: their audio frames are encrypted.
+//! descriptors as PES private data. The HLS SAMPLE-AES stream types (`0xc1` AC-3, `0xc2` E-AC-3,
+//! and `0xcf` AAC) are recognised, but their audio frames are encrypted: no track is produced and
+//! a warning is logged. The same applies to Dolby AC-4 (identified by the DVB AC-4 descriptor, an
+//! extension descriptor with the tag extension `0x15`), for which there is no decoder.
 //!
 //! The PID of a Blu-ray TrueHD stream (`0x83`) carries a TrueHD stream and an AC-3 version of the
 //! same audio, in PES packets that are distinguished by the `stream_id_extension` of their PES

@@ -133,6 +133,8 @@ pub struct StreamDescriptors {
     pub has_eac3: bool,
     /// True if a DTS descriptor was present.
     pub has_dts: bool,
+    /// True if an AC-4 descriptor (DVB extension descriptor 0x15) was present.
+    pub has_ac4: bool,
 }
 
 /// An elementary stream of a program.
@@ -184,6 +186,9 @@ fn parse_descriptors(mut d: &[u8]) -> StreamDescriptors {
             0x7b => out.has_dts = true,
             // Extension descriptor: user defined extension 0x80 is the Opus channel configuration.
             0x7f if len >= 2 && body[0] == 0x80 => out.opus_channel_config = Some(body[1]),
+            // Extension descriptor: the AC-4 descriptor, extension tag 0x15 (ETSI EN 300 468
+            // table 109 and annex D.7).
+            0x7f if len >= 1 && body[0] == 0x15 => out.has_ac4 = true,
             _ => (),
         }
 
@@ -290,15 +295,19 @@ mod tests {
         body.extend_from_slice(&[0x06, 0xe1, 0x02, 0xf0, 0x03, 0x7a, 0x01, 0x00]);
         body.extend_from_slice(&[0x06, 0xe1, 0x03, 0xf0, 0x03, 0x7b, 0x01, 0x00]);
         body.extend_from_slice(&[0x06, 0xe1, 0x04, 0xf0, 0x06, 0x05, 0x04, b'D', b'T', b'S', b'1']);
+        // AC-4 (DVB extension descriptor 0x15).
+        body.extend_from_slice(&[0x06, 0xe1, 0x05, 0xf0, 0x05, 0x7f, 0x03, 0x15, 0x00, 0x00]);
 
         let pmt = parse_pmt(&build_section(2, 1, &body)).unwrap();
         assert_eq!(pmt.registration, Some(*b"HDMV"));
-        assert_eq!(pmt.streams.len(), 5);
+        assert_eq!(pmt.streams.len(), 6);
         assert_eq!(pmt.streams[0].descriptors, StreamDescriptors::default());
         assert!(pmt.streams[1].descriptors.has_ac3);
         assert!(pmt.streams[2].descriptors.has_eac3);
         assert!(pmt.streams[3].descriptors.has_dts);
         assert_eq!(pmt.streams[4].descriptors.registration, Some(*b"DTS1"));
+        assert!(pmt.streams[5].descriptors.has_ac4);
+        assert!(!pmt.streams[1].descriptors.has_ac4);
 
         // A program without a registration descriptor.
         let pmt = parse_pmt(&build_section(2, 1, &[0xe1, 0x00, 0xf0, 0x00])).unwrap();
