@@ -40,9 +40,15 @@
 //!   conjugate.
 //!
 //! Between borders the four H matrices are linearly interpolated
-//! (§8.6.4.6.4), the first region interpolating from the previous
-//! frame's final coefficients (zeros on the very first frame), the
-//! region after the last border holding. FIX_BORDERS positions are
+//! (§8.6.4.6.4). Region `e` covers the slots `n_{e−1} < n ≤ n_e`
+//! (with `n_{−1} = −1`) and advances by `1/(n_e − n_{e−1})` per slot,
+//! so slot `n_e` carries exactly `H(e)` and slot 0 is already the
+//! first ramp step away from the previous frame's final coefficients.
+//! Before any `ps_data()` has been processed those coefficients are
+//! the dual-mono mix `h11 = h12 = 1`, `h21 = h22 = 0` (the initial
+//! state of the FDK and faad2 decoders). VAR_BORDERS ending before
+//! slot 31 get a final envelope repeating the last parameters.
+//! FIX_BORDERS positions are
 //! `⌊32·(e+1)/num_env⌋ − 1`; VAR_BORDERS come from the bitstream.
 //! `num_env == 0` holds the previous frame's coefficients for the
 //! whole frame (§8.6.4.6.5). A stereo-band-count switch (Table 8.47)
@@ -93,12 +99,21 @@ pub struct PsStereo {
 }
 
 impl PsStereo {
-    /// Fresh state (first frame interpolates from zero coefficients).
+    /// Fresh state: the previous coefficients are the dual-mono mix
+    /// (`h11 = h12 = 1`, `h21 = h22 = 0`), so a `num_env == 0` first
+    /// frame passes the mono signal to both channels and the first
+    /// envelope ramps away from it.
     #[must_use]
     pub fn new(n_bands: usize) -> Self {
+        let dual_mono = [
+            Complex::new(1.0, 0.0),
+            Complex::new(1.0, 0.0),
+            Complex::default(),
+            Complex::default(),
+        ];
         PsStereo {
             n_bands,
-            h_prev: vec![[Complex::default(); 4]; n_bands],
+            h_prev: vec![dual_mono; n_bands],
             ipd_hist: [vec![0.0; n_bands], vec![0.0; n_bands]],
             opd_hist: [vec![0.0; n_bands], vec![0.0; n_bands]],
         }
@@ -171,26 +186,37 @@ impl PsStereo {
             }
         }
         else {
-            // Envelope borders n_e.
-            let borders: Vec<usize> = if ps.frame_class {
-                ps.border_position.iter().map(|&b| usize::from(b).min(NUM_QMF_SLOTS - 1)).collect()
+            // Envelope borders n_e, each with the parameter set it uses.
+            let mut borders: Vec<(usize, usize)> = if ps.frame_class {
+                ps.border_position
+                    .iter()
+                    .enumerate()
+                    .map(|(e, &b)| (usize::from(b).min(NUM_QMF_SLOTS - 1), e))
+                    .collect()
             }
             else {
-                (0..ps.num_env).map(|e| NUM_QMF_SLOTS * (e + 1) / ps.num_env - 1).collect()
+                (0..ps.num_env).map(|e| (NUM_QMF_SLOTS * (e + 1) / ps.num_env - 1, e)).collect()
             };
+            // VAR_BORDERS ending before the last slot: a final envelope
+            // repeats the last parameter set up to slot 31 (the reference
+            // decoders append it as an extra envelope, which also keeps
+            // the phase smoothing advancing).
+            if let Some(&(n_last, e_last)) = borders.last() {
+                if n_last < NUM_QMF_SLOTS - 1 {
+                    borders.push((NUM_QMF_SLOTS - 1, e_last));
+                }
+            }
 
             let mut h_from = self.h_prev.clone();
             let mut n_from: isize = -1; // "border" behind slot 0
-            for (e, &n_e) in borders.iter().enumerate() {
+            for &(n_e, e) in &borders {
                 let h_to = self.envelope_h(ps, idx, e)?;
-                // §8.6.4.6.4: first region divides by n_0 with
-                // multiplier n; later regions by (n_e − n_{e−1}).
-                let (den, base) = if e == 0 {
-                    (n_e.max(1) as f64, 0isize)
-                }
-                else {
-                    (((n_e as isize - n_from).max(1)) as f64, n_from)
-                };
+                // §8.6.4.6.4: every region `n_{e−1} < n ≤ n_e` ramps from
+                // H(e−1) to H(e) in steps of 1/(n_e − n_{e−1}), reaching
+                // H(e) exactly at slot n_e. The "border" behind the first
+                // envelope is n_{−1} = −1 (slot 0 is the first ramp step,
+                // not H(−1) itself), so the first region has n_0 + 1 steps.
+                let (den, base) = (((n_e as isize - n_from).max(1)) as f64, n_from);
                 let lo = ((n_from + 1).max(0)) as usize;
                 let hi = n_e.min(NUM_QMF_SLOTS - 1);
                 for (n, slot) in h_slots.iter_mut().enumerate().take(hi + 1).skip(lo) {
@@ -203,11 +229,6 @@ impl PsStereo {
                 }
                 h_from = h_to;
                 n_from = n_e as isize;
-            }
-            // Region after the last border: hold.
-            let lo = ((n_from + 1).max(0)) as usize;
-            for slot in h_slots.iter_mut().skip(lo) {
-                slot.copy_from_slice(&h_from);
             }
             self.h_prev = h_from;
         }
@@ -355,8 +376,10 @@ fn mix_rb(c: f64, rho: f64) -> (f64, f64, f64, f64) {
     };
     // Modulo correction into [0, π/2).
     alpha -= (alpha / core::f64::consts::FRAC_PI_2).floor() * core::f64::consts::FRAC_PI_2;
-    let mu = 1.0 + (4.0 * rho * rho - 4.0) / (c + 1.0 / c).powi(2);
-    let gamma = ((1.0 - mu) / (1.0 + mu)).max(0.0).sqrt().atan();
+    // μ = sqrt(1 + (4ρ² − 4) / (c + 1/c)²) and γ = atan(sqrt((1 − μ)/(1 + μ)))
+    // (§8.6.4.6.2.2; the square root of the radicand belongs to μ itself).
+    let mu = (1.0 + (4.0 * rho * rho - 4.0) / (c + 1.0 / c).powi(2)).max(0.0).sqrt();
+    let gamma = ((1.0 - mu) / (1.0 + mu)).sqrt().atan();
     let s2 = core::f64::consts::SQRT_2;
     (
         s2 * alpha.cos() * gamma.cos(),
@@ -465,25 +488,53 @@ mod tests {
         assert!((r[n][20].re + 1.0).abs() < 1e-12);
     }
 
-    /// The first region interpolates from zero (fresh state) to the
-    /// envelope coefficients linearly in n/n_0.
+    /// The first region (`−1 < n ≤ n_0`) ramps from the previous
+    /// coefficients (dual mono on a fresh state) to the envelope
+    /// coefficients in steps of `1/(n_0 + 1)`: slot 0 is the first
+    /// step, slot `n_0` carries the envelope value exactly
+    /// (§8.6.4.6.4, `n_{−1} = −1`).
     #[test]
-    fn first_region_interpolates_from_zero() {
+    fn first_region_interpolates_from_dual_mono() {
         let config = HybridConfig::Bands1020;
-        let (ps, idx) = ps_with(0, 0); // IID 0 dB, ICC 1 → h11 = h12 = 1
+        let (ps, idx) = ps_with(7, 0); // +25 dB, ICC 1 → h11 = c2, h12 = c1
         let mut st = PsStereo::new(20);
         let s = ones(config.nr_bands());
         let d = zeros(config.nr_bands());
-        let (l, _r) = st.process(&ps, &idx, config, &s, &d).unwrap();
-        // num_env = 1, FIX → n_0 = 31; H(n) = n/31 · h.
-        for (n, row) in l.iter().enumerate() {
-            let expect = n as f64 / 31.0;
-            assert!((row[20].re - expect).abs() < 1e-12, "slot {n}: {} vs {expect}", row[20].re);
+        let (l, r) = st.process(&ps, &idx, config, &s, &d).unwrap();
+        let c = 10f64.powf(25.0 / 20.0);
+        let c1 = core::f64::consts::SQRT_2 / (1.0 + c * c).sqrt();
+        let c2 = c * c1;
+        // num_env = 1, FIX → n_0 = 31, 32 ramp steps.
+        for n in 0..NUM_QMF_SLOTS {
+            let t = (n + 1) as f64 / NUM_QMF_SLOTS as f64;
+            let (el, er) = (1.0 + (c2 - 1.0) * t, 1.0 + (c1 - 1.0) * t);
+            assert!((l[n][20].re - el).abs() < 1e-12, "l slot {n}: {} vs {el}", l[n][20].re);
+            assert!((r[n][20].re - er).abs() < 1e-12, "r slot {n}: {} vs {er}", r[n][20].re);
         }
         // A second identical frame is flat at the full value.
         let (l2, _) = st.process(&ps, &idx, config, &s, &d).unwrap();
         for row in &l2 {
-            assert!((row[20].re - 1.0).abs() < 1e-12);
+            assert!((row[20].re - c2).abs() < 1e-12);
+        }
+    }
+
+    /// A fresh decoder holding (`num_env == 0`) passes the mono signal
+    /// to both channels unchanged.
+    #[test]
+    fn fresh_hold_is_dual_mono() {
+        let config = HybridConfig::Bands34;
+        let (ps, _) = ps_with(7, 0);
+        let mut hold = ps.clone();
+        hold.num_env = 0;
+        let mut st = PsStereo::new(20);
+        st.switch_bands(34);
+        let s = ones(config.nr_bands());
+        let d = ones(config.nr_bands());
+        let (l, r) = st.process(&hold, &PsIndices::default(), config, &s, &d).unwrap();
+        for (lr, rr) in l.iter().zip(&r) {
+            for k in 0..config.nr_bands() {
+                assert!((lr[k].re - 1.0).abs() < 1e-12 && (rr[k].re - 1.0).abs() < 1e-12);
+            }
         }
     }
 
@@ -522,6 +573,48 @@ mod tests {
         assert!((h12 - 1.0).abs() < 1e-12);
         assert!(h21.abs() < 1e-12);
         assert!(h22.abs() < 1e-12);
+    }
+
+    /// Rb at c = 1 (IID 0 dB): α = π/4 and μ = √(1 + (4ρ² − 4)/4) = ρ,
+    /// so γ = atan(√((1 − ρ)/(1 + ρ))) = ½·arccos(ρ) — the same
+    /// half-angle as Ra's α. For ρ = ½ that is γ = π/6, giving
+    /// `h11 = h12 = cos γ` and `h21 = −h22 = −sin γ`.
+    #[test]
+    fn rb_equal_levels_uses_half_arccos_rho() {
+        let (h11, h12, h21, h22) = mix_rb(1.0, 0.5);
+        let gamma = core::f64::consts::FRAC_PI_6;
+        assert!((h11 - gamma.cos()).abs() < 1e-12, "h11 {h11}");
+        assert!((h12 - gamma.cos()).abs() < 1e-12, "h12 {h12}");
+        assert!((h21 + gamma.sin()).abs() < 1e-12, "h21 {h21}");
+        assert!((h22 - gamma.sin()).abs() < 1e-12, "h22 {h22}");
+    }
+
+    /// Rb away from equal levels, against the reference tables of FFmpeg's `aacps_tablegen.h`
+    /// (`alpha = ½·atan2(2cρ, c²−1)`, shifted by π/2 if negative, `γ = atan(sqrt((1−μ)/(1+μ)))`
+    /// with `μ = sqrt(1 + (4ρ² − 4)/(c + 1/c)²)`, ρ clamped to ≥ 0.05) evaluated in f64. The cases
+    /// cover `c < 1` and `c > 1` (the two branches of the atan2 quadrant) and both ρ clamps.
+    #[test]
+    fn rb_matches_reference_tables() {
+        #[rustfmt::skip]
+        let cases: [(f64, f64, [f64; 4]); 5] = [
+            (10f64.powf(-7.0 / 20.0), 0.60092,
+                [0.390935622514010, 1.284785473860589, -0.424080653511461, 0.129039623851352]),
+            (10f64.powf(7.0 / 20.0), 0.36764,
+                [1.287204536316883, 0.253805814388133, -0.102124532077822, 0.517935971154640]),
+            (10f64.powf(-18.0 / 20.0), 0.84118,
+                [0.149270200914992, 1.403102170133782, -0.094454918360334, 0.010048665693185]),
+            (1.0, 0.0,
+                [0.724568837309472, 0.724568837309472, -0.689202437604511, 0.689202437604511]),
+            (10f64.powf(2.0 / 20.0), -1.0,
+                [1.103480903936750, 0.117412254444021, -0.092755242187274, 0.871745789895246]),
+        ];
+
+        for (c, rho, want) in cases {
+            let (h11, h12, h21, h22) = mix_rb(c, rho);
+            for (got, want) in [h11, h12, h21, h22].into_iter().zip(want) {
+                assert!((got - want).abs() < 1e-12, "c {c} rho {rho}: got {got}, want {want}");
+            }
+        }
     }
 
     /// Ra preserves total energy: |h11|² + |h12|² + |h21|² + |h22|²

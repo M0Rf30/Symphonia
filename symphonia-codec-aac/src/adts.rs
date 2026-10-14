@@ -21,14 +21,19 @@ use symphonia_core::meta::{Metadata, MetadataLog};
 
 use symphonia_common::mpeg::audio::*;
 
+use std::collections::VecDeque;
 use std::io::{Seek, SeekFrom};
 
+use crate::AacDecoder;
 use crate::implicit_sbr::{
-    ImplicitExtensions, MAX_IMPLICIT_SBR_CORE_RATE, MAX_PROBE_BLOCKS, detect, plain_asc,
+    ImplicitExtensions, MAX_IMPLICIT_SBR_CORE_RATE, MAX_PROBE_BLOCKS, build_asc, detect, plain_asc,
     with_explicit_sbr,
 };
 
 use log::{debug, info};
+
+/// The `id_syn_ele` of a `program_config_element()`.
+const ID_PCE: u32 = 5;
 
 const SAMPLES_PER_AAC_PACKET: Duration = Duration::new(1024);
 
@@ -63,6 +68,13 @@ pub struct AdtsReader<'s> {
     /// The duration of a packet in decoded frames: 1024 per frame of the core codec, doubled for
     /// SBR.
     packet_dur: Duration,
+    /// The plain (without SBR) audio specific config of the stream, if it is AAC-LC with a known
+    /// channel layout. It configures the parser that splits frames with multiple blocks.
+    plain_asc: Option<Box<[u8]>>,
+    /// The parser of the syntax of `raw_data_block()`s, created when a frame has multiple blocks.
+    parser: Option<AacDecoder>,
+    /// The blocks of the current frame that have not been returned.
+    pending: VecDeque<Box<[u8]>>,
 }
 
 /// The maximum number of bytes of the stream examined to look for SBR: a limit of the buffering of
@@ -78,8 +90,9 @@ impl<'s> AdtsReader<'s> {
 
         let first_frame_pos = mss.pos();
 
-        // Look for SBR and parametric stereo in the first frames.
-        let ext = probe_implicit_extensions(&mut mss, &header, first_frame_pos)?;
+        // Look for SBR and parametric stereo in the first frames, and, if the channel layout is
+        // not predefined, for the program config element that has it.
+        let (plain, ext) = probe_stream(&mut mss, &header, first_frame_pos)?;
 
         // Use the header to populate the codec parameters.
         let mut codec_params = AudioCodecParameters::new();
@@ -89,16 +102,25 @@ impl<'s> AdtsReader<'s> {
         if let Some(channels) = header.channels.clone() {
             codec_params.with_channels(channels);
         }
+        else if let Some(asc) =
+            plain.as_deref().and_then(|asc| AudioSpecificConfig::read(asc).ok())
+        {
+            // The channel layout is that of the program config element.
+            if let Some(channels) = asc.channels {
+                codec_params.with_channels(channels);
+            }
+
+            codec_params.with_extra_data(plain.clone().unwrap_or_default());
+        }
 
         // If the stream has SBR, the codec parameters describe the output of the decoder, and
         // the audio specific config tells the decoder.
         let mut ratio = 1;
 
-        if ext.sbr {
-            let plain = plain_asc(header.sample_rate, header.channel_config);
+        if let (true, Some(plain)) = (ext.sbr, plain.as_deref()) {
             let out_rate = header.sample_rate.saturating_mul(2);
 
-            if let Some(extra_data) = with_explicit_sbr(&plain, out_rate, ext.ps) {
+            if let Some(extra_data) = with_explicit_sbr(plain, out_rate, ext.ps) {
                 if let Ok(asc) = AudioSpecificConfig::read(&extra_data) {
                     info!(
                         "adts: stream has {}, output is {} Hz",
@@ -150,24 +172,38 @@ impl<'s> AdtsReader<'s> {
             core_rate: header.sample_rate,
             sbr: ext.sbr,
             packet_dur,
+            plain_asc: plain,
+            parser: None,
+            pending: VecDeque::new(),
         })
     }
 }
 
-/// Looks for SBR and parametric stereo in the first frames of the stream, which is positioned at
-/// the start of the first frame (at `first_frame_pos`) and is left there.
-fn probe_implicit_extensions(
+/// Examines the first frames of the stream, which is positioned at the start of the first frame
+/// (at `first_frame_pos`) and is left there. Returns the plain (AAC-LC, without SBR) audio specific
+/// config of the stream, if the channel layout is known, and the extensions (SBR and parametric
+/// stereo) that the stream uses.
+///
+/// ADTS has no config for the extensions, so they are looked for in the first blocks. The channel
+/// layout is a predefined `channel_configuration`, or, if that is 0, the program config element at
+/// the start of the first block.
+fn probe_stream(
     mss: &mut MediaSourceStream<'_>,
     header: &AdtsHeader,
     first_frame_pos: u64,
-) -> Result<ImplicitExtensions> {
-    // Only a stream of AAC-LC with a predefined channel configuration, and a rate that SBR can
-    // double, may have implicit SBR.
-    if header.profile != AudioObjectType::Lc
-        || header.channels.is_none()
-        || header.sample_rate > MAX_IMPLICIT_SBR_CORE_RATE
-    {
-        return Ok(ImplicitExtensions::default());
+) -> Result<(Option<Box<[u8]>>, ImplicitExtensions)> {
+    // Only a stream of AAC-LC may be decoded, and have implicit SBR, if its rate can be doubled.
+    let can_have_sbr = header.profile == AudioObjectType::Lc
+        && header.channels.is_some()
+        && header.sample_rate <= MAX_IMPLICIT_SBR_CORE_RATE;
+
+    let needs_pce = header.channel_config == 0 && header.profile == AudioObjectType::Lc;
+
+    if !can_have_sbr && !needs_pce {
+        let plain = (header.profile == AudioObjectType::Lc && header.channels.is_some())
+            .then(|| plain_asc(header.sample_rate, header.channel_config));
+
+        return Ok((plain, ImplicitExtensions::default()));
     }
 
     if !mss.is_seekable() {
@@ -200,9 +236,29 @@ fn probe_implicit_extensions(
         mss.seek_buffered(first_frame_pos);
     }
 
-    let plain = plain_asc(header.sample_rate, header.channel_config);
+    let plain: Option<Box<[u8]>> = if needs_pce {
+        // The program config element is the first element of a block, ISO/IEC 14496-3 4.5.2.1.
+        blocks
+            .iter()
+            .find_map(|block| {
+                let mut bs = BitReaderLtr::new(block);
+                (bs.read_bits_leq32(3).ok()? == ID_PCE)
+                    .then(|| ProgramConfig::read(&mut bs).ok())?
+            })
+            .map(|pce| build_asc(2, header.sample_rate, 0, Some(&pce), None))
+    }
+    else {
+        Some(plain_asc(header.sample_rate, header.channel_config))
+    };
 
-    Ok(detect(&plain, header.sample_rate, blocks.iter().map(|b| &b[..])))
+    let ext = match plain.as_deref() {
+        Some(plain) if header.sample_rate <= MAX_IMPLICIT_SBR_CORE_RATE => {
+            detect(plain, header.sample_rate, blocks.iter().map(|b| &b[..]))
+        }
+        _ => ImplicitExtensions::default(),
+    };
+
+    Ok((plain, ext))
 }
 
 impl Scoreable for AdtsReader<'_> {
@@ -244,6 +300,8 @@ struct AdtsHeader {
     frame_len: u16,
     /// An optional CRC.
     crc: Option<u16>,
+    /// The number of `raw_data_block()`s in the frame (`number_of_raw_data_blocks_in_frame + 1`).
+    raw_data_blocks: u8,
 }
 
 impl AdtsHeader {
@@ -253,15 +311,34 @@ impl AdtsHeader {
     pub const SIZE_NO_CRC: u16 = 7;
     /// The size of a ADTS header including the sync word and CRC.
     pub const SIZE_WITH_CRC: u16 = Self::SIZE_NO_CRC + Self::CRC_SIZE;
+    /// The maximum size of the header without the sync word: the error check of a frame of the
+    /// maximum 4 raw data blocks has the position of 3 of them, and the CRC.
+    const MAX_HEADER_LEN: usize = 5 + 2 * 3 + 2;
 
     /// Read the body of a header at the current position of the reader.
     fn read_body<B: ReadBytes>(reader: &mut B, has_crc: bool) -> Result<Self> {
-        // The length of the header.
-        let len = if has_crc { Self::SIZE_WITH_CRC } else { Self::SIZE_NO_CRC };
+        // The fixed and variable header, without the sync word. The number of raw data blocks is
+        // in its last two bits, and decides the length of the error check that follows.
+        let mut buf = [0; Self::MAX_HEADER_LEN];
+        reader.read_buf_exact(&mut buf[..usize::from(Self::SIZE_NO_CRC - 2)])?;
 
-        // Read the body of the header (no sync word).
-        let mut buf = [0; 7];
-        reader.read_buf_exact(&mut buf[..usize::from(len - 2)])?;
+        let raw_data_blocks = (buf[Self::SIZE_NO_CRC as usize - 3] & 0x3) + 1;
+
+        // The error check is the `raw_data_block_position`s of all but the first block (only if
+        // there are multiple blocks), and the CRC of the header.
+        let check_len = if has_crc {
+            Self::CRC_SIZE * (u16::from(raw_data_blocks) - 1) + Self::CRC_SIZE
+        }
+        else {
+            0
+        };
+
+        reader.read_buf_exact(
+            &mut buf[usize::from(Self::SIZE_NO_CRC - 2)
+                ..usize::from(Self::SIZE_NO_CRC - 2 + check_len)],
+        )?;
+
+        let len = Self::SIZE_NO_CRC + check_len;
 
         let mut bs = BitReaderLtr::new(&buf);
 
@@ -306,18 +383,27 @@ impl AdtsHeader {
         // Buffer fullness.
         let _fullness = bs.read_bits_leq32(11)?;
 
-        // Number of raw data blocks (AAC packets).
-        let raw_data_blocks = bs.read_bits_leq32(2)? + 1;
+        // Number of raw data blocks (AAC packets), already read.
+        bs.ignore_bits(2)?;
 
-        if raw_data_blocks > 1 {
-            // TODO: Support multiple AAC packets per ADTS packet.
-            return unsupported_error("adts: only 1 aac frame per adts packet is supported");
+        // The CRC of the header, if provided. It follows the positions of the raw data blocks.
+        let crc = if has_crc {
+            let pos = usize::from(Self::SIZE_NO_CRC - 2 + check_len - Self::CRC_SIZE);
+            Some(u16::from_be_bytes([buf[pos], buf[pos + 1]]))
         }
+        else {
+            None
+        };
 
-        // The CRC, if the CRC is provided.
-        let crc = if has_crc { Some(bs.read_bits_leq32(16)? as u16) } else { None };
-
-        Ok(AdtsHeader { profile, channels, channel_config, sample_rate, frame_len, crc })
+        Ok(AdtsHeader {
+            profile,
+            channels,
+            channel_config,
+            sample_rate,
+            frame_len,
+            crc,
+            raw_data_blocks,
+        })
     }
 
     /// Returns true if the provided word is a valid sync word.
@@ -356,7 +442,8 @@ impl AdtsHeader {
     /// Get the length of the header including the sync word.
     #[inline]
     fn header_len(&self) -> u16 {
-        Self::SIZE_NO_CRC + if self.crc.is_some() { Self::CRC_SIZE } else { 0 }
+        Self::SIZE_NO_CRC
+            + if self.crc.is_some() { Self::CRC_SIZE * u16::from(self.raw_data_blocks) } else { 0 }
     }
 
     /// Get the length of the payload.
@@ -367,6 +454,66 @@ impl AdtsHeader {
 }
 
 impl AdtsReader<'_> {
+    /// Read the payload of the frame with the header `header` from the stream, and queue the
+    /// `raw_data_block()`s in it.
+    ///
+    /// A frame has `number_of_raw_data_blocks_in_frame + 1` of them (ISO/IEC 14496-3 Table 1.A.5),
+    /// each ending with its `ID_END` element and byte aligned: the end of a block is found by
+    /// parsing it. If the frame has a CRC, the payload has a 16 bit check after every block.
+    fn read_blocks(&mut self, header: &AdtsHeader) -> Result<()> {
+        let payload = self.reader.read_boxed_slice_exact(usize::from(header.payload_len()))?;
+
+        if header.raw_data_blocks == 1 {
+            self.pending.push_back(payload);
+            return Ok(());
+        }
+
+        if self.parser.is_none() {
+            let Some(asc) = &self.plain_asc
+            else {
+                return unsupported_error(
+                    "adts: frames with multiple blocks require an aac-lc stream with a known channel layout",
+                );
+            };
+
+            let mut params = AudioCodecParameters::new();
+            params
+                .for_codec(CODEC_ID_AAC)
+                .with_sample_rate(self.core_rate)
+                .with_extra_data(asc.clone());
+
+            self.parser = Some(AacDecoder::try_new_syntax_parser(&params)?);
+        }
+
+        let parser = self.parser.as_mut().expect("parser was just created");
+
+        let check_len = if header.crc.is_some() { usize::from(AdtsHeader::CRC_SIZE) } else { 0 };
+
+        let mut rest = &payload[..];
+
+        for i in 0..header.raw_data_blocks {
+            let len = if i + 1 == header.raw_data_blocks {
+                // The last block is the rest of the frame, without its check.
+                match rest.len().checked_sub(check_len) {
+                    Some(len) => len,
+                    None => return decode_error("adts: truncated raw data block"),
+                }
+            }
+            else {
+                parser.measure_raw_data_block(rest)?
+            };
+
+            self.pending.push_back(Box::from(&rest[..len]));
+
+            rest = match rest.get(len + check_len..) {
+                Some(rest) => rest,
+                None => return decode_error("adts: truncated raw data block"),
+            };
+        }
+
+        Ok(())
+    }
+
     /// Returns true if the stream may use SBR, which ADTS can only signal implicitly.
     fn may_use_sbr(&self) -> bool {
         self.sbr || self.core_rate <= MAX_IMPLICIT_SBR_CORE_RATE
@@ -406,18 +553,25 @@ impl FormatReader for AdtsReader<'_> {
     }
 
     fn next_packet(&mut self) -> Result<Option<Packet>> {
-        // Parse the header to get the calculated frame size.
-        let header = match AdtsHeader::read(&mut self.reader) {
-            Ok(header) => header,
-            Err(Error::IoError(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
-                // ADTS streams have no well-defined end, so when no more frames can be read,
-                // consider the stream ended.
-                return Ok(None);
+        // Read frames until there is a block to return.
+        let data = loop {
+            if let Some(block) = self.pending.pop_front() {
+                break block;
             }
-            Err(err) => return Err(err),
-        };
 
-        // TODO: Support multiple AAC packets per ADTS packet.
+            // Parse the header to get the calculated frame size.
+            let header = match AdtsHeader::read(&mut self.reader) {
+                Ok(header) => header,
+                Err(Error::IoError(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    // ADTS streams have no well-defined end, so when no more frames can be read,
+                    // consider the stream ended.
+                    return Ok(None);
+                }
+                Err(err) => return Err(err),
+            };
+
+            self.read_blocks(&header)?;
+        };
 
         let ts = self.next_packet_ts;
 
@@ -426,12 +580,7 @@ impl FormatReader for AdtsReader<'_> {
             None => return Ok(None),
         };
 
-        Ok(Some(Packet::new(
-            0,
-            ts,
-            self.packet_dur,
-            self.reader.read_boxed_slice_exact(usize::from(header.payload_len()))?,
-        )))
+        Ok(Some(Packet::new(0, ts, self.packet_dur, data)))
     }
 
     fn metadata(&mut self) -> Metadata<'_> {
@@ -500,12 +649,25 @@ impl FormatReader for AdtsReader<'_> {
             if self.reader.is_seekable() {
                 // Successfuly seeked to the start of the stream, reset the next packet timestamp.
                 self.next_packet_ts = Timestamp::from(0);
+                self.pending.clear();
             }
         }
 
         // Parse frames from the stream until the frame to start from is reached. If the stream
         // cannot be rewound (non-seekable), the frame closest to it that is available is used.
         loop {
+            // Skip the blocks of a frame that was partially read.
+            if !self.pending.is_empty() {
+                match self.next_packet_ts.checked_add(self.packet_dur) {
+                    Some(ts) if ts <= start_ts => {
+                        self.pending.pop_front();
+                        self.next_packet_ts = ts;
+                        continue;
+                    }
+                    _ => break,
+                }
+            }
+
             // Parse the next frame header.
             let header = match AdtsHeader::read(&mut self.reader) {
                 Ok(header) => header,
@@ -517,7 +679,11 @@ impl FormatReader for AdtsReader<'_> {
                 Err(err) => return Err(err),
             };
 
-            // TODO: Support multiple AAC packets per ADTS packet.
+            // A frame with multiple blocks is split to count them.
+            if header.raw_data_blocks > 1 {
+                self.read_blocks(&header)?;
+                continue;
+            }
 
             let next_packet_ts = match self.next_packet_ts.checked_add(self.packet_dur) {
                 Some(ts) if ts <= start_ts => ts,
@@ -561,7 +727,7 @@ fn approximate_frame_count(mut source: &mut MediaSourceStream<'_>) -> Result<Opt
         _ => return Ok(None),
     };
 
-    let mut parsed_n_frames = 0;
+    let mut parsed_n_frames = 0u64;
     let mut n_bytes = 0;
 
     if !source.is_seekable() {
@@ -576,7 +742,7 @@ fn approximate_frame_count(mut source: &mut MediaSourceStream<'_>) -> Result<Opt
                 break;
             }
 
-            parsed_n_frames += 1;
+            parsed_n_frames += u64::from(header.raw_data_blocks);
             n_bytes += u64::from(header.frame_len);
         }
 
@@ -608,7 +774,7 @@ fn approximate_frame_count(mut source: &mut MediaSourceStream<'_>) -> Result<Opt
                         _ => break,
                     };
 
-                    parsed_n_frames += 1;
+                    parsed_n_frames += u64::from(header.raw_data_blocks);
                     n_bytes += u64::from(header.frame_len);
 
                     // skip frame payload to avoid seaching the sync word in the audio data

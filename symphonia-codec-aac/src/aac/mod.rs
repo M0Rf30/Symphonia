@@ -37,6 +37,7 @@ mod cpe;
 mod dsp;
 mod eld_window;
 mod ics;
+use ics::coupling::CouplingChannel;
 mod sbr;
 
 use common::*;
@@ -52,6 +53,8 @@ pub struct AacDecoder {
     // info: NACodecInfoRef,
     asc: AudioSpecificConfig,
     pairs: Vec<cpe::ChannelPair>,
+    /// The coupling channels, by `element_instance_tag`, created on first use.
+    cces: Vec<Option<Box<ics::coupling::CouplingChannel>>>,
     /// The perceptual noise substitution (PNS) random number generator. A single generator is
     /// shared by every channel of every syntactic element, in bitstream order, for the whole
     /// stream (as in ffmpeg and FAAD2) rather than one per element. This keeps the generated
@@ -429,6 +432,7 @@ impl AacDecoder {
         Ok(AacDecoder {
             asc,
             pairs: Vec::new(),
+            cces: (0..16).map(|_| None).collect(),
             lcg: Lcg::new(PNS_SEED),
             elem_targets,
             dsp,
@@ -505,6 +509,9 @@ impl AacDecoder {
         let mut terminated = false;
         let mut sbr_ext: Vec<Option<sbr::extension::SbrExtensionData>> =
             vec![None; self.elem_targets.len()];
+        for cce in self.cces.iter_mut().flatten() {
+            cce.present = false;
+        }
         while bs.bits_left() > 3 {
             let id = bs.read_bits_leq32(3)?;
 
@@ -513,31 +520,36 @@ impl AacDecoder {
                     // ID_SCE / ID_LFE: both are single-channel elements; the target output
                     // channel (e.g. LFE1 vs. front-center) was already resolved into
                     // `elem_targets` from the channel configuration / PCE.
-                    let _tag = bs.read_bits_leq32(4)?;
+                    let tag = bs.read_bits_leq32(4)? as u8;
                     validate!(cur_pair < self.elem_targets.len());
                     let (is_pair, indices) = self.elem_targets[cur_pair];
                     validate!(!is_pair);
                     self.set_pair(cur_pair, indices[0], false)?;
+                    self.pairs[cur_pair].tag = tag;
+                    self.pairs[cur_pair].is_lfe = id == 3;
                     self.pairs[cur_pair].decode_ga_sce(bs, &mut self.lcg, self.asc.object_type)?;
                     cur_pair += 1;
                 }
                 1 => {
                     // ID_CPE
-                    let _tag = bs.read_bits_leq32(4)?;
+                    let tag = bs.read_bits_leq32(4)? as u8;
                     validate!(cur_pair < self.elem_targets.len());
                     let (is_pair, indices) = self.elem_targets[cur_pair];
                     validate!(is_pair);
                     self.set_pair(cur_pair, indices[0], true)?;
+                    self.pairs[cur_pair].tag = tag;
                     self.pairs[cur_pair].decode_ga_cpe(bs, &mut self.lcg, self.asc.object_type)?;
                     cur_pair += 1;
                 }
                 2 => {
-                    // ID_CCE (coupling channel element): used for encoder-side downmix/dialogue
-                    // normalization hints. Vanishingly rare outside broadcast encoders; no
-                    // bitstream in the validation corpus (ffmpeg output, Fraunhofer conformance
-                    // samples) produces one, so it is left unsupported rather than applying an
-                    // unverified gain.
-                    return unsupported_error("aac: coupling channel element");
+                    // ID_CCE: the coupling is applied when the block is synthesised, since the
+                    // element may follow its targets.
+                    let tag = usize::from(bs.read_bits_leq32(4)? as u8);
+                    let (sbinfo, aot) = (self.sbinfo, self.asc.object_type);
+                    let cce = self.cces[tag]
+                        .get_or_insert_with(|| Box::new(CouplingChannel::new(sbinfo, aot)));
+                    cce.decode(bs, &mut self.lcg, aot)?;
+                    cce.present = true;
                 }
                 4 => {
                     // ID_DSE
@@ -755,8 +767,15 @@ impl AacDecoder {
         sbr_ext: Vec<Option<sbr::extension::SbrExtensionData>>,
     ) -> Result<()> {
         let rate_idx = GASubbandInfo::find_idx(self.asc.sample_rate);
+        let mut any_cce = false;
+        for cce in self.cces.iter_mut().flatten().filter(|cce| cce.present) {
+            cce.prepare(&mut self.dsp, rate_idx);
+            any_cce = true;
+        }
+        let cces = any_cce.then_some(self.cces.as_slice());
+
         for pair in 0..cur_pair {
-            self.pairs[pair].synth_audio(&mut self.dsp, &mut self.buf, rate_idx);
+            self.pairs[pair].synth_audio(&mut self.dsp, &mut self.buf, rate_idx, cces);
         }
 
         // SBR reconstruction: once active for the stream, every element gets 2×-rate output
@@ -903,6 +922,9 @@ impl AudioDecoder for AacDecoder {
     fn reset(&mut self) {
         for pair in self.pairs.iter_mut() {
             pair.reset();
+        }
+        for cce in self.cces.iter_mut().flatten() {
+            cce.reset();
         }
 
         // Restart the noise generator so that a decode restarted from the beginning of the

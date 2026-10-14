@@ -20,11 +20,16 @@ use symphonia_common::mpeg::audio::AudioObjectType;
 use crate::aac::common::*;
 use crate::aac::dsp;
 use crate::aac::ics;
+use crate::aac::ics::coupling::{CouplingChannel, CouplingPoint};
 
 #[derive(Clone)]
 pub struct ChannelPair {
     pub is_pair: bool,
     pub channel: usize,
+    /// The `element_instance_tag` of the element in the current block.
+    pub tag: u8,
+    /// Whether the element is an LFE (which can't be the target of a coupling channel).
+    pub is_lfe: bool,
     ms_mask_present: u8,
     ms_used: [[bool; MAX_SFBS]; MAX_WINDOWS],
     ics0: ics::Ics,
@@ -36,6 +41,8 @@ impl ChannelPair {
         Self {
             is_pair,
             channel,
+            tag: 0,
+            is_lfe: false,
             ms_mask_present: 0,
             ms_used: [[false; MAX_SFBS]; MAX_WINDOWS],
             ics0: ics::Ics::new(sbinfo, aot),
@@ -125,6 +132,9 @@ impl ChannelPair {
                     if self.ics1.is_intensity(g, sfb) {
                         // Intensity stereo
                         // Section 4.6.8.2.3
+                        // invert_intensity() (ISO/IEC 13818-7 §8.3.? / 14496-3): the phase is
+                        // inverted by ms_used only when ms_mask_present == 1. faad2 follows this;
+                        // FFmpeg also inverts for ms_mask_present == 2 (non-conformant).
                         let invert = self.ms_mask_present == 1 && self.ms_used[g][sfb];
                         let dir = if self.ics1.get_intensity_dir(g, sfb) { 1.0 } else { -1.0 };
                         let factor = if invert { -1.0 } else { 1.0 };
@@ -165,19 +175,35 @@ impl ChannelPair {
         dsp: &mut dsp::Dsp,
         abuf: &mut AudioBuffer<f32>,
         rate_idx: usize,
+        cces: Option<&[Option<Box<CouplingChannel>>]>,
     ) {
-        self.ics0.synth_channel(
-            dsp,
-            rate_idx,
-            abuf.plane_mut(self.channel).expect("channel index is valid"),
-        );
+        let n_ch = if self.is_pair { 2 } else { 1 };
 
-        if self.is_pair {
-            self.ics1.synth_channel(
-                dsp,
-                rate_idx,
-                abuf.plane_mut(self.channel + 1).expect("channel+1 index is valid"),
-            );
+        for ch in 0..n_ch {
+            let ics = if ch == 0 { &mut self.ics0 } else { &mut self.ics1 };
+            let dst = abuf.plane_mut(self.channel + ch).expect("channel index is valid");
+
+            let Some(cces) = cces.filter(|_| !self.is_lfe)
+            else {
+                ics.synth_channel(dsp, rate_idx, dst);
+                continue;
+            };
+
+            let (is_cpe, tag) = (self.is_pair, self.tag);
+            let couple = |ics: &mut ics::Ics, point| {
+                for cce in cces.iter().flatten() {
+                    cce.couple_spectrum(point, is_cpe, tag, ch, ics);
+                }
+            };
+
+            couple(ics, CouplingPoint::BeforeTns);
+            ics.apply_tns(rate_idx);
+            couple(ics, CouplingPoint::AfterTns);
+            ics.imdct(dsp, dst);
+
+            for cce in cces.iter().flatten() {
+                cce.couple_time(is_cpe, tag, ch, dst);
+            }
         }
     }
 }

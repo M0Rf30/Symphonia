@@ -124,7 +124,7 @@ fn hash_bin(path: &std::path::Path, frame_len: usize) -> u64 {
 const FIXTURE_CASES: &[(&str, &str, u64)] = &[
     ("he_aac_v1_mono.aac", "adts", 0xac21fb661844d3f8),
     ("he_aac_v1_stereo.aac", "adts", 0xa7fd2ca7eeceff4c),
-    ("he_aac_v2.aac", "adts", 0x902e128b72a6b6fa),
+    ("he_aac_v2.aac", "adts", 0xdc6c8e9e8a37a029),
     ("aac_lc_22k_mono.aac", "adts", 0xf0625fcda47da9b5),
     ("aac_eld_sbr_480_mono.bin", "bin480", 0xfde3ef2cee24301e),
     ("aac_eld_sbr_512_dual_stereo.bin", "bin512", 0xa02a510eaa36b0bb),
@@ -136,12 +136,12 @@ const FIXTURE_CASES: &[(&str, &str, u64)] = &[
 
 const SAMPLE_CASES: &[(&str, &str, u64)] = &[
     ("heaac_v1_fdk_adts.aac", "adts", 0xb0fda23d1ada3601),
-    ("heaac_v2_fdk_adts.aac", "adts", 0xfffca6a94bd8482c),
+    ("heaac_v2_fdk_adts.aac", "adts", 0x098255cb724b3aa8),
     ("heaac_v1_fdk_m4a.m4a", "mp4", 0xc2ce160a433304f6),
     ("heaac_v1_fdk_mono.m4a", "mp4", 0x9eb47d4a1875f935),
     ("heaac_v1_fdk_5_1.m4a", "mp4", 0x69849d87c8a98587),
     ("heaac_v1_fdk_downsampled_sbr.m4a", "mp4", 0xcddc68950b6dcf3e),
-    ("heaac_v2_fdk_m4a.m4a", "mp4", 0xce95b55060d7d7f8),
+    ("heaac_v2_fdk_m4a.m4a", "mp4", 0x14890b5f9872d5cf),
     ("heaac_nero_sample.mp4", "mp4", 0x69cb203791622fa0),
     ("aac_eld_sbr_fdk.m4a", "mp4", 0x2081fb9411d892b6),
     ("aac_eld_sbr_dual_fdk.m4a", "mp4", 0x8ff1cae748a8bfc8),

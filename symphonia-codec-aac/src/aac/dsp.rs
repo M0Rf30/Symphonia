@@ -336,6 +336,26 @@ impl Dsp {
     }
 
     #[allow(clippy::cognitive_complexity)]
+    /// Change the window applied to the second half of a long block in the overlap-add state
+    /// `delay`, which was saved windowed with the right slope of one window shape, to the one of
+    /// the other shape.
+    pub fn rewindow_long_overlap(&self, delay: &mut [f32], from_kbd: bool, to_kbd: bool) {
+        if from_kbd == to_kbd {
+            return;
+        }
+
+        let (from, to) = if from_kbd {
+            (&self.kbd_long_win, &self.sine_long_win)
+        }
+        else {
+            (&self.sine_long_win, &self.kbd_long_win)
+        };
+
+        for (i, d) in delay.iter_mut().take(1024).enumerate() {
+            *d *= to[1023 - i] / from[1023 - i];
+        }
+    }
+
     pub fn synth(
         &mut self,
         coeffs: &[f32; 1024],

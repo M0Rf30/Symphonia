@@ -25,6 +25,7 @@ use crate::aac::dsp;
 use lazy_static::lazy_static;
 use log::debug;
 
+pub mod coupling;
 mod gain;
 mod ltp;
 mod pulse;
@@ -499,15 +500,25 @@ impl Ics {
         }
 
         self.decode_spectrum(bs, lcg)?;
+
+        // The pulses modify the quantized spectrum, so they are added before stereo processing.
+        if let Some(pulse) = &self.pulse {
+            let bands = self.get_bands();
+            pulse.apply(
+                bands,
+                self.info.max_sfb,
+                &self.sfb_cb[0],
+                &self.scales[0],
+                &mut self.coeffs,
+            );
+        }
+
         Ok(())
     }
 
-    pub fn synth_channel(&mut self, dsp: &mut dsp::Dsp, rate_idx: usize, dst: &mut [f32]) {
+    /// Apply the TNS filters, if any, to the spectrum.
+    pub fn apply_tns(&mut self, rate_idx: usize) {
         let bands = self.get_bands();
-
-        if let Some(pulse) = &self.pulse {
-            pulse.synth(bands, &self.scales, &mut self.coeffs);
-        }
 
         if let Some(tns) = &self.tns {
             tns.synth(
@@ -518,7 +529,15 @@ impl Ics {
                 &mut self.coeffs,
             );
         }
+    }
 
+    pub fn synth_channel(&mut self, dsp: &mut dsp::Dsp, rate_idx: usize, dst: &mut [f32]) {
+        self.apply_tns(rate_idx);
+        self.imdct(dsp, dst);
+    }
+
+    /// Transform the spectrum to the time domain, with windowing and overlap-add.
+    pub fn imdct(&mut self, dsp: &mut dsp::Dsp, dst: &mut [f32]) {
         match self.aot {
             AudioObjectType::ErAacLd => dsp.synth_ld(
                 &self.coeffs,
