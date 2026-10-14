@@ -107,6 +107,12 @@ bitflags! {
         ///
         /// Apple calls this channel "right wide".
         const FRONT_RIGHT_WIDE    = 1 << 25;
+        /// Surround-direct left channel.
+        ///
+        /// Dolby TrueHD calls this channel "LRsd". It is distinct from the side channels.
+        const SURROUND_DIRECT_LEFT  = 1 << 26;
+        /// Surround-direct right channel.
+        const SURROUND_DIRECT_RIGHT = 1 << 27;
     }
 }
 
@@ -151,8 +157,8 @@ impl Position {
 
 const POSITION_NAMES: &[&str; 28] = &[
     "FL", "FR", "FC", "LFE1", "RL", "RR", "FLC", "FRC", "RC", "SL", "SR", "TC", "TFL", "TFC",
-    "TFR", "TRL", "TRC", "TRR", "LFE2", "TSL", "TSR", "BFC", "BFL", "BFR", "FLW", "FRW", "RLC",
-    "RRC",
+    "TFR", "TRL", "TRC", "TRR", "LFE2", "TSL", "TSR", "BFC", "BFL", "BFR", "FLW", "FRW", "SDL",
+    "SDR",
 ];
 
 impl std::fmt::Display for Position {

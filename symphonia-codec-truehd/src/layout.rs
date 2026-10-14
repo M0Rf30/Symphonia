@@ -62,9 +62,8 @@ impl ChannelList {
         l
     }
 
-    /// The layout for a TrueHD channel assignment bitmap (13 bits). Returns `None` if the
-    /// assignment cannot be represented.
-    pub(crate) fn from_truehd_map(chanmap: u32) -> Option<ChannelList> {
+    /// The layout for a TrueHD channel assignment bitmap (13 bits).
+    pub(crate) fn from_truehd_map(chanmap: u32) -> ChannelList {
         // The channel groups in bit order of the channel assignment.
         const GROUPS: [&[Position]; 13] = [
             // LR
@@ -85,8 +84,8 @@ impl ChannelList {
             &[Position::REAR_CENTER],
             // Ts
             &[Position::TOP_CENTER],
-            // LRsd (surround direct), the nearest equivalent is the side pair.
-            &[Position::SIDE_LEFT, Position::SIDE_RIGHT],
+            // LRsd (surround direct)
+            &[Position::SURROUND_DIRECT_LEFT, Position::SURROUND_DIRECT_RIGHT],
             // LRw
             &[Position::FRONT_LEFT_WIDE, Position::FRONT_RIGHT_WIDE],
             // Cvh
@@ -100,17 +99,12 @@ impl ChannelList {
         for (bit, group) in GROUPS.iter().enumerate() {
             if chanmap & (1 << bit) != 0 {
                 for &pos in *group {
-                    // Surround direct channels share a position with the side channels; both
-                    // cannot be present at once.
-                    if list.mask().intersects(pos) {
-                        return None;
-                    }
                     list.push(pos);
                 }
             }
         }
 
-        Some(list)
+        list
     }
 
     /// The layout for an MLP channel arrangement (0..=20). Returns `None` for an unassigned
@@ -155,5 +149,20 @@ impl ChannelList {
             list.push(pos);
         }
         Some(list)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_surround_direct_is_distinct_from_side() {
+        // LRs (bit 3) and LRsd (bit 9) together.
+        let list = ChannelList::from_truehd_map((1 << 3) | (1 << 9));
+        assert_eq!(list.len(), 4);
+        assert_eq!(list.get(0), Some(Position::SIDE_LEFT));
+        assert_eq!(list.get(2), Some(Position::SURROUND_DIRECT_LEFT));
+        assert_eq!(list.mask().bits().count_ones(), 4);
     }
 }

@@ -30,7 +30,10 @@
 //!
 //! The streams have no timestamps and no index. The timeline is the running sample count; the
 //! duration of AC-3 and DTS streams is estimated from the average size of the first frames, and
-//! TrueHD/MLP streams (which have a variable bit rate) have no known duration. The readers seek
+//! TrueHD/MLP streams (which have a variable bit rate) have no known duration, unless
+//! [`FormatOptions::prebuild_seek_index`](symphonia_core::formats::FormatOptions) is set and the
+//! source is seekable: the whole stream is then scanned when the reader is created, which gives
+//! the exact duration of all three, and a complete seek index. The readers seek
 //! by scanning forward from the nearest frame they have seen, so seeking into a part of a seekable
 //! stream that was not yet read scans the stream up to it.
 

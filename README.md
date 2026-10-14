@@ -93,7 +93,7 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 
 \* Gapless playback requires support from both the demuxer and decoder.
 
-\*\* Raw elementary streams have no container timing: their duration is estimated (AC-3, DTS) or unknown (TrueHD/MLP).
+\*\* Raw elementary streams have no container timing: their duration is estimated (AC-3, DTS) or unknown (TrueHD/MLP), unless `prebuild_seek_index` is set and the source is seekable, in which case the stream is scanned and the duration is exact.
 
 \*\*\* FLV carries no end padding: only the leading decoder delay (e.g. Opus pre-skip) is trimmed.
 

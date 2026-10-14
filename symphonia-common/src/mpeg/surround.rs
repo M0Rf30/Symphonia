@@ -796,7 +796,7 @@ const TRUEHD_GROUPS: [Position; 13] = [
     Position::REAR_LEFT.union(Position::REAR_RIGHT),
     Position::REAR_CENTER,
     Position::TOP_CENTER,
-    Position::SIDE_LEFT.union(Position::SIDE_RIGHT),
+    Position::SURROUND_DIRECT_LEFT.union(Position::SURROUND_DIRECT_RIGHT),
     Position::FRONT_LEFT_WIDE.union(Position::FRONT_RIGHT_WIDE),
     Position::TOP_FRONT_CENTER,
     Position::LFE2,

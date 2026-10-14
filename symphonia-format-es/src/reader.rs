@@ -145,6 +145,42 @@ fn score_stream(kind: &Kind, mut src: ScopedStream<&mut MediaSourceStream<'_>>) 
     })
 }
 
+/// Parse the whole stream from `start_pos`. Returns the total duration, and the index of the
+/// frames that decoding can start at (one for about every quarter second).
+fn scan_stream(
+    kind: &Kind,
+    mss: &mut MediaSourceStream<'_>,
+    start_pos: u64,
+    rate: u32,
+) -> Result<(u64, Vec<(i64, u64)>)> {
+    mss.seek(SeekFrom::Start(start_pos))?;
+
+    let mut parser = (kind.parser)();
+    let mut index: Vec<(i64, u64)> = Vec::new();
+    let mut ts = 0i64;
+    let mut eof = false;
+    let period = i64::from(rate / 4);
+    let mut buf = [0; CHUNK_LEN];
+
+    while !eof {
+        let (len, at_eof) = read_up_to(mss, &mut buf)?;
+        parser.push(&buf[..len]);
+        eof = at_eof;
+
+        while let Some(frame) = parser.next_frame(eof) {
+            if (kind.is_sync_point)(&frame.data)
+                && index.last().is_none_or(|&(last, _)| ts >= last + period)
+            {
+                index.push((ts, start_pos + frame.start));
+            }
+
+            ts += frame.dur as i64;
+        }
+    }
+
+    Ok((ts as u64, index))
+}
+
 /// A reader of a raw elementary stream.
 struct EsReader<'s> {
     reader: MediaSourceStream<'s>,
@@ -245,6 +281,20 @@ impl<'s> EsReader<'s> {
             track.with_duration(Duration::new(num_frames));
         }
 
+        let mut index = Vec::new();
+
+        if opts.prebuild_seek_index && mss.is_seekable() {
+            // Scan the whole stream: the duration is exact, and the seek index is complete.
+            info!("{}: scanning stream for duration", kind.info.short_name);
+
+            let (total, scanned) = scan_stream(&kind, &mut mss, start_pos, rate)?;
+            mss.seek(SeekFrom::Start(start_pos))?;
+
+            track.with_num_frames(total);
+            track.with_duration(Duration::new(total));
+            index = scanned;
+        }
+
         Ok(EsReader {
             reader: mss,
             kind,
@@ -259,7 +309,7 @@ impl<'s> EsReader<'s> {
             pushed: 0,
             origin: start_pos as i64,
             eof: false,
-            index: Vec::new(),
+            index,
             pending: None,
             last_ts: None,
         })

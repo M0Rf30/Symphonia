@@ -180,3 +180,26 @@ fn seeking_lands_on_a_frame_before_the_timestamp() {
         assert_eq!(seeked.actual_ts.get(), 0, "{}", e.file);
     }
 }
+
+const THD: &[u8] = include_bytes!("../../symphonia-codec-truehd/tests/data/surround24.thd");
+
+fn open_bytes(data: &[u8], opts: FormatOptions) -> Box<dyn FormatReader + 'static> {
+    let mss =
+        MediaSourceStream::new(Box::new(std::io::Cursor::new(data.to_vec())), Default::default());
+    probe().probe(&Hint::new(), mss, opts, MetadataOptions::default()).unwrap()
+}
+
+#[test]
+fn truehd_duration_is_exact_only_with_a_prebuilt_index() {
+    let reader = open_bytes(THD, FormatOptions::default());
+    assert_eq!(reader.tracks()[0].num_frames, None);
+
+    let mut reader = open_bytes(THD, FormatOptions::default().prebuild_seek_index(true));
+    assert_eq!(reader.tracks()[0].num_frames, Some(1600));
+
+    // Seeking uses the index, and still lands on a frame at or before the timestamp.
+    let to = SeekTo::Timestamp { ts: Timestamp::new(1000), track_id: 0 };
+    let seeked = reader.seek(SeekMode::Accurate, to).unwrap();
+    assert!(seeked.actual_ts.get() <= 1000);
+    assert!(reader.next_packet().unwrap().is_some());
+}

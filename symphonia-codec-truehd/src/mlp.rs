@@ -223,8 +223,8 @@ struct MajorSync {
     channel_layout_mlp: Option<ChannelList>,
     channels_thd_stream1: u32,
     channels_thd_stream2: u32,
-    layout_thd_stream1: Option<ChannelList>,
-    layout_thd_stream2: Option<ChannelList>,
+    layout_thd_stream1: ChannelList,
+    layout_thd_stream2: ChannelList,
     access_unit_size: usize,
     access_unit_size_pow2: usize,
     num_substreams: usize,
@@ -282,8 +282,8 @@ fn read_major_sync(buf: &[u8]) -> Result<MajorSync> {
         channel_layout_mlp: None,
         channels_thd_stream1: 0,
         channels_thd_stream2: 0,
-        layout_thd_stream1: None,
-        layout_thd_stream2: None,
+        layout_thd_stream1: ChannelList::EMPTY,
+        layout_thd_stream2: ChannelList::EMPTY,
         access_unit_size: 0,
         access_unit_size_pow2: 0,
         num_substreams: 0,
@@ -520,16 +520,10 @@ impl MlpDecoder {
             self.substreams[substr].layout = layout;
         }
         else {
-            let none_if_empty = |l: Option<ChannelList>| l.filter(|l| l.len() > 0);
+            let none_if_empty = |l: ChannelList| Some(l).filter(|l| l.len() > 0);
 
             let layout1 = none_if_empty(mh.layout_thd_stream1);
             let layout2 = none_if_empty(mh.layout_thd_stream2);
-
-            // A channel assignment that cannot be represented is only an error if it is used
-            // for decoding.
-            let unsupported_layout = (mh.layout_thd_stream1.is_none()
-                && mh.channels_thd_stream1 > 0)
-                || (mh.layout_thd_stream2.is_none() && mh.channels_thd_stream2 > 0);
 
             self.substreams[1].layout = layout1.unwrap_or(ChannelList::EMPTY);
 
@@ -557,10 +551,6 @@ impl MlpDecoder {
             // presentation.
             if mh.num_substreams == 1 && self.substreams[0].layout.len() == 0 {
                 self.substreams[0].layout = layout2.or(layout1).unwrap_or(ChannelList::EMPTY);
-            }
-
-            if unsupported_layout && self.substreams[self.max_decoded_substream].layout.len() == 0 {
-                return unsupported_error("truehd: unsupported channel assignment");
             }
         }
 
