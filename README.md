@@ -16,7 +16,7 @@
 
 <p>
     <strong>
-        Symphonia is a pure Rust audio decoding and media demuxing library supporting AAC, AC-3, E-AC-3, ADPCM, AIFF, ALAC, APE, CAF, DSD, DTS, FLAC, FLV, MKV, MP1, MP2, MP3, mp3PRO, MP4, MPEG-PS, MPEG-TS, Musepack, Nellymoser, OGG, Opus, PCM, Speex, TrueHD, MLP, Vorbis, WAV, WavPack, and WebM.
+        Symphonia is a pure Rust audio decoding and media demuxing library supporting AAC, AC-3, E-AC-3, ADPCM, AIFF, ALAC, APE, CAF, DSD, DTS, FLAC, FLV, MKV, MP1, MP2, MP3, mp3PRO, MP4, MPEG-PS, MPEG-TS, Musepack, Nellymoser, OGG, Opus, PCM, Speex, TrueHD, MLP, TrueSpeech, Vorbis, WAV, WavPack, and WebM.
     </strong>
 </p>
 
@@ -133,6 +133,7 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | PCM                          | Excellent | Yes     | `pcm`        | Yes     | [`symphonia-codec-pcm`]    |
 | Speex                        | Excellent | Yes     | `speex`      | No      | [`symphonia-codec-speex`]    |
 | TrueHD, MLP                  | Excellent | No      | `truehd`     | No      | [`symphonia-codec-truehd`]   |
+| TrueSpeech                   | Excellent | No      | `truespeech` | No      | [`symphonia-codec-truespeech`]|
 | Vorbis                       | Excellent | Yes     | `vorbis`     | Yes     | [`symphonia-codec-vorbis`] |
 | WavPack                      | Great     | Yes     | `wavpack`    | No      | [`symphonia-codec-wavpack`]  |
 
@@ -156,6 +157,7 @@ mp3PRO streams decode as plain MP3 by default. The `mp3pro` feature adds `Mp3Pro
 [`symphonia-codec-nellymoser`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-nellymoser
 [`symphonia-codec-speex`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-speex
 [`symphonia-codec-truehd`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-truehd
+[`symphonia-codec-truespeech`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-truespeech
 [`symphonia-codec-wavpack`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-wavpack
 
 > [!TIP]

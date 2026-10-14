@@ -16,6 +16,7 @@ use symphonia_core::codecs::audio::well_known::{
     CODEC_ID_ADPCM_MS, CODEC_ID_ADPCM_YAMAHA, CODEC_ID_DCA, CODEC_ID_EAC3, CODEC_ID_MP2,
     CODEC_ID_MP3, CODEC_ID_PCM_ALAW, CODEC_ID_PCM_F32LE, CODEC_ID_PCM_F64LE, CODEC_ID_PCM_MULAW,
     CODEC_ID_PCM_S16LE, CODEC_ID_PCM_S24LE, CODEC_ID_PCM_S32LE, CODEC_ID_PCM_U8,
+    CODEC_ID_TRUESPEECH,
 };
 use symphonia_core::errors::{Error, Result, decode_error, unsupported_error};
 use symphonia_core::formats::Track;
@@ -512,6 +513,7 @@ impl ParseChunk for WaveFormatChunk {
         const WAVE_FORMAT_ALAW: u16 = 0x0006;
         const WAVE_FORMAT_MULAW: u16 = 0x0007;
         const WAVE_FORMAT_ADPCM_IMA: u16 = 0x0011;
+        const WAVE_FORMAT_DSPGROUP_TRUESPEECH: u16 = 0x0022;
         const WAVE_FORMAT_G723_ADPCM: u16 = 0x0014;
         const WAVE_FORMAT_G726: u16 = 0x0045;
         const WAVE_FORMAT_G726_ADPCM: u16 = 0x0064;
@@ -559,6 +561,28 @@ impl ParseChunk for WaveFormatChunk {
                 len,
                 CODEC_ID_ADPCM_IMA_WAV,
             ),
+            // DSP Group TrueSpeech: 8 kHz mono, 240 samples per 32-byte frame. `WAVEFORMATEX`
+            // extension (revision, samples per block, reserved) is passed on verbatim.
+            WAVE_FORMAT_DSPGROUP_TRUESPEECH => {
+                let extra_data = if len >= 18 {
+                    let extra_size = u64::from(reader.read_u16()?);
+                    if extra_size > u64::from(len - 18) {
+                        return decode_error("wav: malformed fmt_truespeech chunk");
+                    }
+                    Some(reader.read_boxed_slice_exact(extra_size as usize)?)
+                }
+                else {
+                    None
+                };
+                let channels = map_wave_channel_count(num_channels)?;
+                Ok(FormatData::Adpcm(FormatAdpcm {
+                    block_align,
+                    bits_per_sample,
+                    channels,
+                    codec: CODEC_ID_TRUESPEECH,
+                    extra_data,
+                }))
+            }
             // G.726 ADPCM (ITU-T), 2 to 5 bits per sample. 0x0014 and 0x0064 are the other tags
             // that are used for it.
             WAVE_FORMAT_G726 | WAVE_FORMAT_G723_ADPCM | WAVE_FORMAT_G726_ADPCM => {

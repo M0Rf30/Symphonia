@@ -1,0 +1,12 @@
+This crate (`symphonia-codec-truespeech`) is a pure-Rust DSP Group TrueSpeech decoder. It is
+licensed under the Mozilla Public License, v. 2.0, like the rest of Project Symphonia.
+
+TrueSpeech has no public specification. The bitstream layout (including the 32-bit byte swap of
+each 32-byte block), the codebooks and the other tables (`src/tables.rs`, copied from
+`libavcodec/truespeech_data.h`), the filter correlation/merging, the two-point filter, the pulse
+placement and the synthesis filters follow FFmpeg's `libavcodec/truespeech.c`, which is distributed
+under the GNU Lesser General Public License, version 2.1 or later.
+
+Copyright (c) 2005 Konstantin Shishkov
+
+The LGPL-2.1+ terms apply to those derived portions.

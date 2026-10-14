@@ -15,7 +15,7 @@ use symphonia_core::audio::Channels;
 use symphonia_core::codecs::audio::well_known::{
     CODEC_ID_ADPCM_G722, CODEC_ID_ADPCM_G726, CODEC_ID_ADPCM_G726LE, CODEC_ID_ADPCM_IMA_QT,
     CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_MS, CODEC_ID_ADPCM_YAMAHA, CODEC_ID_PCM_F32BE,
-    CODEC_ID_PCM_F32LE, CODEC_ID_PCM_F64BE, CODEC_ID_PCM_F64LE,
+    CODEC_ID_PCM_F32LE, CODEC_ID_PCM_F64BE, CODEC_ID_PCM_F64LE, CODEC_ID_TRUESPEECH,
 };
 use symphonia_core::codecs::audio::{AudioCodecId, AudioCodecParameters};
 use symphonia_core::errors::{Error, Result, decode_error, unsupported_error};
@@ -323,6 +323,16 @@ impl FormatAdpcm {
                     return decode_error("riff (adpcm_ima_qt): invalid block align");
                 }
                 PacketInfo::with_blocks(self.block_align, 64)
+            }
+            CODEC_ID_TRUESPEECH => {
+                // Mono; every 32-byte frame holds 240 samples. A block holds one or more frames.
+                if num_channels != 1 {
+                    return unsupported_error("riff (truespeech): only mono is supported");
+                }
+                if self.block_align == 0 || self.block_align % 32 != 0 {
+                    return decode_error("riff (truespeech): invalid block align");
+                }
+                PacketInfo::with_blocks(self.block_align, u64::from(self.block_align / 32) * 240)
             }
             _ => unimplemented!("incomplete new adpcm codec"),
         }

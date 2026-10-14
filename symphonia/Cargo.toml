@@ -52,6 +52,7 @@ opus = ["dep:symphonia-codec-opus"]
 pcm = ["dep:symphonia-codec-pcm"]
 speex = ["dep:symphonia-codec-speex"]
 truehd = ["dep:symphonia-codec-truehd"]
+truespeech = ["dep:symphonia-codec-truespeech"]
 aiff = ["dep:symphonia-format-riff", "symphonia-format-riff/aiff"]
 vorbis = ["dep:symphonia-codec-vorbis"]
 wav = ["dep:symphonia-format-riff", "symphonia-format-riff/wav"]
@@ -81,6 +82,7 @@ all-codecs = [
     "pcm",
     "speex",
     "truehd",
+    "truespeech",
     "vorbis",
     "wavpack",
 ]
@@ -177,6 +179,10 @@ workspace = true
 optional = true
 
 [dependencies.symphonia-codec-nellymoser]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-truespeech]
 workspace = true
 optional = true
 

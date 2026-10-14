@@ -59,6 +59,7 @@
 //! | MP3      | `mp3`, `mpa` | Yes     | No      |
 //! | Musepack | `musepack`   | Yes     | No      |
 //! | Nellymoser | `nellymoser` | No    | No      |
+//! | TrueSpeech | `truespeech` | No    | No      |
 //! | Opus     | `opus`       | Yes     | Yes     |
 //! | PCM      | `pcm`        | Yes     | Yes     |
 //! | Speex    | `speex`      | Yes     | No      |
@@ -161,6 +162,8 @@ pub mod default {
         pub use symphonia_codec_dsd::DsdDecoder;
         #[cfg(feature = "nellymoser")]
         pub use symphonia_codec_nellymoser::NellymoserDecoder;
+        #[cfg(feature = "truespeech")]
+        pub use symphonia_codec_truespeech::TrueSpeechDecoder;
         #[cfg(feature = "opus")]
         pub use symphonia_codec_opus::OpusAudioDecoder;
         #[cfg(feature = "pcm")]
@@ -317,6 +320,9 @@ pub mod default {
 
         #[cfg(feature = "nellymoser")]
         registry.register_audio_decoder::<codecs::NellymoserDecoder>();
+
+        #[cfg(feature = "truespeech")]
+        registry.register_audio_decoder::<codecs::TrueSpeechDecoder>();
 
         #[cfg(feature = "pcm")]
         registry.register_audio_decoder::<codecs::PcmDecoder>();
