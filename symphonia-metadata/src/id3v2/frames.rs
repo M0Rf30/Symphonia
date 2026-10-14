@@ -314,7 +314,7 @@ lazy_static! {
             m.insert(b"GEOB", (read_geob_frame, None));
             m.insert(b"GRID", (read_grid_frame, None));
             m.insert(b"IPLS", (read_tipl_frame, None));
-            m.insert(b"LINK", (skip_frame, None));
+            m.insert(b"LINK", (read_raw_frame, None));
             m.insert(b"MCDI", (read_mcdi_frame, None));
             m.insert(b"MLLT", (read_raw_frame, None)); // TODO: SeekIndex side-data?
             m.insert(b"OWNE", (read_owne_frame, None));

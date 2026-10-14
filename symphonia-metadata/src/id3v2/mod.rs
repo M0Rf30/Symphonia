@@ -1340,6 +1340,23 @@ mod tests {
         assert_eq!(titles(&tags), ["It\u{2019}s a \u{201c}test\u{201d}"]);
     }
 
+    /// "UTF-16 with BOM" text without a BOM is decoded using a guess of its byte order.
+    #[test]
+    fn verify_utf16_without_bom_guesses_byte_order() {
+        let le: Vec<u8> = "Tést".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let be: Vec<u8> = "Tést".encode_utf16().flat_map(u16::to_be_bytes).collect();
+
+        for text in [le, be] {
+            let mut body = vec![1u8];
+            body.extend_from_slice(&text);
+            let frames = frame_v23(b"TIT2", 0, &body);
+
+            let tags = read_tags(tag_bytes(3, &frames, false));
+
+            assert_eq!(titles(&tags), ["Tést"]);
+        }
+    }
+
     /// Bytes undefined in Windows-1252 decode to the replacement character.
     #[test]
     fn verify_latin1_undefined_windows_1252_byte() {

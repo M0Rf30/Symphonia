@@ -28,9 +28,11 @@ use symphonia_core::meta::{
 use symphonia_core::support_metadata;
 
 use lazy_static::lazy_static;
+use log::{debug, warn};
 use symphonia_core::util::text;
 
-use crate::utils::ape::ApeTagFlags;
+use crate::utils::ape::{ApeTagFlags, HEADER_LEN};
+use crate::utils::id3v1::decode_windows_1252_byte;
 use crate::utils::images::{ImageInfo, try_get_image_info, visual_from_image_data};
 use crate::utils::std_tag::*;
 
@@ -49,6 +51,7 @@ lazy_static! {
         m.insert("acoustid_fingerprint"        , parse_acoustid_fingerprint);
         m.insert("acoustid_id"                 , parse_acoustid_id);
         m.insert("album artist"                , parse_album_artist);
+        m.insert("albumartist"                 , parse_album_artist);
         m.insert("album"                       , parse_album);
         m.insert("albumartistsort"             , parse_sort_album_artist);
         m.insert("albumsort"                   , parse_sort_album);
@@ -67,6 +70,9 @@ lazy_static! {
         m.insert("copyright"                   , parse_copyright);
         // Disc Number or Disc Number/Total Discs
         m.insert("disc"                        , parse_disc_number);
+        m.insert("discnumber"                  , parse_disc_number);
+        m.insert("disctotal"                   , parse_disc_total);
+        m.insert("totaldiscs"                  , parse_disc_total);
         m.insert("djmixer"                     , parse_mix_dj);
         // EAN-13/UPC-A
         m.insert("ean/upc"                     , parse_ident_ean_upn);
@@ -76,9 +82,11 @@ lazy_static! {
         m.insert("engineer"                    , parse_engineer);
         m.insert("file"                        , parse_original_file);
         m.insert("genre"                       , parse_genre);
+        m.insert("grouping"                    , parse_grouping);
         m.insert("isbn"                        , parse_ident_isbn);
         m.insert("isrc"                        , parse_ident_isrc);
         m.insert("label"                       , parse_label);
+        m.insert("lc"                          , parse_label_code);
         m.insert("labelcode"                   , parse_label_code);
         m.insert("language"                    , parse_language);
         m.insert("lyricist"                    , parse_lyricist);
@@ -86,6 +94,7 @@ lazy_static! {
         m.insert("media"                       , parse_media_format);
         m.insert("mixer"                       , parse_mix_engineer);
         m.insert("mood"                        , parse_mood);
+        m.insert("mixartist"                   , parse_remixer);
         m.insert("movement"                    , parse_movement_total);
         m.insert("movementname"                , parse_movement_name);
         m.insert("movementtotal"               , parse_movement_total);
@@ -106,20 +115,27 @@ lazy_static! {
         m.insert("musicbrainz_trmid"           , parse_musicbrainz_trm_id);
         m.insert("musicbrainz_workid"          , parse_musicbrainz_work_id);
         m.insert("original artist"             , parse_original_artist);
+        m.insert("performer"                   , parse_performer);
+        m.insert("producer"                    , parse_producer);
         m.insert("originalyear"                , parse_original_release_year);
         m.insert("publisher"                   , parse_label);
         m.insert("record date"                 , parse_recording_date);
         m.insert("record location"             , parse_recording_location);
         m.insert("related"                     , parse_url);
+        m.insert("remixer"                     , parse_remixer);
         m.insert("replaygain_album_gain"       , parse_replaygain_album_gain);
         m.insert("replaygain_album_peak"       , parse_replaygain_album_peak);
         m.insert("replaygain_track_gain"       , parse_replaygain_track_gain);
         m.insert("replaygain_track_peak"       , parse_replaygain_track_peak);
+        m.insert("weblink"                     , parse_url);
         m.insert("subtitle"                    , parse_track_subtitle);
         m.insert("title"                       , parse_track_title);
         m.insert("titlesort"                   , parse_sort_track_title);
         // Track Number or Track Number/Total Tracks
         m.insert("track"                       , parse_track_number);
+        m.insert("tracknumber"                 , parse_track_number);
+        m.insert("tracktotal"                  , parse_track_total);
+        m.insert("totaltracks"                 , parse_track_total);
         m.insert("writer"                      , parse_writer);
         m.insert("year"                        , parse_release_date);
         // TODO: Debut Album
@@ -187,6 +203,13 @@ struct ApeHeader {
 }
 
 impl ApeHeader {
+    /// The length of the items of the tag in bytes. `size` is the length of the whole tag: the
+    /// items, the footer, and the header if the tag has one.
+    fn items_len(&self) -> u64 {
+        let header_len = if self.has_header { HEADER_LEN } else { 0 };
+        self.size.saturating_sub(header_len).saturating_sub(HEADER_LEN)
+    }
+
     /// Read and verify the APE tag preamble and version.
     fn read_identity<B: ReadBytes>(reader: &mut B) -> Result<ApeVersion> {
         let mut preamble = [0; 8];
@@ -251,8 +274,12 @@ struct ApeItem {
 }
 
 impl ApeItem {
-    /// Try to read and return an APE tag item.
-    fn read<B: ReadBytes>(reader: &mut B, header: &ApeHeader) -> Result<ApeItem> {
+    /// Try to read and return an APE tag item. `None` is returned if the item was skipped.
+    fn read<B: ReadBytes>(
+        reader: &mut B,
+        header: &ApeHeader,
+        items_end: u64,
+    ) -> Result<Option<ApeItem>> {
         // The length of the value in bytes.
         let len = reader.read_u32()? as usize;
 
@@ -269,6 +296,11 @@ impl ApeItem {
         // Read the null-terminated key.
         let key = read_key(reader)?;
 
+        // The value must be within the items of the tag.
+        if len as u64 > items_end.saturating_sub(reader.pos()) {
+            return decode_error("ape: item value exceeds the tag");
+        }
+
         // Read the value.
         let value = match (flags >> 1) & 0x3 {
             // UTF-8
@@ -277,12 +309,16 @@ impl ApeItem {
             1 => ApeItemValue::Binary(reader.read_boxed_slice_exact(len)?),
             // Locator
             2 => ApeItemValue::Locator(read_utf8_value(reader, len)?),
-            // Reserved
-            3 => return decode_error("ape: reserved item value type"),
+            // Reserved. The length of the value is known, so skip the item and keep reading the tag.
+            3 => {
+                reader.ignore_bytes(len as u64)?;
+                warn!("ape: skipping item '{key}' with a reserved value type");
+                return Ok(None);
+            }
             _ => unreachable!(),
         };
 
-        Ok(ApeItem { key, value })
+        Ok(Some(ApeItem { key, value }))
     }
 }
 
@@ -365,6 +401,9 @@ impl MetadataReader for ApeReader<'_> {
 
         // If the header was actually a footer. Seek to the start of the APE tag.
         if !header.is_header {
+            // The position after the footer is the end of the tag.
+            let tag_end = self.reader.pos();
+
             // The current position is the first byte after the APE footer. After the seek, the
             // reader will be at the header (if the tag contains one), or the first item.
             self.reader.seek(SeekFrom::Current(-(header.size as i64)))?;
@@ -372,23 +411,54 @@ impl MetadataReader for ApeReader<'_> {
             // If the APE tag contains a header, read it and do some verification checks. All header
             // and footer fields should match other than the `is_header` flag.
             if header.has_header {
-                let real_header = ApeHeader::read(&mut self.reader)?;
+                match ApeHeader::read(&mut self.reader) {
+                    Ok(real_header) => {
+                        if header.has_footer != real_header.has_footer
+                            || header.has_header != real_header.has_header
+                            || header.is_header == real_header.is_header
+                            || header.num_items != real_header.num_items
+                            || header.size != real_header.size
+                            || header.version != real_header.version
+                        {
+                            return decode_error("ape: header and footer mismatch");
+                        }
+                    }
+                    Err(_) => {
+                        // Some writers set the header flag without writing a header. The size
+                        // does not include the header, so the items are still found by seeking
+                        // back from the end of the tag.
+                        warn!("ape: the footer indicates a header, but there is none");
 
-                if header.has_footer != real_header.has_footer
-                    || header.has_header != real_header.has_header
-                    || header.is_header == real_header.is_header
-                    || header.num_items != real_header.num_items
-                    || header.size != real_header.size
-                    || header.version != real_header.version
-                {
-                    return decode_error("ape: header and footer mismatch");
+                        let items_start = tag_end.saturating_sub(header.size - HEADER_LEN);
+                        self.reader.seek(SeekFrom::Start(items_start))?;
+                    }
                 }
             }
         }
 
-        // Read APE tag items.
+        // Read APE tag items. The items are bounded by the size of the tag. The item count is not
+        // trusted: a count that is too large would otherwise read the footer, or the audio data
+        // that follows the tag, as items.
+        let items_end = self.reader.pos().saturating_add(header.items_len());
+
         for _ in 0..header.num_items {
-            let item = ApeItem::read(&mut self.reader, &header)?;
+            // The smallest item is the value length, flags, a 2 character key, and the key's
+            // null-terminator.
+            if items_end.saturating_sub(self.reader.pos()) < MIN_ITEM_LEN {
+                warn!("ape: the tag has fewer items than indicated");
+                break;
+            }
+
+            let item = match ApeItem::read(&mut self.reader, &header, items_end) {
+                Ok(Some(item)) => item,
+                Ok(None) => continue,
+                Err(err) => {
+                    // The structure of the remaining items is lost, but the items that were read
+                    // are good.
+                    warn!("ape: stopped reading items: {err}");
+                    break;
+                }
+            };
 
             let key_lower = item.key.to_ascii_lowercase();
 
@@ -447,20 +517,32 @@ impl MetadataReader for ApeReader<'_> {
             builder.add_mapped_tags(RawTag::new(item.key, value), &APE_TAG_MAP);
         }
 
-        // Read the footer.
-        let footer = ApeHeader::read(&mut self.reader)?;
+        // Skip over any unread items so the reader is positioned at the footer.
+        let pos = self.reader.pos();
 
+        if pos < items_end {
+            self.reader.ignore_bytes(items_end - pos)?;
+        }
+
+        // Read the footer. All the items have been read at this point, so a missing or
+        // inconsistent footer must not discard them.
+        //
         // If the initial header was the actual header, then this checks the entire APE tag was
         // read, and the footer matches the header. If the initial header was actually the footer,
         // or there was no header, then this only checks the entire tag APE tag was read. However,
         // if there was a header, then the header and footer was checked to match earlier above.
-        if header.has_footer != footer.has_footer
-            || header.has_header != footer.has_header
-            || header.num_items != footer.num_items
-            || header.size != footer.size
-            || header.version != footer.version
-        {
-            return decode_error("ape: header and footer mismatch");
+        match ApeHeader::read(&mut self.reader) {
+            Ok(footer)
+                if header.has_footer != footer.has_footer
+                    || header.has_header != footer.has_header
+                    || header.num_items != footer.num_items
+                    || header.size != footer.size
+                    || header.version != footer.version =>
+            {
+                warn!("ape: header and footer mismatch");
+            }
+            Ok(_) => (),
+            Err(err) => warn!("ape: failed to read the footer: {err}"),
         }
 
         Ok(MetadataBuffer { revision: builder.build(), side_data: Vec::new() })
@@ -473,6 +555,9 @@ impl MetadataReader for ApeReader<'_> {
         self.reader
     }
 }
+
+/// The minimum length of an item in bytes.
+const MIN_ITEM_LEN: u64 = 4 + 4 + 2 + 1;
 
 /// The maximum length of an item key in bytes.
 const MAX_KEY_LEN: usize = 255;
@@ -505,11 +590,16 @@ fn read_key<B: ReadBytes>(reader: &mut B) -> Result<String> {
     Ok(key)
 }
 
+/// Read a text value of `len` bytes. Items are specified to be UTF-8, but APEv1 does not specify
+/// an encoding and many taggers write the system's ANSI code page. A value that is not valid UTF-8
+/// is therefore decoded as Windows-1252 rather than discarding the whole tag.
 fn read_utf8_value<B: ReadBytes>(reader: &mut B, len: usize) -> Result<String> {
-    match String::from_utf8(reader.read_boxed_slice_exact(len)?.into_vec()) {
-        Ok(value) => Ok(value),
-        Err(_) => decode_error("ape: item value is valid not utf-8"),
-    }
+    let buf = reader.read_boxed_slice_exact(len)?.into_vec();
+
+    Ok(String::from_utf8(buf).unwrap_or_else(|err| {
+        debug!("ape: item value is not valid utf-8, decoding as windows-1252");
+        err.as_bytes().iter().copied().map(decode_windows_1252_byte).collect()
+    }))
 }
 
 fn try_parse_image_data(buf: Box<[u8]>, tags: &mut Vec<Tag>) -> (Box<[u8]>, Option<ImageInfo>) {
@@ -561,10 +651,116 @@ fn try_parse_image_data(buf: Box<[u8]>, tags: &mut Vec<Tag>) -> (Box<[u8]>, Opti
 
 #[cfg(test)]
 mod tests {
-    use symphonia_core::errors::Error;
-    use symphonia_core::io::{BufReader, FiniteStream};
+    use std::io::{Cursor, Seek};
 
-    use super::{MAX_KEY_LEN, read_key};
+    use symphonia_core::errors::Error;
+    use symphonia_core::io::{BufReader, FiniteStream, MediaSourceStream};
+    use symphonia_core::meta::{MetadataOptions, MetadataReader, StandardTag, Tag};
+
+    use super::{ApeReader, MAX_KEY_LEN, read_key};
+
+    fn item(key: &str, flags: u32, value: &[u8]) -> Vec<u8> {
+        let mut b = (value.len() as u32).to_le_bytes().to_vec();
+        b.extend_from_slice(&flags.to_le_bytes());
+        b.extend_from_slice(key.as_bytes());
+        b.push(0);
+        b.extend_from_slice(value);
+        b
+    }
+
+    /// An APEv2 tag with a header and a footer.
+    fn tag(items: &[Vec<u8>]) -> Vec<u8> {
+        let body: Vec<u8> = items.concat();
+        let size = (body.len() + 32) as u32;
+        let block = |flags: u32| {
+            let mut b = b"APETAGEX".to_vec();
+            b.extend_from_slice(&2000u32.to_le_bytes());
+            b.extend_from_slice(&size.to_le_bytes());
+            b.extend_from_slice(&(items.len() as u32).to_le_bytes());
+            b.extend_from_slice(&flags.to_le_bytes());
+            b.extend_from_slice(&[0; 8]);
+            b
+        };
+
+        [block(0xa000_0000), body, block(0x8000_0000)].concat()
+    }
+
+    fn read_tags(tag: Vec<u8>) -> Vec<Tag> {
+        let mss = MediaSourceStream::new(Box::new(Cursor::new(tag)), Default::default());
+        ApeReader::try_new(mss, MetadataOptions::default())
+            .unwrap()
+            .read_all()
+            .unwrap()
+            .revision
+            .media
+            .tags
+    }
+
+    /// A footer-only APEv2 tag (the footer is the only block) with the given item count and flags.
+    fn footer_only_tag(items: &[Vec<u8>], count: u32, flags: u32) -> Vec<u8> {
+        let body: Vec<u8> = items.concat();
+        let mut b = body.clone();
+        b.extend_from_slice(b"APETAGEX");
+        b.extend_from_slice(&2000u32.to_le_bytes());
+        b.extend_from_slice(&((body.len() + 32) as u32).to_le_bytes());
+        b.extend_from_slice(&count.to_le_bytes());
+        b.extend_from_slice(&flags.to_le_bytes());
+        b.extend_from_slice(&[0; 8]);
+
+        // Place the tag after some stream data.
+        [vec![0x55; 64], b].concat()
+    }
+
+    fn read_tags_at_end(stream: Vec<u8>) -> Vec<Tag> {
+        let end = stream.len() as u64;
+        let mut mss = MediaSourceStream::new(Box::new(Cursor::new(stream)), Default::default());
+        mss.seek(std::io::SeekFrom::Start(end - 32)).unwrap();
+        ApeReader::try_new(mss, MetadataOptions::default())
+            .unwrap()
+            .read_all()
+            .unwrap()
+            .revision
+            .media
+            .tags
+    }
+
+    /// An item count that is larger than the number of items in the tag does not discard the
+    /// items, nor read the stream data before the tag as items.
+    #[test]
+    fn verify_item_count_larger_than_items_in_tag() {
+        let items = [item("Title", 0, b"x")];
+        let tags = read_tags_at_end(footer_only_tag(&items, u32::MAX, 0));
+
+        assert_eq!(tags.len(), 1);
+    }
+
+    /// A footer that has the header flag but is not preceded by a header still yields the items.
+    #[test]
+    fn verify_header_flag_without_header() {
+        let items = [item("Title", 0, b"x")];
+        let tags = read_tags_at_end(footer_only_tag(&items, 1, 0x8000_0000));
+
+        assert_eq!(tags.len(), 1);
+    }
+
+    /// A value that is not valid UTF-8 is decoded as Windows-1252, and a reserved item type is
+    /// skipped, without discarding the other items of the tag.
+    #[test]
+    fn verify_non_utf8_value_and_reserved_item_type_do_not_discard_tag() {
+        let tags = read_tags(tag(&[
+            item("Title", 0, b"Caf\xe9"),
+            item("Junk", 6, b"abc"),
+            item("Albumartist", 0, b"Artist"),
+        ]));
+
+        assert!(tags.iter().any(|t| {
+            matches!(&t.std, Some(StandardTag::TrackTitle(v)) if v.as_str() == "Caf\u{e9}")
+        }));
+        assert!(tags.iter().any(|t| {
+            matches!(&t.std, Some(StandardTag::AlbumArtist(v)) if v.as_str() == "Artist")
+        }));
+        assert_eq!(tags.len(), 2);
+    }
 
     #[test]
     fn verify_read_key_max_length() {

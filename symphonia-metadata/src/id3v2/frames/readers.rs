@@ -113,12 +113,36 @@ fn decode_string_buf(buf: &[u8], encoding: Encoding) -> String {
             // Decode as UTF-8.
             String::from_utf8_lossy(buf).into_owned()
         }
+        Encoding::Utf16Bom if is_bomless_utf16le(buf) => {
+            // Decode as UTF-16LE, the byte order of the writers that omit the BOM.
+            text::decode_utf16le_lossy(buf).collect()
+        }
         Encoding::Utf16Bom | Encoding::Utf16Be => {
             // Decode as UTF-16. If a byte-order-mark is present, it will be respected. Otherwise,
             // big-endian is assumed.
             text::decode_utf16be_lossy(buf).collect()
         }
     }
+}
+
+/// Returns `true` if `buf`, the text of a frame with the "UTF-16 with BOM" encoding, has no BOM
+/// and is most likely little-endian.
+///
+/// The specification requires a BOM for this encoding, but some writers (that use the native byte
+/// order of Windows) omit it. Without a BOM, the byte order is guessed from the position of the
+/// zero bytes: the high byte of the Latin characters of a string is 0x00, so it is at the odd
+/// offsets of little-endian text, and the even offsets of big-endian text. Big-endian is assumed
+/// if the text is not conclusive.
+fn is_bomless_utf16le(buf: &[u8]) -> bool {
+    if matches!(buf.first_chunk::<2>(), Some([0xfe, 0xff] | [0xff, 0xfe])) {
+        return false;
+    }
+
+    let (even, odd) = buf.chunks_exact(2).fold((0usize, 0usize), |(even, odd), pair| {
+        (even + usize::from(pair[0] == 0), odd + usize::from(pair[1] == 0))
+    });
+
+    odd > even
 }
 
 fn decode_id3v2_iso8859_1(buf: &[u8]) -> impl Iterator<Item = char> + '_ {
