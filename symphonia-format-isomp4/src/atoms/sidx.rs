@@ -37,7 +37,10 @@ pub struct SidxAtom {
     pub earliest_pts: u64,
     pub first_offset: u64,
     pub references: Vec<SidxReference>,
-    pub total_duration: u64,
+    /// The duration of the media subsegments this index references directly. References to other
+    /// segment indexes are excluded: their duration is that of the referenced index's
+    /// subsegments (ISO/IEC 14496-12, 8.16.3), so summing every index counts them only once.
+    pub media_duration: u64,
 }
 
 impl Atom for SidxAtom {
@@ -67,15 +70,11 @@ impl Atom for SidxAtom {
         let reference_count = it.read_u16()?;
 
         let mut references = Vec::new();
-        let mut total_duration = 0u64;
+        let mut media_duration = 0u64;
 
         for _ in 0..reference_count {
             let reference = it.read_u32()?;
             let subsegment_duration = it.read_u32()?;
-
-            total_duration = total_duration
-                .checked_add(u64::from(subsegment_duration))
-                .ok_or(Error::DecodeError("isomp4 (sidx): total duration overflow"))?;
 
             let reference_type = match (reference & 0x8000_0000) != 0 {
                 false => ReferenceType::Media,
@@ -86,6 +85,10 @@ impl Atom for SidxAtom {
 
             // Ignore SAP
             let _ = it.read_u32()?;
+            // At most 65535 32-bit durations: the sum cannot overflow.
+            if matches!(reference_type, ReferenceType::Media) {
+                media_duration += u64::from(subsegment_duration);
+            }
 
             references.push(SidxReference { reference_type, reference_size, subsegment_duration });
         }
@@ -96,7 +99,7 @@ impl Atom for SidxAtom {
             earliest_pts,
             first_offset,
             references,
-            total_duration,
+            media_duration,
         })
     }
 }
@@ -107,14 +110,20 @@ mod tests {
     use std::io::Cursor;
     use symphonia_core::io::{MediaSourceStream, MediaSourceStreamOptions};
 
-    fn read_sidx_v1(first_offset: u64) -> Result<SidxAtom> {
+    /// Reads a version 1 `sidx` with `(is_segment_index, duration)` references.
+    fn read_sidx_v1(first_offset: u64, refs: &[(bool, u32)]) -> Result<SidxAtom> {
         let mut body = vec![1, 0, 0, 0]; // Version and flags.
         body.extend_from_slice(&1u32.to_be_bytes()); // Reference ID.
         body.extend_from_slice(&1000u32.to_be_bytes()); // Timescale.
         body.extend_from_slice(&0u64.to_be_bytes()); // Earliest presentation time.
         body.extend_from_slice(&first_offset.to_be_bytes());
         body.extend_from_slice(&0u16.to_be_bytes()); // Reserved.
-        body.extend_from_slice(&0u16.to_be_bytes()); // Reference count.
+        body.extend_from_slice(&(refs.len() as u16).to_be_bytes()); // Reference count.
+        for &(is_index, duration) in refs {
+            body.extend_from_slice(&(u32::from(is_index) << 31 | 100).to_be_bytes());
+            body.extend_from_slice(&duration.to_be_bytes());
+            body.extend_from_slice(&0u32.to_be_bytes()); // SAP.
+        }
 
         let mut data = Vec::with_capacity(8 + body.len());
         data.extend_from_slice(&(body.len() as u32 + 8).to_be_bytes());
@@ -133,15 +142,27 @@ mod tests {
 
     #[test]
     fn sidx_first_offset_overflow_is_an_error() {
-        assert!(read_sidx_v1(u64::MAX).is_err());
+        assert!(read_sidx_v1(u64::MAX, &[]).is_err());
     }
 
     #[test]
     fn sidx_first_offset_is_relative_to_the_end_of_the_atom() {
-        let Ok(sidx) = read_sidx_v1(16)
+        let Ok(sidx) = read_sidx_v1(16, &[])
         else {
             panic!("valid sidx");
         };
         assert_eq!(sidx.first_offset, 40 + 16);
+    }
+
+    /// A daisy-chained index: two media subsegments, then a reference to the next index whose
+    /// duration covers the rest of the stream. Only the media subsegments count.
+    #[test]
+    fn sidx_media_duration_excludes_index_references() {
+        let Ok(sidx) = read_sidx_v1(0, &[(false, 1000), (false, 2000), (true, 9000)])
+        else {
+            panic!("valid sidx");
+        };
+        assert_eq!(sidx.references.len(), 3);
+        assert_eq!(sidx.media_duration, 3000);
     }
 }

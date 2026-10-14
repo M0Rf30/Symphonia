@@ -697,7 +697,7 @@ struct SampleDataInfo {
 }
 
 /// A representation of time, defining a duration relative to a specific frequency
-#[derive(Debug)]
+#[derive(Copy, Clone, Debug)]
 pub struct TimeSpan {
     pub timescale: NonZero<u32>,
     pub duration: Duration,
@@ -760,8 +760,8 @@ impl<'s> IsoMp4Reader<'s> {
         // Parse all atoms if the stream is seekable, otherwise parse all atoms up-to the mdat atom.
         let mut it = AtomIterator::new(mss, total_len);
         // Maps each track id to its cumulative duration (TimeSpan) as parsed from the segment
-        // index.
-        let mut sidx_timespans: HashMap<u32, TimeSpan> = HashMap::new();
+        // index, or None if the indexes of the track are inconsistent.
+        let mut sidx_timespans: HashMap<u32, Option<TimeSpan>> = HashMap::new();
 
         while let Some(header) = it.next_header()? {
             // Top-level atoms.
@@ -775,23 +775,26 @@ impl<'s> IsoMp4Reader<'s> {
                 AtomType::SegmentIndex => {
                     let sidx = it.read_atom::<SidxAtom>()?;
 
-                    // Calculate the total duration, per track, from the segment index atoms.
+                    // Calculate the total duration, per track, from the segment index atoms. The
+                    // segment index is not authoritative: if it is inconsistent, the duration is
+                    // taken from the other atoms instead of failing.
                     let sidx_timespan = sidx_timespans
                         .entry(sidx.reference_id)
-                        .or_insert(TimeSpan::new(sidx.timescale, Duration::ZERO));
+                        .or_insert(Some(TimeSpan::new(sidx.timescale, Duration::ZERO)));
 
-                    if sidx_timespan.timescale != sidx.timescale {
-                        return unsupported_error(
-                            "isomp4: different sidx timescale for the same track",
-                        );
+                    let next = sidx_timespan.and_then(|span| {
+                        let duration =
+                            span.duration.checked_add(Duration::new(sidx.media_duration));
+                        duration
+                            .filter(|_| span.timescale == sidx.timescale)
+                            .map(|duration| TimeSpan::new(span.timescale, duration))
+                    });
+
+                    if next.is_none() && sidx_timespan.is_some() {
+                        warn!("isomp4: inconsistent sidx for track {}", sidx.reference_id);
                     }
 
-                    // Don't overflow.
-                    // TODO: Duration should maybe be None since SIDX is non-authoritative.
-                    sidx_timespan.duration = sidx_timespan
-                        .duration
-                        .checked_add(Duration::new(sidx.total_duration))
-                        .ok_or(Error::DecodeError("isomp4: sidx total duration overflow"))?
+                    *sidx_timespan = next;
                 }
                 AtomType::MediaData | AtomType::MovieFragment => {
                     // The mdat atom contains the codec bitstream data. For fragmented streams, a
@@ -917,7 +920,7 @@ impl<'s> IsoMp4Reader<'s> {
                 // If fragmented, prefer the duration from the sidx, if it is provided. Otherwise,
                 // fallback to the mdhd, and the fragment duration of the mvex. These durations are
                 // usually 0 (unknown) for a stream that is written as it is produced.
-                match sidx_timespans.get(&trak.tkhd.id) {
+                match sidx_timespans.get(&trak.tkhd.id).copied().flatten() {
                     Some(sidx_tspan) => (sidx_tspan.timescale, Some(sidx_tspan.duration)),
                     None => {
                         let mehd_duration = moov
