@@ -1157,6 +1157,23 @@ pub mod sub_fields {
     pub const ENCR_ENCRYPTION_DATA: &str = "ENCRYPTION_DATA";
     pub const ENCR_OWNER: &str = "OWNER";
 
+    // EQU2 frames
+
+    pub const EQU2_INTERPOLATION_METHOD: &str = "INTERPOLATION_METHOD";
+    pub const EQU2_FREQUENCIES_HZ: &str = "FREQUENCIES_HZ";
+    pub const EQU2_ADJUSTMENTS_DB: &str = "ADJUSTMENTS_DB";
+
+    // ETCO and SYTC frames
+
+    pub const TIMING_TIMESTAMP_FORMAT: &str = "TIMESTAMP_FORMAT";
+    pub const TIMING_TIMESTAMPS: &str = "TIMESTAMPS";
+
+    // SYLT frames
+
+    pub const SYLT_LANGUAGE: &str = "LANGUAGE";
+    pub const SYLT_CONTENT_TYPE: &str = "CONTENT_TYPE";
+    pub const SYLT_DESCRIPTION: &str = "DESCRIPTION";
+
     // GEOB frames
 
     pub const GEOB_DESCRIPTION: &str = "DESCRIPTION";

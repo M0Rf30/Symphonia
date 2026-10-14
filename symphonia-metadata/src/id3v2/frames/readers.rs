@@ -480,6 +480,7 @@ pub fn read_comm_frame(mut reader: BufReader<'_>, frame: &FrameInfo<'_>) -> Resu
     let encoding = read_encoding(&mut reader)?;
 
     let mut sub_fields = Vec::new();
+    let mut is_itunnorm = false;
 
     // The next three bytes are the language.
     if let Some(lang) = read_lang_code(&mut reader)? {
@@ -488,17 +489,81 @@ pub fn read_comm_frame(mut reader: BufReader<'_>, frame: &FrameInfo<'_>) -> Resu
 
     // Optional content description.
     if let Some(desc) = read_string_ignore_empty(&mut reader, encoding)? {
+        // A description of "iTunNORM" means the comment contains iTunes normalization data.
+        is_itunnorm = desc == "iTunNORM";
         sub_fields.push(RawTagSubField::new(COMM_SHORT_DESCRIPTION, desc));
-        // TODO: A description of "iTunNORM" means the comment contains iTunes normalization data.
     }
 
     // The lyrics.
     let text = read_string(&mut reader, encoding)?;
 
+    if is_itunnorm {
+        return Ok(map_itunnorm(frame, text, sub_fields));
+    }
+
     // Create the tag.
     let raw = RawTag::new_with_sub_fields(frame.id, text, sub_fields.into_boxed_slice());
 
     Ok(map_raw_tag(raw, Some(parse_comment)))
+}
+
+/// Maps an `iTunNORM` comment (iTunes Sound Check data) to a track gain and peak.
+///
+/// The comment is 10 space-separated 8-digit hexadecimal words (see
+/// <https://id3.org/iTunes%20Normalization%20settings>). Words 0-1 are the left/right volume
+/// adjustment relative to 1/1000 W, words 2-3 the same relative to 1/2500 W, and words 6-7 the
+/// peak sample value (up to 32768). iTunes uses the largest of words 0-3 (words 2-3 rebased to
+/// 1/1000 W) to adjust the track: `gain_dB = -10 * log10(max / 1000)`.
+///
+/// The comment itself is not a user comment, so it is only kept as an unmapped raw tag. If it can
+/// not be parsed, only the raw tag is returned.
+fn map_itunnorm(
+    frame: &FrameInfo<'_>,
+    text: String,
+    sub_fields: Vec<RawTagSubField>,
+) -> FrameResult {
+    let words: Option<Vec<u32>> = text
+        .split_ascii_whitespace()
+        .map(|w| if w.len() == 8 { u32::from_str_radix(w, 16).ok() } else { None })
+        .collect();
+
+    let raw = Tag::new(RawTag::new_with_sub_fields(frame.id, text, sub_fields.into_boxed_slice()));
+
+    let words = match words {
+        Some(words) if words.len() == 10 => words,
+        _ => return FrameResult::Tag(raw),
+    };
+
+    let mut tags: SmallVec<[Tag; 2]> = SmallVec::new();
+    tags.push(raw);
+
+    let max_a = f64::from(words[0].max(words[1]));
+    // Rebase 1/2500 W values to 1/1000 W: -10*log10(v/2500) gain equals a 1000-based value of
+    // v / 2.5.
+    let max_b = f64::from(words[2].max(words[3])) / 2.5;
+    let max = max_a.max(max_b);
+
+    if max > 0.0 {
+        let gain = format!("{:.2} dB", -10.0 * (max / 1000.0).log10());
+        tags.push(Tag::new_from_parts(
+            "REPLAYGAIN_TRACK_GAIN",
+            gain.clone(),
+            Some(StandardTag::ReplayGainTrackGain(Arc::new(gain))),
+        ));
+    }
+
+    let peak_word = words[6].max(words[7]);
+
+    if peak_word > 0 {
+        let peak = format!("{:.6}", f64::from(peak_word) / 32768.0);
+        tags.push(Tag::new_from_parts(
+            "REPLAYGAIN_TRACK_PEAK",
+            peak.clone(),
+            Some(StandardTag::ReplayGainTrackPeak(Arc::new(peak))),
+        ));
+    }
+
+    FrameResult::MultipleTags(tags)
 }
 
 /// Reads a `COMR` (commercial) frame.
@@ -706,15 +771,157 @@ pub fn read_grid_frame(mut reader: BufReader<'_>, frame: &FrameInfo<'_>) -> Resu
 
 /// Reads a `MCDI` (music CD identifier) frame.
 pub fn read_mcdi_frame(mut reader: BufReader<'_>, frame: &FrameInfo<'_>) -> Result<FrameResult> {
-    // The entire frame is a binary dump of a CD-DA TOC.
-    let buf = reader.read_buf_bytes_ref(reader.byte_len() as usize)?;
+    // The entire frame is a binary dump of a CD-DA TOC (id3v2.4 section 4.5: "the binary dump of
+    // a CD-DA table of contents").
+    let buf = reader.read_buf_bytes_available_ref();
 
-    // TODO: Parse binary MCDI into hex-string based format as specified for the StandardTag.
+    // The standard tag is the uppercase hexadecimal encoding of the binary TOC. The raw value
+    // retains the original binary data.
+    let mut hex = String::with_capacity(buf.len() * 2);
+    for byte in buf {
+        hex.push_str(&format!("{byte:02X}"));
+    }
 
-    // Create the tag.
-    let tag = Tag::new_from_parts(frame.id, buf, None);
+    let std = if hex.is_empty() { None } else { Some(StandardTag::CdToc(Arc::new(hex))) };
 
-    Ok(FrameResult::Tag(tag))
+    Ok(FrameResult::Tag(Tag::new_from_parts(frame.id, buf, std)))
+}
+
+/// Reads a timestamp format byte. Valid values are 1 (MPEG frames) and 2 (milliseconds).
+fn read_timestamp_format(reader: &mut BufReader<'_>) -> Result<u8> {
+    let format = reader.read_u8()?;
+
+    if format != 1 && format != 2 {
+        return decode_error("id3v2: invalid timestamp format");
+    }
+
+    Ok(format)
+}
+
+/// Reads a `SYLT` (synchronised lyrics/text) frame.
+///
+/// The value is the list of text segments. The timestamp of each segment is in the `TIMESTAMPS`
+/// sub-field at the same index.
+pub fn read_sylt_frame(mut reader: BufReader<'_>, frame: &FrameInfo<'_>) -> Result<FrameResult> {
+    let encoding = read_encoding(&mut reader)?;
+
+    let mut sub_fields = Vec::new();
+
+    if let Some(lang) = read_lang_code(&mut reader)? {
+        sub_fields.push(RawTagSubField::new(SYLT_LANGUAGE, lang));
+    }
+
+    sub_fields
+        .push(RawTagSubField::new(TIMING_TIMESTAMP_FORMAT, read_timestamp_format(&mut reader)?));
+    // 0: other, 1: lyrics, 2: text transcription, 3: movement/part name, 4: events, 5: chord,
+    // 6: trivia/pop-up information, 7: web page URLs, 8: image URLs.
+    sub_fields.push(RawTagSubField::new(SYLT_CONTENT_TYPE, reader.read_u8()?));
+
+    if let Some(desc) = read_string_ignore_empty(&mut reader, encoding)? {
+        sub_fields.push(RawTagSubField::new(SYLT_DESCRIPTION, desc));
+    }
+
+    let mut texts = Vec::new();
+    let mut times = Vec::new();
+
+    while reader.bytes_available() > 0 {
+        texts.push(read_string(&mut reader, encoding)?);
+        times.push(reader.read_be_u32()?.to_string());
+    }
+
+    sub_fields.push(RawTagSubField::new(TIMING_TIMESTAMPS, times));
+
+    let raw = RawTag::new_with_sub_fields(frame.id, texts, sub_fields.into_boxed_slice());
+
+    Ok(FrameResult::Tag(Tag::new(raw)))
+}
+
+/// Reads an `ETCO` (event timing codes) frame.
+///
+/// The value is the list of event types as decimal strings. The timestamp of each event is in the
+/// `TIMESTAMPS` sub-field at the same index.
+pub fn read_etco_frame(mut reader: BufReader<'_>, frame: &FrameInfo<'_>) -> Result<FrameResult> {
+    let format = read_timestamp_format(&mut reader)?;
+
+    let mut events = Vec::new();
+    let mut times = Vec::new();
+
+    while reader.bytes_available() > 0 {
+        events.push(reader.read_u8()?.to_string());
+        times.push(reader.read_be_u32()?.to_string());
+    }
+
+    let sub_fields = vec![
+        RawTagSubField::new(TIMING_TIMESTAMP_FORMAT, format),
+        RawTagSubField::new(TIMING_TIMESTAMPS, times),
+    ];
+
+    let raw = RawTag::new_with_sub_fields(frame.id, events, sub_fields.into_boxed_slice());
+
+    Ok(FrameResult::Tag(Tag::new(raw)))
+}
+
+/// Reads a `SYTC` (synchronised tempo codes) frame.
+///
+/// The value is the list of tempos (BPM) as decimal strings. A tempo byte of 0xff is followed by a
+/// second byte that is added to it. The timestamp of each tempo is in the `TIMESTAMPS` sub-field
+/// at the same index.
+pub fn read_sytc_frame(mut reader: BufReader<'_>, frame: &FrameInfo<'_>) -> Result<FrameResult> {
+    let format = read_timestamp_format(&mut reader)?;
+
+    let mut tempos = Vec::new();
+    let mut times = Vec::new();
+
+    while reader.bytes_available() > 0 {
+        let mut tempo = u16::from(reader.read_u8()?);
+
+        if tempo == 0xff {
+            tempo += u16::from(reader.read_u8()?);
+        }
+
+        tempos.push(tempo.to_string());
+        times.push(reader.read_be_u32()?.to_string());
+    }
+
+    let sub_fields = vec![
+        RawTagSubField::new(TIMING_TIMESTAMP_FORMAT, format),
+        RawTagSubField::new(TIMING_TIMESTAMPS, times),
+    ];
+
+    let raw = RawTag::new_with_sub_fields(frame.id, tempos, sub_fields.into_boxed_slice());
+
+    Ok(FrameResult::Tag(Tag::new(raw)))
+}
+
+/// Reads an `EQU2` (equalisation 2) frame.
+///
+/// The value is the identification string. The adjustment points are in the `FREQUENCIES_HZ`
+/// (stored in 1/2 Hz units) and `ADJUSTMENTS_DB` (stored in 1/512 dB units) sub-fields.
+pub fn read_equ2_frame(mut reader: BufReader<'_>, frame: &FrameInfo<'_>) -> Result<FrameResult> {
+    // 0: band, 1: linear interpolation.
+    let method = reader.read_u8()?;
+    let ident = read_string(&mut reader, Encoding::Iso8859_1)?;
+
+    let mut freqs = Vec::new();
+    let mut adjusts = Vec::new();
+
+    while reader.bytes_available() > 0 {
+        let freq = reader.read_be_u16()?;
+        let adjust = reader.read_be_u16()? as i16;
+
+        freqs.push((f64::from(freq) / 2.0).to_string());
+        adjusts.push((f64::from(adjust) / 512.0).to_string());
+    }
+
+    let sub_fields = vec![
+        RawTagSubField::new(EQU2_INTERPOLATION_METHOD, method),
+        RawTagSubField::new(EQU2_FREQUENCIES_HZ, freqs),
+        RawTagSubField::new(EQU2_ADJUSTMENTS_DB, adjusts),
+    ];
+
+    let raw = RawTag::new_with_sub_fields(frame.id, ident, sub_fields.into_boxed_slice());
+
+    Ok(FrameResult::Tag(Tag::new(raw)))
 }
 
 /// Reads a `OWNE` (terms of use) frame.

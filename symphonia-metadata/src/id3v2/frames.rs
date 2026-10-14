@@ -300,7 +300,7 @@ lazy_static! {
             let mut m: FrameReaderMap = HashMap::new();
             m.insert(b"AENC", (read_aenc_frame as FrameReader, None));
             m.insert(b"APIC", (read_apic_frame, None));
-            m.insert(b"ASPI", (read_raw_frame, None)); // TODO: SeekIndex side-data?
+            m.insert(b"ASPI", (read_raw_frame, None)); // Binary, intentionally not parsed.
             m.insert(b"ATXT", (read_atxt_frame, None));
             m.insert(b"CHAP", (read_chap_frame, None));
             m.insert(b"COMM", (read_comm_frame, None));
@@ -308,15 +308,15 @@ lazy_static! {
             m.insert(b"CRM_", (read_crm_frame, None)); // Pseudo-frame to support ID3v2.2 frame.
             m.insert(b"CTOC", (read_ctoc_frame, None));
             m.insert(b"ENCR", (read_encr_frame, None));
-            m.insert(b"EQU2", (read_raw_frame, None));
+            m.insert(b"EQU2", (read_equ2_frame, None));
             m.insert(b"EQUA", (read_raw_frame, None));
-            m.insert(b"ETCO", (read_raw_frame, None));
+            m.insert(b"ETCO", (read_etco_frame, None));
             m.insert(b"GEOB", (read_geob_frame, None));
             m.insert(b"GRID", (read_grid_frame, None));
             m.insert(b"IPLS", (read_tipl_frame, None));
             m.insert(b"LINK", (read_raw_frame, None));
             m.insert(b"MCDI", (read_mcdi_frame, None));
-            m.insert(b"MLLT", (read_raw_frame, None)); // TODO: SeekIndex side-data?
+            m.insert(b"MLLT", (read_raw_frame, None)); // Binary, intentionally not parsed.
             m.insert(b"OWNE", (read_owne_frame, None));
             m.insert(b"PCNT", (read_pcnt_frame, None));
             m.insert(b"POPM", (read_popm_frame, None));
@@ -328,8 +328,8 @@ lazy_static! {
             m.insert(b"RVRB", (read_raw_frame, None));
             m.insert(b"SEEK", (skip_frame, None));
             m.insert(b"SIGN", (read_sign_frame, None));
-            m.insert(b"SYLT", (read_raw_frame, None));
-            m.insert(b"SYTC", (read_raw_frame, None));
+            m.insert(b"SYLT", (read_sylt_frame, None));
+            m.insert(b"SYTC", (read_sytc_frame, None));
             m.insert(b"TALB", (read_text_frame, Some(parse_album)));
             m.insert(b"TBPM", (read_text_frame, Some(parse_bpm)));
             m.insert(b"TCMP", (read_text_frame, Some(parse_compilation)));

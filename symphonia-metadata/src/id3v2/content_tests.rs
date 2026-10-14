@@ -10,7 +10,7 @@
 use std::io::Cursor;
 
 use symphonia_core::io::{MediaSourceStream, MediaSourceStreamOptions};
-use symphonia_core::meta::{MetadataOptions, MetadataReader, StandardTag, Tag};
+use symphonia_core::meta::{MetadataOptions, MetadataReader, RawValue, StandardTag, Tag};
 
 use super::Id3v2Reader;
 use super::unsync::encode_synchsafe;
@@ -208,4 +208,187 @@ fn verify_rva2_replaygain() {
             .any(|t| matches!(t, StandardTag::ReplayGainAlbumGain(g) if g.as_str() == "1.00 dB"))
     );
     assert!(!tags.iter().any(|t| matches!(t, StandardTag::ReplayGainAlbumPeak(_))));
+}
+
+fn raw_tag<'a>(tags: &'a [Tag], key: &str) -> &'a Tag {
+    tags.iter().find(|t| t.raw.key == key).unwrap_or_else(|| panic!("no {key} tag"))
+}
+
+fn sub_field<'a>(tag: &'a Tag, name: &str) -> &'a RawValue {
+    &tag.raw
+        .sub_fields
+        .as_ref()
+        .and_then(|s| s.iter().find(|f| f.field == name))
+        .unwrap_or_else(|| panic!("no {name} sub-field"))
+        .value
+}
+
+fn strings(v: &RawValue) -> Vec<&str> {
+    match v {
+        RawValue::StringList(l) => l.iter().map(String::as_str).collect(),
+        RawValue::String(s) => vec![s.as_str()],
+        other => panic!("not a string value: {other:?}"),
+    }
+}
+
+#[test]
+fn verify_sylt_frame() {
+    let mut body = vec![0u8];
+    body.extend_from_slice(b"eng");
+    body.extend_from_slice(&[2, 1]);
+    body.extend_from_slice(b"desc\0");
+    body.extend_from_slice(b"Hel\0");
+    body.extend_from_slice(&1000u32.to_be_bytes());
+    body.extend_from_slice(b"lo\0");
+    body.extend_from_slice(&2500u32.to_be_bytes());
+
+    let tags = read_tags(tag(3, vec![frame_v3(b"SYLT", &body)]));
+    let t = raw_tag(&tags, "SYLT");
+    assert_eq!(strings(&t.raw.value), ["Hel", "lo"]);
+    assert_eq!(strings(sub_field(t, "TIMESTAMPS")), ["1000", "2500"]);
+    assert!(matches!(sub_field(t, "TIMESTAMP_FORMAT"), RawValue::UnsignedInt(2)));
+    assert!(matches!(sub_field(t, "CONTENT_TYPE"), RawValue::UnsignedInt(1)));
+    assert_eq!(strings(sub_field(t, "LANGUAGE")), ["eng"]);
+    assert_eq!(strings(sub_field(t, "DESCRIPTION")), ["desc"]);
+}
+
+#[test]
+fn verify_etco_frame() {
+    let mut body = vec![2u8, 0x02];
+    body.extend_from_slice(&0u32.to_be_bytes());
+    body.push(0x03);
+    body.extend_from_slice(&90_000u32.to_be_bytes());
+
+    let tags = read_tags(tag(3, vec![frame_v3(b"ETCO", &body)]));
+    let t = raw_tag(&tags, "ETCO");
+    assert_eq!(strings(&t.raw.value), ["2", "3"]);
+    assert_eq!(strings(sub_field(t, "TIMESTAMPS")), ["0", "90000"]);
+    assert!(matches!(sub_field(t, "TIMESTAMP_FORMAT"), RawValue::UnsignedInt(2)));
+}
+
+#[test]
+fn verify_sytc_frame() {
+    // Tempo 120 at frame 0, then 0xff + 45 = 300 at frame 100.
+    let mut body = vec![1u8, 120];
+    body.extend_from_slice(&0u32.to_be_bytes());
+    body.extend_from_slice(&[0xff, 45]);
+    body.extend_from_slice(&100u32.to_be_bytes());
+
+    let tags = read_tags(tag(3, vec![frame_v3(b"SYTC", &body)]));
+    let t = raw_tag(&tags, "SYTC");
+    assert_eq!(strings(&t.raw.value), ["120", "300"]);
+    assert_eq!(strings(sub_field(t, "TIMESTAMPS")), ["0", "100"]);
+    assert!(matches!(sub_field(t, "TIMESTAMP_FORMAT"), RawValue::UnsignedInt(1)));
+}
+
+#[test]
+fn verify_equ2_frame() {
+    // Linear interpolation, "eq1", 1000 Hz at +1.5 dB, 20000 Hz at -2 dB.
+    let mut body = vec![1u8];
+    body.extend_from_slice(b"eq1\0");
+    body.extend_from_slice(&2000u16.to_be_bytes());
+    body.extend_from_slice(&768i16.to_be_bytes());
+    body.extend_from_slice(&40000u16.to_be_bytes());
+    body.extend_from_slice(&(-1024i16).to_be_bytes());
+
+    let tags = read_tags(tag(4, vec![frame_v3(b"EQU2", &body)]));
+    let t = raw_tag(&tags, "EQU2");
+    assert_eq!(strings(&t.raw.value), ["eq1"]);
+    assert_eq!(strings(sub_field(t, "FREQUENCIES_HZ")), ["1000", "20000"]);
+    assert_eq!(strings(sub_field(t, "ADJUSTMENTS_DB")), ["1.5", "-2"]);
+    assert!(matches!(sub_field(t, "INTERPOLATION_METHOD"), RawValue::UnsignedInt(1)));
+}
+
+#[test]
+fn verify_geob_priv_sign_comr_frames() {
+    let mut geob = vec![0u8];
+    geob.extend_from_slice(b"image/png\0name.png\0a desc\0");
+    geob.extend_from_slice(&[1, 2, 3]);
+
+    let mut private = b"owner@example.com\0".to_vec();
+    private.extend_from_slice(&[9, 8]);
+
+    let mut sign = vec![7u8];
+    sign.extend_from_slice(&[0xaa, 0xbb]);
+
+    let mut comr = vec![0u8];
+    comr.extend_from_slice(b"EUR1.00\0");
+    comr.extend_from_slice(b"20301231");
+    comr.extend_from_slice(b"http://x.example\0");
+    comr.push(2);
+    comr.extend_from_slice(b"Seller\0Desc\0image/png\0");
+    comr.extend_from_slice(&[0x89, 0x50]);
+
+    let tags = read_tags(tag(
+        4,
+        vec![
+            frame_v3(b"GEOB", &geob),
+            frame_v3(b"PRIV", &private),
+            frame_v3(b"SIGN", &sign),
+            frame_v3(b"COMR", &comr),
+        ],
+    ));
+
+    let g = raw_tag(&tags, "GEOB");
+    assert!(matches!(&g.raw.value, RawValue::Binary(b) if b.as_ref().as_ref() == [1, 2, 3]));
+    assert_eq!(strings(sub_field(g, "MIME_TYPE")), ["image/png"]);
+    assert_eq!(strings(sub_field(g, "FILE_NAME")), ["name.png"]);
+    assert_eq!(strings(sub_field(g, "DESCRIPTION")), ["a desc"]);
+
+    let p = raw_tag(&tags, "PRIV");
+    assert!(matches!(&p.raw.value, RawValue::Binary(b) if b.as_ref().as_ref() == [9, 8]));
+    assert_eq!(strings(sub_field(p, "OWNER")), ["owner@example.com"]);
+
+    let s = raw_tag(&tags, "SIGN");
+    assert!(matches!(&s.raw.value, RawValue::Binary(b) if b.as_ref().as_ref() == [0xaa, 0xbb]));
+    assert!(matches!(sub_field(s, "GROUP_ID"), RawValue::UnsignedInt(7)));
+
+    let c = raw_tag(&tags, "COMR");
+    assert_eq!(strings(&c.raw.value), ["EUR1.00"]);
+    assert_eq!(strings(sub_field(c, "VALID_UNTIL")), ["20301231"]);
+    assert_eq!(strings(sub_field(c, "SELLER_NAME")), ["Seller"]);
+}
+
+#[test]
+fn verify_aspi_mllt_remain_raw_binary() {
+    let tags = read_tags(tag(4, vec![frame_v3(b"ASPI", &[1, 2, 3]), frame_v3(b"MLLT", &[4, 5])]));
+    assert!(matches!(&raw_tag(&tags, "ASPI").raw.value, RawValue::Binary(_)));
+    assert!(matches!(&raw_tag(&tags, "MLLT").raw.value, RawValue::Binary(_)));
+}
+
+#[test]
+fn verify_mcdi_is_typed_as_cd_toc() {
+    let toc = [0x00, 0x14, 0x01, 0x02, 0xAB, 0xCD];
+    let tags = read_tags(tag(3, vec![frame_v3(b"MCDI", &toc)]));
+    let t = raw_tag(&tags, "MCDI");
+    assert!(matches!(&t.raw.value, RawValue::Binary(b) if b.as_ref().as_ref() == toc));
+    assert!(matches!(&t.std, Some(StandardTag::CdToc(v)) if v.as_str() == "00140102ABCD"));
+}
+
+#[test]
+fn verify_itunnorm_comment_is_mapped_to_replaygain() {
+    let norm =
+        "00001E86 00001E86 0000A2A3 0000A2A3 000006A6 000006A6 000078FA 000078FA 00000211 00000211";
+    let mut body = vec![0u8];
+    body.extend_from_slice(b"eng");
+    body.extend_from_slice(b"iTunNORM\0");
+    body.extend_from_slice(norm.as_bytes());
+
+    let tags = read_tags(tag(3, vec![frame_v3(b"COMM", &body)]));
+    let std = std_tags(&tags);
+
+    // Not exposed as a user comment.
+    assert!(!std.iter().any(|t| matches!(t, StandardTag::Comment(_))));
+    // max(0x1E86 = 7814, 0xA2A3 / 2.5 = 16617) -> 16617: -10*log10(16.617) = -12.22 dB.
+    assert!(
+        std.iter()
+            .any(|t| matches!(t, StandardTag::ReplayGainTrackGain(g) if g.as_str() == "-12.22 dB"))
+    );
+    // 0x78FA / 32768.
+    assert!(
+        std.iter()
+            .any(|t| matches!(t, StandardTag::ReplayGainTrackPeak(p) if p.as_str() == "0.945129"))
+    );
+    // The original raw comment is retained.
+    assert!(tags.iter().any(|t| t.raw.key == "COMM"));
 }
