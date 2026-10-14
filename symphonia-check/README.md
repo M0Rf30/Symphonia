@@ -6,6 +6,8 @@ The currently supported reference decoders include:
 
 * `ffmpeg`
 * `flac`
+* `libopus` (`ffmpeg` with its libopus decoder and float output; FFmpeg's native Opus decoder is
+  not bit-exact with libopus)
 * `mpg123` (when provided by `libmad` aka. `mpg321`)
 * `oggdec`
 

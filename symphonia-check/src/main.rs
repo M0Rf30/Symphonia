@@ -40,6 +40,7 @@ enum RefDecoder {
     #[default]
     Ffmpeg,
     Flac,
+    Libopus,
     Mpg123,
     Oggdec,
 }
@@ -66,12 +67,19 @@ struct TestResult {
     ref_unchecked_samples: u64,
 }
 
-fn build_ffmpeg_command(path: &Path, gapless: bool) -> Command {
+/// Builds an ffmpeg command, optionally forcing the decoder of the input.
+fn build_ffmpeg_command(path: &Path, gapless: bool, decoder: Option<&str>) -> Command {
     let mut cmd = Command::new("ffmpeg");
 
     // Gapless argument must come before everything else.
     if !gapless {
         cmd.arg("-flags2").arg("skip_manual");
+    }
+
+    // The input decoder options apply to the next input. Request float output: decoders such as
+    // libopus otherwise output 16-bit samples (soft-clipped, in the case of libopus).
+    if let Some(decoder) = decoder {
+        cmd.arg("-c:a").arg(decoder).arg("-request_sample_fmt").arg("flt");
     }
 
     cmd.arg("-nostats") // Quiet command.
@@ -124,7 +132,9 @@ struct RefProcess {
 impl RefProcess {
     fn try_spawn(decoder: RefDecoder, gapless: bool, path: &Path) -> Result<RefProcess> {
         let mut cmd = match decoder {
-            RefDecoder::Ffmpeg => build_ffmpeg_command(path, gapless),
+            RefDecoder::Ffmpeg => build_ffmpeg_command(path, gapless, None),
+            // FFmpeg's native Opus decoder is not bit-exact with libopus (notably SILK).
+            RefDecoder::Libopus => build_ffmpeg_command(path, gapless, Some("libopus")),
             RefDecoder::Flac => build_flac_command(path),
             RefDecoder::Mpg123 => build_mpg123_command(path, gapless),
             RefDecoder::Oggdec => build_oggdec_command(path),
@@ -144,6 +154,7 @@ struct FlushStats {
 struct DecoderInstance {
     format: Box<dyn FormatReader>,
     decoder: Box<dyn AudioDecoder>,
+    dec_opts: AudioDecoderOptions,
     track_id: u32,
 }
 
@@ -160,6 +171,16 @@ impl DecoderInstance {
 
         let format = symphonia::default::get_probe().probe(&hint, mss, fmt_opts, meta_opts)?;
 
+        let (decoder, track_id) = Self::make_decoder(format.as_ref(), &dec_opts)?;
+
+        Ok(DecoderInstance { format, decoder, dec_opts, track_id })
+    }
+
+    /// Creates a decoder for the default audio track of the format reader.
+    fn make_decoder(
+        format: &dyn FormatReader,
+        dec_opts: &AudioDecoderOptions,
+    ) -> Result<(Box<dyn AudioDecoder>, u32)> {
         let track = match format.default_track(TrackType::Audio) {
             Some(t) => t,
             None => return unsupported_error("only audio tracks are supported"),
@@ -171,11 +192,9 @@ impl DecoderInstance {
         };
 
         let decoder =
-            symphonia::default::get_codecs().make_audio_decoder(codec_params, &dec_opts)?;
+            symphonia::default::get_codecs().make_audio_decoder(codec_params, dec_opts)?;
 
-        let track_id = track.id;
-
-        Ok(DecoderInstance { format, decoder, track_id })
+        Ok((decoder, track.id))
     }
 
     fn samples_per_frame(&self) -> Option<u64> {
@@ -193,6 +212,15 @@ impl DecoderInstance {
                     // reference decoder is piping the decoded audio and cannot write out the
                     // actual length of the media. Treat UnexpectedEof as the end of the stream.
                     return Ok(None);
+                }
+                // The track list changed (e.g. a new link of a chained Ogg stream): recreate the
+                // decoder from the new track list.
+                Err(Error::ResetRequired) => {
+                    let (decoder, track_id) =
+                        Self::make_decoder(self.format.as_ref(), &self.dec_opts)?;
+                    self.decoder = decoder;
+                    self.track_id = track_id;
+                    continue;
                 }
                 Err(err) => return Err(err),
             };
@@ -408,7 +436,7 @@ fn main() {
         .arg(
             Arg::new("decoder")
                 .long("ref")
-                .value_parser(["ffmpeg", "flac", "mpg123", "oggdec"])
+                .value_parser(["ffmpeg", "flac", "libopus", "mpg123", "oggdec"])
                 .default_value("ffmpeg")
                 .help("Specify a particular decoder to be used as the reference"),
         )
@@ -436,6 +464,7 @@ fn main() {
     {
         "ffmpeg" => RefDecoder::Ffmpeg,
         "flac" => RefDecoder::Flac,
+        "libopus" => RefDecoder::Libopus,
         "mpg123" => RefDecoder::Mpg123,
         "oggdec" => RefDecoder::Oggdec,
         _ => {
