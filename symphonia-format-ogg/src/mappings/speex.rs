@@ -16,19 +16,14 @@
 //! already exclude the encoder lookahead, and (except the clamped final one of `speexenc`) lag the
 //! source timeline by the decoder lookahead. See `SpeexMapper::absgp_to_ts`.
 
-use crate::common::SideData;
-
-use super::{MapResult, Mapper, PacketParser};
+use super::{MapResult, Mapper, PacketParser, read_bare_comment};
 
 use symphonia_core::codecs::CodecParameters;
 use symphonia_core::codecs::audio::AudioCodecParameters;
 use symphonia_core::codecs::audio::well_known::CODEC_ID_SPEEX;
 use symphonia_core::errors::Result;
 use symphonia_core::formats::Track;
-use symphonia_core::io::BufReader;
-use symphonia_core::meta::MetadataBuilder;
 use symphonia_core::units::{Duration, Timestamp};
-use symphonia_metadata::embedded::vorbis::{self, VORBIS_COMMENT_METADATA_INFO};
 
 use symphonia_core::audio::{Channels, Position};
 
@@ -277,14 +272,7 @@ impl Mapper for SpeexMapper {
 
         if self.packets_seen == 1 {
             // The comment packet is a bare Vorbis comment: no signature, no framing bit.
-            let mut builder = MetadataBuilder::new(VORBIS_COMMENT_METADATA_INFO);
-            let mut side_data = Default::default();
-
-            vorbis::read_vorbis_comment(&mut BufReader::new(packet), &mut builder, &mut side_data)?;
-
-            let rev = builder.build();
-
-            return Ok(MapResult::SideData { data: SideData::Metadata { rev, side_data } });
+            return read_bare_comment(packet);
         }
 
         Ok(MapResult::Setup)

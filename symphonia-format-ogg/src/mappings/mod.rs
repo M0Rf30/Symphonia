@@ -9,10 +9,15 @@ use super::common::SideData;
 
 use symphonia_core::errors::Result;
 use symphonia_core::formats::Track;
+use symphonia_core::io::BufReader;
+use symphonia_core::meta::MetadataBuilder;
 use symphonia_core::units::{Duration, Timestamp};
+use symphonia_metadata::embedded::vorbis::{VORBIS_COMMENT_METADATA_INFO, read_vorbis_comment};
 
+mod celt;
 mod flac;
 mod opus;
+mod pcm;
 mod speex;
 mod vorbis;
 
@@ -22,6 +27,8 @@ pub fn detect(serial: u32, buf: &[u8]) -> Result<Option<Box<dyn Mapper>>> {
         .or(vorbis::detect(serial, buf)?)
         .or(opus::detect(serial, buf)?)
         .or(speex::detect(serial, buf)?)
+        .or(celt::detect(serial, buf)?)
+        .or(pcm::detect(serial, buf)?)
         .or_else(make_null_mapper);
 
     Ok(mapper)
@@ -91,6 +98,19 @@ pub trait Mapper: Send + Sync {
     fn is_ready(&self) -> bool {
         true
     }
+}
+
+/// Map the comment packet of a stream whose comment is a bare Vorbis comment: no signature, no
+/// framing bit (Speex, CELT, OggPCM).
+fn read_bare_comment(packet: &[u8]) -> Result<MapResult> {
+    let mut builder = MetadataBuilder::new(VORBIS_COMMENT_METADATA_INFO);
+    let mut side_data = Default::default();
+
+    read_vorbis_comment(&mut BufReader::new(packet), &mut builder, &mut side_data)?;
+
+    let rev = builder.build();
+
+    Ok(MapResult::SideData { data: SideData::Metadata { rev, side_data } })
 }
 
 fn make_null_mapper() -> Option<Box<dyn Mapper>> {

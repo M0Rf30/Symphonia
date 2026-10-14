@@ -472,6 +472,8 @@ pub mod well_known {
     pub const CODEC_ID_ATRAC3: AudioCodecId = AudioCodecId(0x100d);
     /// Adaptive Transform Acoustic Coding 3+ (ATRAC3+)
     pub const CODEC_ID_ATRAC3PLUS: AudioCodecId = AudioCodecId(0x100e);
+    /// CELT (the pre-standard codec that was merged into Opus, as muxed by `celtenc`)
+    pub const CODEC_ID_CELT: AudioCodecId = AudioCodecId(0x1040);
     /// Adaptive Transform Acoustic Coding 9 (ATRAC9)
     pub const CODEC_ID_ATRAC9: AudioCodecId = AudioCodecId(0x100f);
     /// Windows Media Audio

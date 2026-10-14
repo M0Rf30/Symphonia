@@ -515,3 +515,102 @@ fn large_packets_spanning_pages_seek() {
         assert_eq!(pkt.dur.get(), BLOCK as u64);
     }
 }
+
+/// Builds an OggPCM link (S16LE stereo, 48 kHz) with `n_packets` packets of `frames` frames.
+fn pcm_link(serial: u32, n_packets: usize, frames: usize) -> Vec<u8> {
+    let mut head = Vec::new();
+    head.extend_from_slice(b"PCM     ");
+    head.extend_from_slice(&0u16.to_be_bytes()); // major
+    head.extend_from_slice(&0u16.to_be_bytes()); // minor
+    head.extend_from_slice(&2u32.to_be_bytes()); // OGGPCM_FMT_S16_LE
+    head.extend_from_slice(&48000u32.to_be_bytes());
+    head.push(0); // significant bits
+    head.push(2); // channels
+    head.extend_from_slice(&(frames as u16).to_be_bytes());
+    head.extend_from_slice(&1u32.to_be_bytes()); // one extra header
+
+    let mut comment = Vec::new();
+    comment.extend_from_slice(&0u32.to_le_bytes()); // vendor length
+    comment.extend_from_slice(&0u32.to_le_bytes()); // comment count
+
+    let mut w = OggPacketWriter::new(Vec::new(), serial);
+    w.set_page_target(1);
+    w.write_packet(&head, 0, false).unwrap();
+    w.flush_page().unwrap();
+    w.write_packet(&comment, 0, false).unwrap();
+    w.flush_page().unwrap();
+    // A channel mapping header (ID 0, version 0.0, no pairs).
+    w.write_packet(&[0; 8], 0, false).unwrap();
+    w.flush_page().unwrap();
+
+    let pkt = vec![0x11; frames * 4];
+    for i in 0..n_packets {
+        let last = i + 1 == n_packets;
+        w.write_packet(&pkt, ((i + 1) * frames) as i64, last).unwrap();
+    }
+    w.finish().unwrap()
+}
+
+#[test]
+fn oggpcm_mapping_demuxes_data_packets() {
+    use symphonia_core::codecs::CodecParameters;
+    use symphonia_core::codecs::audio::well_known::CODEC_ID_PCM_S16LE;
+
+    let mut reader = open(pcm_link(0x77, 4, 480));
+
+    let Some(CodecParameters::Audio(params)) = &reader.tracks()[0].codec_params
+    else {
+        panic!("expected audio parameters");
+    };
+    assert_eq!(params.codec, CODEC_ID_PCM_S16LE);
+    assert_eq!(params.sample_rate, Some(48000));
+
+    let mut n = 0;
+    while let Some(pkt) = reader.next_packet().unwrap() {
+        assert_eq!(pkt.pts.get(), n * 480);
+        assert_eq!(pkt.dur.get(), 480);
+        assert_eq!(pkt.data.len(), 480 * 4);
+        n += 1;
+    }
+    assert_eq!(n, 4);
+}
+
+#[test]
+fn celt_mapping_demuxes_frames() {
+    use symphonia_core::codecs::CodecParameters;
+    use symphonia_core::codecs::audio::well_known::CODEC_ID_CELT;
+
+    let mut head = Vec::new();
+    head.extend_from_slice(b"CELT    ");
+    head.extend_from_slice(&[0; 20]);
+    for v in [0x8000_000bu32, 60, 48000, 2, 480, 120, 100, 0] {
+        head.extend_from_slice(&v.to_le_bytes());
+    }
+
+    let mut w = OggPacketWriter::new(Vec::new(), 0x99);
+    w.set_page_target(1);
+    w.write_packet(&head, 0, false).unwrap();
+    w.flush_page().unwrap();
+    w.write_packet(&[0; 8], 0, false).unwrap(); // comment
+    w.flush_page().unwrap();
+    for i in 0..3i64 {
+        w.write_packet(&[0x42; 100], (i + 1) * 480, i == 2).unwrap();
+    }
+
+    let mut reader = open(w.finish().unwrap());
+
+    let Some(CodecParameters::Audio(params)) = &reader.tracks()[0].codec_params
+    else {
+        panic!("expected audio parameters");
+    };
+    assert_eq!(params.codec, CODEC_ID_CELT);
+    assert_eq!(params.sample_rate, Some(48000));
+
+    let mut n = 0;
+    while let Some(pkt) = reader.next_packet().unwrap() {
+        assert_eq!(pkt.pts.get(), n * 480);
+        assert_eq!(pkt.dur.get(), 480);
+        n += 1;
+    }
+    assert_eq!(n, 3);
+}

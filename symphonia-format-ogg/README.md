@@ -4,6 +4,9 @@
 
 OGG demuxer for Project Symphonia.
 
+Mapped codecs: Vorbis, Opus, FLAC, Speex, CELT (the legacy 0.x header; demuxed only, there is no
+CELT decoder), and PCM (OggPCM draft: integer, float, A-law and mu-law formats).
+
 With the `writer` cargo feature the crate also provides a minimal, codec-agnostic Ogg page
 writer (`symphonia_format_ogg::writer`, RFC 3533): lacing, page splitting, granule positions,
 BOS/EOS flags and page CRC.
