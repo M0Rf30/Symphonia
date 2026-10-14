@@ -9,12 +9,15 @@ ADPCM audio decoders for Project Symphonia.
 
 ## Support
 
-The following ADPCM encodings are supported:
-
-* Microsoft ADPCM
-* ADPCM IMA WAV
-
-Only 4 bits per sample and only mono and stereo channels are supported.
+| Encoding          | Bits per sample        | Channels         |
+|-------------------|------------------------|------------------|
+| Microsoft ADPCM   | 4                      | mono, stereo     |
+| IMA ADPCM (WAV)   | 2, 3, 4, 5             | mono to 8        |
+| IMA ADPCM (QT)    | 4                      | mono, stereo     |
+| Yamaha ADPCM      | 4                      | mono, stereo     |
+| SWF ADPCM (Flash) | 2, 3, 4, 5             | mono, stereo     |
+| G.722             | 6, 7, 8 (per codeword) | mono             |
+| G.726 (BE and LE) | 2, 3, 4, 5             | mono             |
 
 ## License
 

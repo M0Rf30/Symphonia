@@ -8,20 +8,10 @@
 //! The CELT sub-decoder. Ported from libopus `celt/*.c` (float build: `celt_sig`/`celt_norm`
 //! are `f32`). Ported from libopus (BSD-3-Clause), see NOTICE.
 //!
-//! # Ownership (wave 1)
-//!
-//! This `celt/**` subtree is split between two wave-1 agents. Each file below lists its owner
-//! and the C translation unit(s) it ports. `decoder.rs` is written purely against the function
-//! signatures declared by the other files in this module (all defined in wave 0, bodies
-//! `todo!()`), so both agents can work in parallel without touching each other's files.
-//!
-//! **"CeltBitstream"** owns: [`modes`], [`laplace`], [`quant_bands`], [`rate`], [`cwrs`], [`vq`],
-//! [`bands`] — everything that reads range-coded symbols and produces/consumes normalized band
-//! energy and shape (MDCT-domain, pre-synthesis).
-//!
-//! **"CeltSynthesis"** owns: [`kiss_fft`], [`mdct`], [`pitch`], [`lpc`], [`celt`], `decoder.rs`,
-//! `mod.rs` (this file) — everything from denormalized MDCT bins through inverse MDCT, comb
-//! filtering, and PLC (which needs pitch search/LPC extrapolation, not entropy decoding).
+//! Modules group by stage: [`modes`], [`laplace`], [`quant_bands`], [`rate`], [`cwrs`], [`vq`]
+//! and [`bands`] read range-coded symbols and produce normalized band energy and shape;
+//! [`kiss_fft`], [`mdct`], [`pitch`], [`lpc`], [`celt`] and `decoder.rs` cover denormalization,
+//! inverse MDCT, comb filtering and packet loss concealment.
 
 pub mod bands;
 #[allow(clippy::module_inception)]

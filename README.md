@@ -16,7 +16,7 @@
 
 <p>
     <strong>
-        Symphonia is a pure Rust audio decoding and media demuxing library supporting AAC, ADPCM, AIFF, ALAC, CAF, FLAC, MKV, MP1, MP2, MP3, MP4, OGG, Opus, Vorbis, WAV, and WebM.
+        Symphonia is a pure Rust audio decoding and media demuxing library supporting AAC, AC-3, E-AC-3, ADPCM, AIFF, ALAC, APE, CAF, DSD, DTS, FLAC, FLV, MKV, MP1, MP2, MP3, mp3PRO, MP4, MPEG-PS, MPEG-TS, Musepack, Nellymoser, OGG, Opus, PCM, Speex, TrueHD, MLP, Vorbis, WAV, WavPack, and WebM.
     </strong>
 </p>
 
@@ -82,7 +82,7 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | CAF      | Excellent | Yes      | `caf`        | No      | [`symphonia-format-caf`]    |
 | DSD (DSF, DFF) | Great | Yes    | `dsd`        | No      | [`symphonia-format-dsd`]      |
 | Elementary streams (AC-3, E-AC-3, DTS, TrueHD/MLP) | Great | Yes\*\* | `es`   | No      | [`symphonia-format-es`]       |
-| FLV (audio only) | Great | No     | `flv`        | No      | [`symphonia-format-flv`]    |
+| FLV (audio only) | Great | Yes\*\*\* | `flv`      | No      | [`symphonia-format-flv`]    |
 | ISO/MP4  | Excellent | Yes      | `isomp4`     | No      | [`symphonia-format-isomp4`] |
 | MKV/WebM | Excellent | Yes      | `mkv`        | Yes     | [`symphonia-format-mkv`]    |
 | Musepack | Excellent | Yes      | `musepack`   | No      | [`symphonia-bundle-musepack`] |
@@ -94,6 +94,8 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 \* Gapless playback requires support from both the demuxer and decoder.
 
 \*\* Raw elementary streams have no container timing: their duration is estimated (AC-3, DTS) or unknown (TrueHD/MLP).
+
+\*\*\* FLV carries no end padding: only the leading decoder delay (e.g. Opus pre-skip) is trimmed.
 
 [`symphonia-format-caf`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-caf
 [`symphonia-format-flv`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-flv
