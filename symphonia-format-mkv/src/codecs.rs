@@ -93,6 +93,22 @@ fn make_audio_codec_params(
         codec_params.with_bits_per_sample(bits.get() as u32);
     }
 
+    // The WAVE format structure describes the samples, not the track's bit depth. As the RIFF
+    // reader does, only integer PCM states its (valid) bits per sample: A-law, mu-law and float
+    // have an implicit width, and the compressed codecs have none.
+    if track.codec_id == "A_MS/ACM" {
+        codec_params.sample_format = None;
+        codec_params.bits_per_sample = None;
+        codec_params.bits_per_coded_sample = None;
+
+        if let Some(acm) = track.codec_private.as_deref().and_then(AcmFormat::parse) {
+            if acm.tag == AcmFormat::WAVE_FORMAT_PCM {
+                let bits = u32::from(acm.valid_bits_per_sample);
+                codec_params.with_bits_per_coded_sample(bits).with_bits_per_sample(bits);
+            }
+        }
+    }
+
     // Matroska WavPack blocks have their `wvpk` headers stripped. The WavPack decoder relies on
     // the 2-byte version number that the Matroska spec mandates in CodecPrivate to recognise
     // this packet flavour, so make sure it is always present (default: 4.16, the version
@@ -114,6 +130,85 @@ fn make_audio_codec_params(
     }
 
     Ok(Some(CodecParameters::Audio(codec_params)))
+}
+
+/// The `WAVEFORMATEX` or `WAVEFORMATEXTENSIBLE` structure that is the CodecPrivate of an
+/// `A_MS/ACM` track (Matroska codec mappings; layout from Microsoft `mmreg.h`).
+pub(crate) struct AcmFormat {
+    /// The format tag. For `WAVEFORMATEXTENSIBLE`, the tag embedded in the sub-format GUID.
+    tag: u16,
+    block_align: u16,
+    bits_per_sample: u16,
+    valid_bits_per_sample: u16,
+}
+
+impl AcmFormat {
+    const WAVE_FORMAT_PCM: u16 = 0x0001;
+    const WAVE_FORMAT_IEEE_FLOAT: u16 = 0x0003;
+    const WAVE_FORMAT_ALAW: u16 = 0x0006;
+    const WAVE_FORMAT_MULAW: u16 = 0x0007;
+    const WAVE_FORMAT_EXTENSIBLE: u16 = 0xfffe;
+
+    pub(crate) fn parse(data: &[u8]) -> Option<Self> {
+        let u16_at = |pos: usize| data.get(pos..pos + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+
+        // wFormatTag, nChannels, nSamplesPerSec, nAvgBytesPerSec, nBlockAlign, wBitsPerSample,
+        // then cbSize and cbSize bytes of extra data (absent in a 16-byte PCMWAVEFORMAT).
+        let mut tag = u16_at(0)?;
+        let block_align = u16_at(12)?;
+        let bits_per_sample = u16_at(14)?;
+        let mut valid_bits_per_sample = bits_per_sample;
+
+        if tag == Self::WAVE_FORMAT_EXTENSIBLE {
+            // wValidBitsPerSample, dwChannelMask, then the SubFormat GUID. The GUIDs of the
+            // KSDATAFORMAT_SUBTYPE_* formats start with the format tag (little-endian).
+            if u16_at(16)? < 22 {
+                return None;
+            }
+            valid_bits_per_sample = u16_at(18)?;
+            tag = u16_at(24)?;
+
+            if valid_bits_per_sample == 0 || valid_bits_per_sample > bits_per_sample {
+                valid_bits_per_sample = bits_per_sample;
+            }
+        }
+
+        Some(AcmFormat { tag, block_align, bits_per_sample, valid_bits_per_sample })
+    }
+
+    /// Gets the codec of the format, if it is supported.
+    pub(crate) fn codec(&self) -> Option<AudioCodecId> {
+        let codec = match (self.tag, self.bits_per_sample) {
+            // 8-bit WAVE PCM is unsigned.
+            (Self::WAVE_FORMAT_PCM, 8) => CODEC_ID_PCM_U8,
+            (Self::WAVE_FORMAT_PCM, 16) => CODEC_ID_PCM_S16LE,
+            (Self::WAVE_FORMAT_PCM, 24) => CODEC_ID_PCM_S24LE,
+            (Self::WAVE_FORMAT_PCM, 32) => CODEC_ID_PCM_S32LE,
+            (Self::WAVE_FORMAT_IEEE_FLOAT, 32) => CODEC_ID_PCM_F32LE,
+            (Self::WAVE_FORMAT_IEEE_FLOAT, 64) => CODEC_ID_PCM_F64LE,
+            (Self::WAVE_FORMAT_ALAW, 8) => CODEC_ID_PCM_ALAW,
+            (Self::WAVE_FORMAT_MULAW, 8) => CODEC_ID_PCM_MULAW,
+            // Self-framing codecs (WAVE_FORMAT_MPEG, _MPEGLAYER3, Dolby AC-3 SPDIF, DTS).
+            (0x0050, _) => CODEC_ID_MP2,
+            (0x0055, _) => CODEC_ID_MP3,
+            (0x2000, _) => CODEC_ID_AC3,
+            (0x2001, _) => CODEC_ID_DCA,
+            _ => return None,
+        };
+        Some(codec)
+    }
+
+    /// Gets the number of bytes in a frame, if the format is PCM.
+    pub(crate) fn pcm_frame_bytes(&self) -> Option<u32> {
+        let is_pcm = matches!(
+            self.tag,
+            Self::WAVE_FORMAT_PCM
+                | Self::WAVE_FORMAT_IEEE_FLOAT
+                | Self::WAVE_FORMAT_ALAW
+                | Self::WAVE_FORMAT_MULAW
+        );
+        (is_pcm && self.codec().is_some()).then_some(u32::from(self.block_align))
+    }
 }
 
 fn make_video_codec_params(
@@ -271,7 +366,7 @@ fn get_codec_id(track: &TrackElement) -> Option<CodecId> {
             64 => CodecId::Audio(CODEC_ID_PCM_F64LE),
             _ => return None,
         },
-        // A_MS/ACM
+        "A_MS/ACM" => CodecId::Audio(AcmFormat::parse(track.codec_private.as_deref()?)?.codec()?),
         // A_QUICKTIME
         // A_QUICKTIME/QDMC
         // A_QUICKTIME/QDM2
@@ -449,5 +544,61 @@ mod tests {
             make_track_codec_params(audio_track(2, f64::INFINITY)),
             Err(Error::Unsupported(_))
         ));
+    }
+
+    /// A WAVEFORMATEX with the given tag, block alignment, bits per sample and extra data.
+    fn wave_format(tag: u16, block_align: u16, bits: u16, extra: &[u8]) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(&tag.to_le_bytes());
+        data.extend_from_slice(&2u16.to_le_bytes()); // Channels.
+        data.extend_from_slice(&48000u32.to_le_bytes()); // Sample rate.
+        data.extend_from_slice(&0u32.to_le_bytes()); // Average bytes per second.
+        data.extend_from_slice(&block_align.to_le_bytes());
+        data.extend_from_slice(&bits.to_le_bytes());
+        data.extend_from_slice(&(extra.len() as u16).to_le_bytes());
+        data.extend_from_slice(extra);
+        data
+    }
+
+    #[test]
+    fn verify_acm_wave_formats() {
+        use symphonia_core::codecs::audio::well_known::*;
+
+        use super::AcmFormat;
+
+        let parse = |data: &[u8]| AcmFormat::parse(data).and_then(|f| f.codec().zip(Some(f)));
+
+        // 8-bit WAVE PCM is unsigned; a 16-byte PCMWAVEFORMAT has no cbSize.
+        let Some((codec, fmt)) = parse(&wave_format(1, 2, 8, &[])[..16])
+        else {
+            panic!("8-bit pcm")
+        };
+        assert_eq!(codec, CODEC_ID_PCM_U8);
+        assert_eq!(fmt.pcm_frame_bytes(), Some(2));
+
+        // WAVEFORMATEXTENSIBLE: 20 valid bits in 24, KSDATAFORMAT_SUBTYPE_PCM.
+        let mut ext = Vec::new();
+        ext.extend_from_slice(&20u16.to_le_bytes());
+        ext.extend_from_slice(&3u32.to_le_bytes());
+        ext.extend_from_slice(&[1, 0, 0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71]);
+        let Some((codec, fmt)) = parse(&wave_format(0xfffe, 6, 24, &ext))
+        else {
+            panic!("extensible pcm")
+        };
+        assert_eq!(codec, CODEC_ID_PCM_S24LE);
+        assert_eq!(fmt.valid_bits_per_sample, 20);
+        assert_eq!(fmt.pcm_frame_bytes(), Some(6));
+
+        // MP3 is not PCM: its blocks have no fixed frame size.
+        let Some((codec, fmt)) = parse(&wave_format(0x55, 1, 0, &[0; 12]))
+        else {
+            panic!("mp3")
+        };
+        assert_eq!(codec, CODEC_ID_MP3);
+        assert_eq!(fmt.pcm_frame_bytes(), None);
+
+        // ADPCM is not mapped, and a truncated EXTENSIBLE is rejected.
+        assert!(parse(&wave_format(2, 1024, 4, &[0; 32])).is_none());
+        assert!(parse(&wave_format(0xfffe, 6, 24, &ext[..10])).is_none());
     }
 }

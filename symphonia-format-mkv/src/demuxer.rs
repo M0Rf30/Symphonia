@@ -25,7 +25,7 @@ use log::{info, warn};
 use symphonia_common::xiph::audio::opus;
 use symphonia_metadata::utils::images::try_get_image_info;
 
-use crate::codecs::make_track_codec_params;
+use crate::codecs::{AcmFormat, make_track_codec_params};
 use crate::content::ContentDecoder;
 use crate::ebml::{
     EbmlElementInfo, EbmlError, EbmlIterator, EbmlSchema, ReadEbml, read_unsigned_vint,
@@ -644,11 +644,18 @@ impl<'s> MkvReader<'s> {
                 sample_rate.map(|sr| track.codec_delay.into_samples(sr)).unwrap_or(0);
 
             // The number of bytes in a frame of PCM audio.
-            let pcm_frame_bytes = match (&track.audio, track.codec_id.starts_with("A_PCM/")) {
-                (Some(audio), true) => audio
+            let pcm_frame_bytes = match (&track.audio, track.codec_id.as_str()) {
+                (Some(audio), id) if id.starts_with("A_PCM/") => audio
                     .bit_depth
                     .and_then(|bits| bits.get().div_ceil(8).checked_mul(audio.channels.get()))
                     .and_then(|bytes| u32::try_from(bytes).ok())
+                    .and_then(NonZero::new),
+                // The block alignment of a WAVE format is the size of a PCM frame.
+                (Some(_), "A_MS/ACM") => track
+                    .codec_private
+                    .as_deref()
+                    .and_then(AcmFormat::parse)
+                    .and_then(|acm| acm.pcm_frame_bytes())
                     .and_then(NonZero::new),
                 _ => None,
             };
