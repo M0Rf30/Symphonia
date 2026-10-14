@@ -1873,18 +1873,74 @@ fn corrupt_zlib_frames_are_an_error() {
     assert!(open(file.to_bytes(&track)).next_packet().is_err());
 }
 
+/// A `ContentEncodings` element with a single encryption encoding (AES, `ContentEncAlgo` 5).
+fn encryption() -> Vec<u8> {
+    el(
+        &[0x6d, 0x80],
+        &el(
+            &[0x62, 0x40],
+            &[
+                uint(&[0x50, 0x31], 0),
+                uint(&[0x50, 0x32], 1),
+                uint(&[0x50, 0x33], 1),
+                el(&[0x50, 0x35], &uint(&[0x47, 0xe1], 5)),
+            ]
+            .concat(),
+        ),
+    )
+}
+
 #[test]
 fn frames_of_tracks_with_unrecoverable_contents_are_dropped() {
-    // bzlib (1) and lzo (2) are not supported.
-    for algo in [1, 2] {
+    // Encryption, and an unknown compression algorithm (9).
+    for encodings in [encryption(), compression(9, None, 1)] {
         let mut file = File::default();
         file.clusters
             .push((0, vec![Block::with_data(0, vec![1, 2]), Block::with_data(10, vec![3, 4])]));
-        let mut reader = open(file.to_bytes(&pcm_with_encodings(compression(algo, None, 1))));
+        let mut reader = open(file.to_bytes(&pcm_with_encodings(encodings)));
 
         assert!(reader.tracks()[0].codec_params.is_none());
         assert!(reader.next_packet().unwrap().is_none());
     }
+}
+
+#[test]
+fn bzip2_compressed_frames_are_decompressed() {
+    let payload = b"abcabcabcabc-the quick brown fox-abcabcabc";
+    // Made with Python's bz2.compress(payload, 9).
+    let compressed: &[u8] = &[
+        0x42, 0x5a, 0x68, 0x39, 0x31, 0x41, 0x59, 0x26, 0x53, 0x59, 0x32, 0x84, 0x12, 0x0b, 0x00,
+        0x00, 0x04, 0x11, 0x80, 0x40, 0x02, 0x3b, 0x69, 0xb6, 0xc0, 0x20, 0x00, 0x31, 0x4d, 0x32,
+        0x31, 0x31, 0x31, 0x0a, 0xf5, 0x03, 0x09, 0xa1, 0xa7, 0xa8, 0xfa, 0x52, 0xc0, 0x22, 0x80,
+        0xac, 0x04, 0x45, 0xe7, 0xcc, 0x4c, 0xa3, 0xc1, 0x34, 0xf8, 0xbb, 0x92, 0x29, 0xc2, 0x84,
+        0x81, 0x94, 0x20, 0x90, 0x58,
+    ];
+
+    let mut file = File::default();
+    file.clusters.push((0, vec![Block::with_data(0, compressed.to_vec())]));
+    let mut reader = open(file.to_bytes(&pcm_with_encodings(compression(1, None, 1))));
+
+    assert!(reader.tracks()[0].codec_params.is_some());
+    assert_eq!(&reader.next_packet().unwrap().unwrap().data[..], payload);
+}
+
+#[test]
+fn lzo_compressed_frames_are_decompressed() {
+    // An initial literal run of 6 (17 + 6), an M3 match (length 4, distance 6) with 2 trailing
+    // literals, and the end-of-stream marker.
+    let mut compressed = vec![23];
+    compressed.extend_from_slice(b"abcdef");
+    compressed.push(0x22);
+    compressed.extend_from_slice(&[((5 << 2) | 2) as u8, 0]);
+    compressed.extend_from_slice(b"XY");
+    compressed.extend_from_slice(&[0x11, 0, 0]);
+
+    let mut file = File::default();
+    file.clusters.push((0, vec![Block::with_data(0, compressed)]));
+    let mut reader = open(file.to_bytes(&pcm_with_encodings(compression(2, None, 1))));
+
+    assert!(reader.tracks()[0].codec_params.is_some());
+    assert_eq!(&reader.next_packet().unwrap().unwrap().data[..], b"abcdefabcdXY");
 }
 
 #[test]

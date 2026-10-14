@@ -728,7 +728,14 @@ impl<'s> MkvReader<'s> {
 
             // The frames of a track whose contents cannot be recovered (e.g., encrypted) are
             // dropped, and the track cannot be decoded.
-            if !state.content.is_unsupported() {
+            if let Some(reason) = state.content.unsupported() {
+                log::warn!(
+                    "mkv: track {} cannot be decoded and its frames are dropped: {}",
+                    state.track_num,
+                    reason
+                );
+            }
+            else {
                 if let Some(codec_params) = make_track_codec_params(track)? {
                     tr.with_codec_params(codec_params);
                 }

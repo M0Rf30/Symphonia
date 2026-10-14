@@ -560,6 +560,10 @@ impl EbmlElement<MkvSchema> for ContentEncodingsElement {
 
 /// `ContentCompAlgo` value of zlib compression.
 pub(crate) const COMP_ALGO_ZLIB: u64 = 0;
+/// `ContentCompAlgo` value of bzlib (bzip2) compression.
+pub(crate) const COMP_ALGO_BZLIB: u64 = 1;
+/// `ContentCompAlgo` value of lzo1x compression.
+pub(crate) const COMP_ALGO_LZO: u64 = 2;
 /// `ContentCompAlgo` value of header stripping.
 pub(crate) const COMP_ALGO_HEADER_STRIPPING: u64 = 3;
 

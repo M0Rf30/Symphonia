@@ -40,12 +40,14 @@
 #![allow(clippy::identity_op)]
 #![allow(clippy::manual_range_contains)]
 
+mod bzip2;
 mod codecs;
 mod content;
 mod demuxer;
 mod ebml;
 mod inflate;
 mod lacing;
+mod lzo;
 mod schema;
 mod segment;
 mod tags;

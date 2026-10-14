@@ -9,8 +9,13 @@
 
 use symphonia_core::errors::Result;
 
+use crate::bzip2::bzip2_decompress;
 use crate::inflate::zlib_decompress;
-use crate::segment::{COMP_ALGO_HEADER_STRIPPING, COMP_ALGO_ZLIB, ContentEncodingElement};
+use crate::lzo::lzo1x_decompress;
+use crate::segment::{
+    COMP_ALGO_BZLIB, COMP_ALGO_HEADER_STRIPPING, COMP_ALGO_LZO, COMP_ALGO_ZLIB,
+    ContentEncodingElement,
+};
 
 /// The `ContentEncodingScope` bit of the frames of a track.
 const SCOPE_FRAMES: u64 = 1;
@@ -23,15 +28,38 @@ enum Step {
     Prepend(Box<[u8]>),
     /// Zlib compression.
     Zlib,
+    /// Bzip2 compression (`ContentCompAlgo` bzlib).
+    Bzip2,
+    /// LZO1X compression (`ContentCompAlgo` lzo1x).
+    Lzo,
+}
+
+/// Why the contents of a track cannot be recovered.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Unsupported {
+    /// The contents are encrypted (`ContentEncryption`).
+    Encrypted,
+    /// The compression algorithm is unknown.
+    UnknownCompression(u64),
+}
+
+impl std::fmt::Display for Unsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unsupported::Encrypted => f.write_str("the contents are encrypted"),
+            Unsupported::UnknownCompression(algo) => {
+                write!(f, "unknown content compression algorithm {algo}")
+            }
+        }
+    }
 }
 
 /// The steps that recover the original contents of a track's frames.
 #[derive(Debug, Default)]
 pub(crate) struct ContentDecoder {
     steps: Vec<Step>,
-    /// The contents cannot be recovered (encryption, or a compression algorithm that is not
-    /// supported).
-    unsupported: bool,
+    /// Set if the contents cannot be recovered (encryption, or an unknown compression algorithm).
+    unsupported: Option<Unsupported>,
 }
 
 impl ContentDecoder {
@@ -51,8 +79,10 @@ impl ContentDecoder {
                 (false, COMP_ALGO_HEADER_STRIPPING) => {
                     decoder.steps.push(Step::Prepend(enc.comp_settings.clone().unwrap_or_default()))
                 }
-                // Encryption, bzlib (1), lzo (2), and unknown algorithms.
-                _ => decoder.unsupported = true,
+                (false, COMP_ALGO_BZLIB) => decoder.steps.push(Step::Bzip2),
+                (false, COMP_ALGO_LZO) => decoder.steps.push(Step::Lzo),
+                (true, _) => decoder.unsupported = Some(Unsupported::Encrypted),
+                (false, algo) => decoder.unsupported = Some(Unsupported::UnknownCompression(algo)),
             }
         }
 
@@ -69,14 +99,19 @@ impl ContentDecoder {
         Self::new(encodings, SCOPE_CODEC_PRIVATE)
     }
 
+    /// Why the contents cannot be recovered, if they cannot.
+    pub(crate) fn unsupported(&self) -> Option<Unsupported> {
+        self.unsupported
+    }
+
     /// `true` if the contents cannot be recovered.
     pub(crate) fn is_unsupported(&self) -> bool {
-        self.unsupported
+        self.unsupported.is_some()
     }
 
     /// `true` if the contents are not encoded.
     pub(crate) fn is_identity(&self) -> bool {
-        self.steps.is_empty() && !self.unsupported
+        self.steps.is_empty() && self.unsupported.is_none()
     }
 
     /// Recover the original contents of `data`.
@@ -85,6 +120,8 @@ impl ContentDecoder {
             Step::Prepend(prefix) if prefix.is_empty() => Ok(data),
             Step::Prepend(prefix) => Ok([&prefix[..], &data[..]].concat().into_boxed_slice()),
             Step::Zlib => zlib_decompress(&data).map(Vec::into_boxed_slice),
+            Step::Bzip2 => bzip2_decompress(&data).map(Vec::into_boxed_slice),
+            Step::Lzo => lzo1x_decompress(&data).map(Vec::into_boxed_slice),
         })
     }
 }
