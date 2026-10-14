@@ -14,9 +14,10 @@ use log::debug;
 use symphonia_core::audio::{Channels, layouts};
 use symphonia_core::codecs::audio::AudioCodecId;
 use symphonia_core::codecs::audio::well_known::{
-    CODEC_ID_PCM_ALAW, CODEC_ID_PCM_F32BE, CODEC_ID_PCM_F64BE, CODEC_ID_PCM_MULAW, CODEC_ID_PCM_S8,
-    CODEC_ID_PCM_S16BE, CODEC_ID_PCM_S16LE, CODEC_ID_PCM_S24BE, CODEC_ID_PCM_S32BE,
-    CODEC_ID_PCM_S32LE, CODEC_ID_PCM_U8,
+    CODEC_ID_ADPCM_IMA_QT, CODEC_ID_PCM_ALAW, CODEC_ID_PCM_F32BE, CODEC_ID_PCM_F64BE,
+    CODEC_ID_PCM_MULAW, CODEC_ID_PCM_S8, CODEC_ID_PCM_S16BE, CODEC_ID_PCM_S16LE,
+    CODEC_ID_PCM_S24BE, CODEC_ID_PCM_S24LE, CODEC_ID_PCM_S32BE, CODEC_ID_PCM_S32LE,
+    CODEC_ID_PCM_U8,
 };
 use symphonia_core::errors::{Result, decode_error, unsupported_error};
 use symphonia_core::io::ReadBytes;
@@ -24,8 +25,8 @@ use symphonia_core::meta::{StandardTag, Tag};
 use symphonia_core::util::text;
 
 use crate::common::{
-    ChunkParser, FormatALaw, FormatData, FormatIeeeFloat, FormatMuLaw, FormatPcm, Id3Chunk,
-    PacketInfo, ParseChunk, ParseChunkTag,
+    ChunkParser, FormatALaw, FormatAdpcm, FormatData, FormatIeeeFloat, FormatMuLaw, FormatPcm,
+    Id3Chunk, PacketInfo, ParseChunk, ParseChunkTag,
 };
 
 use extended::Extended;
@@ -35,7 +36,6 @@ pub struct CommonChunk {
     /// The number of channels.
     pub num_channels: u16,
     /// The number of audio frames.
-    #[allow(dead_code)]
     pub num_sample_frames: u32,
     /// The sample size in bits.
     pub sample_size: u16,
@@ -132,10 +132,35 @@ impl CommonChunk {
         Ok(FormatData::IeeeFloat(FormatIeeeFloat { channels, codec: CODEC_ID_PCM_F64BE }))
     }
 
+    /// Apple QuickTime IMA 4:1 ADPCM (`ima4`). Each channel is coded as an independent 34-byte
+    /// block of 64 samples. The blocks of all channels are stored one after the other.
+    fn read_ima4_fmt(bits_per_sample: u16, num_channels: u16) -> Result<FormatData> {
+        if bits_per_sample != 16 {
+            debug!("bits per sample is not 16 for ima4 format");
+        }
+        let channels = map_aiff_channel_count(num_channels)?;
+        let Some(block_align) = 34u16.checked_mul(num_channels)
+        else {
+            return decode_error("aiff: too many channels for ima4");
+        };
+        Ok(FormatData::Adpcm(FormatAdpcm {
+            block_align,
+            bits_per_sample: 4,
+            channels,
+            codec: CODEC_ID_ADPCM_IMA_QT,
+            extra_data: None,
+        }))
+    }
+
     fn read_sowt_fmt(bits_per_sample: u16, num_channels: u16) -> Result<FormatData> {
+        // 'sowt' is the little-endian counterpart of 'twos'. QuickTime also uses it for 8, 24, and
+        // 32-bit integer PCM.
         let codec = match bits_per_sample {
+            8 => CODEC_ID_PCM_S8,
             16 => CODEC_ID_PCM_S16LE,
-            _ => return decode_error("aiff: bits per sample for sowt must be 16 bits"),
+            24 => CODEC_ID_PCM_S24LE,
+            32 => CODEC_ID_PCM_S32LE,
+            _ => return decode_error("aiff: bits per sample for sowt must be 8, 16, 24 or 32"),
         };
 
         Self::make_pcm_fmt(bits_per_sample, num_channels, codec)
@@ -143,8 +168,11 @@ impl CommonChunk {
 
     fn read_twos_fmt(bits_per_sample: u16, num_channels: u16) -> Result<FormatData> {
         let codec = match bits_per_sample {
+            8 => CODEC_ID_PCM_S8,
             16 => CODEC_ID_PCM_S16BE,
-            _ => return decode_error("aiff: bits per sample for twos must be 16 bits"),
+            24 => CODEC_ID_PCM_S24BE,
+            32 => CODEC_ID_PCM_S32BE,
+            _ => return decode_error("aiff: bits per sample for twos must be 8, 16, 24 or 32"),
         };
 
         Self::make_pcm_fmt(bits_per_sample, num_channels, codec)
@@ -168,9 +196,7 @@ impl CommonChunk {
             FormatData::Extensible(_) => {
                 unsupported_error("aiff: packet info not implemented for format Extensible")
             }
-            FormatData::Adpcm(_) => {
-                unsupported_error("aiff: packet info not implemented for format Adpcm")
-            }
+            FormatData::Adpcm(adpcm) => adpcm.make_packet_info(),
             FormatData::Mpeg(_) => {
                 unsupported_error("aiff: packet info not implemented for format Mpeg")
             }
@@ -224,8 +250,11 @@ impl fmt::Display for CommonChunk {
             FormatData::Extensible(_) => {
                 writeln!(f, "\tformat_data: Extensible DISPLAY UNSUPPORTED {{")?;
             }
-            FormatData::Adpcm(_) => {
-                writeln!(f, "\tformat_data: Adpcm DISPLAY UNSUPPORTED {{")?;
+            FormatData::Adpcm(ref adpcm) => {
+                writeln!(f, "\tformat_data: Adpcm {{")?;
+                writeln!(f, "\t\tblock_align: {},", adpcm.block_align)?;
+                writeln!(f, "\t\tchannels: {},", adpcm.channels)?;
+                writeln!(f, "\t\tcodec: {},", adpcm.codec)?;
             }
             FormatData::Mpeg(_) => {
                 writeln!(f, "\tformat_data: Mpeg DISPLAY UNSUPPORTED {{")?;
@@ -268,6 +297,7 @@ impl CommonChunkParser for ChunkParser<CommonChunk> {
             b"fl64" | b"FL64" => CommonChunk::read_fl64_fmt(sample_size, num_channels),
             b"sowt" | b"SOWT" => CommonChunk::read_sowt_fmt(sample_size, num_channels),
             b"twos" | b"TWOS" => CommonChunk::read_twos_fmt(sample_size, num_channels),
+            b"ima4" | b"IMA4" => CommonChunk::read_ima4_fmt(sample_size, num_channels),
             b"raw " | b"RAW " => CommonChunk::read_raw_fmt(sample_size, num_channels),
             _ => return unsupported_error("aifc: compression type not supported"),
         }?;
@@ -303,10 +333,9 @@ impl ParseChunk for SoundChunk {
         let offset = reader.read_be_u32()?;
         let block_size = reader.read_be_u32()?;
 
-        if block_size != 0 {
-            return unsupported_error("aiff: no support for aiff block-aligned data");
-        }
-
+        // A non-zero block size only states that the sound data is aligned to blocks of that size
+        // (with `offset` bytes of leading padding to achieve it). It does not change how the
+        // sample frames are laid out, so it can be ignored when reading.
         if offset > len - 8 {
             return decode_error("aiff: sound data offset too large");
         }
@@ -380,6 +409,20 @@ impl ParseChunk for AppSpecificChunk {
     }
 }
 
+/// A chunk without a defined meaning to the reader (`INST`, `MIDI`, `AESD`, `SAXL`) that is
+/// preserved verbatim.
+pub struct RawChunk {
+    pub ident: String,
+    pub data: Box<[u8]>,
+}
+
+impl ParseChunk for RawChunk {
+    fn parse<B: ReadBytes>(reader: &mut B, tag: [u8; 4], len: u32) -> Result<Self> {
+        let data = reader.read_boxed_slice_exact(len as usize)?;
+        Ok(RawChunk { ident: String::from_utf8_lossy(&tag).into_owned(), data })
+    }
+}
+
 pub struct CommentsChunk {
     pub comments: Vec<Comment>,
 }
@@ -403,6 +446,12 @@ impl ParseChunk for CommentsChunk {
             let marker_id = reader.read_be_i16()?;
             let len = reader.read_be_u16()?;
             let buf = reader.read_boxed_slice_exact(usize::from(len))?;
+
+            // The comment text is padded with a zero byte to an even length. The pad byte is not
+            // included in the count.
+            if len & 1 == 1 {
+                reader.read_byte()?;
+            }
 
             comments.push(Comment { timestamp, marker_id, text: decode_string(&buf) });
         }
@@ -446,6 +495,7 @@ pub enum RiffAiffChunks {
     Marker(ChunkParser<MarkerChunk>),
     AppSpecific(ChunkParser<AppSpecificChunk>),
     Comments(ChunkParser<CommentsChunk>),
+    Raw(ChunkParser<RawChunk>),
     Text(ChunkParser<TextChunk>),
     Id3(ChunkParser<Id3Chunk>),
 }
@@ -464,6 +514,9 @@ impl ParseChunkTag for RiffAiffChunks {
             b"MARK" => parser!(RiffAiffChunks::Marker, MarkerChunk, tag, len),
             b"APPL" => parser!(RiffAiffChunks::AppSpecific, AppSpecificChunk, tag, len),
             b"COMT" => parser!(RiffAiffChunks::Comments, CommentsChunk, tag, len),
+            b"INST" | b"MIDI" | b"AESD" | b"SAXL" => {
+                parser!(RiffAiffChunks::Raw, RawChunk, tag, len)
+            }
             b"NAME" | b"AUTH" | b"(c) " | b"ANNO" => {
                 parser!(RiffAiffChunks::Text, TextChunk, tag, len)
             }

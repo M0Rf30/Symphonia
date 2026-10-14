@@ -13,11 +13,12 @@ use std::num::NonZero;
 
 use symphonia_core::audio::Channels;
 use symphonia_core::codecs::audio::well_known::{
-    CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_MS, CODEC_ID_PCM_F32BE, CODEC_ID_PCM_F32LE,
-    CODEC_ID_PCM_F64BE, CODEC_ID_PCM_F64LE,
+    CODEC_ID_ADPCM_G722, CODEC_ID_ADPCM_G726, CODEC_ID_ADPCM_G726LE, CODEC_ID_ADPCM_IMA_QT,
+    CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_MS, CODEC_ID_ADPCM_YAMAHA, CODEC_ID_PCM_F32BE,
+    CODEC_ID_PCM_F32LE, CODEC_ID_PCM_F64BE, CODEC_ID_PCM_F64LE,
 };
 use symphonia_core::codecs::audio::{AudioCodecId, AudioCodecParameters};
-use symphonia_core::errors::{Error, Result, decode_error};
+use symphonia_core::errors::{Error, Result, decode_error, unsupported_error};
 use symphonia_core::formats::prelude::*;
 use symphonia_core::io::{MediaSourceStream, ReadBytes, ScopedStream};
 use symphonia_core::meta::MetadataRevision;
@@ -249,12 +250,15 @@ pub struct FormatAdpcm {
     pub channels: Channels,
     /// Codec ID.
     pub codec: AudioCodecId,
+    /// The format extension data following `cbSize` (WAVE only): for IMA ADPCM, the samples per
+    /// block; for MS ADPCM, the samples per block and coefficient table.
+    pub extra_data: Option<Box<[u8]>>,
 }
 
 impl FormatAdpcm {
     pub fn make_packet_info(&self) -> Result<PacketInfo> {
         let num_channels = self.channels.count() as u16;
-        let bits_per_frame = (self.bits_per_sample * num_channels) as u64;
+        let bits_per_frame = u64::from(self.bits_per_sample) * u64::from(num_channels);
 
         match self.codec {
             CODEC_ID_ADPCM_MS => {
@@ -271,9 +275,53 @@ impl FormatAdpcm {
                 if 4 * num_channels > self.block_align {
                     return decode_error("riff (adpcm_ima_wav): block align too small");
                 }
+
+                // Per channel, the samples are coded in chunks of (bytes, samples): 2 bit: (4, 16),
+                // 3 bit: (12, 32), 4 bit: (4, 8), 5 bit: (20, 32).
+                let (chunk_bytes, chunk_samples) = match self.bits_per_sample {
+                    2 => (4u64, 16u64),
+                    3 => (12, 32),
+                    4 => (4, 8),
+                    5 => (20, 32),
+                    _ => return decode_error("riff (adpcm_ima_wav): unsupported bits per sample"),
+                };
+                let data_len = u64::from(self.block_align - 4 * num_channels);
                 let frames_per_block =
-                    (8 * u64::from(self.block_align - 4 * num_channels)) / bits_per_frame + 1;
+                    (data_len / (chunk_bytes * u64::from(num_channels))) * chunk_samples + 1;
                 PacketInfo::with_blocks(self.block_align, frames_per_block)
+            }
+            CODEC_ID_ADPCM_G726 | CODEC_ID_ADPCM_G726LE => {
+                // A mono bitstream of `bits_per_sample` bits per sample. 8 samples always make a
+                // whole number of bytes (`bits_per_sample` bytes).
+                if num_channels != 1 {
+                    return unsupported_error("riff (adpcm_g726): only mono is supported");
+                }
+                PacketInfo::with_blocks(self.bits_per_sample, 8)
+            }
+            CODEC_ID_ADPCM_YAMAHA => {
+                // 4 bits per sample, so a byte holds 2 mono frames or 1 stereo frame.
+                match num_channels {
+                    1 => PacketInfo::with_blocks(1, 2),
+                    2 => PacketInfo::with_blocks(1, 1),
+                    _ => {
+                        unsupported_error("riff (adpcm_yamaha): only mono and stereo are supported")
+                    }
+                }
+            }
+            CODEC_ID_ADPCM_G722 => {
+                // Two 4-bit codes per byte, mono.
+                if num_channels != 1 {
+                    return unsupported_error("riff (adpcm_g722): only mono is supported");
+                }
+                PacketInfo::with_blocks(1, 2)
+            }
+            CODEC_ID_ADPCM_IMA_QT => {
+                // Every channel is an independent block of 64 frames and 34 bytes, and the blocks
+                // of all channels are stored consecutively.
+                if 34 * num_channels != self.block_align {
+                    return decode_error("riff (adpcm_ima_qt): invalid block align");
+                }
+                PacketInfo::with_blocks(self.block_align, 64)
             }
             _ => unimplemented!("incomplete new adpcm codec"),
         }
@@ -522,7 +570,13 @@ pub fn append_format_params(
                 .with_channels(pcm.channels);
         }
         FormatData::Adpcm(adpcm) => {
-            codec_params.for_codec(adpcm.codec).with_channels(adpcm.channels);
+            codec_params
+                .for_codec(adpcm.codec)
+                .with_channels(adpcm.channels)
+                .with_bits_per_coded_sample(u32::from(adpcm.bits_per_sample));
+            if let Some(extra_data) = adpcm.extra_data {
+                codec_params.with_extra_data(extra_data);
+            }
         }
         FormatData::IeeeFloat(ieee) => {
             codec_params.for_codec(ieee.codec).with_channels(ieee.channels);

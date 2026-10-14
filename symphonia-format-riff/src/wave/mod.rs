@@ -26,8 +26,10 @@ use crate::common::{
     next_packet,
 };
 mod chunks;
+mod extras;
 mod mpeg;
 use chunks::*;
+use extras::WaveExtras;
 
 /// WAVE is actually a RIFF stream, with a "RIFF" ASCII stream marker.
 const WAVE_STREAM_MARKER: [u8; 4] = *b"RIFF";
@@ -70,6 +72,7 @@ pub struct WavReader<'s> {
     reader: MediaSourceStream<'s>,
     media_info: MediaInfo,
     tracks: Vec<Track>,
+    attachments: Vec<Attachment>,
     chapters: Option<ChapterGroup>,
     metadata: MetadataLog,
     packet_info: PacketInfo,
@@ -151,6 +154,8 @@ impl<'s> WavReader<'s> {
         let mut is_mpeg = false;
         let mut mpeg_avg_bytes_per_sec = 0u32;
         let mut rf64_sizes = Rf64Sizes::default();
+        let mut extras = WaveExtras::default();
+        let mut sample_rate = 0u32;
 
         loop {
             let chunk = match &mut w64_chunks {
@@ -214,6 +219,8 @@ impl<'s> WavReader<'s> {
                         .with_max_frames_per_packet(info.max_frames_per_packet.get())
                         .with_frames_per_block(info.frames_per_block.get());
 
+                    sample_rate = format.sample_rate;
+
                     // Append Format chunk fields to codec parameters.
                     append_format_params(&mut codec_params, format.format_data, format.sample_rate);
 
@@ -229,8 +236,13 @@ impl<'s> WavReader<'s> {
                     // lists.
                     match &list.form {
                         b"INFO" => metadata.push(read_info_chunk(&mut mss, list.len)?),
+                        b"adtl" => extras.read_adtl_list(&mut mss, list.len)?,
                         _ => list.skip(&mut mss)?,
                     }
+                }
+                RiffWaveChunks::Extra(chunk) => {
+                    let chunk = chunk.parse(&mut mss)?;
+                    extras.add_chunk(chunk, &mut metadata);
                 }
                 RiffWaveChunks::Id3(id3) => {
                     let chunk_end_pos = mss.pos() + u64::from(id3.len);
@@ -270,6 +282,7 @@ impl<'s> WavReader<'s> {
                             data_start_pos,
                             data_end_pos,
                             &mut metadata,
+                            &mut extras,
                         )?;
                     }
 
@@ -364,7 +377,8 @@ impl<'s> WavReader<'s> {
                         reader: mss,
                         media_info: MediaInfo::from_track(&track),
                         tracks: vec![track],
-                        chapters: opts.external_data.chapters,
+                        chapters: extras.chapters(sample_rate).or(opts.external_data.chapters),
+                        attachments: extras.attachments,
                         metadata,
                         packet_info,
                         data_start_pos,
@@ -546,6 +560,10 @@ impl FormatReader for WavReader<'_> {
 
     fn metadata(&mut self) -> Metadata<'_> {
         self.metadata.metadata()
+    }
+
+    fn attachments(&self) -> &[Attachment] {
+        &self.attachments
     }
 
     fn chapters(&self) -> Option<&ChapterGroup> {
@@ -1641,5 +1659,180 @@ mod tests {
             },
         );
         assert!(result.is_err());
+    }
+
+    // -- bext, cue points, and vendor chunks ---------------------------------------------------
+
+    fn bext_payload() -> Vec<u8> {
+        let mut bext = vec![0u8; 602];
+        bext[..5].copy_from_slice(b"A mix");
+        bext[256..264].copy_from_slice(b"Studio B");
+        bext[320..330].copy_from_slice(b"2026-01-02");
+        bext[330..338].copy_from_slice(b"03:04:05");
+        bext[338..346].copy_from_slice(&48_000u64.to_le_bytes());
+        bext[346..348].copy_from_slice(&2u16.to_le_bytes());
+        bext[412..414].copy_from_slice(&(-2300i16).to_le_bytes());
+        for unset in 1..5 {
+            bext[412 + unset * 2..414 + unset * 2].copy_from_slice(&0x7fffi16.to_le_bytes());
+        }
+        bext.extend_from_slice(b"A=PCM\r\n");
+        bext
+    }
+
+    fn cue_payload(points: &[(u32, u32)]) -> Vec<u8> {
+        let mut cue = (points.len() as u32).to_le_bytes().to_vec();
+        for &(id, offset) in points {
+            cue.extend_from_slice(&id.to_le_bytes());
+            cue.extend_from_slice(&offset.to_le_bytes());
+            cue.extend_from_slice(b"data");
+            cue.extend_from_slice(&0u32.to_le_bytes());
+            cue.extend_from_slice(&0u32.to_le_bytes());
+            cue.extend_from_slice(&offset.to_le_bytes());
+        }
+        cue
+    }
+
+    fn adtl_list() -> Vec<u8> {
+        let mut labl = 2u32.to_le_bytes().to_vec();
+        labl.extend_from_slice(b"Verse\0");
+        let mut note = 2u32.to_le_bytes().to_vec();
+        note.extend_from_slice(b"Remark\0");
+        let mut ltxt = 1u32.to_le_bytes().to_vec();
+        ltxt.extend_from_slice(&4000u32.to_le_bytes());
+        ltxt.extend_from_slice(b"rgn ");
+        ltxt.extend_from_slice(&[0u8; 8]);
+        ltxt.extend_from_slice(b"Intro");
+
+        let mut payload = b"adtl".to_vec();
+        payload.extend(chunk(b"ltxt", &ltxt));
+        payload.extend(chunk(b"labl", &labl));
+        payload.extend(chunk(b"note", &note));
+        chunk(b"LIST", &payload)
+    }
+
+    fn check_cue_chapters(reader: &WavReader<'_>) {
+        let chapters = reader.chapters().expect("chapters");
+        assert_eq!(chapters.items.len(), 2);
+
+        let symphonia_core::meta::ChapterGroupItem::Chapter(first) = &chapters.items[0]
+        else {
+            panic!("expected a chapter");
+        };
+        // 4000 frames at 8 kHz, with an ltxt length of 4000 frames.
+        assert_eq!(first.start_time.as_secs_f64(), 0.5);
+        assert_eq!(first.end_time.map(|t| t.as_secs_f64()), Some(1.0));
+
+        let symphonia_core::meta::ChapterGroupItem::Chapter(second) = &chapters.items[1]
+        else {
+            panic!("expected a chapter");
+        };
+        assert_eq!(second.start_time.as_secs_f64(), 1.0);
+        let keys: Vec<_> =
+            second.tags.iter().map(|t| (&t.raw.key[..], t.raw.value.to_string())).collect();
+        assert_eq!(keys, [("labl", "Verse".to_string()), ("note", "Remark".to_string())]);
+    }
+
+    #[test]
+    fn bext_cue_and_vendor_chunks_before_data() {
+        let data = vec![0u8; 16000];
+        let bytes = riff_wave(
+            None,
+            &[
+                chunk(b"fmt ", &pcm16_mono_fmt()),
+                chunk(b"bext", &bext_payload()),
+                chunk(b"cue ", &cue_payload(&[(1, 4000), (2, 8000)])),
+                adtl_list(),
+                chunk(b"iXML", b"<BWFXML/>"),
+                chunk(b"data", &data),
+            ],
+        );
+
+        let mut reader = open_wav(bytes).unwrap();
+        check_cue_chapters(&reader);
+
+        let tags = all_tags(&mut reader);
+        let get = |key: &str| tags.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
+        assert_eq!(get("description"), Some("A mix"));
+        assert_eq!(get("originator"), Some("Studio B"));
+        assert_eq!(get("origination_date"), Some("2026-01-02"));
+        assert_eq!(get("origination_time"), Some("03:04:05"));
+        assert_eq!(get("time_reference"), Some("48000"));
+        assert_eq!(get("loudness_value"), Some("-23.00"));
+        assert_eq!(get("loudness_range"), None);
+        assert_eq!(get("coding_history"), Some("A=PCM"));
+
+        assert_eq!(reader.attachments().len(), 1);
+    }
+
+    #[test]
+    fn cue_points_after_data_are_read() {
+        let data = vec![0u8; 16000];
+        let bytes = riff_wave(
+            None,
+            &[
+                chunk(b"fmt ", &pcm16_mono_fmt()),
+                chunk(b"data", &data),
+                chunk(b"cue ", &cue_payload(&[(1, 4000), (2, 8000)])),
+                adtl_list(),
+            ],
+        );
+
+        let reader = open_wav(bytes).unwrap();
+        check_cue_chapters(&reader);
+    }
+
+    #[test]
+    fn adpcm_fmt_extension_is_exposed_as_extra_data() {
+        let reader = open_wav(adpcm_wav(0x0002, 256, 2)).unwrap();
+        let params = reader.tracks()[0].codec_params.as_ref().and_then(|p| p.audio()).unwrap();
+        let extra = params.extra_data.as_ref().expect("extra data");
+        assert_eq!(extra.len(), 32);
+        assert_eq!(&extra[..4], &[0xf4, 0x01, 0x07, 0x00]);
+    }
+
+    #[test]
+    fn ima_adpcm_frames_per_block_depends_on_bits_per_sample() {
+        // (bits per sample, block align, expected frames per block), mono, from FFmpeg's
+        // get_nb_samples().
+        for (bits, block_align, frames) in
+            [(2u16, 100u16, 385u64), (3, 100, 257), (4, 256, 505), (5, 104, 161)]
+        {
+            let mut fmt = Vec::new();
+            fmt.extend_from_slice(&0x0011u16.to_le_bytes());
+            fmt.extend_from_slice(&1u16.to_le_bytes());
+            fmt.extend_from_slice(&8000u32.to_le_bytes());
+            fmt.extend_from_slice(&4000u32.to_le_bytes());
+            fmt.extend_from_slice(&block_align.to_le_bytes());
+            fmt.extend_from_slice(&bits.to_le_bytes());
+            fmt.extend_from_slice(&2u16.to_le_bytes());
+            fmt.extend_from_slice(&0u16.to_le_bytes());
+            let data = vec![0u8; usize::from(block_align)];
+            let reader =
+                open_wav(riff_wave(None, &[chunk(b"fmt ", &fmt), chunk(b"data", &data)])).unwrap();
+            let params = reader.tracks()[0].codec_params.as_ref().and_then(|p| p.audio()).unwrap();
+            assert_eq!(params.frames_per_block, Some(frames), "{bits} bits");
+            assert_eq!(params.bits_per_coded_sample, Some(u32::from(bits)));
+        }
+    }
+
+    #[test]
+    fn g726_and_g722_are_recognised() {
+        for (tag, bits, rate, codec_rate) in
+            [(0x0045u16, 3u16, 8000u32, 8000u32), (0x028f, 4, 8000, 16000)]
+        {
+            let mut fmt = Vec::new();
+            fmt.extend_from_slice(&tag.to_le_bytes());
+            fmt.extend_from_slice(&1u16.to_le_bytes());
+            fmt.extend_from_slice(&rate.to_le_bytes());
+            fmt.extend_from_slice(&3000u32.to_le_bytes());
+            fmt.extend_from_slice(&1u16.to_le_bytes());
+            fmt.extend_from_slice(&bits.to_le_bytes());
+            fmt.extend_from_slice(&0u16.to_le_bytes());
+            let reader =
+                open_wav(riff_wave(None, &[chunk(b"fmt ", &fmt), chunk(b"data", &[0u8; 30])]))
+                    .unwrap();
+            let params = reader.tracks()[0].codec_params.as_ref().and_then(|p| p.audio()).unwrap();
+            assert_eq!(params.sample_rate, Some(codec_rate));
+        }
     }
 }

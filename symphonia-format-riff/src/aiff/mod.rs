@@ -154,7 +154,13 @@ impl<'s> AiffReader<'s> {
                     // The length of the sound data chunk must also be known.
                     let ssnd_ref = ssnd.as_ref().expect("ssnd assigned a few lines above");
                     if let Some(len) = ssnd_ref.len {
-                        mss.ignore_bytes(u64::from(len))?;
+                        // The file may be truncated within the sound data. Whatever is present can
+                        // still be played, so reaching the end of the stream is not an error.
+                        match mss.ignore_bytes(u64::from(len)) {
+                            Ok(()) => (),
+                            Err(err) if err.kind() == ErrorKind::UnexpectedEof => break,
+                            Err(err) => return Err(err.into()),
+                        }
                     }
                     else {
                         break;
@@ -185,6 +191,14 @@ impl<'s> AiffReader<'s> {
                     attachments.push(Attachment::VendorData(VendorDataAttachment {
                         ident: appl.application,
                         data: appl.data,
+                    }));
+                }
+                RiffAiffChunks::Raw(chunk) => {
+                    let raw = chunk.parse_and_skip_unread(&mut mss)?;
+
+                    attachments.push(Attachment::VendorData(VendorDataAttachment {
+                        ident: raw.ident,
+                        data: raw.data,
                     }));
                 }
                 RiffAiffChunks::Text(chunk) => {
@@ -238,9 +252,52 @@ impl<'s> AiffReader<'s> {
         let mut track = Track::new(0);
         track.with_codec_params(CodecParameters::Audio(codec_params));
 
+        // The common chunk is authoritative on the number of sample frames, and the sound data
+        // chunk may be larger (e.g., zero padding or trailing bytes). If the declared count is
+        // zero, it is unknown (e.g., a streamed file), so the sound data chunk length is used. If
+        // the sound data chunk is shorter (e.g., a truncated file), only the data that is present
+        // can be decoded.
+        //
+        // QuickTime and FFmpeg write the number of 34-byte blocks (packets) instead of the number
+        // of sample frames for `ima4`. A count equal to the number of blocks present is therefore
+        // not a frame count for block-based formats.
+        let frames_per_block = packet_info.frames_per_block.get();
+
+        let declared_frames = match u64::from(comm.num_sample_frames) {
+            0 => None,
+            frames if frames_per_block > 1 => {
+                let is_block_count = ssnd
+                    .len
+                    .is_some_and(|len| u64::from(len) / packet_info.block_size.get() == frames);
+                (!is_block_count).then_some(frames)
+            }
+            frames => Some(frames),
+        };
+
+        let data_len = ssnd.len.map(|len| {
+            let len = u64::from(len);
+            declared_frames
+                .and_then(|frames| {
+                    frames.div_ceil(frames_per_block).checked_mul(packet_info.block_size.get())
+                })
+                .map_or(len, |declared_len| len.min(declared_len))
+        });
+
         // Append sound data chunk fields to track.
-        if let Some(data_len) = ssnd.len {
-            append_data_params(&mut track, u64::from(data_len), &packet_info);
+        if let Some(data_len) = data_len {
+            append_data_params(&mut track, data_len, &packet_info);
+
+            // Block-based codecs code whole blocks, so the final block may carry frames past the
+            // end of the audio. These are padding.
+            let coded_frames = packet_info.get_num_frames_at(data_len);
+
+            if let Some(frames) = declared_frames.filter(|&frames| frames < coded_frames) {
+                track.with_num_frames(frames);
+                track.with_duration(Duration::from(frames));
+                if let Ok(padding) = u32::try_from(coded_frames - frames) {
+                    track.with_padding(padding);
+                }
+            }
         }
 
         Ok(AiffReader {
@@ -252,7 +309,7 @@ impl<'s> AiffReader<'s> {
             metadata,
             packet_info,
             data_start_pos: ssnd.data_start_pos,
-            data_end_pos: ssnd.len.map(|data_len| ssnd.data_start_pos + u64::from(data_len)),
+            data_end_pos: data_len.map(|data_len| ssnd.data_start_pos + data_len),
         })
     }
 }
@@ -453,8 +510,7 @@ impl FormatReader for AiffReader<'_> {
         let actual_ts = self.packet_info.get_actual_ts(required_ts);
 
         // Calculate the absolute byte offset of the desired audio frame.
-        let seek_pos =
-            self.data_start_pos + (actual_ts.get() as u64 * self.packet_info.block_size.get());
+        let seek_pos = self.data_start_pos + self.packet_info.get_data_pos_at(actual_ts);
 
         // If the reader supports seeking we can seek directly to the frame's offset wherever it may
         // be.
@@ -487,5 +543,149 @@ impl FormatReader for AiffReader<'_> {
         Self: 's,
     {
         self.reader
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use symphonia_core::codecs::audio::well_known::CODEC_ID_ADPCM_IMA_QT;
+    use symphonia_core::formats::FormatOptions;
+    use symphonia_core::io::MediaSourceStream;
+    use symphonia_core::meta::ChapterGroupItem;
+
+    use super::*;
+
+    fn chunk(tag: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut out = tag.to_vec();
+        out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        out.extend_from_slice(payload);
+        if payload.len() & 1 == 1 {
+            out.push(0);
+        }
+        out
+    }
+
+    /// An 8 kHz, extended-precision sample rate.
+    const RATE_8000: [u8; 10] = [0x40, 0x0b, 0xfa, 0, 0, 0, 0, 0, 0, 0];
+
+    fn comm(channels: u16, frames: u32, bits: u16, compression: Option<&[u8; 4]>) -> Vec<u8> {
+        let mut c = channels.to_be_bytes().to_vec();
+        c.extend_from_slice(&frames.to_be_bytes());
+        c.extend_from_slice(&bits.to_be_bytes());
+        c.extend_from_slice(&RATE_8000);
+        if let Some(compression) = compression {
+            c.extend_from_slice(compression);
+            c.extend_from_slice(&[0, 0]); // Empty pstring, plus its pad byte.
+        }
+        chunk(b"COMM", &c)
+    }
+
+    fn ssnd(data: &[u8]) -> Vec<u8> {
+        let mut s = vec![0u8; 8];
+        s.extend_from_slice(data);
+        chunk(b"SSND", &s)
+    }
+
+    fn form(kind: &[u8; 4], chunks: &[Vec<u8>]) -> Vec<u8> {
+        let body: Vec<u8> = chunks.iter().flatten().copied().collect();
+        let mut out = b"FORM".to_vec();
+        out.extend_from_slice(&(4 + body.len() as u32).to_be_bytes());
+        out.extend_from_slice(kind);
+        out.extend_from_slice(&body);
+        out
+    }
+
+    fn open(bytes: Vec<u8>) -> Result<AiffReader<'static>> {
+        let mss = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
+        AiffReader::try_new(mss, FormatOptions::default())
+    }
+
+    #[test]
+    fn comments_with_odd_text_length_are_padded() {
+        // Two comments: the first has a 3 byte text (followed by a pad byte).
+        let mut comt = 2u16.to_be_bytes().to_vec();
+        for (marker, text) in [(0i16, &b"abc"[..]), (0, &b"de"[..])] {
+            comt.extend_from_slice(&0u32.to_be_bytes());
+            comt.extend_from_slice(&marker.to_be_bytes());
+            comt.extend_from_slice(&(text.len() as u16).to_be_bytes());
+            comt.extend_from_slice(text);
+            if text.len() & 1 == 1 {
+                comt.push(0);
+            }
+        }
+
+        let mut reader =
+            open(form(b"AIFF", &[comm(1, 2, 16, None), chunk(b"COMT", &comt), ssnd(&[0; 4])]))
+                .unwrap();
+
+        let mut values = Vec::new();
+        let mut metadata = reader.metadata();
+        loop {
+            if let Some(rev) = metadata.current() {
+                values.extend(rev.media.tags.iter().map(|t| t.raw.value.to_string()));
+            }
+            if metadata.is_latest() {
+                break;
+            }
+            metadata.pop();
+        }
+        assert_eq!(values, ["abc", "de"]);
+    }
+
+    #[test]
+    fn sound_data_beyond_declared_frames_is_ignored() {
+        let reader = open(form(b"AIFF", &[comm(1, 3, 16, None), ssnd(&[0; 12])])).unwrap();
+        assert_eq!(reader.tracks()[0].num_frames, Some(3));
+    }
+
+    #[test]
+    fn truncated_sound_data_is_playable() {
+        let mut bytes = form(b"AIFF", &[comm(1, 100, 16, None), ssnd(&[1; 200])]);
+        bytes.truncate(bytes.len() - 100);
+        let mut reader = open(bytes).unwrap();
+        let packet = reader.next_packet().unwrap().expect("packet");
+        assert_eq!(packet.dur.get(), 50);
+    }
+
+    #[test]
+    fn ima4_is_block_based() {
+        // 2 channels, 3 blocks of 64 frames; the common chunk declares 150 frames.
+        let reader =
+            open(form(b"AIFC", &[comm(2, 150, 16, Some(b"ima4")), ssnd(&[0; 3 * 68])])).unwrap();
+        let track = &reader.tracks()[0];
+        let params = track.codec_params.as_ref().and_then(|p| p.audio()).unwrap();
+        assert_eq!(params.codec, CODEC_ID_ADPCM_IMA_QT);
+        assert_eq!(params.frames_per_block, Some(64));
+        assert_eq!(track.num_frames, Some(150));
+        assert_eq!(track.padding, Some(42));
+    }
+
+    #[test]
+    fn ima4_block_count_in_common_chunk_is_not_a_frame_count() {
+        // QuickTime and FFmpeg write the number of blocks for ima4.
+        let reader =
+            open(form(b"AIFC", &[comm(1, 3, 16, Some(b"ima4")), ssnd(&[0; 3 * 34])])).unwrap();
+        assert_eq!(reader.tracks()[0].num_frames, Some(192));
+    }
+
+    #[test]
+    fn markers_become_chapters() {
+        let mut mark = 1u16.to_be_bytes().to_vec();
+        mark.extend_from_slice(&1i16.to_be_bytes());
+        mark.extend_from_slice(&4000u32.to_be_bytes());
+        mark.extend_from_slice(&[3, b'a', b'b', b'c']);
+        let reader = open(form(
+            b"AIFF",
+            &[comm(1, 8000, 16, None), chunk(b"MARK", &mark), ssnd(&[0; 16000])],
+        ))
+        .unwrap();
+        let chapters = reader.chapters().unwrap();
+        let ChapterGroupItem::Chapter(chapter) = &chapters.items[0]
+        else {
+            panic!("expected a chapter");
+        };
+        assert_eq!(chapter.start_time.as_secs_f64(), 0.5);
     }
 }

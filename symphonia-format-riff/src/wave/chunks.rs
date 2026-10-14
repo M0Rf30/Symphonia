@@ -12,9 +12,10 @@ use symphonia_core::audio::AmbisonicBFormat;
 use symphonia_core::audio::{ChannelLabel, Channels, Position};
 use symphonia_core::codecs::audio::AudioCodecId;
 use symphonia_core::codecs::audio::well_known::{
-    CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_MS, CODEC_ID_MP2, CODEC_ID_MP3, CODEC_ID_PCM_ALAW,
-    CODEC_ID_PCM_F32LE, CODEC_ID_PCM_F64LE, CODEC_ID_PCM_MULAW, CODEC_ID_PCM_S16LE,
-    CODEC_ID_PCM_S24LE, CODEC_ID_PCM_S32LE, CODEC_ID_PCM_U8,
+    CODEC_ID_ADPCM_G722, CODEC_ID_ADPCM_G726, CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_MS,
+    CODEC_ID_ADPCM_YAMAHA, CODEC_ID_MP2, CODEC_ID_MP3, CODEC_ID_PCM_ALAW, CODEC_ID_PCM_F32LE,
+    CODEC_ID_PCM_F64LE, CODEC_ID_PCM_MULAW, CODEC_ID_PCM_S16LE, CODEC_ID_PCM_S24LE,
+    CODEC_ID_PCM_S32LE, CODEC_ID_PCM_U8,
 };
 use symphonia_core::errors::{Error, Result, decode_error, unsupported_error};
 use symphonia_core::formats::Track;
@@ -32,6 +33,7 @@ use crate::common::{
 use log::info;
 
 use super::WAVE_METADATA_INFO;
+use super::extras::{BufChunk, WaveExtras, is_extra_chunk};
 
 pub struct WaveFormatChunk {
     /// The number of channels.
@@ -115,6 +117,14 @@ impl WaveFormatChunk {
         }))
     }
 
+    /// Skips the bytes of the fmt chunk beyond the 16-byte base (the `WAVEFORMATEX` extension).
+    fn skip_fmt_extension<B: ReadBytes>(reader: &mut B, len: u32) -> Result<()> {
+        if len > 16 {
+            reader.ignore_bytes(u64::from(len - 16))?;
+        }
+        Ok(())
+    }
+
     fn read_adpcm_fmt<B: ReadBytes>(
         reader: &mut B,
         block_align: u16,
@@ -123,8 +133,14 @@ impl WaveFormatChunk {
         len: u32,
         codec: AudioCodecId,
     ) -> Result<FormatData> {
-        if bits_per_sample != 4 {
-            return decode_error("wav: bits per sample for fmt_adpcm must be 4 bits");
+        let valid_bits = match codec {
+            // IMA ADPCM may use 2 to 5 bits per sample.
+            CODEC_ID_ADPCM_IMA_WAV => (2..=5).contains(&bits_per_sample),
+            _ => bits_per_sample == 4,
+        };
+
+        if !valid_bits {
+            return decode_error("wav: unsupported bits per sample for fmt_adpcm");
         }
 
         // WaveFormatEx with extension data length field present and with atleast frames per block data.
@@ -143,10 +159,24 @@ impl WaveFormatChunk {
             }
             _ => (),
         }
-        reader.ignore_bytes(extra_size)?;
+
+        // The extension data must be within the chunk.
+        if extra_size > u64::from(len - 18) {
+            return decode_error("wav: malformed fmt_adpcm chunk");
+        }
+
+        // The extension data holds the samples per block (IMA and MS ADPCM), and for MS ADPCM,
+        // the coefficient table. Pass it on to the decoder verbatim.
+        let extra_data = reader.read_boxed_slice_exact(extra_size as usize)?;
 
         let channels = map_wave_channel_count(num_channels)?;
-        Ok(FormatData::Adpcm(FormatAdpcm { block_align, bits_per_sample, channels, codec }))
+        Ok(FormatData::Adpcm(FormatAdpcm {
+            block_align,
+            bits_per_sample,
+            channels,
+            codec,
+            extra_data: Some(extra_data),
+        }))
     }
 
     fn read_ieee_fmt<B: ReadBytes>(
@@ -440,7 +470,7 @@ impl ParseChunk for WaveFormatChunk {
 
         let format = reader.read_u16()?;
         let num_channels = reader.read_u16()?;
-        let sample_rate = reader.read_u32()?;
+        let mut sample_rate = reader.read_u32()?;
         let avg_bytes_per_sec = reader.read_u32()?;
         let block_align = reader.read_u16()?;
         let bits_per_sample = reader.read_u16()?;
@@ -453,6 +483,11 @@ impl ParseChunk for WaveFormatChunk {
         const WAVE_FORMAT_ALAW: u16 = 0x0006;
         const WAVE_FORMAT_MULAW: u16 = 0x0007;
         const WAVE_FORMAT_ADPCM_IMA: u16 = 0x0011;
+        const WAVE_FORMAT_G723_ADPCM: u16 = 0x0014;
+        const WAVE_FORMAT_G726: u16 = 0x0045;
+        const WAVE_FORMAT_G726_ADPCM: u16 = 0x0064;
+        const WAVE_FORMAT_G722: u16 = 0x028f;
+        const WAVE_FORMAT_YAMAHA_ADPCM: u16 = 0x0020;
         const WAVE_FORMAT_MPEG: u16 = 0x0050;
         const WAVE_FORMAT_MPEGLAYER3: u16 = 0x0055;
         const WAVE_FORMAT_EXTENSIBLE: u16 = 0xfffe;
@@ -492,6 +527,51 @@ impl ParseChunk for WaveFormatChunk {
                 len,
                 CODEC_ID_ADPCM_IMA_WAV,
             ),
+            // G.726 ADPCM (ITU-T), 2 to 5 bits per sample. 0x0014 and 0x0064 are the other tags
+            // that are used for it.
+            WAVE_FORMAT_G726 | WAVE_FORMAT_G723_ADPCM | WAVE_FORMAT_G726_ADPCM => {
+                if !(2..=5).contains(&bits_per_sample) {
+                    return decode_error("wav: bits per sample for g726 must be 2 to 5 bits");
+                }
+                Self::skip_fmt_extension(reader, len)?;
+                let channels = map_wave_channel_count(num_channels)?;
+                Ok(FormatData::Adpcm(FormatAdpcm {
+                    block_align,
+                    bits_per_sample,
+                    channels,
+                    codec: CODEC_ID_ADPCM_G726,
+                    extra_data: None,
+                }))
+            }
+            // Yamaha ADPCM, 4 bits per sample.
+            WAVE_FORMAT_YAMAHA_ADPCM => {
+                if bits_per_sample != 4 {
+                    return decode_error("wav: bits per sample for yamaha adpcm must be 4 bits");
+                }
+                Self::skip_fmt_extension(reader, len)?;
+                let channels = map_wave_channel_count(num_channels)?;
+                Ok(FormatData::Adpcm(FormatAdpcm {
+                    block_align,
+                    bits_per_sample,
+                    channels,
+                    codec: CODEC_ID_ADPCM_YAMAHA,
+                    extra_data: None,
+                }))
+            }
+            // G.722 (ITU-T) wideband ADPCM. The audio is always sampled at 16 kHz, regardless of
+            // the rate in the header.
+            WAVE_FORMAT_G722 => {
+                Self::skip_fmt_extension(reader, len)?;
+                sample_rate = 16000;
+                let channels = map_wave_channel_count(num_channels)?;
+                Ok(FormatData::Adpcm(FormatAdpcm {
+                    block_align,
+                    bits_per_sample: 8,
+                    channels,
+                    codec: CODEC_ID_ADPCM_G722,
+                    extra_data: None,
+                }))
+            }
             // The MPEG-1 Audio Layer III (MP3) Format.
             WAVE_FORMAT_MPEGLAYER3 => Self::read_mpeg_fmt(reader, num_channels, len, CODEC_ID_MP3),
             // The MPEG-1 Audio Layer I/II Format.
@@ -718,6 +798,7 @@ pub enum RiffWaveChunks {
     Data(ChunkParser<DataChunk>),
     Ds64(ChunkParser<Ds64Chunk>),
     Id3(ChunkParser<Id3Chunk>),
+    Extra(ChunkParser<BufChunk>),
 }
 
 macro_rules! parser {
@@ -735,6 +816,7 @@ impl ParseChunkTag for RiffWaveChunks {
             b"data" => parser!(RiffWaveChunks::Data, DataChunk, tag, len),
             b"ds64" => parser!(RiffWaveChunks::Ds64, Ds64Chunk, tag, len),
             b"id3 " | b"ID3 " => parser!(RiffWaveChunks::Id3, Id3Chunk, tag, len),
+            _ if is_extra_chunk(&tag, len) => parser!(RiffWaveChunks::Extra, BufChunk, tag, len),
             _ => None,
         }
     }
@@ -782,6 +864,7 @@ pub fn read_info_chunk(source: &mut MediaSourceStream<'_>, len: u32) -> Result<M
 pub enum RiffTrailingChunks {
     List(ChunkParser<ListChunk>),
     Id3(ChunkParser<Id3Chunk>),
+    Extra(ChunkParser<BufChunk>),
 }
 
 impl ParseChunkTag for RiffTrailingChunks {
@@ -789,6 +872,9 @@ impl ParseChunkTag for RiffTrailingChunks {
         match &tag {
             b"LIST" => parser!(RiffTrailingChunks::List, ListChunk, tag, len),
             b"id3 " | b"ID3 " => parser!(RiffTrailingChunks::Id3, Id3Chunk, tag, len),
+            _ if is_extra_chunk(&tag, len) => {
+                parser!(RiffTrailingChunks::Extra, BufChunk, tag, len)
+            }
             _ => None,
         }
     }
@@ -805,6 +891,7 @@ pub fn read_trailing_metadata(
     data_start_pos: u64,
     data_end_pos: u64,
     metadata: &mut MetadataLog,
+    extras: &mut WaveExtras,
 ) -> Result<()> {
     /// The maximum number of chunks that will be inspected.
     const MAX_CHUNKS: usize = 32;
@@ -841,7 +928,14 @@ pub fn read_trailing_metadata(
                         break;
                     };
 
-                    // Only INFO lists are supported.
+                    // Only INFO and adtl lists are supported.
+                    if &list.form == b"adtl" && list.len <= MAX_INFO_LIST_LEN {
+                        if extras.read_adtl_list(source, list.len).is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+
                     if &list.form != b"INFO" {
                         if list.skip(source).is_err() {
                             break;
@@ -854,6 +948,14 @@ pub fn read_trailing_metadata(
                     }
 
                     read_info_chunk(source, list.len).ok()
+                }
+                RiffTrailingChunks::Extra(chunk) => {
+                    let Ok(chunk) = chunk.parse(source)
+                    else {
+                        break;
+                    };
+                    extras.add_chunk(chunk, metadata);
+                    continue;
                 }
                 RiffTrailingChunks::Id3(id3) => id3.parse(source).ok().map(|id3| id3.metadata),
             };
