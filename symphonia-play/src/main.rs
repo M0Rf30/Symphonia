@@ -176,7 +176,12 @@ fn run(args: &ArgMatches) -> Result<i32> {
     let mss = MediaSourceStream::new(source, Default::default());
 
     // Use the default options for format readers other than for gapless playback.
-    let fmt_opts: FormatOptions = Default::default();
+    let mut fmt_opts: FormatOptions = Default::default();
+
+    // A hybrid WavPack file decodes losslessly only together with its `.wvc` correction file.
+    if path.as_os_str() != "-" {
+        fmt_opts = symphonia::default::formats::wavpack_with_sibling_correction(path, fmt_opts);
+    }
 
     // Use the default options for metadata readers.
     let meta_opts: MetadataOptions = Default::default();

@@ -783,3 +783,30 @@ fn reader_decoder_pipeline_mono_silence() {
         _ => panic!("expected S32 buffer"),
     }
 }
+
+/// `unpack3_open.c` rejects a v3 file whose channel count disagrees with `MONO_FLAG`.
+#[test]
+fn decoder_rejects_mono_flag_channel_mismatch() {
+    // Stereo track, mono flag set.
+    let mut dec = make_decoder(2, SampleFormat::S32);
+    let mut data = make_prefix(3, 0, 3 /*MONO|FAST*/, 0, 4, 0, 2, 2).to_vec();
+    data.push(0xAA);
+    let pkt = Packet::new(0, Timestamp::new(0), Duration::new(4), data);
+    assert!(dec.decode(&pkt).is_err());
+
+    // Mono track, mono flag clear.
+    let mut dec = make_decoder(1, SampleFormat::S32);
+    let mut data = make_prefix(3, 0, 2 /*FAST*/, 0, 4, 0, 1, 2).to_vec();
+    data.extend_from_slice(&[0xAA, 0xAA]);
+    let pkt = Packet::new(0, Timestamp::new(0), Duration::new(4), data);
+    assert!(dec.decode(&pkt).is_err());
+}
+
+/// The v1-v3 format only ever had mono and stereo (`unpack3_open.c`: `NumChannels > 2` is
+/// rejected), so a RIFF header with more channels is not a valid WavPack file.
+#[test]
+fn v3_more_than_two_channels_returns_error() {
+    let riff = build_riff_dummy(3, 44100, 2, &[], 1, &[0u8; 4]);
+    let mss = MediaSourceStream::new(Box::new(Cursor::new(riff)), Default::default());
+    assert!(WavPackReader::try_new(mss, FormatOptions::default()).is_err());
+}

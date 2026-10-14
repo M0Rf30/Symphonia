@@ -279,6 +279,13 @@ impl WavPackDecoder {
         let sample_count = hdr.total_samples as u32;
         let num_channels = hdr.num_channels as u32;
 
+        // The decoder picks the mono or stereo path from `MONO_FLAG`, the output layout from the
+        // channel count of the RIFF header. `WavpackOpenFile3()` (unpack3_open.c) rejects a file
+        // where the two disagree; so do we, instead of writing to a missing channel plane.
+        if ((hdr.flags & MONO_FLAG) != 0) != (num_channels == 1) {
+            return decode_error("wavpack v3: mono flag does not match the channel count");
+        }
+
         // First block (or after reset): initialise decorr passes
         if !self.initialized || hdr.flags != self.last_flags {
             unpack_init3(hdr.flags, &mut self.decorr, &mut self.num_terms);

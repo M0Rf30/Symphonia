@@ -30,7 +30,9 @@
 
 use symphonia_core::errors::{Result, decode_error};
 
-/// The largest number of channels in a DST stream.
+/// The largest number of channels in a DST stream: the DST frame header and the channel maps
+/// of ISO/IEC 14496-3 Subpart 10 are defined for at most 6 channels (also `DST_MAX_CHANNELS` in
+/// FFmpeg's `dstdec.c`, which refuses more).
 pub const DST_MAX_CHANNELS: usize = 6;
 
 const MAX_TABLES: usize = 2 * DST_MAX_CHANNELS;
@@ -272,7 +274,8 @@ impl ArithmeticDecoder {
     /// Decode a bit, given the probability `p` (1 to 128, of 256) that it is 1.
     #[inline]
     fn decode(&mut self, r: &mut BitReader<'_>, p: u32) -> u32 {
-        // The product of `a` and `p` is approximated with partial rounding.
+        // The product of `a` and `p` is approximated with partial rounding (`ac_get()` of
+        // FFmpeg's `dstdec.c` does the same: `k = (a >> 8) | ((a >> 7) & 1)`).
         let k = (self.a >> 8) | ((self.a >> 7) & 1);
         let q = k * p;
         let a_q = self.a - q;

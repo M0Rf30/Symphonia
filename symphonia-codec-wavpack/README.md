@@ -76,6 +76,9 @@ and seeks count DSD bits. There is no DSD to PCM decimation.
   the end of the file for streams that do not say it (and for streams that do not start at
   block index 0).
 * Output is in the order of the file (the speaker mask), `ID_CHANNEL_IDENTITIES` is not used.
+* v1-v3 files are PCM with 1 or 2 channels only: the reference library (`unpack3_open.c`) rejects
+  every other WAVE format tag, more than 2 channels, and a channel count that disagrees with the
+  block's mono flag, and so do we (non-PCM and multichannel audio exists only in v4/v5).
 * The v1-v3 decoder is checked only with synthetic streams: the reference tools can no longer
   decode those versions.
 

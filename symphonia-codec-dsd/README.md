@@ -54,7 +54,8 @@ ISO/IEC 14496-3 Subpart 10: segmented filters and probability tables, mappings, 
 tables, half-probability start, arithmetic decoding, uncompressed frames) and then handled like DSD.
 The packet layout is described in the docs of `DsdDecoder`. With the decoder option `verify` the
 CRC of the decoded frame (the `DSTC` chunk) and the end of the arithmetic code are checked, and
-`finalize()` reports the result. Up to 6 channels.
+`finalize()` reports the result. Up to 6 channels: that is the limit of the format (the
+frame header and channel maps of ISO/IEC 14496-3 Subpart 10, `DST_MAX_CHANNELS` in FFmpeg).
 
 ## Testing
 
@@ -65,7 +66,9 @@ decoding of a DST file to the DSD of the MPEG-4 reference decoder.
 
 DST output was also compared to that reference decoder (`dstcnv`) on DSDIFF files compressed by
 a third party encoder (mono, stereo and 6 channel DSD64, prediction orders 16 and 128): identical,
-and the CRCs of all 1200 frames match. DSD128 and DSD256 files decode to the source.
+and the CRCs of all 1200 frames match. The arithmetic decoder rounding is the one of FFmpeg's
+`dstdec.c`, and the DSD of `dst-64fs44-2ch.dff` (wrapped as uncompressed DSDIFF) gives, through
+FFmpeg, the same PCM as FFmpeg's own DST decoder, byte for byte. DSD128 and DSD256 files decode to the source.
 
 ## License
 
