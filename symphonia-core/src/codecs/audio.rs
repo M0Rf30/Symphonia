@@ -111,7 +111,7 @@ pub struct AudioCodecParameters {
     pub channel_data_layout: Option<ChannelDataLayout>,
     /// The bit order within bytes for bitstream formats.
     pub bit_order: Option<BitOrder>,
-    /// The number of frames per block, in case packets are seperated in multiple blocks.
+    /// The number of frames per block, in case packets are separated in multiple blocks.
     pub frames_per_block: Option<u64>,
     /// Extra data (defined by the codec).
     pub extra_data: Option<Box<[u8]>>,
@@ -464,6 +464,8 @@ pub mod well_known {
     pub const CODEC_ID_BINK_AUDIO: AudioCodecId = AudioCodecId(0x1019);
     /// Smacker Audio
     pub const CODEC_ID_SMACKER_AUDIO: AudioCodecId = AudioCodecId(0x1020);
+    /// Nellymoser Asao
+    pub const CODEC_ID_NELLYMOSER: AudioCodecId = AudioCodecId(0x1021);
 
     // Compressed lossless audio codecs
     //---------------------------------

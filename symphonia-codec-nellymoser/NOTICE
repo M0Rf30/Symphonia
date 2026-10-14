@@ -1,0 +1,20 @@
+This crate (`symphonia-codec-nellymoser`) is a from-scratch, pure-Rust Nellymoser Asao decoder. It is
+licensed under the Mozilla Public License, v. 2.0, like the rest of Project Symphonia.
+
+Nellymoser has no public specification. The bit allocation algorithm, the dequantization,
+band-size, initial-value and delta tables (`src/tables.rs`, extracted programmatically), the
+noise-substitution generator (FFmpeg's additive lagged Fibonacci generator `av_lfg`, seed 0), and
+the block layout follow FFmpeg's `libavcodec/nellymoser.c`, `libavcodec/nellymoserdec.c` and
+`libavutil/lfg.c`, which are distributed under the GNU Lesser General Public License, version 2.1 or
+later. FFmpeg's Nellymoser code is in turn derived from the nelly2pcm project
+(http://code.google.com/p/nelly2pcm/).
+
+Copyright (c) 2007 a840bda5870ba11f19698ff6eb9581dfb0f95fa5,
+                   539459aeb7d425140b62a3ec7dbf6dc8e408a306, and
+                   520e17cd55896441042b14df2566a6eb610ed444
+Copyright (c) 2007 Loic Minier <lool at dooz.org>
+Copyright (c) 2007 Benjamin Larsson
+Copyright (c) 2008 Alex Beregszaszi
+Copyright (c) 2007 Benjamin Larsson
+
+The LGPL-2.1+ terms apply to those derived portions.
