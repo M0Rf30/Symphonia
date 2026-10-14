@@ -24,6 +24,15 @@ These targets bypass the demuxer and feed data directly to the codec implementat
 * **`decode_opus`**: Opus
 * **`decode_wavpack`**: WavPack
 * **`decode_dsd`**: DSD
+* **`decode_ac3`**: AC-3 and E-AC-3
+* **`decode_dca`**: DTS
+* **`decode_truehd`**: Dolby TrueHD and MLP
+* **`decode_speex`**: Speex (with and without an Ogg header)
+* **`decode_nellymoser`**: Nellymoser
+
+The last five targets read the input as a sequence of packets, each prefixed by its
+16-bit little-endian length (`fuzz_audio_decoder_packets`), so state carried between packets is
+exercised. A first selector byte, where present, picks the codec variant or stream parameters.
 
 ### Component Demuxer Fuzzers
 
@@ -48,8 +57,12 @@ These targets instantiate a specific `FormatReader` directly, bypassing probing.
 * **`demux_adts`**: AAC ADTS
 * **`demux_adif`**: AAC ADIF
 * **`demux_loas`**: AAC LOAS/LATM
+* **`demux_es`**: AC-3/E-AC-3, DTS and TrueHD/MLP elementary streams (first byte selects the reader)
 
 Each target is a `[[bin]]` entry in `Cargo.toml` plus a file in `fuzz_targets/`. `run_all.sh` enumerates `fuzz_targets/*.rs`, so new targets only need those two.
+
+CI (`.github/workflows/fuzz.yml`) runs every target for 10 seconds on each pull request and push,
+and for 10 minutes each night (one job per target, crash inputs uploaded as artifacts).
 
 ## How to Run
 

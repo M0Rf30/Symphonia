@@ -215,3 +215,39 @@ name = "demux_loas"
 path = "fuzz_targets/demux_loas.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "decode_ac3"
+path = "fuzz_targets/decode_ac3.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_dca"
+path = "fuzz_targets/decode_dca.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_truehd"
+path = "fuzz_targets/decode_truehd.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_speex"
+path = "fuzz_targets/decode_speex.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_nellymoser"
+path = "fuzz_targets/decode_nellymoser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_es"
+path = "fuzz_targets/demux_es.rs"
+test = false
+doc = false

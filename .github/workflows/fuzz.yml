@@ -1,0 +1,120 @@
+name: Fuzz
+
+on:
+  push:
+    branches:
+      - rmpd-next
+  pull_request: {}
+  schedule:
+    # Nightly, longer runs of every target.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds to run each target"
+        default: "600"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Pull requests and pushes: build every target once and run each briefly, so a crash on
+  # trivially reachable input fails the change.
+  smoke:
+    name: Smoke
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # cargo-fuzz needs nightly for the sanitizer flags.
+      - name: Setup Toolchain
+        run: rustup install nightly --profile minimal && rustup default nightly
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          workspaces: symphonia/fuzz
+
+      - name: Build targets
+        working-directory: symphonia/fuzz
+        run: cargo fuzz build
+
+      - name: Run targets
+        working-directory: symphonia/fuzz
+        run: ./run_all.sh 10
+
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-smoke
+          path: symphonia/fuzz/artifacts
+
+  # Scheduled or manual: one job per target, derived from `fuzz_targets/` so it cannot drift.
+  targets:
+    name: List targets
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+
+    runs-on: ubuntu-latest
+
+    outputs:
+      targets: ${{ steps.list.outputs.targets }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: list
+        run: |
+          targets=$(for f in symphonia/fuzz/fuzz_targets/*.rs; do basename "$f" .rs; done \
+            | jq -R . | jq -cs .)
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+
+  long:
+    name: Fuzz ${{ matrix.target }}
+    needs: targets
+
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        target: ${{ fromJson(needs.targets.outputs.targets) }}
+      fail-fast: false
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Toolchain
+        run: rustup install nightly --profile minimal && rustup default nightly
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          workspaces: symphonia/fuzz
+
+      - name: Run ${{ matrix.target }}
+        working-directory: symphonia/fuzz
+        env:
+          SECONDS_PER_TARGET: ${{ inputs.seconds || '600' }}
+        run: cargo fuzz run "${{ matrix.target }}" -- -max_total_time="$SECONDS_PER_TARGET"
+
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: symphonia/fuzz/artifacts/${{ matrix.target }}
