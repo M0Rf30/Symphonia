@@ -17,7 +17,9 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use symphonia::core::codecs::CodecParameters;
-use symphonia::core::codecs::audio::{AudioDecoderOptions, FinalizeResult};
+use symphonia::core::codecs::audio::{
+    AudioCodecParameters, AudioDecoder, AudioDecoderOptions, FinalizeResult,
+};
 use symphonia::core::errors::{Error, Result};
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, TrackType};
@@ -278,8 +280,7 @@ fn decode_only(mut reader: Box<dyn FormatReader>, opts: DecodeOptions) -> Result
     };
 
     // Create a decoder for the track.
-    let mut decoder =
-        symphonia::default::get_codecs().make_audio_decoder(codec_params, &opts.dec_opts)?;
+    let mut decoder = make_decoder(codec_params, &opts.dec_opts)?;
 
     // Save the track ID to filter demuxed packets.
     let track_id = track.id;
@@ -420,8 +421,7 @@ fn play_track(
     };
 
     // Create a decoder for the track.
-    let mut decoder =
-        symphonia::default::get_codecs().make_audio_decoder(codec_params, &opts.decoder_opts)?;
+    let mut decoder = make_decoder(codec_params, &opts.decoder_opts)?;
 
     // Get the selected track's timebase and duration.
     let tb = track.time_base;
@@ -497,6 +497,18 @@ fn play_track(
 
     // Finalize the decoder and return the verification result if it's been enabled.
     do_verification(decoder.finalize())
+}
+
+/// Make a decoder for a track, naming the codec when no decoder is registered for it.
+fn make_decoder(
+    params: &AudioCodecParameters,
+    opts: &AudioDecoderOptions,
+) -> Result<Box<dyn AudioDecoder>> {
+    let codecs = symphonia::default::get_codecs();
+    if codecs.get_audio_decoder(params.codec).is_none() {
+        error!("no decoder is available for the codec of the track ({})", params.codec);
+    }
+    codecs.make_audio_decoder(params, opts)
 }
 
 fn do_reset(reader: &mut Box<dyn FormatReader>) -> Option<u32> {

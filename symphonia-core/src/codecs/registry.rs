@@ -281,6 +281,11 @@ macro_rules! codec_registry_methods {
                 Ok((codec.factory)(params, opts)?)
             }
             else {
+                // The error is static, so name the codec in the log for the user.
+                log::warn!(
+                    concat!("core (codec): no ", $kind, " decoder is registered for codec {}"),
+                    params.codec
+                );
                 unsupported_error(concat!("core (codec): unsupported ", $kind, " codec"))
             }
         }
