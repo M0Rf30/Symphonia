@@ -32,6 +32,7 @@ pub const NB_FRAME_SIZE: usize = 160;
 const NB_SUBFRAME_SIZE: usize = 40;
 const NB_NB_SUBFRAMES: usize = 4;
 const NB_ORDER: usize = 10;
+const VERY_SMALL: f32 = 1e-15;
 const NB_PITCH_START: i32 = 17;
 const NB_PITCH_END: i32 = 144;
 const NB_DEC_BUFFER: usize = NB_FRAME_SIZE + 2 * NB_PITCH_END as usize + NB_SUBFRAME_SIZE + 12;
@@ -41,6 +42,35 @@ const EXC: usize = 2 * NB_PITCH_END as usize + NB_SUBFRAME_SIZE + 6;
 /// Bits of each wide-band sub-mode, skipped when a wide-band layer is found by a narrow-band
 /// decoder (`wb_skip_table`).
 const WB_SKIP_TABLE: [i32; 8] = [0, 36, 112, 192, 352, 0, 0, 0];
+
+/// Attenuation of the pitch contribution and of the noise by the number of consecutive lost
+/// frames (`attenuation`, floating-point table).
+const LOST_ATTENUATION: [f32; 10] =
+    [1.0, 0.961, 0.852, 0.698, 0.527, 0.368, 0.237, 0.141, 0.077, 0.039];
+
+/// Median of three values (`median3`).
+fn median3(a: f32, b: f32, c: f32) -> f32 {
+    if a < b {
+        if b < c {
+            b
+        }
+        else if a < c {
+            c
+        }
+        else {
+            a
+        }
+    }
+    else if c < b {
+        b
+    }
+    else if c < a {
+        c
+    }
+    else {
+        a
+    }
+}
 
 /// Parameters of a split (vector-quantised) innovation codebook.
 pub struct SplitCb {
@@ -306,6 +336,14 @@ pub struct NbDecoder {
     voc_mean: f32,
     voc_offset: i32,
     dtx_enabled: bool,
+    /// Number of consecutive frames that were lost before the current one.
+    count_lost: usize,
+    /// Pitch and pitch gain of the last correctly decoded frame.
+    last_pitch: i32,
+    last_pitch_gain: f32,
+    /// Pitch gains of the last three frames and the slot to overwrite next.
+    pitch_gain_buf: [f32; 3],
+    pitch_gain_buf_idx: usize,
 }
 
 impl NbDecoder {
@@ -325,6 +363,11 @@ impl NbDecoder {
             voc_mean: 0.0,
             voc_offset: 0,
             dtx_enabled: false,
+            count_lost: 0,
+            last_pitch: 40,
+            last_pitch_gain: 0.0,
+            pitch_gain_buf: [0.0; 3],
+            pitch_gain_buf_idx: 0,
         }
     }
 
@@ -342,6 +385,84 @@ impl NbDecoder {
     pub fn exc_rms(&self, rms: &mut [f32]) {
         for (i, r) in rms.iter_mut().enumerate().take(NB_NB_SUBFRAMES) {
             *r = compute_rms(&self.exc_buf[EXC + i * NB_SUBFRAME_SIZE..][..NB_SUBFRAME_SIZE]);
+        }
+    }
+
+    /// Synthesises a frame of comfort noise at the level of the previous excitation: the null
+    /// mode, and a lost frame while discontinuous transmission is on.
+    fn comfort_noise(&mut self, out: &mut [f32]) {
+        let mut lpc = [0f32; NB_ORDER];
+        bw_lpc(0.93, &self.interp_qlpc, &mut lpc);
+
+        let exc = &mut self.exc_buf[EXC..EXC + NB_FRAME_SIZE];
+        let innov_gain = compute_rms(exc);
+        for e in exc.iter_mut() {
+            *e = speex_rand(innov_gain, &mut self.seed);
+        }
+
+        self.first = true;
+
+        out.copy_from_slice(exc);
+        iir_mem(out, &lpc, &mut self.mem_sp);
+        self.count_lost = 0;
+    }
+
+    /// Conceals a lost frame (`nb_decode` without a bit-stream): comfort noise if the stream
+    /// is in discontinuous transmission, otherwise the pitch contribution of the previous
+    /// frames, fading out with the number of lost frames, plus noise (`nb_decode_lost`).
+    pub fn decode_lost(&mut self, out: &mut [f32]) {
+        let out = &mut out[..NB_FRAME_SIZE];
+
+        if self.dtx_enabled {
+            self.exc_buf.copy_within(NB_FRAME_SIZE.., 0);
+            self.comfort_noise(out);
+            return;
+        }
+
+        let fact = LOST_ATTENUATION.get(self.count_lost).copied().unwrap_or(0.0);
+
+        let gain_med =
+            median3(self.pitch_gain_buf[0], self.pitch_gain_buf[1], self.pitch_gain_buf[2]);
+        if gain_med < self.last_pitch_gain {
+            self.last_pitch_gain = gain_med;
+        }
+
+        let mut pitch_gain = self.last_pitch_gain;
+        if f64::from(pitch_gain) > 0.85 {
+            pitch_gain = 0.85f64 as f32;
+        }
+        pitch_gain = fact * pitch_gain + VERY_SMALL;
+
+        let innov_gain = compute_rms(&self.exc_buf[EXC..EXC + NB_FRAME_SIZE]);
+        let noise_gain = innov_gain * (fact * (1.0 - pitch_gain * pitch_gain));
+
+        // Shift the excitation by one frame.
+        self.exc_buf.copy_within(NB_FRAME_SIZE.., 0);
+
+        // The pitch is that of the last good frame, with a small random walk (the C cast
+        // truncates towards zero).
+        let walk = speex_rand((1 + self.count_lost) as f32, &mut self.seed) as i32;
+        let pitch = (self.last_pitch + walk).clamp(NB_PITCH_START, NB_PITCH_END) as usize;
+
+        for i in 0..NB_FRAME_SIZE {
+            let past = self.exc_buf[EXC + i - pitch];
+            self.exc_buf[EXC + i] =
+                pitch_gain * (past + VERY_SMALL) + speex_rand(noise_gain, &mut self.seed);
+        }
+
+        let qlpc = self.interp_qlpc;
+        bw_lpc(0.98, &qlpc, &mut self.interp_qlpc);
+        out.copy_from_slice(&self.exc_buf[EXC - NB_SUBFRAME_SIZE..][..NB_FRAME_SIZE]);
+        iir_mem(out, &self.interp_qlpc, &mut self.mem_sp);
+        // The reference always uses the narrow-band filter here.
+        highpass(out, 1, &mut self.mem_hp);
+
+        self.first = false;
+        self.count_lost += 1;
+        self.pitch_gain_buf[self.pitch_gain_buf_idx] = pitch_gain;
+        self.pitch_gain_buf_idx += 1;
+        if self.pitch_gain_buf_idx > 2 {
+            self.pitch_gain_buf_idx = 0;
         }
     }
 
@@ -404,26 +525,27 @@ impl NbDecoder {
         // A null mode carries no data: synthesise comfort noise.
         let Some(submode) = &SUBMODES[submode_id]
         else {
-            let mut lpc = [0f32; NB_ORDER];
-            bw_lpc(0.93, &self.interp_qlpc, &mut lpc);
-
-            let exc = &mut self.exc_buf[EXC..EXC + NB_FRAME_SIZE];
-            let innov_gain = compute_rms(exc);
-            for e in exc.iter_mut() {
-                *e = speex_rand(innov_gain, &mut self.seed);
-            }
-
-            self.first = true;
-
-            out.copy_from_slice(exc);
-            iir_mem(out, &lpc, &mut self.mem_sp);
+            self.comfort_noise(out);
             return Ok(());
         };
 
         let mut qlsp = [0f32; NB_ORDER];
         submode.lsp.unquant(&mut qlsp, bits);
 
-        if self.first {
+        // Damp the filter memory if a frame was lost and the LSPs changed too much.
+        if self.count_lost > 0 {
+            let mut lsp_dist = 0f32;
+            for (o, q) in self.old_qlsp.iter().zip(&qlsp) {
+                lsp_dist += (o - q).abs();
+            }
+            let fact = (0.6 * (-0.2 * f64::from(lsp_dist)).exp()) as f32;
+            for m in self.mem_sp.iter_mut() {
+                *m *= fact;
+            }
+        }
+
+        // Handle the first frame and the lost-packet case.
+        if self.first || self.count_lost > 0 {
             self.old_qlsp = qlsp;
         }
 
@@ -452,6 +574,7 @@ impl NbDecoder {
 
         let mut best_pitch = 40;
         let mut best_pitch_gain = 0f32;
+        let mut pitch_average = 0f32;
 
         for sub in 0..NB_NB_SUBFRAMES {
             let offset = NB_SUBFRAME_SIZE * sub;
@@ -486,6 +609,25 @@ impl NbDecoder {
                         *g = (0.015625 * f64::from(gain_cdbk[gain_index * 4 + i]) + 0.5) as f32;
                     }
 
+                    // After a lost frame, do not let the pitch gain exceed that of the last
+                    // good frame (halved after more than three lost frames).
+                    if self.count_lost > 0 && pitch as usize > offset {
+                        let limit = if self.count_lost < 4 {
+                            self.last_pitch_gain
+                        }
+                        else {
+                            0.5 * self.last_pitch_gain
+                        };
+                        let limit = if f64::from(limit) > 0.95 { 0.95f64 as f32 } else { limit };
+                        let gain_sum = gain_3tap_to_1tap(&pitch_gain);
+                        if gain_sum > limit {
+                            let fact = limit / gain_sum;
+                            for g in pitch_gain.iter_mut() {
+                                *g *= fact;
+                            }
+                        }
+                    }
+
                     for i in 0..3 {
                         let pp = (pitch + 1 - i as i32) as usize;
                         let tmp1 = NB_SUBFRAME_SIZE.min(pp);
@@ -505,6 +647,7 @@ impl NbDecoder {
             sanitize(&mut exc32, -32000.0, 32000.0);
 
             let tmp = gain_3tap_to_1tap(&pitch_gain);
+            pitch_average += tmp;
 
             let bp = best_pitch;
             let bg = f64::from(best_pitch_gain);
@@ -597,7 +740,7 @@ impl NbDecoder {
         }
 
         // The perceptual enhancer (comb filter) on the excitation.
-        if submode.comb_gain > 0.0 {
+        if submode.comb_gain > 0.0 && self.count_lost == 0 {
             let (first, second) = out.split_at_mut(2 * NB_SUBFRAME_SIZE);
             multicomb(
                 &self.exc_buf,
@@ -620,6 +763,16 @@ impl NbDecoder {
         }
         else {
             out.copy_from_slice(&self.exc_buf[EXC - NB_SUBFRAME_SIZE..][..NB_FRAME_SIZE]);
+        }
+
+        // If the last frame was lost, rescale the excitation to the energy that was encoded.
+        if self.count_lost > 0 {
+            let exc_ener = compute_rms(&self.exc_buf[EXC..EXC + NB_FRAME_SIZE]);
+            let gain = (ol_gain / (exc_ener + 1.0)).min(2.0);
+            for i in 0..NB_FRAME_SIZE {
+                self.exc_buf[EXC + i] *= gain;
+                out[i] = self.exc_buf[EXC + i - NB_SUBFRAME_SIZE];
+            }
         }
 
         // Synthesis filter, sub-frame by sub-frame.
@@ -647,6 +800,14 @@ impl NbDecoder {
 
         self.old_qlsp = qlsp;
         self.first = false;
+        self.count_lost = 0;
+        self.last_pitch = best_pitch;
+        self.last_pitch_gain = (0.25 * f64::from(pitch_average)) as f32;
+        self.pitch_gain_buf[self.pitch_gain_buf_idx] = self.last_pitch_gain;
+        self.pitch_gain_buf_idx += 1;
+        if self.pitch_gain_buf_idx > 2 {
+            self.pitch_gain_buf_idx = 0;
+        }
 
         Ok(())
     }

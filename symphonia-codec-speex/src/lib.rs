@@ -22,10 +22,21 @@
 //! Decodes narrow-band (8 kHz), wide-band (16 kHz) and ultra-wide-band (32 kHz) Speex (CELP and
 //! sub-band CELP) streams, including all the sub-modes (the "quality" levels), the perceptual
 //! post-filter ("enhancer"), discontinuous transmission, in-band signalling, several frames per
-//! packet, and intensity stereo.
+//! packet, packet loss concealment (an empty packet), and intensity stereo.
 //!
 //! The decoder is a port of the floating-point decoder of libspeex 1.2.1 (BSD-3-Clause, see the
 //! `NOTICE` file), and reproduces its output sample for sample.
+//!
+//! # Packet loss
+//!
+//! A packet with no data stands for a lost packet, and is concealed like `speex_decode` does when
+//! given no bit-stream: a lost packet yields the frames it would have held.
+//!
+//! # In-band requests
+//!
+//! Like `speexdec`, which registers only the stereo handler, the decoder acts on the in-band
+//! stereo request and skips every other in-band and user request: they ask the encoder (mode,
+//! VBR, bit-rate) for something, and have no effect on decoding.
 //!
 //! # Codec parameters
 //!
@@ -180,6 +191,14 @@ impl Core {
             Core::Sb(sb) => sb.decode(bits, out, None, stereo),
         }
     }
+
+    /// Conceals one lost frame.
+    fn decode_lost(&mut self, out: &mut [f32]) {
+        match self {
+            Core::Nb(nb) => nb.decode_lost(out),
+            Core::Sb(sb) => sb.decode_lost(out),
+        }
+    }
 }
 
 /// Speex decoder.
@@ -265,6 +284,10 @@ impl SpeexDecoder {
         self.buf.clear();
         self.buf.resize_uninit(frame_size * self.frames_per_packet);
 
+        // An empty packet stands for a lost one, which libspeex conceals by decoding with no
+        // bit-stream.
+        let lost = packet.data.is_empty();
+
         let mut bits = Bits::new(packet.data);
         let mut num_frames = 0;
         let mut status = Ok(());
@@ -277,10 +300,25 @@ impl SpeexDecoder {
 
             let res = match self.stereo.as_mut() {
                 // Intensity stereo: decode the mono frame, which carries the stereo requests.
-                Some(stereo) => self.core.decode(&mut bits, &mut self.mono, Some(stereo)),
+                Some(stereo) => {
+                    if lost {
+                        self.core.decode_lost(&mut self.mono);
+                        Ok(())
+                    }
+                    else {
+                        self.core.decode(&mut bits, &mut self.mono, Some(stereo))
+                    }
+                }
                 None => {
                     let plane = self.buf.plane_mut(0).expect("a mono plane");
-                    self.core.decode(&mut bits, &mut plane[start..start + frame_size], None)
+                    let out = &mut plane[start..start + frame_size];
+                    if lost {
+                        self.core.decode_lost(out);
+                        Ok(())
+                    }
+                    else {
+                        self.core.decode(&mut bits, out, None)
+                    }
                 }
             };
 
@@ -290,7 +328,7 @@ impl SpeexDecoder {
             }
 
             // The frame overran the packet: discard it.
-            if bits.remaining() < 0 {
+            if !lost && bits.remaining() < 0 {
                 status = Err(Status::Corrupt);
                 break;
             }

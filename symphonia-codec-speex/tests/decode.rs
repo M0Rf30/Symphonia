@@ -60,12 +60,19 @@ fn fnv(samples: &[f32]) -> u64 {
 
 /// Decodes every packet of a fixture to interleaved samples.
 fn decode_all(fixture: &[u8]) -> Vec<f32> {
+    decode_lossy(fixture, &[])
+}
+
+/// Decodes every packet of a fixture, replacing the audio packets with the given indices (0 is
+/// the first audio packet) by empty ones, which stand for lost packets.
+fn decode_lossy(fixture: &[u8], lost: &[usize]) -> Vec<f32> {
     let pkts = split(fixture);
     let mut dec = SpeexDecoder::try_new(&params(Some(pkts[0]), None), &Default::default()).unwrap();
 
     let mut out = Vec::new();
     let mut tmp = Vec::new();
-    for p in &pkts[1..] {
+    for (i, p) in pkts[1..].iter().enumerate() {
+        let p = if lost.contains(&i) { &[][..] } else { p };
         let buf = dec.decode_ref(&packet(p)).unwrap();
         buf.copy_to_vec_interleaved::<f32>(&mut tmp);
         out.extend_from_slice(&tmp);
@@ -96,6 +103,34 @@ fixture!(wb_vbr, "wb_vbr.pkts", 8320, 0x9a720d46b9e532d6);
 fixture!(uwb, "uwb.pkts", 16640, 0x88e90227d234bca2);
 // Narrow-band intensity stereo, two frames per packet.
 fixture!(nb_stereo_two_frames, "nb_stereo.pkts", 8320, 0xa03bc238baa8379d);
+
+macro_rules! lossy_fixture {
+    ($name:ident, $file:literal, $lost:expr, $samples:expr, $hash:expr) => {
+        #[test]
+        fn $name() {
+            let out = decode_lossy(include_bytes!(concat!("data/", $file)), &$lost);
+            assert_eq!(out.len(), $samples);
+            assert_eq!(fnv(&out), $hash);
+        }
+    };
+}
+
+// Packet loss concealment. The expected hashes are the output of libspeex 1.2.1 (built as
+// above) decoding the same streams with `speex_decode(state, NULL, out)` for the lost packets.
+lossy_fixture!(plc_nb, "nb_q10.pkts", [3, 9, 10, 20], 4160, 0xcf694cba1b3f9cc4);
+// A burst longer than the ten frames over which the concealment fades out.
+lossy_fixture!(
+    plc_nb_long_burst,
+    "nb_q10.pkts",
+    [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
+    4160,
+    0xa65074b68bbe7af8
+);
+// Losses inside and around DTX (comfort noise).
+lossy_fixture!(plc_nb_dtx, "nb_dtx.pkts", [2, 3, 8, 9, 10, 11, 18], 4160, 0x55895b4a70c778f8);
+lossy_fixture!(plc_wb, "wb_q10.pkts", [4, 5, 12, 13, 14, 22], 8320, 0xb0742f947cf94c08);
+lossy_fixture!(plc_wb_vbr, "wb_vbr.pkts", [3, 4, 5, 6, 15], 8320, 0x0564ef5c4b84cc78);
+lossy_fixture!(plc_uwb, "uwb.pkts", [6, 7, 8, 16], 16640, 0xf9167a53be4e7732);
 
 #[test]
 fn without_header_the_mode_follows_the_sample_rate() {
@@ -162,8 +197,9 @@ fn truncated_and_corrupt_packets_do_not_panic() {
     let mut dec = SpeexDecoder::try_new(&params(Some(pkts[0]), None), &Default::default()).unwrap();
 
     for p in &pkts[1..] {
-        // A truncated frame is an error or is dropped, but never yields partial data.
-        for len in [0, 1, 2, p.len() / 2] {
+        // A truncated frame is an error or is dropped, but never yields partial data. (An
+        // empty packet is a lost one, see `plc_*`.)
+        for len in [1, 2, p.len() / 2] {
             if let Ok(buf) = dec.decode_ref(&packet(&p[..len])) {
                 assert_eq!(buf.frames(), 0);
             }

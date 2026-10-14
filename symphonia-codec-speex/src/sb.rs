@@ -14,7 +14,7 @@
 
 use crate::bits::Bits;
 use crate::dsp::{
-    QMF_ORDER, compute_rms, iir_mem, lsp_interpolate, lsp_to_lpc, qmf_synth, speex_rand,
+    QMF_ORDER, bw_lpc, compute_rms, iir_mem, lsp_interpolate, lsp_to_lpc, qmf_synth, speex_rand,
 };
 use crate::nb::{NbDecoder, SplitCb, Status};
 use crate::stereo::StereoState;
@@ -123,6 +123,13 @@ impl LowBand {
         match self {
             LowBand::Nb(nb) => nb.decode(bits, out, innov_save, stereo),
             LowBand::Sb(sb) => sb.decode(bits, out, innov_save, stereo),
+        }
+    }
+
+    fn decode_lost(&mut self, out: &mut [f32]) {
+        match self {
+            LowBand::Nb(nb) => nb.decode_lost(out),
+            LowBand::Sb(sb) => sb.decode_lost(out),
         }
     }
 
@@ -235,6 +242,34 @@ impl SbDecoder {
         );
     }
 
+    /// Synthesises a lost frame, or the null sub-mode of a stream in discontinuous transmission:
+    /// noise at the last high-band energy, which fades out while frames are lost
+    /// (`sb_decode_lost`). The low band is already in `out[..frame_size]`.
+    fn conceal(&mut self, dtx: bool, out: &mut [f32]) {
+        if !dtx {
+            let qlpc = self.interp_qlpc;
+            bw_lpc(0.99, &qlpc, &mut self.interp_qlpc);
+            self.last_ener *= 0.9f64 as f32;
+        }
+
+        self.first = true;
+        for h in self.high.iter_mut() {
+            *h = speex_rand(self.last_ener, &mut self.seed);
+        }
+        iir_mem(&mut self.high, &self.interp_qlpc, &mut self.mem_sp);
+        self.synthesize(out);
+    }
+
+    /// Conceals a lost frame of `2 * frame_size` samples (`sb_decode` without a bit-stream).
+    pub fn decode_lost(&mut self, out: &mut [f32]) {
+        let fs = self.frame_size;
+        let out = &mut out[..2 * fs];
+
+        self.low.decode_lost(&mut out[..fs]);
+        let dtx = self.low.dtx_enabled();
+        self.conceal(dtx, out);
+    }
+
     /// Decodes one frame of `2 * frame_size` samples to `out` (`sb_decode`).
     pub fn decode(
         &mut self,
@@ -272,15 +307,12 @@ impl SbDecoder {
             // Null submode: no high band was transmitted.
             if dtx {
                 // Discontinuous transmission: comfort noise at the last energy.
-                self.first = true;
-                for h in self.high.iter_mut() {
-                    *h = speex_rand(self.last_ener, &mut self.seed);
-                }
+                self.conceal(true, out);
+                return Ok(());
             }
-            else {
-                self.first = true;
-                self.high.fill(VERY_SMALL);
-            }
+
+            self.first = true;
+            self.high.fill(VERY_SMALL);
             iir_mem(&mut self.high, &self.interp_qlpc, &mut self.mem_sp);
             self.synthesize(out);
             return Ok(());
