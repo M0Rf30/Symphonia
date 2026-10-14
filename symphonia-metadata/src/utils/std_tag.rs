@@ -268,7 +268,7 @@ pub fn parse_release_year(v: Arc<String>) -> StandardTagPair {
 
 noop_parser!(parse_remixer, StandardTag::Remixer);
 
-// Parser ReplayGain string into floating point dB values?
+// ReplayGain values keep their text; `StandardTag::replaygain_value` parses them.
 noop_parser!(parse_replaygain_album_gain, StandardTag::ReplayGainAlbumGain);
 noop_parser!(parse_replaygain_album_peak, StandardTag::ReplayGainAlbumPeak);
 noop_parser!(parse_replaygain_album_range, StandardTag::ReplayGainAlbumRange);

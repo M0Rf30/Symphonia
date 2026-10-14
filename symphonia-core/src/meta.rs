@@ -377,6 +377,37 @@ pub enum StandardTag {
     WrittenDate(Arc<String>),
 }
 
+impl StandardTag {
+    /// Get the numeric value of a ReplayGain tag, or `None` if this is not a ReplayGain tag or
+    /// its value is not a number.
+    ///
+    /// Gains and ranges are in dB, peaks are linear sample amplitudes (1.0 is full scale), and
+    /// the reference loudness is in the unit it was written with (dB SPL or LUFS). Values are
+    /// written as text, such as `-6.48 dB`, `0.988525`, `89.0 dB` or `-18.00 LUFS` (ReplayGain
+    /// 2.0 specification, "Metadata format"); a trailing `dB` or `LUFS` unit is ignored.
+    pub fn replaygain_value(&self) -> Option<f64> {
+        let text = match self {
+            StandardTag::ReplayGainAlbumGain(v)
+            | StandardTag::ReplayGainAlbumPeak(v)
+            | StandardTag::ReplayGainAlbumRange(v)
+            | StandardTag::ReplayGainReferenceLoudness(v)
+            | StandardTag::ReplayGainTrackGain(v)
+            | StandardTag::ReplayGainTrackPeak(v)
+            | StandardTag::ReplayGainTrackRange(v) => v.trim(),
+            _ => return None,
+        };
+
+        let lower = text.to_ascii_lowercase();
+        let number = ["lufs", "db"]
+            .iter()
+            .find_map(|unit| lower.strip_suffix(unit))
+            .unwrap_or(&lower)
+            .trim_end();
+
+        number.parse::<f64>().ok().filter(|value| value.is_finite())
+    }
+}
+
 /// The value of a [`RawTag`].
 ///
 /// Note: The data types in this enumeration are an abstraction. Depending on the particular tagging
@@ -929,4 +960,25 @@ pub mod well_known {
     pub const METADATA_ID_ISOMP4: MetadataId = MetadataId(0x404);
     /// CAF `info` chunk tags
     pub const METADATA_ID_CAF: MetadataId = MetadataId(0x405);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_replaygain_value() {
+        let value = |tag: fn(Arc<String>) -> StandardTag, text: &str| {
+            tag(Arc::new(text.to_string())).replaygain_value()
+        };
+
+        assert_eq!(value(StandardTag::ReplayGainTrackGain, "-6.48 dB"), Some(-6.48));
+        assert_eq!(value(StandardTag::ReplayGainAlbumGain, "+2.10dB"), Some(2.10));
+        assert_eq!(value(StandardTag::ReplayGainTrackPeak, " 0.988525 "), Some(0.988525));
+        assert_eq!(value(StandardTag::ReplayGainReferenceLoudness, "-18.00 LUFS"), Some(-18.0));
+        assert_eq!(value(StandardTag::ReplayGainTrackRange, "5.5 DB"), Some(5.5));
+        assert_eq!(value(StandardTag::ReplayGainTrackGain, "loud"), None);
+        assert_eq!(value(StandardTag::ReplayGainTrackGain, "inf dB"), None);
+        assert_eq!(value(StandardTag::Album, "1.0"), None);
+    }
 }
