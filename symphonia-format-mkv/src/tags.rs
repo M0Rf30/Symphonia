@@ -51,9 +51,22 @@ pub fn resolve_target(targets: Option<&TargetsElement>) -> Option<Target> {
 
     let has_track_uid = targets.uids.iter().any(|uid| matches!(uid, TargetUid::Track(_)));
 
-    let value = targets.target_type_value.unwrap_or(if has_track_uid { 30 } else { 50 });
+    let has_chapter_uid = targets.uids.iter().any(|uid| matches!(uid, TargetUid::Chapter(_)));
 
-    Some(Target { value, name: targets.target_type.clone().map(Rc::new) })
+    let value =
+        targets.target_type_value.unwrap_or(if has_track_uid || has_chapter_uid { 30 } else { 50 });
+
+    let mut name = targets.target_type.clone().map(Rc::new);
+
+    // A chapter is the (level 30) common part of a movie or episode, or, as described by the
+    // Matroska tag specification, the container of a track of an audio record that is
+    // identified by a `TagChapterUID`. Name an unnamed chapter target so that it is not
+    // resolved to the audio default (TRACK), and its tags map as chapter tags.
+    if name.is_none() && targets.target_type_value.is_none() && has_chapter_uid {
+        name = Some(Rc::new("CHAPTER".into()));
+    }
+
+    Some(Target { value, name })
 }
 
 pub fn make_raw_tags(tag: SimpleTagElement, ctx: &TagContext, out: &mut Vec<RawTag>) {
@@ -384,14 +397,24 @@ pub fn map_std_tag(raw: &RawTag, lower_ctx: &TagContext) -> Option<StandardTag> 
 
         Some(std)
     }
-    // else if let RawValue::Binary(_value) = &raw.value {
-    //     // Binary tags.
-    //     match raw.key.as_str() {
-    //         // TODO: Parse MCDI into CD-TOC string.
-    //         // "MCDI" => None,
-    //         _ => None,
-    //     }
-    // }
+    else if let RawValue::Binary(value) = &raw.value {
+        // Binary tags.
+        let tag = raw.key.rsplit_once('@').map_or(raw.key.as_str(), |(_, tag)| tag);
+
+        match tag {
+            // `MCDI` is a binary dump of the CD-DA table of contents (Matroska tag registry, same
+            // semantics as the ID3v2 `MCDI` frame). Like the ID3v2 reader, the standard tag is
+            // the uppercase hexadecimal encoding of the binary TOC.
+            "MCDI" if !value.is_empty() => {
+                let mut hex = String::with_capacity(value.len() * 2);
+                for byte in value.iter() {
+                    hex.push_str(&format!("{byte:02X}"));
+                }
+                Some(StandardTag::CdToc(Arc::new(hex)))
+            }
+            _ => None,
+        }
+    }
     else {
         // Unexpected type.
         None
@@ -494,7 +517,8 @@ fn map_part_number(value: &Arc<String>, target: &str) -> Option<StandardTag> {
         "PART" | "SESSION" => StandardTag::DiscNumber(number),
         "TRACK" | "SONG" => StandardTag::TrackNumber(number),
         // "CHAPTER" => None,
-        // "SUBTRACK" => None,
+        // A subtrack is the part of a track that an index point of a CD delimits.
+        "SUBTRACK" => StandardTag::CdTrackIndex(u8::try_from(number).ok()?),
         "MOVEMENT" => StandardTag::MovementNumber(number),
         // "SCENE" => None,
         // "SHOT" => None,
@@ -786,5 +810,46 @@ mod tests {
             map_std_tag(&raw, &ctx),
             Some(StandardTag::TrackTitle(Arc::new("My Track".into())))
         );
+    }
+
+    #[test]
+    fn unnamed_chapter_target_maps_title_to_chapter_title() {
+        let mut targets = empty_targets();
+        targets.uids.push(TargetUid::Chapter(7));
+        let target = resolve_target(Some(&targets)).expect("target");
+        assert_eq!(target.value, 30);
+
+        // The key path generated for the tag names the target, even for audio-only media.
+        let ctx = TagContext { is_video: false, target: Some(target) };
+        assert_eq!(get_target_path(&ctx), "CHAPTER@");
+
+        let raw = raw_string("CHAPTER@TITLE", "Intro");
+        assert_eq!(
+            map_std_tag(&raw, &ctx),
+            Some(StandardTag::ChapterTitle(Arc::new("Intro".into())))
+        );
+    }
+
+    #[test]
+    fn subtrack_part_number_maps_to_cd_track_index() {
+        let ctx = TagContext { is_video: false, target: None };
+        let raw = raw_string("SUBTRACK@PART_NUMBER", "2");
+        assert_eq!(map_std_tag(&raw, &ctx), Some(StandardTag::CdTrackIndex(2)));
+        // Out of range of a CD index.
+        assert_eq!(map_std_tag(&raw_string("SUBTRACK@PART_NUMBER", "300"), &ctx), None);
+    }
+
+    #[test]
+    fn mcdi_binary_tag_maps_to_cd_toc() {
+        let ctx = TagContext { is_video: false, target: None };
+        let toc: &[u8] = &[0x00, 0x14, 0x01, 0x02, 0xab, 0xcd];
+        let raw = RawTag::new("MCDI", toc);
+        assert_eq!(
+            map_std_tag(&raw, &ctx),
+            Some(StandardTag::CdToc(Arc::new("00140102ABCD".into())))
+        );
+        let targeted = RawTag::new("ALBUM@MCDI", toc);
+        assert!(matches!(map_std_tag(&targeted, &ctx), Some(StandardTag::CdToc(_))));
+        assert_eq!(map_std_tag(&RawTag::new("MCDI", &[][..]), &ctx), None);
     }
 }
