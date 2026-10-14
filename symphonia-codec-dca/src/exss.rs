@@ -9,7 +9,7 @@
 
 //! DTS-HD extension substream (EXSS) header parser (ETSI TS 102 114, section 7).
 
-use symphonia_core::errors::{Result, decode_error, unsupported_error};
+use symphonia_core::errors::{Result, decode_error};
 
 use crate::bits::BitReader;
 
@@ -36,6 +36,8 @@ fn count_chs_for_mask(mask: u32) -> u32 {
 /// An audio asset descriptor of an extension substream.
 #[derive(Clone, Debug, Default)]
 pub struct ExssAsset {
+    /// Audio asset identifier.
+    pub asset_index: u32,
     /// Offset to the asset data from the start of the substream.
     pub asset_offset: usize,
     /// Size of the encoded asset data.
@@ -141,7 +143,7 @@ impl Parser<'_> {
         let descr_size = self.gb.get(9) as usize + 1;
 
         // Audio asset identifier.
-        let _asset_index = self.gb.get(3);
+        asset.asset_index = self.gb.get(3);
 
         let mut embedded_stereo = false;
         let mut embedded_6ch = false;
@@ -429,8 +431,8 @@ fn set_exss_offsets(asset: &mut ExssAsset) -> bool {
         && take(mask & EXSS_XLL != 0, &mut asset.xll_offset, asset.xll_size)
 }
 
-/// Parse an extension substream header and its (single) audio asset. `data` starts at the EXSS
-/// sync word.
+/// Parse an extension substream header and all of its audio assets, and return the asset to
+/// decode. `data` starts at the EXSS sync word.
 pub fn parse(data: &[u8]) -> Result<ExssAsset> {
     let mut p = Parser {
         gb: BitReader::new(data),
@@ -464,6 +466,12 @@ pub fn parse(data: &[u8]) -> Result<ExssAsset> {
         return decode_error("dca: packet too short for exss frame");
     }
 
+    // Without static fields there is a single presentation with a single asset.
+    let mut nassets = 1;
+
+    // Bit mask of the assets of this substream that are active in the first audio presentation.
+    let mut active_asset_mask = 0u32;
+
     // Per stream static fields presence flag.
     p.static_fields_present = p.gb.get1();
     if p.static_fields_present {
@@ -483,21 +491,29 @@ pub fn parse(data: &[u8]) -> Result<ExssAsset> {
 
         // Number of defined audio presentations.
         let npresents = gb.get(3) as usize + 1;
-        if npresents > 1 {
-            return unsupported_error("dca: multiple exss audio presentations");
-        }
 
         // Number of audio assets in extension substream.
-        let nassets = gb.get(3) + 1;
-        if nassets > 1 {
-            return unsupported_error("dca: multiple exss audio assets");
+        nassets = gb.get(3) as usize + 1;
+
+        // Active extension substream mask for each audio presentation.
+        let mut active_exss_mask = [0u32; 8];
+        for mask in &mut active_exss_mask[..npresents] {
+            *mask = gb.get(exss_index + 1);
         }
 
-        // Active extension substream mask for audio presentation.
-        let active_exss_mask = gb.get(exss_index + 1);
-
-        // Active audio asset mask.
-        gb.skip(active_exss_mask.count_ones() as usize * 8);
+        // Active audio asset mask for each audio presentation and active extension substream.
+        // The first presentation is the one that is decoded: record the asset mask of this
+        // substream if it takes part in it.
+        for (i, &mask) in active_exss_mask[..npresents].iter().enumerate() {
+            for ss in 0..=exss_index {
+                if mask & (1 << ss) != 0 {
+                    let asset_mask = gb.get(8);
+                    if i == 0 && ss == exss_index {
+                        active_asset_mask = asset_mask;
+                    }
+                }
+            }
+        }
 
         // Mixing metadata enable flag.
         p.mix_metadata_enabled = gb.get1();
@@ -519,16 +535,23 @@ pub fn parse(data: &[u8]) -> Result<ExssAsset> {
     }
 
     // Size of encoded asset data in bytes.
-    let mut asset = ExssAsset { asset_offset: header_size, ..Default::default() };
-    asset.asset_size = p.gb.get(p.exss_size_nbits) as usize + 1;
-    if header_size + asset.asset_size > exss_size {
-        return decode_error("dca: exss asset out of bounds");
+    let mut assets = Vec::with_capacity(nassets);
+    let mut offset = header_size;
+    for _ in 0..nassets {
+        let asset_size = p.gb.get(p.exss_size_nbits) as usize + 1;
+        assets.push(ExssAsset { asset_offset: offset, asset_size, ..Default::default() });
+        offset += asset_size;
+        if offset > exss_size {
+            return decode_error("dca: exss asset out of bounds");
+        }
     }
 
-    // Audio asset descriptor.
-    p.parse_descriptor(&mut asset)?;
-    if !set_exss_offsets(&mut asset) {
-        return decode_error("dca: invalid extension size in exss asset descriptor");
+    // Audio asset descriptors.
+    for asset in &mut assets {
+        p.parse_descriptor(asset)?;
+        if !set_exss_offsets(asset) {
+            return decode_error("dca: invalid extension size in exss asset descriptor");
+        }
     }
 
     // Backward compatible core present, backward compatible core substream index, backward
@@ -537,5 +560,106 @@ pub fn parse(data: &[u8]) -> Result<ExssAsset> {
         return decode_error("dca: read past end of exss header");
     }
 
-    Ok(asset)
+    // Decode the lowest numbered asset that is active in the first audio presentation, otherwise
+    // the first asset.
+    let selected = (0..assets.len())
+        .find(|&i| {
+            let id = assets[i].asset_index;
+            id < 8 && active_asset_mask & (1 << id) != 0
+        })
+        .unwrap_or(0);
+
+    Ok(assets.swap_remove(selected))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct BitWriter {
+        bits: Vec<bool>,
+    }
+
+    impl BitWriter {
+        fn put(&mut self, nbits: u32, value: u32) {
+            for i in (0..nbits).rev() {
+                self.bits.push(value >> i & 1 != 0);
+            }
+        }
+
+        fn into_bytes(mut self) -> Vec<u8> {
+            while self.bits.len() % 8 != 0 {
+                self.bits.push(false);
+            }
+            self.bits.chunks(8).map(|c| c.iter().fold(0, |b, &x| b << 1 | u8::from(x))).collect()
+        }
+    }
+
+    /// Put a descriptor of an asset holding only a core component of `core_size` bytes.
+    fn put_core_descriptor(w: &mut BitWriter, asset_index: u32, core_size: u32) {
+        w.put(9, 8); // Descriptor size (9 bytes).
+        w.put(3, asset_index);
+        w.put(3, 0); // No asset type, language or text.
+        w.put(5, 15); // 16-bit.
+        w.put(4, 12); // 48 kHz.
+        w.put(8, 1); // 2 channels.
+        w.put(1, 0); // Not one to one mapped.
+        w.put(3, 0); // Representation type.
+        w.put(2, 0); // No DRC, no dialog normalization.
+        w.put(2, 0); // Coding mode 0.
+        w.put(12, 0x010); // Core only.
+        w.put(14, core_size - 1);
+        w.put(1, 0); // No core sync word.
+        w.put(5, 0); // Pad to 9 bytes (72 bits).
+    }
+
+    /// An EXSS with two core assets of 4 and 6 bytes of which `active` is active.
+    fn two_asset_exss(active: u32) -> Vec<u8> {
+        let mut w = BitWriter::default();
+        w.put(32, 0x6458_2025);
+        w.put(8, 0); // User defined bits.
+        w.put(2, 0); // Substream index.
+        w.put(1, 0); // Short header.
+        let mut body = BitWriter::default();
+        body.put(1, 1); // Static fields.
+        body.put(2, 0);
+        body.put(3, 0);
+        body.put(1, 0); // No timecode.
+        body.put(3, 1); // Two presentations: 1 + 1.
+        body.put(3, 1); // Two assets.
+        body.put(1, 1); // Presentation 0: substream 0 active.
+        body.put(1, 1); // Presentation 1: substream 0 active.
+        body.put(8, active); // Asset mask of presentation 0.
+        body.put(8, 1); // Asset mask of presentation 1.
+        body.put(1, 0); // No mixing metadata.
+        body.put(16, 3); // Asset 0 size - 1.
+        body.put(16, 5); // Asset 1 size - 1.
+        put_core_descriptor(&mut body, 0, 4);
+        put_core_descriptor(&mut body, 1, 6);
+        let body_bits = body.bits.len();
+        // Fixed fields: 32 + 8 + 2 + 1 + 8 (header size) + 16 (exss size) = 67 bits.
+        let header_len = (67 + body_bits).div_ceil(8) + 2;
+        let total = header_len + 10;
+        w.put(8, header_len as u32 - 1);
+        w.put(16, total as u32 - 1);
+        w.bits.extend(body.bits);
+        let mut out = w.into_bytes();
+        out.resize(total, 0);
+        out
+    }
+
+    #[test]
+    fn verify_multiple_assets_select_active() {
+        let asset = parse(&two_asset_exss(0b10)).expect("two asset exss header");
+        assert_eq!(asset.asset_index, 1);
+        assert_eq!(asset.core_size, 6);
+        assert_eq!(asset.asset_size, 6);
+        assert!(asset.asset_offset > 4);
+
+        let asset = parse(&two_asset_exss(0b01)).expect("two asset exss header");
+        assert_eq!(asset.asset_index, 0);
+        assert_eq!(asset.core_size, 4);
+        assert_eq!(asset.asset_size, 4);
+    }
 }
