@@ -531,8 +531,9 @@ fn read_subframe_wide<B: ReadBitsLtr>(
             }
 
             let qlp_coeff_shift = sign_extend_leq32_to_i32(bs.read_bits_leq32(5)?, 5);
+            // RFC 9639, 9.2.6: the prediction right shift MUST NOT be negative.
             if qlp_coeff_shift < 0 {
-                return unsupported_error("flac: lpc shifts less than 0 are not supported");
+                return decode_error("flac: negative lpc shift is forbidden");
             }
 
             // The first coefficient applies to the most recent sample (lag 1).
@@ -679,7 +680,8 @@ fn decode_linear<B: ReadBitsLtr>(bs: &mut B, bps: u32, order: u32, buf: &mut [i3
         };
     }
     else {
-        return unsupported_error("flac: lpc shifts less than 0 are not supported");
+        // RFC 9639, 9.2.6: the prediction right shift MUST NOT be negative.
+        return decode_error("flac: negative lpc shift is forbidden");
     }
 
     Ok(())
