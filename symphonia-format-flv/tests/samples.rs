@@ -101,7 +101,7 @@ fn mp3_in_flv_sample() {
 
 #[test]
 fn unsupported_codecs_are_rejected() {
-    for name in ["unsupported/adpcm_swf_flv.flv", "unsupported/nellymoser_flv.flv"] {
+    for name in ["unsupported/nellymoser_flv.flv"] {
         let Some(path) = sample(name)
         else {
             continue;

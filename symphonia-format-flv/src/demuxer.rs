@@ -33,6 +33,7 @@ use log::{debug, info, warn};
 
 use crate::amf::{Amf, parse_values};
 use crate::es::{PcmEs, RawAacEs};
+use crate::frames::FramedEs;
 
 const FLV_SIGNATURE: [u8; 4] = *b"FLV\x01";
 
@@ -76,6 +77,24 @@ const SOUND_EX_HEADER: u8 = 9;
 const SOUND_AAC: u8 = 10;
 const SOUND_SPEEX: u8 = 11;
 const SOUND_MP3_8K: u8 = 14;
+
+// The audio packet types of the enhanced audio tags (Enhanced RTMP v2).
+const PKT_SEQUENCE_START: u8 = 0;
+const PKT_CODED_FRAMES: u8 = 1;
+const PKT_MULTITRACK: u8 = 5;
+const PKT_MODEX: u8 = 7;
+
+// The multitrack types of the multitrack enhanced audio tags.
+const MULTITRACK_ONE_TRACK: u8 = 0;
+const MULTITRACK_MANY_CODECS: u8 = 2;
+
+// The FourCCs of the codecs of the enhanced audio tags.
+const FOURCC_AAC: [u8; 4] = *b"mp4a";
+const FOURCC_MP3: [u8; 4] = *b".mp3";
+const FOURCC_OPUS: [u8; 4] = *b"Opus";
+const FOURCC_FLAC: [u8; 4] = *b"fLaC";
+const FOURCC_AC3: [u8; 4] = *b"ac-3";
+const FOURCC_EAC3: [u8; 4] = *b"ec-3";
 
 const FLV_FORMAT_INFO: FormatInfo =
     FormatInfo { format: FORMAT_ID_FLV, short_name: "flv", long_name: "Flash Video" };
@@ -142,16 +161,179 @@ fn read_tag_body<B: ReadBytes>(reader: &mut B, size: usize, buf: &mut Vec<u8>) -
     reader.read_buf_exact(buf).is_ok()
 }
 
-/// Push the frames of the body of an audio tag, if it has any, into the elementary stream.
-/// Returns true if the tag had audio data.
-fn push_audio_tag(es: &mut EsTrack, format: u8, ts: u32, body: &[u8]) -> bool {
-    match frame_data(body, format) {
-        Some(payload) => {
-            es.push_pes(Some(ms_to_pts(ts)), payload);
-            true
+/// The identity of an audio stream in the audio tags: the sound format, and for the enhanced audio
+/// tags the FourCC of the codec, and the ID of the track of a multitrack tag.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct StreamKey {
+    format: u8,
+    fourcc: [u8; 4],
+    track: u8,
+}
+
+/// The audio of one stream in an audio tag.
+struct AudioUnit<'a> {
+    key: StreamKey,
+    /// The packet type: for AAC the packet type of the tag, for enhanced audio the audio packet
+    /// type, and otherwise `PKT_CODED_FRAMES`.
+    packet_type: u8,
+    /// The data after the header of the tag.
+    body: &'a [u8],
+    /// The first byte of the tag.
+    flags: u8,
+}
+
+/// Call `f` with the audio of each stream in the audio tag with data `data`. The header of the
+/// enhanced audio tag (Enhanced RTMP v2, "ExAudioTagHeader") is parsed, including the ModEx
+/// wrappers, which are skipped (the nanosecond offset of the time stamp is not used), and the
+/// multitrack tags.
+fn for_each_unit<'a>(data: &'a [u8], mut f: impl FnMut(AudioUnit<'a>)) {
+    let Some(&flags) = data.first()
+    else {
+        return;
+    };
+
+    let format = flags >> 4;
+
+    if format != SOUND_EX_HEADER {
+        let (packet_type, body) = if format == SOUND_AAC {
+            match (data.get(1), data.get(2..)) {
+                (Some(&t), Some(body)) => (t, body),
+                _ => return,
+            }
         }
-        None => false,
+        else {
+            (PKT_CODED_FRAMES, &data[1..])
+        };
+
+        let key = StreamKey { format, fourcc: [0; 4], track: 0 };
+        f(AudioUnit { key, packet_type, body, flags });
+        return;
     }
+
+    let fourcc_at = |pos: usize| -> Option<[u8; 4]> { data.get(pos..pos + 4)?.try_into().ok() };
+
+    let mut pos = 1;
+    let mut packet_type = flags & 0xf;
+
+    while packet_type == PKT_MODEX {
+        let Some(&n) = data.get(pos)
+        else {
+            return;
+        };
+        pos += 1;
+
+        let mut size = usize::from(n) + 1;
+
+        if size == 256 {
+            let Some(b) = data.get(pos..pos + 2)
+            else {
+                return;
+            };
+            size = usize::from(u16::from_be_bytes([b[0], b[1]])) + 1;
+            pos += 2;
+        }
+
+        // The ModEx data, then the type of the ModEx data and the packet type.
+        pos = pos.saturating_add(size);
+
+        let Some(&t) = data.get(pos)
+        else {
+            return;
+        };
+        pos += 1;
+        packet_type = t & 0xf;
+    }
+
+    if packet_type != PKT_MULTITRACK {
+        let Some(fourcc) = fourcc_at(pos)
+        else {
+            return;
+        };
+
+        let key = StreamKey { format, fourcc, track: 0 };
+        f(AudioUnit { key, packet_type, body: &data[pos + 4..], flags });
+        return;
+    }
+
+    // Multitrack: the multitrack type and the packet type of all tracks, then, unless the tracks
+    // have different codecs, the FourCC of all tracks.
+    let Some(&t) = data.get(pos)
+    else {
+        return;
+    };
+    pos += 1;
+
+    let (multitrack, packet_type) = (t >> 4, t & 0xf);
+
+    if multitrack > MULTITRACK_MANY_CODECS || matches!(packet_type, PKT_MODEX | PKT_MULTITRACK) {
+        return;
+    }
+
+    let mut fourcc = [0; 4];
+
+    if multitrack != MULTITRACK_MANY_CODECS {
+        let Some(c) = fourcc_at(pos)
+        else {
+            return;
+        };
+        fourcc = c;
+        pos += 4;
+    }
+
+    while pos < data.len() {
+        if multitrack == MULTITRACK_MANY_CODECS {
+            let Some(c) = fourcc_at(pos)
+            else {
+                return;
+            };
+            fourcc = c;
+            pos += 4;
+        }
+
+        let Some(&track) = data.get(pos)
+        else {
+            return;
+        };
+        pos += 1;
+
+        let body = if multitrack == MULTITRACK_ONE_TRACK {
+            let body = &data[pos..];
+            pos = data.len();
+            body
+        }
+        else {
+            let Some(b) = data.get(pos..pos + 3)
+            else {
+                return;
+            };
+            let size = usize::from(b[0]) << 16 | usize::from(b[1]) << 8 | usize::from(b[2]);
+            pos += 3;
+
+            let Some(body) = data.get(pos..pos + size)
+            else {
+                return;
+            };
+            pos += size;
+            body
+        };
+
+        f(AudioUnit { key: StreamKey { format, fourcc, track }, packet_type, body, flags });
+    }
+}
+
+/// Push the frames of an audio tag of the stream `key` into the elementary stream. Returns true if
+/// the tag had audio data.
+fn push_audio_tag(es: &mut EsTrack, key: StreamKey, ts: u32, data: &[u8]) -> bool {
+    let mut pushed = false;
+
+    for_each_unit(data, |unit| {
+        if unit.key == key && unit.packet_type == PKT_CODED_FRAMES {
+            es.push_pes(Some(ms_to_pts(ts)), unit.body);
+            pushed = true;
+        }
+    });
+
+    pushed
 }
 
 /// The properties of the audio of an audio tag header.
@@ -186,43 +368,27 @@ impl AudioFlags {
 /// The name of an unsupported sound format.
 fn unsupported_format_name(format: u8) -> &'static str {
     match format {
-        SOUND_ADPCM => "swf adpcm",
         SOUND_NELLYMOSER_16K | SOUND_NELLYMOSER_8K | SOUND_NELLYMOSER => "nellymoser",
-        SOUND_EX_HEADER => "enhanced rtmp audio",
         SOUND_SPEEX => "speex",
         _ => "unknown",
     }
 }
 
-/// Get the frame data of an audio tag, if the tag contains frames of the audio of `format`.
-fn frame_data(data: &[u8], format: u8) -> Option<&[u8]> {
-    if data.first()? >> 4 != format {
-        return None;
-    }
+/// Create the elementary stream for the audio of `unit`, and the number of samples to skip at the
+/// start of the stream. Returns `None` if the audio cannot be configured by this unit (an AAC
+/// tag that is not the sequence header).
+fn make_es(unit: &AudioUnit<'_>) -> Result<Option<(EsTrack, u32)>> {
+    let flags = AudioFlags::parse(unit.flags);
 
-    match format {
-        // AAC packet type 1 is a raw data block.
-        SOUND_AAC if data.get(1) == Some(&1) => data.get(2..),
-        SOUND_AAC => None,
-        _ => data.get(1..),
-    }
-}
-
-/// Create the elementary stream for the audio of the audio tag with data `data`. Returns `None` if
-/// the audio cannot be configured by this tag (an AAC tag that is not the sequence header).
-fn make_es(data: &[u8]) -> Result<Option<EsTrack>> {
-    let Some(&flags) = data.first()
-    else {
-        return Ok(None);
-    };
-
-    let flags = AudioFlags::parse(flags);
+    let mut delay = 0;
 
     let parser: Box<dyn EsParser> = match flags.format {
         SOUND_MP3 | SOUND_MP3_8K => Box::new(MpaEs::new()),
-        SOUND_AAC => match (data.get(1), data.get(2..)) {
+        SOUND_AAC => match unit {
             // The sequence header. Some muxers write an empty one before the real one.
-            (Some(0), Some(asc)) if asc.len() >= 2 => Box::new(RawAacEs::new(asc)?),
+            AudioUnit { packet_type: PKT_SEQUENCE_START, body, .. } if body.len() >= 2 => {
+                Box::new(RawAacEs::new(body)?)
+            }
             _ => return Ok(None),
         },
         SOUND_PCM_PLATFORM | SOUND_PCM_LE => {
@@ -259,6 +425,36 @@ fn make_es(data: &[u8]) -> Result<Option<EsTrack>> {
 
             Box::new(PcmEs::new(params, flags.channels().count()))
         }
+        SOUND_ADPCM => Box::new(FramedEs::swf_adpcm(flags.rate, flags.channels())),
+        SOUND_EX_HEADER => {
+            let configures = unit.packet_type == PKT_SEQUENCE_START;
+            let has_frames = unit.packet_type == PKT_CODED_FRAMES;
+
+            match unit.key.fourcc {
+                FOURCC_AAC if configures && unit.body.len() >= 2 => {
+                    Box::new(RawAacEs::new(unit.body)?)
+                }
+                FOURCC_MP3 if configures || has_frames => Box::new(MpaEs::new()),
+                FOURCC_OPUS if configures => {
+                    let config = FramedEs::opus(unit.body)?;
+                    delay = u32::from(config.pre_skip);
+                    Box::new(config.es)
+                }
+                FOURCC_FLAC if configures => Box::new(FramedEs::flac(unit.body)?),
+                FOURCC_AC3 if configures || has_frames => Box::new(FramedEs::ac3(false)),
+                FOURCC_EAC3 if configures || has_frames => Box::new(FramedEs::ac3(true)),
+                FOURCC_AAC | FOURCC_MP3 | FOURCC_OPUS | FOURCC_FLAC | FOURCC_AC3 | FOURCC_EAC3 => {
+                    return Ok(None);
+                }
+                fourcc => {
+                    warn!(
+                        "flv: unsupported enhanced audio codec {}",
+                        String::from_utf8_lossy(&fourcc)
+                    );
+                    return unsupported_error("flv: unsupported audio codec");
+                }
+            }
+        }
         format => {
             let name = unsupported_format_name(format);
             warn!("flv: unsupported audio format {format} ({name})");
@@ -266,13 +462,15 @@ fn make_es(data: &[u8]) -> Result<Option<EsTrack>> {
         }
     };
 
-    Ok(Some(EsTrack::new(0, parser)))
+    Ok(Some((EsTrack::new(0, parser), delay)))
 }
 
 /// The result of scanning the start of a stream.
 struct Discovered {
     es: EsTrack,
-    format: u8,
+    key: StreamKey,
+    /// The number of samples to skip at the start of the stream.
+    delay: u32,
     /// The position and time stamp of the first audio tag.
     first_audio: (u64, u32),
     meta: Option<Amf>,
@@ -283,7 +481,8 @@ fn discover<B: ReadBytes>(reader: &mut B) -> Result<Discovered> {
     let start = reader.pos();
 
     let mut es: Option<EsTrack> = None;
-    let mut format = 0;
+    let mut key = None;
+    let mut delay = 0;
     let mut first_audio = None;
     let mut meta = None;
     let mut meta_checked = false;
@@ -305,17 +504,38 @@ fn discover<B: ReadBytes>(reader: &mut B) -> Result<Discovered> {
                 }
 
                 if es.is_none() {
-                    // The format of the audio is that of the first audio tag.
-                    es = make_es(&data)?;
+                    // The format of the audio is that of the first audio tag that configures it.
+                    let mut made = None;
+                    let mut error = None;
 
-                    if es.is_some() {
-                        format = data[0] >> 4;
-                        first_audio = Some((tag.pos, tag.ts));
+                    for_each_unit(&data, |unit| {
+                        if made.is_some() {
+                            return;
+                        }
+
+                        match make_es(&unit) {
+                            Ok(Some(configured)) => made = Some((unit.key, configured)),
+                            Ok(None) => (),
+                            Err(e) => {
+                                error.get_or_insert(e);
+                            }
+                        }
+                    });
+
+                    match (made, error) {
+                        (Some((k, (new_es, d))), _) => {
+                            es = Some(new_es);
+                            key = Some(k);
+                            delay = d;
+                            first_audio = Some((tag.pos, tag.ts));
+                        }
+                        (None, Some(e)) => return Err(e),
+                        (None, None) => (),
                     }
                 }
 
-                if let (Some(es), Some(_)) = (es.as_mut(), first_audio) {
-                    if push_audio_tag(es, format, tag.ts, &data) {
+                if let (Some(es), Some(key)) = (es.as_mut(), key) {
+                    if push_audio_tag(es, key, tag.ts, &data) {
                         es.probe(false);
                     }
                 }
@@ -361,7 +581,13 @@ fn discover<B: ReadBytes>(reader: &mut B) -> Result<Discovered> {
         return unsupported_error("flv: could not parse the audio");
     }
 
-    Ok(Discovered { es, format, first_audio: first_audio.expect("audio was found"), meta })
+    Ok(Discovered {
+        es,
+        key: key.expect("audio was found"),
+        delay,
+        first_audio: first_audio.expect("audio was found"),
+        meta,
+    })
 }
 
 /// Reads the keyframe index of the `onMetaData` script data, as pairs of time stamps in
@@ -413,8 +639,10 @@ pub struct FlvReader<'s> {
     metadata: MetadataLog,
     chapters: Option<ChapterGroup>,
     es: EsTrack,
-    /// The sound format of the track.
-    format: u8,
+    /// The stream of the audio tags.
+    key: StreamKey,
+    /// The number of samples to skip at the start of the stream.
+    delay: u32,
     /// The position of the first tag.
     data_start: u64,
     /// The position and time stamp of the first audio tag.
@@ -451,7 +679,7 @@ impl<'s> FlvReader<'s> {
         let data_start = header_pos + data_offset + 4;
         mss.ignore_bytes(data_offset - FLV_HEADER_LEN as u64 + 4)?;
 
-        let Discovered { mut es, format, first_audio, meta } = discover(&mut mss)?;
+        let Discovered { mut es, key, delay, first_audio, meta } = discover(&mut mss)?;
 
         let info = es.info().expect("stream was probed").clone();
         let rate = info.rate;
@@ -474,7 +702,8 @@ impl<'s> FlvReader<'s> {
             metadata: opts.external_data.metadata.unwrap_or_default(),
             chapters: opts.external_data.chapters,
             es,
-            format,
+            key,
+            delay,
             data_start,
             first_audio,
             index,
@@ -510,8 +739,15 @@ impl<'s> FlvReader<'s> {
         track.with_codec_params(CodecParameters::Audio(info.params.clone()));
         track.with_flags(TrackFlags::DEFAULT);
 
-        if let Some(end_ts) = end_ts.filter(|&t| t > 0) {
-            set_track_duration(&mut track, &info, end_ts as u64);
+        // The first sample that is not skipped is at the delay of the stream.
+        let delay = i64::from(delay);
+
+        if delay > 0 {
+            track.with_delay(delay as u32);
+        }
+
+        if let Some(end_ts) = end_ts.filter(|&t| t > delay) {
+            set_track_duration(&mut track, &info, (end_ts - delay) as u64);
         }
 
         reader.media_info = MediaInfo::from_track(&track);
@@ -642,10 +878,19 @@ impl<'s> FlvReader<'s> {
                     break;
                 }
 
-                if let Some(payload) = frame_data(&data, self.format) {
+                let key = self.key;
+                let mut payloads = Vec::new();
+
+                for_each_unit(&data, |unit| {
+                    if unit.key == key && unit.packet_type == PKT_CODED_FRAMES {
+                        payloads.push(unit.body);
+                    }
+                });
+
+                if !payloads.is_empty() {
                     let clock = self.rel_clock(tag.ts, 0);
                     let ticks = self.es.timeline().ticks_for_clock(clock);
-                    let dur = self.es.payload_duration([payload]) as i64;
+                    let dur = self.es.payload_duration(payloads) as i64;
 
                     // The frame must contain samples.
                     if dur > 0 {
@@ -699,12 +944,33 @@ impl<'s> FlvReader<'s> {
         unwrap_pts(ms_to_pts(ts), ms_to_pts(self.first_audio.1), hint)
     }
 
-    /// Flush the frames of the stream at the end of the stream.
-    fn flush(&mut self) {
-        while let Some(packet) = self.es.pop(true) {
+    /// Move the packets of the elementary stream to the output. The timeline of the elementary
+    /// stream begins with the delay samples of the stream. Those are trimmed from the packets, and
+    /// the timeline is shifted so that the first sample that is not skipped is at 0, as the time
+    /// stamps of the delay samples are negative.
+    fn drain(&mut self, flush: bool) {
+        let delay = i64::from(self.delay);
+
+        while let Some(mut packet) = self.es.pop(flush) {
+            let start = packet.dts.get();
+
+            if start < delay {
+                let trim = ((delay - start) as u64).min(packet.dur.get());
+
+                packet.trim_start = Duration::new(packet.trim_start.get() + trim);
+                packet.dur = Duration::new(packet.dur.get() - trim);
+            }
+
+            packet.dts = Timestamp::new(start - delay);
+            packet.pts = packet.dts;
+
             self.out.push_back(packet);
         }
+    }
 
+    /// Flush the frames of the stream at the end of the stream.
+    fn flush(&mut self) {
+        self.drain(true);
         self.eof = true;
     }
 
@@ -749,12 +1015,10 @@ impl<'s> FlvReader<'s> {
                 return Ok(false);
             }
 
-            if push_audio_tag(&mut self.es, self.format, tag.ts, &data) {
+            if push_audio_tag(&mut self.es, self.key, tag.ts, &data) {
                 self.add_index_entry(tag.ts, tag.pos);
 
-                while let Some(packet) = self.es.pop(false) {
-                    self.out.push_back(packet);
-                }
+                self.drain(false);
             }
 
             self.tag_buf = data;
@@ -899,7 +1163,8 @@ impl FormatReader for FlvReader<'_> {
 
         // The timestamp to start decoding from, so that a decoder reproduces a continuous decode
         // at the required timestamp.
-        let start_ts = self.es.parser().seek_start_ts(required_ts.get()).max(0);
+        let delay = i64::from(self.delay);
+        let start_ts = self.es.parser().seek_start_ts(required_ts.get() + delay).max(0);
 
         debug!("flv: seeking to ts={required_ts} (start from {start_ts})");
 
@@ -947,7 +1212,9 @@ impl FormatReader for FlvReader<'_> {
         loop {
             match self.next_packet_inner()? {
                 Some(packet)
-                    if packet.pts.get().saturating_add(packet.dur.get() as i64) > start_ts =>
+                    if (packet.pts.get() + delay)
+                        .saturating_add(packet.block_dur().get() as i64)
+                        > start_ts =>
                 {
                     let actual_ts = packet.pts;
                     self.out.push_front(packet);

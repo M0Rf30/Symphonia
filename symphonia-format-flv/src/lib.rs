@@ -28,9 +28,27 @@
 //! | 0            | Linear PCM (taken to be big-endian), 8-bit unsigned, or 16-bit signed |
 //! | 3            | Linear PCM, little-endian, 8-bit unsigned, or 16-bit signed |
 //! | 7, 8         | G.711 A-law, mu-law (8 kHz)                            |
+//! | 1            | SWF ADPCM, a tag is one or more blocks of 4096 frames   |
+//! | 9            | Enhanced RTMP audio (see below)                        |
 //!
-//! SWF ADPCM, Nellymoser, Speex, and the "enhanced RTMP" extended audio header are not supported.
-//! A file with such audio is not opened.
+//! Nellymoser and Speex (sound formats 4, 5, 6, and 11) are not supported, as Symphonia does not
+//! have decoders for them, and a file with such audio is not opened.
+//!
+//! ## Enhanced RTMP
+//!
+//! The enhanced audio tag header of [Enhanced RTMP v2](https://github.com/veovera/enhanced-rtmp)
+//! (sound format 9) is read, with the FourCCs `mp4a` (AAC), `.mp3`, `Opus` (the identification
+//! header of the sequence start is the codec extra data, and its pre-skip the delay of the track,
+//! which is trimmed from the first packet), `fLaC` (the sequence start is the STREAMINFO block,
+//! with or without the `fLaC` marker and the block header), `ac-3`, and `ec-3`. An AC-3 or E-AC-3
+//! tag is a packet of one or more syncframes; the duration is found from their headers. A
+//! sequence start of Opus without data is taken to be of mono or stereo audio, depending on the
+//! first packet.
+//!
+//! ModEx wrappers are skipped (the sub-millisecond timestamp offset is not used), and the
+//! multichannel configuration is not used, as the codecs signal their channels. A multitrack tag
+//! is read as the audio of the track of the first tag that configures the stream, and the other
+//! tracks are ignored. Tags of other codecs than the first are ignored.
 //!
 //! # Timeline
 //!
@@ -57,5 +75,6 @@
 mod amf;
 mod demuxer;
 mod es;
+mod frames;
 
 pub use demuxer::FlvReader;

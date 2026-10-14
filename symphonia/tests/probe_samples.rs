@@ -45,9 +45,8 @@ static EXPECTED: [(&str, &str); 9] = [
     ("aac/heaac_v1_in_flv.flv", "flv"),
     ("aac/heaac_v1_in_mpegts.ts", "mpegts"),
     ("aac/heaac_v2_in_mpegts.ts", "mpegts"),
-    // The files of unsupported audio in FLV are claimed by the FLV reader, which does not open
-    // them.
-    ("unsupported/adpcm_swf_flv.flv", ""),
+    // SWF ADPCM in FLV now opens. Nellymoser is claimed by the FLV reader, which does not open it.
+    ("unsupported/adpcm_swf_flv.flv", "flv"),
     ("unsupported/nellymoser_flv.flv", ""),
 ];
 

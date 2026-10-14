@@ -14,8 +14,9 @@ mod support;
 use std::io::Cursor;
 
 use symphonia_core::codecs::audio::well_known::{
-    CODEC_ID_AAC, CODEC_ID_MP2, CODEC_ID_PCM_ALAW, CODEC_ID_PCM_MULAW, CODEC_ID_PCM_S16BE,
-    CODEC_ID_PCM_S16LE, CODEC_ID_PCM_U8,
+    CODEC_ID_AAC, CODEC_ID_AC3, CODEC_ID_ADPCM_SWF, CODEC_ID_EAC3, CODEC_ID_FLAC, CODEC_ID_MP2,
+    CODEC_ID_OPUS, CODEC_ID_PCM_ALAW, CODEC_ID_PCM_MULAW, CODEC_ID_PCM_S16BE, CODEC_ID_PCM_S16LE,
+    CODEC_ID_PCM_U8,
 };
 use symphonia_core::errors::Error;
 use symphonia_core::formats::probe::{Hint, Probe, Score, Scoreable};
@@ -455,10 +456,307 @@ fn files_without_audio_are_rejected() {
 
     // Unsupported audio.
     let mut mux = FlvMux::new();
-    mux.audio(0, 0x1f, &[0u8; 100]);
+    mux.audio(0, 0x6f, &[0u8; 100]);
     let mss = MediaSourceStream::new(Box::new(Cursor::new(mux.out)), Default::default());
     let err = FlvReader::try_new(mss, FormatOptions::default()).err().unwrap();
     assert!(matches!(err, Error::Unsupported(_)));
+}
+
+/// Write an enhanced audio tag (Enhanced RTMP, ExAudioTagHeader) with the audio packet type
+/// `packet_type`.
+fn ex_tag(mux: &mut FlvMux, ts: u32, packet_type: u8, fourcc: &[u8; 4], payload: &[u8]) {
+    let mut data = vec![0x90 | packet_type];
+    data.extend_from_slice(fourcc);
+    data.extend_from_slice(payload);
+    mux.tag(8, ts, &data);
+}
+
+#[test]
+fn enhanced_aac_with_modex_and_multichannel_config() {
+    let mut mux = FlvMux::new();
+    ex_tag(&mut mux, 0, 0, b"mp4a", &ASC);
+    // The multichannel config (stereo, native order, FL | FR) is not needed by AAC.
+    ex_tag(&mut mux, 0, 4, b"mp4a", &[1, 2, 0, 0, 0, 3]);
+
+    for i in 0..100usize {
+        let ts = (i as u64 * 1024 * 1000 / 44_100) as u32;
+
+        if i % 2 == 0 {
+            ex_tag(&mut mux, ts, 1, b"mp4a", &[i as u8; 40]);
+        }
+        else {
+            // A ModEx wrapper with a nanosecond offset: 3 bytes of data, the ModEx type 0, and the
+            // packet type 1.
+            let mut data = vec![0x97, 2, 0x00, 0x03, 0xe8, 0x01];
+            data.extend_from_slice(b"mp4a");
+            data.extend_from_slice(&[i as u8; 40]);
+            mux.tag(8, ts, &data);
+        }
+    }
+
+    let mut reader = open(mux.out);
+    let params = audio_params(&reader, 0);
+    assert_eq!(params.codec, CODEC_ID_AAC);
+    assert_eq!(params.extra_data.as_deref(), Some(&ASC[..]));
+
+    let packets = read_all(&mut reader);
+    assert_eq!(packets.len(), 100);
+
+    for (i, p) in packets.iter().enumerate() {
+        assert_eq!(p.pts.get(), i as i64 * 1024);
+        assert_eq!(p.data[..], [i as u8; 40][..]);
+    }
+}
+
+#[test]
+fn enhanced_multitrack_selects_the_first_track() {
+    let mut mux = FlvMux::new();
+
+    // Multitrack (5), many tracks (1), with the packet type, and the FourCC for all tracks, then
+    // each track as its ID, size, and data.
+    let multitrack = |packet_type: u8, tracks: &[(u8, &[u8])]| {
+        let mut data = vec![0x95, 1 << 4 | packet_type];
+        data.extend_from_slice(b"mp4a");
+
+        for (id, body) in tracks {
+            data.push(*id);
+            data.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+            data.extend_from_slice(body);
+        }
+
+        data
+    };
+
+    mux.tag(8, 0, &multitrack(0, &[(3, &ASC), (4, &ASC)]));
+
+    for i in 0..50usize {
+        let ts = (i as u64 * 1024 * 1000 / 44_100) as u32;
+        mux.tag(8, ts, &multitrack(1, &[(3, &[i as u8; 40]), (4, &[0xee; 30])]));
+    }
+
+    let mut reader = open(mux.out);
+    let packets = read_all(&mut reader);
+    assert_eq!(packets.len(), 50);
+    assert!(packets.iter().enumerate().all(|(i, p)| p.data[..] == [i as u8; 40][..]));
+}
+
+#[test]
+fn enhanced_opus_pre_skip_and_seeking() {
+    // An identification header, mapping family 0, stereo, a pre-skip of 312.
+    let mut head = b"OpusHead\x01\x02".to_vec();
+    head.extend_from_slice(&312u16.to_le_bytes());
+    head.extend_from_slice(&48_000u32.to_le_bytes());
+    head.extend_from_slice(&[0, 0, 0]);
+
+    let mut mux = FlvMux::new();
+    ex_tag(&mut mux, 0, 0, b"Opus", &head);
+
+    // 20 ms CELT frames, stereo.
+    for i in 0..100u32 {
+        let mut packet = vec![0xfc];
+        packet.extend_from_slice(&[i as u8; 30]);
+        ex_tag(&mut mux, i * 20, 1, b"Opus", &packet);
+    }
+
+    let mut reader = open(mux.out);
+    let params = audio_params(&reader, 0);
+    assert_eq!(params.codec, CODEC_ID_OPUS);
+    assert_eq!(params.sample_rate, Some(48_000));
+    assert_eq!(params.channels.as_ref().unwrap().count(), 2);
+    assert_eq!(params.extra_data.as_deref(), Some(&head[..]));
+
+    let track = reader.tracks()[0].clone();
+    assert_eq!(track.delay, Some(312));
+    assert_eq!(track.duration.unwrap().get(), 100 * 960 - 312);
+
+    let packets = read_all(&mut reader);
+    assert_eq!(packets.len(), 100);
+
+    // The pre-skip is trimmed from the first packet, which starts before 0.
+    assert_eq!(packets[0].pts.get(), -312);
+    assert_eq!((packets[0].trim_start.get(), packets[0].dur.get()), (312, 648));
+    assert_eq!((packets[1].pts.get(), packets[1].trim_start.get()), (648, 0));
+    assert!(packets.iter().skip(1).all(|p| p.dur.get() == 960));
+
+    // Seeking to the start returns the first packet.
+    let seeked = reader
+        .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(0), track_id: 0 })
+        .unwrap();
+    assert_eq!(seeked.actual_ts.get(), -312);
+    assert_eq!(reader.next_packet().unwrap().unwrap().trim_start.get(), 312);
+
+    // Seeking to the middle starts at least 80 ms before.
+    let ts = 50 * 960 + 100;
+    let seeked = reader
+        .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(ts), track_id: 0 })
+        .unwrap();
+    assert!(seeked.actual_ts.get() <= ts - 3840);
+    assert!(seeked.actual_ts.get() > ts - 3840 - 960);
+    assert_eq!(reader.next_packet().unwrap().unwrap().pts, seeked.actual_ts);
+}
+
+#[test]
+fn enhanced_opus_without_a_header_finds_the_channels() {
+    let mut mux = FlvMux::new();
+    ex_tag(&mut mux, 0, 0, b"Opus", &[]);
+
+    for i in 0..10u32 {
+        // 10 ms SILK frames, mono.
+        ex_tag(&mut mux, i * 10, 1, b"Opus", &[0x00, 1, 2, 3]);
+    }
+
+    let mut reader = open(mux.out);
+    assert_eq!(audio_params(&reader, 0).channels.as_ref().unwrap().count(), 1);
+    assert_eq!(reader.tracks()[0].delay, None);
+
+    let packets = read_all(&mut reader);
+    assert_eq!(packets.len(), 10);
+    assert!(
+        packets
+            .iter()
+            .enumerate()
+            .all(|(i, p)| p.pts.get() == i as i64 * 480 && p.dur.get() == 480)
+    );
+}
+
+#[test]
+fn enhanced_flac() {
+    // STREAMINFO of 44.1 kHz, stereo, 16 bits, blocks of 4096 samples.
+    let mut info = vec![0x10, 0x00, 0x10, 0x00, 0, 0, 0, 0, 0, 0];
+    info.extend_from_slice(&[0x0a, 0xc4, 0x42, 0xf0]);
+    info.resize(34, 0);
+
+    let mut with_marker = b"fLaC".to_vec();
+    with_marker.extend_from_slice(&[0, 0, 0, 34]);
+    with_marker.extend_from_slice(&info);
+
+    for header in [info.clone(), with_marker] {
+        let mut mux = FlvMux::new();
+        ex_tag(&mut mux, 0, 0, b"fLaC", &header);
+
+        for i in 0..40u8 {
+            let ts = (u64::from(i) * 4096 * 1000 / 44_100) as u32;
+            let mut frame = vec![0xff, 0xf8, 0xc9, 0x18, i];
+            frame.extend_from_slice(&[i; 100]);
+            ex_tag(&mut mux, ts, 1, b"fLaC", &frame);
+        }
+
+        // The last frame is shorter: 1000 samples, as 8-bit block size - 1 (code 7 is 16-bit).
+        let last = [0xff, 0xf8, 0x79, 0x18, 40, 0x03, 0xe7, 0, 0, 0];
+        ex_tag(&mut mux, (40u64 * 4096 * 1000 / 44_100) as u32, 1, b"fLaC", &last);
+
+        let mut reader = open(mux.out);
+        let params = audio_params(&reader, 0);
+        assert_eq!(params.codec, CODEC_ID_FLAC);
+        assert_eq!(params.sample_rate, Some(44_100));
+        assert_eq!(params.bits_per_sample, Some(16));
+        assert_eq!(params.channels.as_ref().unwrap().count(), 2);
+        assert_eq!(params.extra_data.as_deref(), Some(&info[..]));
+        assert_eq!(reader.tracks()[0].duration.unwrap().get(), 40 * 4096 + 1000);
+
+        let packets = read_all(&mut reader);
+        assert_eq!(packets.len(), 41);
+        assert!(packets[..40].iter().enumerate().all(|(i, p)| p.pts.get() == i as i64 * 4096));
+        assert_eq!(packets[40].dur.get(), 1000);
+    }
+}
+
+/// An AC-3 syncframe of 192 kb/s at 48 kHz (768 bytes), 3/2 channels and an LFE.
+fn ac3_frame(fill: u8) -> Vec<u8> {
+    let mut f = vec![fill; 768];
+    f[..8].copy_from_slice(&[0x0b, 0x77, 0, 0, 20, 8 << 3, 7 << 5 | 1, 0]);
+    f
+}
+
+/// An E-AC-3 frame of 6 blocks at 48 kHz, 1024 bytes, 3/2 channels, no LFE.
+fn eac3_frame(fill: u8) -> Vec<u8> {
+    let mut f = vec![fill; 1024];
+    f[..8].copy_from_slice(&[0x0b, 0x77, 0x01, 0xff, 3 << 4 | 7 << 1, 16 << 3, 0, 0]);
+    f
+}
+
+#[test]
+fn enhanced_ac3_and_eac3() {
+    for (fourcc, codec, frame, bytes) in [
+        (b"ac-3", CODEC_ID_AC3, ac3_frame as fn(u8) -> Vec<u8>, 768),
+        (b"ec-3", CODEC_ID_EAC3, eac3_frame as fn(u8) -> Vec<u8>, 1024),
+    ] {
+        let mut mux = FlvMux::new();
+        // An empty sequence start, then tags with one frame, and with two frames.
+        ex_tag(&mut mux, 0, 0, fourcc, &[]);
+
+        let mut n = 0u64;
+        for tag in 0..30u8 {
+            let frames = if tag % 3 == 0 { 2 } else { 1 };
+            let payload: Vec<u8> = (0..frames).flat_map(|k| frame(tag * 2 + k)).collect();
+            ex_tag(&mut mux, (n * 1536 * 1000 / 48_000) as u32, 1, fourcc, &payload);
+            n += u64::from(frames);
+        }
+
+        let mut reader = open(mux.out);
+        let params = audio_params(&reader, 0);
+        assert_eq!(params.codec, codec);
+        assert_eq!(params.sample_rate, Some(48_000));
+        assert_eq!(params.channels.as_ref().unwrap().count(), if bytes == 768 { 6 } else { 5 });
+        assert_eq!(reader.tracks()[0].duration.unwrap().get(), n * 1536);
+
+        // A tag is a packet: it may have a number of syncframes.
+        let packets = read_all(&mut reader);
+        assert_eq!(packets.len(), 30);
+
+        let mut ts = 0u64;
+        for (tag, p) in packets.iter().enumerate() {
+            let frames = if tag % 3 == 0 { 2 } else { 1 };
+            assert_eq!(p.pts.get(), ts as i64);
+            assert_eq!(p.dur.get(), frames * 1536);
+            assert_eq!(p.data.len(), frames as usize * bytes);
+            ts += frames * 1536;
+        }
+    }
+}
+
+#[test]
+fn enhanced_audio_with_an_unknown_codec_is_rejected() {
+    let mut mux = FlvMux::new();
+    ex_tag(&mut mux, 0, 0, b"xxxx", &[1, 2, 3]);
+    ex_tag(&mut mux, 0, 1, b"xxxx", &[1, 2, 3]);
+
+    let mss = MediaSourceStream::new(Box::new(Cursor::new(mux.out)), Default::default());
+    let err = FlvReader::try_new(mss, FormatOptions::default()).err().unwrap();
+    assert!(matches!(err, Error::Unsupported(_)));
+}
+
+#[test]
+fn swf_adpcm_blocks() {
+    // Mono, 22.05 kHz. A block has a 2-bit code size (2: 4-bit codes), 22 bits of initial state,
+    // and 4095 codes of 4 bits: 4096 frames in 2051 bytes. Tags have one block, and two blocks.
+    let mut mux = FlvMux::new();
+    let mut ts = 0u64;
+
+    for n in 0..10usize {
+        let blocks = 1 + n % 2;
+        let mut payload = vec![0u8; 2051 * blocks];
+        payload[0] = 2 << 6;
+        mux.audio((ts * 1000 / 22_050) as u32, 1 << 4 | 2 << 2 | 2, &payload);
+        ts += 4096 * blocks as u64;
+    }
+
+    let mut reader = open(mux.out);
+    let params = audio_params(&reader, 0);
+    assert_eq!(params.codec, CODEC_ID_ADPCM_SWF);
+    assert_eq!(params.sample_rate, Some(22_050));
+    assert_eq!(params.channels.as_ref().unwrap().count(), 1);
+    assert!(params.max_frames_per_packet.unwrap() >= 2 * 4096);
+
+    let packets = read_all(&mut reader);
+    assert_eq!(packets.len(), 10);
+
+    let mut ts = 0;
+    for (n, p) in packets.iter().enumerate() {
+        let frames = 4096 * (1 + n as u64 % 2);
+        assert_eq!((p.pts.get(), p.dur.get()), (ts, frames));
+        ts += frames as i64;
+    }
 }
 
 /// Read the stream, and seek in it, without panicking or running forever.
@@ -504,5 +802,36 @@ fn corrupt_streams_do_not_panic() {
     }
     for _ in 0..200 {
         exercise(corrupt(&mux.out, &mut rng), 0, &mut rng);
+    }
+
+    // And the enhanced audio of Opus, FLAC, and AC-3, with a multitrack tag.
+    let mut head = b"OpusHead\x01\x02\x38\x01\x80\xbb\x00\x00\x00\x00\x00".to_vec();
+    head.truncate(19);
+
+    let mut opus = FlvMux::new();
+    ex_tag(&mut opus, 0, 0, b"Opus", &head);
+    for n in 0..100u32 {
+        ex_tag(&mut opus, n * 20, 1, b"Opus", &[0xfc, n as u8, 1, 2, 3]);
+    }
+
+    let mut ac3 = FlvMux::new();
+    ex_tag(&mut ac3, 0, 0, b"ac-3", &[]);
+    for n in 0..60u32 {
+        ex_tag(&mut ac3, n * 32, 1, b"ac-3", &ac3_frame(n as u8));
+    }
+
+    let mut multitrack = FlvMux::new();
+    for n in 0..60u32 {
+        let mut tag = vec![0x95, 1 << 4 | 1];
+        tag.extend_from_slice(b"ac-3");
+        tag.push(1);
+        tag.extend_from_slice(&[0, 3, 0xff, 1, 2]);
+        multitrack.tag(8, n * 32, &tag);
+    }
+
+    for data in [&opus.out, &ac3.out, &multitrack.out] {
+        for _ in 0..200 {
+            exercise(corrupt(data, &mut rng), 0, &mut rng);
+        }
     }
 }
