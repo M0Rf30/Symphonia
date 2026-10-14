@@ -402,6 +402,10 @@ pub mod well_known {
     pub const CODEC_ID_ADPCM_IMA_WAV: AudioCodecId = AudioCodecId(0x204);
     /// ADPCM IMA QuickTime
     pub const CODEC_ID_ADPCM_IMA_QT: AudioCodecId = AudioCodecId(0x205);
+    /// Yamaha ADPCM (AICA)
+    pub const CODEC_ID_ADPCM_YAMAHA: AudioCodecId = AudioCodecId(0x206);
+    /// Shockwave Flash (SWF) ADPCM
+    pub const CODEC_ID_ADPCM_SWF: AudioCodecId = AudioCodecId(0x207);
 
     // Compressed lossy audio codecs
     //------------------------------

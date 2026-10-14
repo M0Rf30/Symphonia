@@ -9,10 +9,16 @@ use symphonia_core::util::clamp::clamp_i16;
 
 use crate::common::{Nibble, from_i16_shift};
 
+/// Step index adjustments indexed by the magnitude (the code without its sign bit) for 2, 3, 4
+/// and 5 bits per sample. IMA Digital Audio Focus and Technical Working Groups, "Recommended
+/// Practices for Enhancing Digital Audio Compatibility in Multimedia Systems", rev 3.00;
+/// verified against FFmpeg's `adpcm_ima_wav` decoder.
 #[rustfmt::skip]
-const IMA_INDEX_TABLE: [i32; 16] = [
-    -1, -1, -1, -1, 2, 4, 6, 8,
-    -1, -1, -1, -1, 2, 4, 6, 8,
+const IMA_INDEX_TABLES: [&[i32]; 4] = [
+    &[-1, 2],
+    &[-1, -1, 1, 2],
+    &[-1, -1, -1, -1, 2, 4, 6, 8],
+    &[-1, -1, -1, -1, -1, -1, -1, -1, 1, 2, 4, 6, 8, 10, 13, 16],
 ];
 
 #[rustfmt::skip]
@@ -36,14 +42,32 @@ pub(crate) struct AdpcmImaBlockStatus {
 
 impl AdpcmImaBlockStatus {
     pub(crate) fn expand_nibble(&mut self, byte: u8, nibble: Nibble) -> i32 {
-        let nibble = nibble.get_nibble(byte);
+        self.expand_code(nibble.get_nibble(byte), 4)
+    }
+
+    /// Expands one `bits_per_sample` (2 to 5) bit code and returns the new sample as an i32
+    /// holding a 16-bit sample in its upper half.
+    pub(crate) fn expand_code(&mut self, code: u8, bits_per_sample: u32) -> i32 {
         let step = IMA_STEP_TABLE[self.step_index as usize];
-        let sign = (nibble & 0x08) != 0;
-        let delta = (nibble & 0x07) as i32;
-        let diff = ((2 * delta + 1) * step) >> 3;
+        let shift = bits_per_sample - 1;
+        let sign = (code >> shift) & 1 != 0;
+        let magnitude = code & ((1 << shift) - 1);
+
+        // Reference IMA/DVI algorithm (IMA "Recommended Practices", rev 3.00): the successive
+        // approximation sum with each term truncated separately. This is NOT equal to
+        // `((2 * magnitude + 1) * step) >> shift`, which rounds differently.
+        let mut diff = step >> shift;
+        for bit in 0..shift {
+            if magnitude & (1 << (shift - 1 - bit)) != 0 {
+                diff += step >> bit;
+            }
+        }
+
         let predictor = if sign { self.predictor - diff } else { self.predictor + diff };
         self.predictor = clamp_i16(predictor) as i32;
-        self.step_index = (self.step_index + IMA_INDEX_TABLE[nibble as usize]).clamp(0, 88);
+        self.step_index = (self.step_index
+            + IMA_INDEX_TABLES[bits_per_sample as usize - 2][magnitude as usize])
+            .clamp(0, 88);
         from_i16_shift!(self.predictor)
     }
 }
