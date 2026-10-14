@@ -116,10 +116,12 @@ impl MpaDecoder {
         match &mut self.state {
             #[cfg(feature = "mp1")]
             State::Layer1(layer) if header.layer == MpegLayer::Layer1 => {
+                layer.verify_crc(packet.data, &header)?;
                 layer.decode(&mut reader, &header, &mut self.buf)?;
             }
             #[cfg(feature = "mp2")]
             State::Layer2(layer) if header.layer == MpegLayer::Layer2 => {
+                layer.verify_crc(packet.data, &header)?;
                 layer.decode(&mut reader, &header, &mut self.buf)?;
             }
             #[cfg(feature = "mp3")]

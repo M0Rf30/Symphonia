@@ -205,8 +205,9 @@ pub fn parse_header(word: u32) -> Option<MpaFrameInfo> {
 
     let is_mono = (word >> 6) & 0x3 == 0b11;
 
-    // Some layer 2 bit-rate and channel mode combinations are not allowed.
-    if layer == 2 && !is_layer2_bitrate_allowed(bitrate, is_mono) {
+    // Some MPEG-1 layer 2 bit-rate and channel mode combinations are not allowed. MPEG-2/2.5 LSF
+    // (ISO/IEC 13818-3 2.4.2.3) has no such restriction.
+    if layer == 2 && is_mpeg1 && !is_layer2_bitrate_allowed(bitrate, is_mono) {
         return None;
     }
 
@@ -377,6 +378,15 @@ mod tests {
         let mut f = vec![0u8; info.frame_len];
         f[..4].copy_from_slice(&word.to_be_bytes());
         f
+    }
+
+    #[test]
+    fn verify_layer2_bitrate_channel_restriction_is_mpeg1_only() {
+        // MPEG-1 layer 2, 32 kbps, stereo: not allowed.
+        assert!(parse_header(0xfffd_1000).is_none());
+        // MPEG-2 LSF layer 2, 22.05 kHz, 32 kbps, stereo: allowed.
+        let info = parse_header(0xfff5_4000).unwrap();
+        assert_eq!(info.codec, CODEC_ID_MP2);
     }
 
     #[test]

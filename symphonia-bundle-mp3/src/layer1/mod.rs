@@ -69,6 +69,27 @@ impl Layer1 {
     }
 }
 
+impl Layer1 {
+    /// Verify the frame CRC, if the frame is protected. In Layer 1 the CRC covers the bit
+    /// allocation of all sub-bands (ISO/IEC 11172-3 2.4.3.1).
+    pub(crate) fn verify_crc(&self, data: &[u8], header: &FrameHeader) -> Result<()> {
+        if !header.has_crc {
+            return Ok(());
+        }
+
+        let bound = match header.channel_mode {
+            ChannelMode::JointStereo(Mode::Intensity { bound }) => bound as usize,
+            _ => 32,
+        };
+
+        // 4 bits per channel for each sub-band below the bound, and 4 bits shared by both channels
+        // for the sub-bands from the bound.
+        let nbits = 4 * (bound * header.n_channels() + (32 - bound));
+
+        verify_crc_bits(data, nbits)
+    }
+}
+
 impl Layer for Layer1 {
     #[allow(clippy::needless_range_loop)]
     fn decode(

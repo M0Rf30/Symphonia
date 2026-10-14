@@ -6,11 +6,16 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use symphonia_core::audio::{AudioBuffer, AudioSpec, Channels, Position, layouts};
+#[cfg(any(feature = "mp1", feature = "mp2"))]
+use symphonia_core::checksum::Crc16Ansi;
 use symphonia_core::codecs::audio::AudioCodecId;
 use symphonia_core::codecs::audio::well_known::{CODEC_ID_MP1, CODEC_ID_MP2, CODEC_ID_MP3};
 use symphonia_core::errors::Result;
-
+#[cfg(any(feature = "mp1", feature = "mp2"))]
+use symphonia_core::errors::decode_error;
 use symphonia_core::io::BufReader;
+#[cfg(any(feature = "mp1", feature = "mp2"))]
+use symphonia_core::io::Monitor;
 use symphonia_core::units::Duration;
 
 use crate::header::MPEG_HEADER_LEN;
@@ -210,6 +215,49 @@ impl FrameHeader {
             (_, _) => 17,
         }
     }
+}
+
+/// Verify the CRC-16 of a Layer 1 or 2 frame (ISO/IEC 11172-3 2.4.3.1, error_check).
+///
+/// The CRC (polynomial x^16 + x^15 + x^2 + 1, initial value 0xffff) covers the last 16 bits of the
+/// frame header, excluding the CRC itself, followed by the first `nbits` bits of the frame after
+/// the CRC: the bit allocation (and, for Layer 2, scale factor selection information) which, unlike
+/// the Layer 3 side information, ends on an arbitrary bit boundary.
+///
+/// `data` is the complete frame including the 4-byte header.
+#[cfg(any(feature = "mp1", feature = "mp2"))]
+pub(crate) fn verify_crc_bits(data: &[u8], nbits: usize) -> Result<()> {
+    let (Some(protected), Some(stored), Some(body)) =
+        (data.get(2..4), data.get(4..6), data.get(6..6 + nbits.div_ceil(8)))
+    else {
+        return decode_error("mpa: frame too small for crc");
+    };
+
+    let mut crc = Crc16Ansi::new(0xffff);
+    crc.process_buf_bytes(protected);
+    crc.process_buf_bytes(&body[..nbits / 8]);
+
+    let mut state = crc.crc();
+
+    // Feed in the remaining bits of the final, partially protected, byte MSB first.
+    if nbits % 8 != 0 {
+        let byte = body[nbits / 8];
+
+        for i in 0..nbits % 8 {
+            let feedback = (state >> 15) as u8 ^ ((byte >> (7 - i)) & 1);
+            state <<= 1;
+
+            if feedback != 0 {
+                state ^= 0x8005;
+            }
+        }
+    }
+
+    if state != u16::from_be_bytes([stored[0], stored[1]]) {
+        return decode_error("mpa: crc mismatch");
+    }
+
+    Ok(())
 }
 
 pub trait Layer {

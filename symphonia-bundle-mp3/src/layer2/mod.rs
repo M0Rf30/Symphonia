@@ -7,10 +7,10 @@
 
 use symphonia_core::audio::{AudioBuffer, AudioMut};
 use symphonia_core::errors::{Result, decode_error};
-use symphonia_core::io::{BitReaderLtr, BufReader, ReadBitsLtr, ReadBytes};
+use symphonia_core::io::{BitReaderLtr, BufReader, FiniteBitStream, ReadBitsLtr, ReadBytes};
 use symphonia_core::util::bits::sign_extend_leq32_to_i32;
 
-use crate::common::{ChannelMode, FrameHeader, Layer, Mode};
+use crate::common::{ChannelMode, FrameHeader, Layer, Mode, verify_crc_bits};
 use crate::layer12::LAYER12_SCALEFACTORS;
 use crate::synthesis;
 
@@ -226,6 +226,87 @@ impl Layer2 {
     }
 }
 
+/// Get the first intensity coded sub-band (or `sblimit` if there is none).
+fn alloc_bound(header: &FrameHeader, sb_info: &SbInfo) -> usize {
+    match header.channel_mode {
+        ChannelMode::JointStereo(Mode::Intensity { bound }) => bound as usize,
+        ChannelMode::JointStereo(Mode::Layer3 { .. }) => {
+            // This mode extension is exclusively used for layer 3, it is a fundamental error
+            // in the decoder logic if layer 1 or 2 stereo encodings are being decoded with
+            // this function.
+            panic!("invalid mode extension for layer 2 stereo decoding")
+        }
+        _ => 32,
+    }
+    .min(sb_info.sblimit)
+}
+
+/// Read the class index (allocation in the standard) of every sub-band.
+#[allow(clippy::needless_range_loop)]
+fn read_alloc(
+    bs: &mut BitReaderLtr<'_>,
+    sb_info: &SbInfo,
+    bound: usize,
+    num_channels: usize,
+    alloc: &mut [[u8; 32]; 2],
+) -> Result<()> {
+    // Non-intensity coded sub-bands.
+    for sb in 0..bound {
+        let nbal = find_sb_quant_info(sb_info, sb).nbal;
+
+        for chan in &mut alloc[..num_channels] {
+            chan[sb] = bs.read_bits_leq32(u32::from(nbal))? as u8;
+        }
+    }
+
+    // Intensity coded sub-bands, the allocation is shared by both channels.
+    for sb in bound..sb_info.sblimit {
+        let nbal = find_sb_quant_info(sb_info, sb).nbal;
+
+        let value = bs.read_bits_leq32(u32::from(nbal))? as u8;
+
+        alloc[0][sb] = value;
+        alloc[1][sb] = value;
+    }
+
+    Ok(())
+}
+
+impl Layer2 {
+    /// Verify the frame CRC, if the frame is protected. In Layer 2 the CRC covers the bit
+    /// allocation and the scale factor selection information (ISO/IEC 11172-3 2.4.3.1).
+    pub(crate) fn verify_crc(&self, data: &[u8], header: &FrameHeader) -> Result<()> {
+        if !header.has_crc {
+            return Ok(());
+        }
+
+        let Some(body) = data.get(6..)
+        else {
+            return decode_error("mpa: frame too small for crc");
+        };
+
+        let mut bs = BitReaderLtr::new(body);
+
+        let num_channels = header.n_channels();
+        let sb_info = find_sb_info(header);
+        let bound = alloc_bound(header, sb_info);
+
+        let mut alloc = [[0u8; 32]; 2];
+
+        read_alloc(&mut bs, sb_info, bound, num_channels, &mut alloc)?;
+
+        // Two bits of scale factor selection information for each allocated sub-band and channel.
+        let n_scfsi = alloc[..num_channels]
+            .iter()
+            .map(|chan| chan[..sb_info.sblimit].iter().filter(|&&a| a != 0).count())
+            .sum::<usize>();
+
+        let nbits = 8 * body.len() - bs.bits_left() as usize + 2 * n_scfsi;
+
+        verify_crc_bits(data, nbits)
+    }
+}
+
 impl Layer for Layer2 {
     #[allow(clippy::needless_range_loop)]
     fn decode(
@@ -247,37 +328,9 @@ impl Layer for Layer2 {
 
         let sb_info = find_sb_info(header);
 
-        let bound = match header.channel_mode {
-            ChannelMode::JointStereo(Mode::Intensity { bound }) => bound as usize,
-            ChannelMode::JointStereo(Mode::Layer3 { .. }) => {
-                // This mode extension is exclusively used for layer 3, it is a fundamental error
-                // in the decoder logic if layer 1 or 2 stereo encodings are being decoded with
-                // this function.
-                panic!("invalid mode extension for layer 2 stereo decoding")
-            }
-            _ => 32,
-        }
-        .min(sb_info.sblimit);
+        let bound = alloc_bound(header, sb_info);
 
-        // Read the class index (allocation in the standard) for each non-intensity coded sub-band.
-        for sb in 0..bound {
-            let nbal = find_sb_quant_info(sb_info, sb).nbal;
-
-            for chan in &mut alloc[..num_channels] {
-                chan[sb] = bs.read_bits_leq32(u32::from(nbal))? as u8;
-            }
-        }
-
-        // Read the class index (allocation in the standard) for each intensity coded sub-band.
-        // NOTE: This loop causes a false positive with clippy.
-        for sb in bound..sb_info.sblimit {
-            let nbal = find_sb_quant_info(sb_info, sb).nbal;
-
-            let value = bs.read_bits_leq32(u32::from(nbal))? as u8;
-
-            alloc[0][sb] = value;
-            alloc[1][sb] = value;
-        }
+        read_alloc(&mut bs, sb_info, bound, num_channels, &mut alloc)?;
 
         // Read scale factor selection information.
         for sb in 0..sb_info.sblimit {
@@ -384,5 +437,88 @@ impl Layer for Layer2 {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::header::parse_frame_header;
+
+    /// Bit-serial CRC-16 (x^16 + x^15 + x^2 + 1, initial value 0xffff) as drawn in ISO/IEC 11172-3
+    /// Figure A.8 (independent of the table driven implementation).
+    fn crc16_bitwise(bits: impl Iterator<Item = bool>) -> u16 {
+        let mut crc = 0xffffu16;
+
+        for bit in bits {
+            let feedback = (crc >> 15 != 0) != bit;
+            crc <<= 1;
+            if feedback {
+                crc ^= 0x8005;
+            }
+        }
+
+        crc
+    }
+
+    fn bits_of(value: u32, n: u32) -> impl Iterator<Item = bool> {
+        (0..n).rev().map(move |i| (value >> i) & 1 != 0)
+    }
+
+    /// A protected MPEG-2 LSF (22.05 kHz) mono Layer 2 frame where only sub-band 0 is allocated, so
+    /// 75 bits of allocation and 2 bits of scale factor selection information (77 bits, ending in
+    /// the middle of a byte) are protected.
+    fn lsf_mono_frame(corrupt: bool) -> (Vec<u8>, FrameHeader) {
+        let word = 0xfff4_40c0u32;
+        let header = parse_frame_header(word).unwrap();
+
+        let mut bits = [false; 77];
+        // Sub-band 0 allocation (4 bits): index 3.
+        bits[2] = true;
+        bits[3] = true;
+        // Scale factor selection information of sub-band 0: 0b10.
+        bits[75] = true;
+
+        let protected = bits_of(word & 0xffff, 16).chain(bits.iter().copied());
+        let crc = crc16_bitwise(protected);
+
+        let mut data = vec![0u8; header.frame_size + 4];
+        data[..4].copy_from_slice(&word.to_be_bytes());
+        data[4..6].copy_from_slice(&crc.to_be_bytes());
+
+        for (i, bit) in bits.iter().enumerate() {
+            data[6 + i / 8] |= u8::from(*bit) << (7 - i % 8);
+        }
+
+        if corrupt {
+            // The last protected bit (the scale factor selection information).
+            data[6 + 76 / 8] ^= 0x80 >> (76 % 8);
+        }
+
+        (data, header)
+    }
+
+    #[test]
+    fn verify_crc_covers_allocation_and_scale_factor_selection() {
+        let layer = Layer2::new();
+
+        let (data, header) = lsf_mono_frame(false);
+        assert!(header.has_crc);
+        assert!(layer.verify_crc(&data, &header).is_ok());
+
+        let (data, header) = lsf_mono_frame(true);
+        assert!(layer.verify_crc(&data, &header).is_err());
+    }
+
+    #[test]
+    fn verify_lsf_layer2_stereo_low_bitrates_are_valid() {
+        // Layer 2 restricts the combinations of bitrate and channel mode in MPEG-1 only. 32 kbit/s
+        // stereo is valid in MPEG-2 LSF.
+        let header = parse_frame_header(0xfff5_4000).unwrap();
+        assert_eq!(header.bitrate, 32_000);
+        assert_eq!(header.n_channels(), 2);
+
+        // But not in MPEG-1.
+        assert!(parse_frame_header(0xfffd_1000).is_err());
     }
 }

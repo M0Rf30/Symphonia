@@ -167,9 +167,12 @@ pub fn parse_frame_header_free(header: u32, free_len: Option<usize>) -> Result<F
         _ => unreachable!(),
     };
 
-    // Some layer 2 channel and bit-rate combinations are not allowed. Check that the frame does not
+    // Some MPEG-1 layer 2 channel and bit-rate combinations are not allowed (ISO/IEC 11172-3
+    // Table 3-B.2 / 2.4.2.3). The restriction does not exist in MPEG-2/2.5 LSF (ISO/IEC 13818-3
+    // 2.4.2.3), where 8-160 kbit/s may be used with any channel mode. Check that the frame does not
     // use them.
     if layer == MpegLayer::Layer2
+        && version == MpegVersion::Mpeg1
         && !is_free
         && !is_layer2_bitrate_allowed(bitrate, channel_mode == ChannelMode::Mono)
     {
