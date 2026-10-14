@@ -3,9 +3,9 @@ name = "symphonia-fuzz"
 publish = false
 # Common package metadata located in workspace Cargo.toml.
 edition = "2024"
-homepage = "https://github.com/pdeljanov/Symphonia"
+homepage = "https://github.com/M0Rf30/Symphonia"
 license = "MPL-2.0"
-repository = "https://github.com/pdeljanov/Symphonia"
+repository = "https://github.com/M0Rf30/Symphonia"
 rust-version = "1.85"
 version = "0.6.1"
 

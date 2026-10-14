@@ -133,7 +133,7 @@ A media format may contain more than one track. For each track that you want to 
 This step will vary depending on your application, though for simple cases, selecting the default track will be sufficient.
 
 > [!WARNING]
-> If playing the audio from video files is desireable, then note that the default track may *not* be an audio track. For this case, it is best to select the first supported audio track.
+> If playing the audio from video files is desirable, then note that the default track may *not* be an audio track. For this case, it is best to select the first supported audio track.
 
 In the example below, the first audio track will be selected and a decoder instantiated.
 
@@ -168,7 +168,7 @@ fn main() {
         .probe(&hint, mss, fmt_opts, meta_opts)
         .expect("unsupported format");
 
-    // Find the first audio track with a known (decodeable) codec.
+    // Find the first audio track with a known (decodable) codec.
     let track = format.default_track(TrackType::Audio).expect("no audio track");
 
     // Use the default options for the decoder.
@@ -243,7 +243,7 @@ fn main() {
         .probe(&hint, mss, fmt_opts, meta_opts)
         .expect("unsupported format");
 
-    // Find the first audio track with a known (decodeable) codec.
+    // Find the first audio track with a known (decodable) codec.
     let track = format.default_track(TrackType::Audio).expect("no audio track");
 
     // Use the default options for the decoder.
@@ -351,7 +351,7 @@ let mut out: Vec<Vec<i16>> = Vec::new();
 decoded.copy_to_vecs_planar(&mut out);
 ```
 
-In the examples above a vector is used as the target for the copy. However, functions to copy to an appropriately sized slice are also provided. Complementary functions for determing the correct size for those slices are also provided.
+In the examples above a vector is used as the target for the copy. However, functions to copy to an appropriately sized slice are also provided. Complementary functions for determining the correct size for those slices are also provided.
 
 ### Using the Audio Buffer
 

@@ -3,13 +3,13 @@
 
 <!--
 <p>
-    <img src="https://raw.githubusercontent.com/pdeljanov/symphonia/main/assets/logo.png" width="200px" />
+    <img src="https://raw.githubusercontent.com/M0Rf30/Symphonia/rmpd-next/assets/logo.png" width="200px" />
 </p>
 -->
 
 [<img alt="Crates.io" src="https://img.shields.io/crates/v/symphonia?style=for-the-badge" height="22"/>](https://crates.io/crates/symphonia)
 [<img alt="Docs.rs" src="https://img.shields.io/badge/docs.rs-symphonia-brightgreen?style=for-the-badge" height="22"/>](https://docs.rs/symphonia)
-[<img alt="GitHub Actions Status" src="https://img.shields.io/github/actions/workflow/status/pdeljanov/symphonia/ci.yml?branch=main&style=for-the-badge" height="22"/>](https://github.com/pdeljanov/Symphonia/actions/workflows/ci.yml)
+[<img alt="GitHub Actions Status" src="https://img.shields.io/github/actions/workflow/status/pdeljanov/symphonia/ci.yml?branch=main&style=for-the-badge" height="22"/>](https://github.com/M0Rf30/Symphonia/actions/workflows/ci.yml)
 [<img alt="Deps.rs" src="https://deps.rs/repo/github/pdeljanov/symphonia/status.svg?style=for-the-badge" height="22"/>](https://deps.rs/repo/github/pdeljanov/symphonia)
 [<img alt="Crates.io MSRV" src="https://img.shields.io/crates/msrv/symphonia?style=for-the-badge" height="22"/>](https://blog.rust-lang.org/2025/02/20/Rust-1.85.0/)
 [<img alt="MPL License" src="https://img.shields.io/crates/l/symphonia?style=for-the-badge" height="22"/>](https://www.mozilla.org/en-US/MPL/2.0/)
@@ -22,13 +22,13 @@
 
 <p>
     <h3>
-        <a href="https://github.com/pdeljanov/Symphonia/blob/main/GETTING_STARTED.md">Getting Started</a>
+        <a href="https://github.com/M0Rf30/Symphonia/blob/rmpd-next/GETTING_STARTED.md">Getting Started</a>
         <span> · </span>
         <a href="https://docs.rs/symphonia">Documentation</a>
         <span> · </span>
-        <a href="https://github.com/pdeljanov/Symphonia/tree/main/symphonia/examples">Examples</a>
+        <a href="https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia/examples">Examples</a>
         <span> · </span>
-        <a href="https://github.com/pdeljanov/Symphonia/blob/main/BENCHMARKS.md">Benchmarks</a>
+        <a href="https://github.com/M0Rf30/Symphonia/blob/rmpd-next/BENCHMARKS.md">Benchmarks</a>
     </h3>
 </p>
 </div>
@@ -116,7 +116,7 @@ A `symphonia-bundle-*` package is a combination of a decoder and a native demuxe
 [`symphonia-codec-alac`]: https://crates.io/crates/symphonia-codec-alac
 [`symphonia-bundle-flac`]: https://crates.io/crates/symphonia-bundle-flac
 [`symphonia-bundle-mp3`]: https://crates.io/crates/symphonia-bundle-mp3
-[`symphonia-codec-opus`]: https://crates.io/crates/symphonia-codec-opus
+[`symphonia-codec-opus`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-opus
 [`symphonia-codec-pcm`]: https://crates.io/crates/symphonia-codec-pcm
 [`symphonia-codec-vorbis`]: https://crates.io/crates/symphonia-codec-vorbis
 
@@ -171,7 +171,7 @@ In addition to the safety guarantees afforded by Rust, Symphonia aims to:
 
 Symphonia aims to be comparable to, or faster than, popular open-source C-based implementations. Currently, Symphonia's decoders are generally +/-15% the performance of FFMpeg. However, the exact range will depend strongly on the codec, which features of the codec are being leveraged in the encoding, the Rust compiler version, and the CPU architecture being compiled for.
 
-See the [benchmarks](https://github.com/pdeljanov/Symphonia/blob/main/BENCHMARKS.md) for more information.
+See the [benchmarks](https://github.com/M0Rf30/Symphonia/blob/rmpd-next/BENCHMARKS.md) for more information.
 
 ### Optimizations
 
@@ -188,16 +188,16 @@ All SIMD optimizations are enabled by default. SIMD support will pull in the `ru
 
 ## Examples
 
-Basic usage examples may be found [`here`](https://github.com/pdeljanov/Symphonia/tree/main/symphonia/examples).
+Basic usage examples may be found [`here`](https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia/examples).
 
-For a more complete application, see [`symphonia-play`](https://github.com/pdeljanov/Symphonia/blob/main/symphonia-play), a simple music player.
+For a more complete application, see [`symphonia-play`](https://github.com/M0Rf30/Symphonia/blob/rmpd-next/symphonia-play), a simple music player.
 
 ## Tools
 
 Symphonia provides the following tools for debugging purposes:
 
-* [`symphonia-play`](https://github.com/pdeljanov/Symphonia/blob/main/symphonia-play) for probing, decoding, validating, and playing back media streams.
-* [`symphonia-check`](https://github.com/pdeljanov/Symphonia/blob/main/symphonia-check) for validating Symphonia's decoded output against various decoders.
+* [`symphonia-play`](https://github.com/M0Rf30/Symphonia/blob/rmpd-next/symphonia-play) for probing, decoding, validating, and playing back media streams.
+* [`symphonia-check`](https://github.com/M0Rf30/Symphonia/blob/rmpd-next/symphonia-check) for validating Symphonia's decoded output against various decoders.
 
 ## Minimum Supported Rust Version
 
@@ -219,4 +219,4 @@ Symphonia is provided under the MPL v2.0 license. Please refer to the LICENSE fi
 
 ## Contributing
 
-Symphonia is a free and open-source project that welcomes contributions! To get started, please read our [Contribution Guidelines](https://github.com/pdeljanov/Symphonia/blob/main/CONTRIBUTING.md).
+Symphonia is a free and open-source project that welcomes contributions! To get started, please read our [Contribution Guidelines](https://github.com/M0Rf30/Symphonia/blob/rmpd-next/CONTRIBUTING.md).

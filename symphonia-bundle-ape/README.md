@@ -1,6 +1,6 @@
 # Symphonia APE (Monkey's Audio) Codec
 
-[![Docs](https://docs.rs/symphonia-bundle-ape/badge.svg)](https://docs.rs/symphonia-bundle-ape)
+[![Docs](https://docs.rs/symphonia-bundle-ape/badge.svg)](https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-bundle-ape)
 
 APE (Monkey's Audio) demuxer and decoder for Project Symphonia.
 
@@ -19,4 +19,4 @@ The `src/mac` module is derived from the [ape-decoder](https://crates.io/crates/
 
 ## Contributing
 
-Symphonia is a free and open-source project that welcomes contributions! To get started, please read our [Contribution Guidelines](https://github.com/pdeljanov/Symphonia/tree/master/CONTRIBUTING.md).
+Symphonia is a free and open-source project that welcomes contributions! To get started, please read our [Contribution Guidelines](https://github.com/M0Rf30/Symphonia/tree/rmpd-next/CONTRIBUTING.md).
