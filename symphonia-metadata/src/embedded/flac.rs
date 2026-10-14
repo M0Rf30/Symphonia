@@ -322,9 +322,28 @@ fn read_flac_cuesheet_track<B: ReadBytes>(
         };
 
         // Add each index as a chapter.
-        for _ in 0..n_indices {
-            let index = read_flac_cuesheet_track_index(reader, is_cdda, n_offset_samples, tb)?;
+        let mut prev_idx_number = None;
 
+        for _ in 0..n_indices {
+            let (idx_number, index) =
+                read_flac_cuesheet_track_index(reader, is_cdda, n_offset_samples, tb)?;
+
+            // RFC 9639, 8.7.1.2: for CD-DA, the first index point number of a track is 0 or 1,
+            // and subsequent numbers increase by 1 (so they are unique).
+            if is_cdda {
+                let valid = match prev_idx_number {
+                    None => idx_number <= 1,
+                    Some(prev) => u16::from(idx_number) == u16::from(prev) + 1,
+                };
+
+                if !valid {
+                    return decode_error(
+                        "flac: cuesheet track index numbers are invalid for CD-DA",
+                    );
+                }
+            }
+
+            prev_idx_number = Some(idx_number);
             group.items.push(ChapterGroupItem::Chapter(index));
         }
 
@@ -355,7 +374,7 @@ fn read_flac_cuesheet_track_index<B: ReadBytes>(
     is_cdda: bool,
     track_ts: u64,
     tb: TimeBase,
-) -> Result<Chapter> {
+) -> Result<(u8, Chapter)> {
     let n_offset_samples = reader.read_be_u64()?;
     let idx_number_raw = reader.read_be_u32()?;
 
@@ -372,9 +391,7 @@ fn read_flac_cuesheet_track_index<B: ReadBytes>(
         return decode_error("flac: cuesheet track index reserved bits should be 0");
     }
 
-    // Upper 8 bits is the index number.
-    // TODO: Should be 0 or 1 for the first index for CD-DA. It should also not exceed 100 for
-    //       CD-DA.
+    // Upper 8 bits is the index number. The CD-DA numbering is validated by the caller.
     let idx_number = ((idx_number_raw & 0xff00_0000) >> 24) as u8;
 
     // Calculate the track index's starting timestamp. Clamp it to the maximum
@@ -386,7 +403,7 @@ fn read_flac_cuesheet_track_index<B: ReadBytes>(
             i64::MAX
         });
 
-    Ok(Chapter {
+    let chapter = Chapter {
         start_time: tb.calc_time_saturating(Timestamp::from(start_ts)),
         end_time: None,
         start_byte: None,
@@ -397,7 +414,9 @@ fn read_flac_cuesheet_track_index<B: ReadBytes>(
             Some(StandardTag::CdTrackIndex(idx_number)),
         )],
         visuals: Vec::new(),
-    })
+    };
+
+    Ok((idx_number, chapter))
 }
 
 /// Convert a buffer slice containing most ASCII into a string identifier.
@@ -421,4 +440,55 @@ fn escape_identifier(buf: &[u8]) -> String {
     }
 
     ident
+}
+
+#[cfg(test)]
+mod tests {
+    use symphonia_core::errors::Error;
+    use symphonia_core::io::BufReader;
+
+    use super::*;
+
+    /// A CD-DA cuesheet with one track whose index points have the given numbers.
+    fn cdda_cuesheet(index_numbers: &[u8]) -> Vec<u8> {
+        let mut buf = vec![0u8; 128]; // Catalog number.
+        buf.extend_from_slice(&0u64.to_be_bytes()); // Lead-in.
+        buf.push(0x80); // CD-DA.
+        buf.extend_from_slice(&[0; 258]); // Reserved.
+        buf.push(1); // Number of tracks.
+
+        buf.extend_from_slice(&0u64.to_be_bytes()); // Track offset.
+        buf.push(1); // Track number.
+        buf.extend_from_slice(&[0; 12]); // ISRC.
+        buf.extend_from_slice(&[0; 14]); // Flags and reserved.
+        buf.push(index_numbers.len() as u8);
+
+        for (i, &number) in index_numbers.iter().enumerate() {
+            buf.extend_from_slice(&(588 * i as u64).to_be_bytes()); // Index offset.
+            buf.push(number);
+            buf.extend_from_slice(&[0; 3]); // Reserved.
+        }
+        buf
+    }
+
+    /// RFC 9639, 8.7.1.2: CD-DA index point numbers start at 0 or 1 and increase by 1.
+    #[test]
+    fn verify_cdda_index_numbering() {
+        let Some(tb) = TimeBase::try_new(1, 44100)
+        else {
+            panic!("valid time base")
+        };
+        let read = |numbers: &[u8]| {
+            read_flac_cuesheet_block(&mut BufReader::new(&cdda_cuesheet(numbers)), tb)
+        };
+
+        assert!(read(&[0, 1, 2]).is_ok());
+        assert!(read(&[1, 2]).is_ok());
+        // The first index point is not 0 or 1.
+        assert!(matches!(read(&[2, 3]), Err(Error::DecodeError(_))));
+        // Skipped, repeated, and decreasing numbers.
+        assert!(matches!(read(&[1, 3]), Err(Error::DecodeError(_))));
+        assert!(matches!(read(&[1, 1]), Err(Error::DecodeError(_))));
+        assert!(matches!(read(&[1, 0]), Err(Error::DecodeError(_))));
+    }
 }

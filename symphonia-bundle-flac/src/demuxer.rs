@@ -25,7 +25,7 @@ use symphonia_core::io::*;
 use symphonia_core::meta::{Metadata, MetadataBuilder, MetadataLog};
 use symphonia_metadata::embedded::flac::*;
 
-use log::{debug, info};
+use log::{debug, info, warn};
 
 use super::frame::{BlockSequence, ChannelAssignment, read_frame_header};
 use super::parser::PacketParser;
@@ -171,7 +171,13 @@ impl<'s> FlacReader<'s> {
                     // timebase is known to calculate the cue times. This should always be the case
                     // since the stream information block must always be the first metadata block.
                     if let Some(tb) = track.as_ref().and_then(|track| track.time_base) {
-                        chapters = Some(read_flac_cuesheet_block(&mut block_stream, tb)?);
+                        // A cuesheet is optional metadata: an invalid one is dropped rather than
+                        // making the stream unplayable. The rest of the block is skipped below.
+                        match read_flac_cuesheet_block(&mut block_stream, tb) {
+                            Ok(cuesheet) => chapters = Some(cuesheet),
+                            Err(Error::DecodeError(err)) => warn!("ignoring cuesheet: {err}"),
+                            Err(err) => return Err(err),
+                        }
                     }
                     else {
                         return decode_error("flac: cuesheet block before stream info");
