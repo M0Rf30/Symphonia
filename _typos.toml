@@ -1,0 +1,57 @@
+[files]
+extend-exclude = [
+    "*.raw",
+    "*.bin",
+    "*.pkts",
+    "**/tests/data/**",
+    "**/tests/fixtures/**",
+    "Cargo.lock",
+]
+
+[default]
+# Hex literals and base64-like test data.
+extend-ignore-re = ["0x[0-9a-fA-F_]+"]
+
+[default.extend-words]
+# Audio jargon: "seeked" is the established term in media APIs.
+seeked = "seeked"
+# Verbatim third-party license text.
+merchantibility = "merchantibility"
+# Container, atom, frame and field identifiers from the specifications.
+caf = "caf"         # Core Audio Format
+trak = "trak"       # ISO/MP4 box
+trun = "trun"       # ISO/MP4 box
+truns = "truns"
+stik = "stik"       # iTunes atom
+nam = "nam"         # iTunes ©nam atom
+wrk = "wrk"         # iTunes ©wrk atom
+cpy = "cpy"         # QuickTime ©cpy atom
+tpe = "tpe"         # ID3v2 TPE1..TPE4
+tye = "tye"         # ID3v2.2 TYE
+toal = "toal"       # ID3v2 TOAL
+tpos = "tpos"       # ID3v2 TPOS
+wors = "wors"       # ID3v2 WORS
+tke = "tke"         # ID3v2.2 TKE
+tak = "tak"         # TAK lossless codec
+ofr = "ofr"         # OptimFROG
+als = "als"         # MPEG-4 ALS
+acn = "acn"         # Ambisonic Channel Number
+cll = "cll"         # Matroska ContentLightLevel
+bord = "bord"       # SBR/PS envelope border
+ba = "ba"           # MPEG bit allocation
+anc = "anc"         # ancillary data
+iy = "iy"
+ue = "ue"
+pn = "pn"
+nd = "nd"
+tre = "tre"
+shft = "shft"       # libopus naming
+numer = "numer"     # numerator
+clen = "clen"       # deflate code lengths
+clens = "clens"
+thr = "thr"         # threshold
+aout = "aout"
+wre = "wre"         # FFT real part of twiddle
+mis = "mis"
+tha = "tha"
+fo = "fo"
