@@ -10,7 +10,10 @@ pub mod blocks;
 use symphonia_core::audio::{Channels, Position};
 use symphonia_core::errors::{Result, decode_error};
 
-/// Get the mapping 0 channel listing for the given number of channels.
+/// Get the mapping 0 channel listing for the given number of channels. Returns `None` for 0.
+///
+/// Above 8 channels the order is application defined (Vorbis I specification, section 4.3.9),
+/// so the channels are discrete.
 pub fn vorbis_channels_to_channels(num_channels: u8) -> Option<Channels> {
     let positions = match num_channels {
         1 => Position::FRONT_LEFT,
@@ -56,7 +59,8 @@ pub fn vorbis_channels_to_channels(num_channels: u8) -> Option<Channels> {
                 | Position::REAR_RIGHT
                 | Position::LFE1
         }
-        _ => return None,
+        0 => return None,
+        _ => return Some(Channels::Discrete(u16::from(num_channels))),
     };
 
     Some(Channels::Positioned(positions))

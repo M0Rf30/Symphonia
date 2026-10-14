@@ -12,13 +12,14 @@ use symphonia_common::xiph::audio::flac::StreamInfo;
 use symphonia_core::audio::{
     AsGenericAudioBufferRef, AudioBuffer, AudioMut, AudioSpec, GenericAudioBufferRef,
 };
+use symphonia_core::checksum::Crc16Ansi;
 use symphonia_core::codecs::CodecInfo;
 use symphonia_core::codecs::audio::well_known::CODEC_ID_FLAC;
 use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoderOptions};
 use symphonia_core::codecs::audio::{AudioDecoder, FinalizeResult, VerificationCheck};
 use symphonia_core::codecs::registry::{RegisterableAudioDecoder, SupportedAudioCodec};
 use symphonia_core::errors::{Error, Result, decode_error, unsupported_error};
-use symphonia_core::io::{BitReaderLtr, BufReader, ReadBitsLtr};
+use symphonia_core::io::{BitReaderLtr, BufReader, Monitor, ReadBitsLtr, ReadBytes};
 use symphonia_core::packet::PacketRef;
 use symphonia_core::support_audio_codec;
 use symphonia_core::util::bits::{sign_extend_leq32_to_i32, sign_extend_leq64_to_i64};
@@ -146,11 +147,6 @@ impl FlacDecoder {
         let spec = AudioSpec::new(info.sample_rate, info.channels.clone());
         let buf = AudioBuffer::new(spec, usize::from(info.block_len_max));
 
-        // TODO: Verify packet integrity if the demuxer is not.
-        // if !params.packet_data_integrity {
-        //     return unsupported_error("flac: packet integrity is required");
-        // }
-
         Ok(FlacDecoder {
             params,
             is_validating: options.verify,
@@ -165,6 +161,20 @@ impl FlacDecoder {
 
         // Synchronize to a frame and get the synchronization code.
         let sync = sync_frame(&mut reader)?;
+
+        // Only the native demuxer checks the CRC-16 footer of a frame. Frames from other
+        // containers (MKV, Ogg, MP4, CAF) are not checked, so check every frame here. The CRC
+        // covers the frame from its sync code up to the footer.
+        let frame = &packet.data[reader.pos() as usize - 2..];
+        let Some((body, footer)) = frame.split_last_chunk::<2>()
+        else {
+            return decode_error("flac: frame is too short");
+        };
+        let mut crc16 = Crc16Ansi::new(0);
+        crc16.process_buf_bytes(body);
+        if crc16.crc() != u16::from_be_bytes(*footer) && cfg!(not(fuzzing)) {
+            return decode_error("flac: computed frame CRC does not match expected CRC");
+        }
 
         let header = read_frame_header(&mut reader, sync)?;
 

@@ -748,7 +748,9 @@ fn get_range(multiplier: u8) -> u32 {
 fn find_neighbors(vec: &[u32], x: usize) -> (usize, usize) {
     let bound = vec[x];
 
-    let mut low = u32::MIN; // TODO: Should be -1?
+    // The x list is unique and starts with 0, so if no element lies strictly between 0 and the
+    // bound, the low neighbor is element 0, which is the initial result.
+    let mut low = u32::MIN;
     let mut high = u32::MAX;
 
     let mut res: (usize, usize) = (0, 0);

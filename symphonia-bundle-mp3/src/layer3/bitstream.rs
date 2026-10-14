@@ -112,7 +112,8 @@ fn read_granule_channel_side_info<B: ReadBitsLtr>(
         if header.is_mpeg2p5() {
             // For MPEG2.5, the number of scale-factor bands in region0 depends on the block type.
             // The standard indicates these values as 1 less than the actual value, therefore 1 is
-            // added here to both values.
+            // added here to both values. This follows mpg123 (layer3.c), which also gives 72 and
+            // 108 at 8 kHz, where the bands are twice as wide.
             let region0_count = match channel.block_type {
                 BlockType::Short { is_mixed: false } => 5 + 1,
                 _ => 7 + 1,
@@ -134,9 +135,7 @@ fn read_granule_channel_side_info<B: ReadBitsLtr>(
             // for region0. These bands are also always  [4, 4, 4, 4, 4, 4, 4, 4, 4, ...] regardless
             // of sample and thus sum to 36 samples.
             //
-            // In all cases, the region0_count is 36.
-            //
-            // TODO: This is not accurate for MPEG2.5 at 8kHz.
+            // In all cases, the region0_count is 36. MPEG2.5, including 8 kHz, is handled above.
             channel.region1_start = 36;
         }
         // If MPEG version 2 AND the block type is not Short...

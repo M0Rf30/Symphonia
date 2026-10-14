@@ -114,7 +114,7 @@ impl VorbisDecoder {
         // Map the channels
         let channels = match vorbis_channels_to_channels(ident.n_channels) {
             Some(channels) => channels,
-            _ => return unsupported_error("vorbis: unknown channel map (fix me)"),
+            _ => return decode_error("vorbis: no channels"),
         };
 
         // Initialize the output buffer.
@@ -123,8 +123,9 @@ impl VorbisDecoder {
         let imdct_short = Imdct::new((1 << ident.bs0_exp) >> 1);
         let imdct_long = Imdct::new((1 << ident.bs1_exp) >> 1);
 
-        // TODO: Should this be half the block size?
-        let duration = 1 << ident.bs1_exp;
+        // A packet renders a quarter of the previous and current block sizes, which is at most half
+        // of the long block size.
+        let duration = 1 << (ident.bs1_exp - 1);
 
         let dsp =
             Dsp { windows, channels: dsp_channels, imdct_short, imdct_long, prev_block_flag: None };
