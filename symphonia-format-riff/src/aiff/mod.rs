@@ -361,7 +361,7 @@ fn process_markers(
             let value = Arc::new(comment.text);
 
             let tag =
-                Tag::new_from_parts("COMMMENT", value.clone(), Some(StandardTag::Comment(value)));
+                Tag::new_from_parts("COMMENT", value.clone(), Some(StandardTag::Comment(value)));
 
             if comment.marker_id == 0 {
                 // Invalid/unset marker ID, this is a general comment.
@@ -504,7 +504,7 @@ impl FormatReader for AiffReader<'_> {
         // RIFF is not internally packetized for PCM codecs. Packetization is simulated by trying to
         // read a constant number of samples or blocks every call to next_packet. Therefore, a
         // packet begins wherever the data stream is currently positioned. Since timestamps on
-        // packets should be determinstic, instead of seeking to the exact timestamp requested and
+        // packets should be deterministic, instead of seeking to the exact timestamp requested and
         // starting the next packet there, seek to a packet boundary. In this way, packets will have
         // have the same timestamps regardless if the stream was seeked or not.
         let actual_ts = self.packet_info.get_actual_ts(required_ts);

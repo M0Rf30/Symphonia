@@ -623,7 +623,7 @@ fn try_parse_image_data(buf: Box<[u8]>, tags: &mut Vec<Tag>) -> (Box<[u8]>, Opti
 
         // Try to detect an image after the null-terminator.
         if let Some(info) = try_get_image_info(right) {
-            // Try to interpret the bytes preceeding the null-terminator as a UTF-8 encoded filename
+            // Try to interpret the bytes preceding the null-terminator as a UTF-8 encoded filename
             // and add it to the visual's tags if successful.
             if let Ok(name) = str::from_utf8(left) {
                 if !name.is_empty() {

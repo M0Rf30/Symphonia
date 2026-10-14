@@ -460,14 +460,14 @@ impl StreamSegment for MoovSegment {
             // Index of the sample relative to the chunk containing the sample.
             let sample_in_chunk = sample_in_group - (chunk_in_group * group.samples_per_chunk);
 
-            // Calculat the byte offset of the sample relative to the chunk containing it.
+            // Calculate the byte offset of the sample relative to the chunk containing it.
             let offset = match stsz.sample_sizes {
                 SampleSize::Constant(size) => {
                     // Constant size samples can be calculated directly.
                     u64::from(sample_in_chunk) * u64::from(size)
                 }
                 SampleSize::Variable(ref entries) => {
-                    // For variable size samples, sum the sizes of all the samples preceeding the
+                    // For variable size samples, sum the sizes of all the samples preceding the
                     // desired sample in the chunk.
                     let chunk_first_sample = (sample_num - sample_in_chunk) as usize;
 

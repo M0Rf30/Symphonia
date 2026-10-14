@@ -179,9 +179,32 @@ fn negative_start_granule_trims_leading_frames() {
     assert_eq!(total, (3 * FRAMES_PER_PACKET - trim) as u64);
 }
 
-/// Builds a Speex link (`mode` 0 narrowband: 160 sample frames) with `n_packets` packets of
-/// `frames_per_packet` frames, one packet per page.
-fn speex_link(serial: u32, frames_per_packet: u32, n_packets: usize) -> Vec<u8> {
+/// The narrowband Speex encoder and decoder lookahead (`SPEEX_GET_LOOKAHEAD`), in samples.
+const SPEEX_NB_ENCODER_LOOKAHEAD: i64 = 40;
+const SPEEX_NB_DECODER_LOOKAHEAD: i64 = 40;
+/// Samples of a narrowband Speex frame.
+const SPEEX_NB_FRAME_SIZE: i64 = 160;
+
+/// How the final granule position of a Speex link is written.
+#[derive(Copy, Clone)]
+enum SpeexEnd {
+    /// Like `speexenc`: the number of source samples (clamped).
+    Source(i64),
+    /// Like libavformat: the same rule as every other page (the packets end, less the encoder
+    /// lookahead).
+    Unclamped,
+}
+
+/// Builds a narrowband Speex link with `n_packets` packets of `frames_per_packet` frames, one
+/// packet per page, and `extra_headers` additional header packets. The granule positions
+/// exclude the encoder lookahead, like those of `speexenc`.
+fn speex_link(
+    serial: u32,
+    frames_per_packet: u32,
+    n_packets: usize,
+    extra_headers: u32,
+    end: SpeexEnd,
+) -> Vec<u8> {
     let mut head = Vec::new();
     head.extend_from_slice(b"Speex   ");
     head.extend_from_slice(&[0; 20]);
@@ -192,14 +215,21 @@ fn speex_link(serial: u32, frames_per_packet: u32, n_packets: usize) -> Vec<u8> 
     head.extend_from_slice(&4u32.to_le_bytes()); // mode bitstream version
     head.extend_from_slice(&1u32.to_le_bytes()); // channels
     head.extend_from_slice(&(-1i32).to_le_bytes()); // bitrate
-    head.extend_from_slice(&160u32.to_le_bytes()); // frame size
+    head.extend_from_slice(&(SPEEX_NB_FRAME_SIZE as u32).to_le_bytes()); // frame size
     head.extend_from_slice(&0u32.to_le_bytes()); // vbr
     head.extend_from_slice(&frames_per_packet.to_le_bytes());
-    head.extend_from_slice(&0u32.to_le_bytes()); // extra headers
+    head.extend_from_slice(&extra_headers.to_le_bytes());
     head.extend_from_slice(&[0; 8]);
 
-    // Vendor length 0, no comments.
-    let tags = [0u8; 8];
+    // Vendor "v" and two comments.
+    let mut tags = Vec::new();
+    tags.extend_from_slice(&1u32.to_le_bytes());
+    tags.push(b'v');
+    tags.extend_from_slice(&2u32.to_le_bytes());
+    for c in [&b"TITLE=Song"[..], &b"ARTIST=Band"[..]] {
+        tags.extend_from_slice(&(c.len() as u32).to_le_bytes());
+        tags.extend_from_slice(c);
+    }
 
     let mut w = OggPacketWriter::new(Vec::new(), serial);
     w.set_page_target(1);
@@ -208,19 +238,39 @@ fn speex_link(serial: u32, frames_per_packet: u32, n_packets: usize) -> Vec<u8> 
     w.write_packet(&tags, 0, false).unwrap();
     w.flush_page().unwrap();
 
-    let pkt = [0x55u8; 30];
-    let dur = i64::from(160 * frames_per_packet);
+    // Additional header packets (e.g. extra metadata). Their content is opaque to the mapper.
+    for _ in 0..extra_headers {
+        w.write_packet(b"extra header packet", 0, false).unwrap();
+        w.flush_page().unwrap();
+    }
 
-    // The granule position excludes the 40 sample narrowband encoder lookahead.
+    let pkt = [0x55u8; 30];
+    let dur = SPEEX_NB_FRAME_SIZE * i64::from(frames_per_packet);
+
     for i in 0..n_packets {
         let last = i + 1 == n_packets;
-        w.write_packet(&pkt, (i as i64 + 1) * dur - 40, last).unwrap();
+        let mut granule = (i as i64 + 1) * dur - SPEEX_NB_ENCODER_LOOKAHEAD;
+
+        if let (true, SpeexEnd::Source(n)) = (last, end) {
+            granule = granule.min(n);
+        }
+        w.write_packet(&pkt, granule, last).unwrap();
     }
     w.finish().unwrap()
 }
 
-/// A Speex stream is mapped: codec parameters, the lookahead as start delay, packet timing from
-/// the header, and seeking.
+/// The sum of the durations of all the packets of a reader (the samples a gapless decoder
+/// outputs).
+fn total_packet_dur(reader: &mut OggReader<'_>) -> u64 {
+    let mut total = 0;
+    while let Some(pkt) = reader.next_packet().unwrap() {
+        total += pkt.dur.get();
+    }
+    total
+}
+
+/// A Speex stream is mapped: codec parameters, tags, the delay of the encode-decode chain, packet
+/// timing from the header and the granule positions, and seeking.
 #[test]
 fn speex_mapping_timing_and_seek() {
     use symphonia_core::codecs::CodecParameters;
@@ -228,7 +278,12 @@ fn speex_mapping_timing_and_seek() {
     use symphonia_core::formats::{SeekMode, SeekTo};
     use symphonia_core::units::{Duration, Timestamp};
 
-    let mut reader = open(speex_link(0x55, 2, 40));
+    const DELAY: i64 = SPEEX_NB_ENCODER_LOOKAHEAD + SPEEX_NB_DECODER_LOOKAHEAD;
+    const PACKETS: usize = 200;
+    // The source ends in the middle of the last packet.
+    const SOURCE: i64 = PACKETS as i64 * 320 - SPEEX_NB_ENCODER_LOOKAHEAD - 100;
+
+    let mut reader = open(speex_link(0x55, 2, PACKETS, 0, SpeexEnd::Source(SOURCE)));
 
     let track = &reader.tracks()[0];
     let Some(CodecParameters::Audio(params)) = &track.codec_params
@@ -237,27 +292,132 @@ fn speex_mapping_timing_and_seek() {
     };
     assert_eq!(params.codec, CODEC_ID_SPEEX);
     assert_eq!(params.sample_rate, Some(8000));
-    assert_eq!(track.start_ts.get(), -40);
-    assert_eq!(track.delay, Some(40));
-    assert_eq!(track.num_frames, Some(40 * 320 - 40));
+    assert_eq!(params.max_frames_per_packet, Some(320));
+    assert_eq!(params.extra_data.as_ref().map(|e| e.len()), Some(80));
+    // Timestamp 0 is the first source sample: decoded sample 80, and the first packet starts
+    // at the negative timestamp -80.
+    assert_eq!(track.start_ts.get(), -DELAY);
+    assert_eq!(track.delay, Some(DELAY as u32));
+    assert_eq!(track.num_frames, Some(SOURCE as u64));
 
-    // Seek into the middle of the stream. The seek lands on a packet boundary before the target.
-    let seeked = reader
-        .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(8000), track_id: 0x55 })
-        .unwrap();
-    assert!(seeked.actual_ts <= Timestamp::new(8000));
-    assert!(seeked.actual_ts >= Timestamp::new(8000 - 2 * 320 - 320));
+    // The Vorbis comments of the second header packet are the metadata of the stream.
+    let tags: Vec<_> =
+        reader.metadata().current().unwrap().media.tags.iter().map(|t| t.raw.clone()).collect();
+    assert!(tags.iter().any(|t| t.key == "TITLE"));
+    assert!(tags.iter().any(|t| t.key == "ARTIST"));
 
-    // Read from the start: the first packet carries the start delay only.
-    let mut reader = open(speex_link(0x55, 2, 40));
+    // Read from the start: the first packet carries the delay, the last the padding.
     let first = reader.next_packet().unwrap().unwrap();
-    assert_eq!(first.pts.get(), -40);
-    assert_eq!(first.trim_start, Duration::new(40));
-    assert_eq!(first.dur, Duration::new(280));
+    assert_eq!(first.pts.get(), -DELAY);
+    assert_eq!(first.trim_start, Duration::new(DELAY as u64));
+    assert_eq!(first.dur, Duration::new(320 - DELAY as u64));
     let second = reader.next_packet().unwrap().unwrap();
-    assert_eq!(second.pts.get(), 280);
+    assert_eq!(second.pts.get(), 320 - DELAY);
     assert_eq!(second.trim_start, Duration::ZERO);
     assert_eq!(second.dur, Duration::new(320));
+
+    let mut total = first.dur.get() + second.dur.get();
+    let mut last = second;
+    while let Some(pkt) = reader.next_packet().unwrap() {
+        total += pkt.dur.get();
+        last = pkt;
+    }
+    assert_eq!(total, SOURCE as u64);
+    // The packets end at the decoded sample `PACKETS * 320`, the stream at the source end.
+    assert_eq!(last.trim_end, Duration::new((PACKETS as i64 * 320 - DELAY - SOURCE) as u64));
+
+    // Seek into the middle of the stream. One second (the sample rate) is decoded and discarded
+    // before the target, and the seek lands on a packet boundary at or before that.
+    let mut reader = open(speex_link(0x55, 2, PACKETS, 0, SpeexEnd::Source(SOURCE)));
+    let target = 40_000;
+    let seeked = reader
+        .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(target), track_id: 0x55 })
+        .unwrap();
+    assert!(seeked.actual_ts <= Timestamp::new(target - 8000));
+    assert!(seeked.actual_ts >= Timestamp::new(target - 8000 - 2 * 320));
+
+    // The next packet starts exactly there.
+    let next = reader.next_packet().unwrap().unwrap();
+    assert_eq!(next.pts, seeked.actual_ts);
+
+    // A seek to the start lands on the first packet again, which carries the delay.
+    let seeked = reader
+        .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(0), track_id: 0x55 })
+        .unwrap();
+    assert_eq!(seeked.actual_ts.get(), -DELAY);
+    let first = reader.next_packet().unwrap().unwrap();
+    assert_eq!(first.pts.get(), -DELAY);
+    assert_eq!(first.trim_start, Duration::new(DELAY as u64));
+}
+
+/// The decoded samples that are output are the same, however many frames a packet carries, and
+/// the last page of a stream not written by `speexenc` (libavformat does not clamp the granule
+/// position to the source length) does not trim anything.
+#[test]
+fn speex_total_duration_by_muxer() {
+    const DELAY: u64 = (SPEEX_NB_ENCODER_LOOKAHEAD + SPEEX_NB_DECODER_LOOKAHEAD) as u64;
+
+    for frames_per_packet in [1u32, 2, 5] {
+        let dur = (SPEEX_NB_FRAME_SIZE as u64) * u64::from(frames_per_packet);
+        let n_packets = 50 / frames_per_packet as usize * 2;
+        let decoded = n_packets as u64 * dur;
+
+        // `speexenc`: the source ends 100 samples before the last decoded sample is needed.
+        let source =
+            decoded - SPEEX_NB_ENCODER_LOOKAHEAD as u64 - SPEEX_NB_DECODER_LOOKAHEAD as u64 - 100;
+        let mut reader =
+            open(speex_link(1, frames_per_packet, n_packets, 0, SpeexEnd::Source(source as i64)));
+        assert_eq!(total_packet_dur(&mut reader), source, "speexenc, {frames_per_packet} frames");
+
+        // libavformat: everything after the chain delay is output.
+        let mut reader = open(speex_link(1, frames_per_packet, n_packets, 0, SpeexEnd::Unclamped));
+        assert_eq!(
+            total_packet_dur(&mut reader),
+            decoded - DELAY,
+            "libavformat, {frames_per_packet} frames"
+        );
+    }
+}
+
+/// Additional header packets are skipped (they are not audio).
+#[test]
+fn speex_extra_header_packets_are_skipped() {
+    let mut reader = open(speex_link(1, 1, 10, 3, SpeexEnd::Unclamped));
+
+    let first = reader.next_packet().unwrap().unwrap();
+    assert_eq!(first.pts.get(), -80);
+    assert_eq!(first.data.len(), 30);
+
+    let mut n = 1;
+    while reader.next_packet().unwrap().is_some() {
+        n += 1;
+    }
+    assert_eq!(n, 10);
+}
+
+/// Each link of a chained Speex stream starts over with its own delay.
+#[test]
+fn speex_chained_links_restart_the_timeline() {
+    let mut data = speex_link(0x11, 2, 20, 0, SpeexEnd::Unclamped);
+    data.extend_from_slice(&speex_link(0x22, 1, 20, 0, SpeexEnd::Unclamped));
+
+    let mut reader = open(data);
+    let mut links: Vec<(u32, i64, u64)> = Vec::new();
+
+    loop {
+        match reader.next_packet() {
+            Ok(Some(pkt)) => match links.last_mut() {
+                Some((serial, _, total)) if *serial == pkt.track_id => *total += pkt.dur.get(),
+                _ => links.push((pkt.track_id, pkt.pts.get(), pkt.dur.get())),
+            },
+            Ok(None) => break,
+            Err(Error::ResetRequired) => (),
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    // 20 packets of 320 and of 160 decoded samples, less the 80 sample chain delay.
+    assert_eq!(links, vec![(0x11, -80, 20 * 320 - 80), (0x22, -80, 20 * 160 - 80)]);
 }
 
 /// CRC-8 (polynomial 0x07) of a FLAC frame header.

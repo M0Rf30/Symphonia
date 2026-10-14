@@ -565,8 +565,8 @@ fn make_raw_codebook(table: &VlcTable) -> Codebook<Entry16x16> {
 
     let len = table.codes.len() as u16;
 
-    // Generate the indicies for each code.
-    let indicies: Vec<u16> = (0..len).collect();
+    // Generate the indices for each code.
+    let indices: Vec<u16> = (0..len).collect();
 
     // Generate the codebook.
     let mut builder = CodebookBuilder::new(BitOrder::Verbatim);
@@ -574,7 +574,7 @@ fn make_raw_codebook(table: &VlcTable) -> Codebook<Entry16x16> {
     // Read in 8-bit blocks.
     builder.bits_per_read(8);
 
-    builder.make(table.codes, table.lens, &indicies).expect("valid static codebook data")
+    builder.make(table.codes, table.lens, &indices).expect("valid static codebook data")
 }
 
 /// Generate a codebook, but also generate a list of values for each variable length code using

@@ -21,6 +21,7 @@ wav = ["symphonia-metadata/riff-info", "symphonia-metadata/riff-id3"]
 [dependencies]
 extended = "0.1.0"
 log = { workspace = true }
+symphonia-common = { workspace = true }
 symphonia-core = { workspace = true }
 
 [dependencies.symphonia-metadata]

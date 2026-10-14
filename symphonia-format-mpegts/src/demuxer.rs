@@ -11,6 +11,7 @@ use std::io::{ErrorKind, Seek, SeekFrom};
 use symphonia_codec_aac::detect_implicit_sbr;
 use symphonia_common::mpeg::es::{AdtsEs, EsParser, EsTrack, LatmEs, MpaEs, OpusEs};
 use symphonia_common::mpeg::pes::{parse_pes_header, split_pes};
+use symphonia_common::mpeg::surround::{Ac3Es, DcaEs, TrueHdEs};
 use symphonia_common::mpeg::timeline::ticks_to_clock;
 use symphonia_common::mpeg::track::{
     LastPes, PROBE_SCAN_LEN, SeekPlan, bisect_pts, build_audio_track, check_forward_only,
@@ -28,7 +29,9 @@ use symphonia_core::support_format;
 use log::{debug, info, warn};
 
 use crate::bdlpcm::BdLpcmEs;
-use crate::psi::{PAT_PID, PatEntry, Pmt, PmtStream, SectionAssembler, parse_pat, parse_pmt};
+use crate::psi::{
+    PAT_PID, PatEntry, Pmt, PmtStream, SectionAssembler, StreamDescriptors, parse_pat, parse_pmt,
+};
 use crate::sniff::SniffEs;
 
 const TS_SYNC: u8 = 0x47;
@@ -286,9 +289,43 @@ impl PesAssembler {
     }
 }
 
+/// The `stream_id_extension` of the PES packets of the AC-3 stream that is embedded in a Blu-ray
+/// TrueHD stream.
+const EMBEDDED_AC3_STREAM_ID_EXT: u8 = 0x76;
+
+/// The first track ID of the streams that share the PID of another stream: the PID plus this
+/// offset, which is beyond the range of PIDs (13 bits).
+const SHARED_PID_TRACK_ID_BASE: u32 = 0x2000;
+
+/// Selects the PES packets of a PID that belong to a stream, for PIDs that carry two streams.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum PesFilter {
+    /// All of the PES packets.
+    All,
+    /// The PES packets of the TrueHD stream in a Blu-ray TrueHD PID: those that are not the
+    /// embedded AC-3 stream.
+    TrueHd,
+    /// The PES packets of the AC-3 stream embedded in a Blu-ray TrueHD PID.
+    EmbeddedAc3,
+}
+
+impl PesFilter {
+    fn accepts(self, extended_stream_id: Option<u8>) -> bool {
+        let embedded = extended_stream_id == Some(EMBEDDED_AC3_STREAM_ID_EXT);
+
+        match self {
+            PesFilter::All => true,
+            PesFilter::TrueHd => !embedded,
+            PesFilter::EmbeddedAc3 => embedded,
+        }
+    }
+}
+
 /// An audio elementary stream.
 struct Stream {
     pid: u16,
+    track_id: u32,
+    filter: PesFilter,
     language: Option<String>,
     es: EsTrack,
     asm: PesAssembler,
@@ -299,6 +336,10 @@ struct Stream {
 impl Stream {
     fn handle_pes(&mut self, pes: &[u8]) {
         if let Some((hdr, payload)) = split_pes(pes) {
+            if !self.filter.accepts(hdr.extended_stream_id) {
+                return;
+            }
+
             if self.first_pts.is_none() {
                 self.first_pts = hdr.pts;
             }
@@ -308,18 +349,42 @@ impl Stream {
     }
 }
 
-/// Create an elementary stream parser for a PMT stream, if the stream is a supported audio
-/// stream.
-fn make_parser(stream: &PmtStream) -> Option<Box<dyn EsParser>> {
+/// Returns true if the program is a Blu-ray program: its registration descriptor is `HDMV` or
+/// `HDPR`, which enables the Blu-ray stream types.
+fn is_hdmv(registration: Option<[u8; 4]>) -> bool {
+    matches!(registration, Some(r) if r == *b"HDMV" || r == *b"HDPR")
+}
+
+/// Create the parser of an AC-3 or DTS stream identified by the registration descriptor or a DVB
+/// descriptor of a stream.
+fn make_parser_from_descriptors(d: &StreamDescriptors) -> Option<Box<dyn EsParser>> {
+    let is_dts = matches!(d.registration, Some(r) if [*b"DTS1", *b"DTS2", *b"DTS3"].contains(&r));
+    let is_ac3 = matches!(d.registration, Some(r) if r == *b"AC-3" || r == *b"EAC3");
+
+    if is_ac3 || d.has_ac3 || d.has_eac3 {
+        Some(Box::new(Ac3Es::new()))
+    }
+    else if is_dts || d.has_dts {
+        Some(Box::new(DcaEs::new()))
+    }
+    else {
+        None
+    }
+}
+
+/// Create the elementary stream parsers for a PMT stream, if the stream is a supported audio
+/// stream. A Blu-ray TrueHD stream has two: TrueHD, and the AC-3 stream embedded in the PID.
+/// `hdmv` is true if the program is a Blu-ray program.
+fn make_parsers(stream: &PmtStream, hdmv: bool) -> Vec<(PesFilter, Box<dyn EsParser>)> {
     let d = &stream.descriptors;
 
-    match stream.stream_type {
+    let parser: Box<dyn EsParser> = match stream.stream_type {
         // MPEG-1 and MPEG-2 audio.
-        0x03 | 0x04 => Some(Box::new(MpaEs::new())),
+        0x03 | 0x04 => Box::new(MpaEs::new()),
         // AAC with ADTS.
-        0x0f => Some(Box::new(AdtsEs::with_detector(detect_implicit_sbr))),
+        0x0f => Box::new(AdtsEs::with_detector(detect_implicit_sbr)),
         // AAC with LATM (LOAS).
-        0x11 => Some(Box::new(LatmEs::with_detector(detect_implicit_sbr))),
+        0x11 => Box::new(LatmEs::with_detector(detect_implicit_sbr)),
         // PES private data: Opus is identified by its registration descriptor or its extension
         // descriptor.
         0x06 if d.registration == Some(*b"Opus") || d.opus_channel_config.is_some() => {
@@ -329,24 +394,53 @@ fn make_parser(stream: &PmtStream) -> Option<Box<dyn EsParser>> {
                 Some(c @ 1..=8) => c,
                 Some(c) => {
                     warn!("mpegts: unsupported opus channel configuration {c:#x}");
-                    return None;
+                    return vec![];
                 }
                 None => 2,
             };
 
-            OpusEs::new(channels).map(|es| Box::new(es) as Box<dyn EsParser>)
+            match OpusEs::new(channels) {
+                Some(es) => Box::new(es),
+                None => return vec![],
+            }
         }
         // Blu-ray LPCM.
-        0x80 => Some(Box::new(BdLpcmEs::new())),
-        // PES private data without any descriptors does not identify its codec: the stream is
-        // identified from the data.
-        0x06 if stream.descriptor_len == 0 => Some(Box::new(SniffEs::new(vec![
-            Box::new(AdtsEs::with_detector(detect_implicit_sbr)),
-            Box::new(LatmEs::with_detector(detect_implicit_sbr)),
-            Box::new(MpaEs::new()),
-        ]))),
-        _ => None,
-    }
+        0x80 => Box::new(BdLpcmEs::new()),
+        // AC-3 (ATSC A/52, and Blu-ray), and E-AC-3 (ATSC).
+        0x81 | 0x87 => Box::new(Ac3Es::new()),
+        // E-AC-3 of Blu-ray: the primary (0x84) and secondary (0xa1) audio.
+        0x84 | 0xa1 if hdmv => Box::new(Ac3Es::new()),
+        // DTS and DTS-HD of Blu-ray (0x82, 0x85, 0x86) and the secondary audio (0xa2) (the latter
+        // only in Blu-ray programs), and DTS (0x8a).
+        0x82 | 0x85 | 0x86 | 0x8a => Box::new(DcaEs::new()),
+        0xa2 if hdmv => Box::new(DcaEs::new()),
+        // Dolby TrueHD of Blu-ray (also written without the Blu-ray registration descriptor, by
+        // FFmpeg). The PID also carries an AC-3 version of the audio, in PES packets that are
+        // identified by their stream ID extension. The AC-3 stream is dropped if there is none.
+        0x83 => {
+            return vec![
+                (PesFilter::TrueHd, Box::new(TrueHdEs::new())),
+                (PesFilter::EmbeddedAc3, Box::new(Ac3Es::new())),
+            ];
+        }
+        // PES private data, and user private stream types, that are identified by their
+        // descriptors (AC-3, E-AC-3, DTS). PES private data without any descriptors does not
+        // identify its codec: the stream is identified from the data.
+        0x06 | 0x80..=0xff => match make_parser_from_descriptors(d) {
+            Some(parser) => parser,
+            None if stream.stream_type == 0x06 && stream.descriptor_len == 0 => {
+                Box::new(SniffEs::new(vec![
+                    Box::new(AdtsEs::with_detector(detect_implicit_sbr)),
+                    Box::new(LatmEs::with_detector(detect_implicit_sbr)),
+                    Box::new(MpaEs::new()),
+                ]))
+            }
+            None => return vec![],
+        },
+        _ => return vec![],
+    };
+
+    vec![(PesFilter::All, parser)]
 }
 
 /// MPEG transport stream (MPEG-TS) format reader.
@@ -420,16 +514,22 @@ impl<'s> MpegTsReader<'s> {
         let mut streams: Vec<Stream> = vec![];
 
         for pmt in &pmts {
+            let hdmv = is_hdmv(pmt.registration);
+
             for stream in &pmt.streams {
                 if streams.iter().any(|s| s.pid == stream.pid) {
                     continue;
                 }
 
-                if let Some(parser) = make_parser(stream) {
+                for (i, (filter, parser)) in make_parsers(stream, hdmv).into_iter().enumerate() {
+                    let track_id = u32::from(stream.pid) + i as u32 * SHARED_PID_TRACK_ID_BASE;
+
                     streams.push(Stream {
                         pid: stream.pid,
+                        track_id,
+                        filter,
                         language: stream.descriptors.language.clone(),
-                        es: EsTrack::new(u32::from(stream.pid), parser),
+                        es: EsTrack::new(track_id, parser),
                         asm: Default::default(),
                         first_pts: None,
                     });
@@ -588,19 +688,16 @@ impl<'s> MpegTsReader<'s> {
                 break;
             };
 
-            let Some(stream) = self.streams.iter_mut().find(|s| s.pid == pkt.pid)
-            else {
-                continue;
-            };
+            for stream in self.streams.iter_mut().filter(|s| s.pid == pkt.pid) {
+                completed.clear();
+                stream.asm.push_packet(&pkt, &buf[pkt.payload.clone()], &mut completed);
 
-            completed.clear();
-            stream.asm.push_packet(&pkt, &buf[pkt.payload.clone()], &mut completed);
+                for pes in completed.drain(..) {
+                    stream.handle_pes(&pes);
+                }
 
-            for pes in completed.drain(..) {
-                stream.handle_pes(&pes);
+                stream.es.probe(false);
             }
-
-            stream.es.probe(false);
         }
 
         // Flush the partial PES packets if the end of the stream was reached.
@@ -644,7 +741,7 @@ impl<'s> MpegTsReader<'s> {
 
         for (i, stream) in self.streams.iter().enumerate() {
             let mut track = build_audio_track(
-                u32::from(stream.pid),
+                stream.track_id,
                 &stream.es,
                 stream.first_pts,
                 base,
@@ -692,26 +789,28 @@ impl<'s> MpegTsReader<'s> {
 
             // Keep the payload of the last PES packet with a PTS, and of the packets after it
             // (which may complete its last frame).
-            let record = |pes: &[u8], last: &mut LastPes| {
+            let record = |pes: &[u8], filter: PesFilter, last: &mut LastPes| {
                 if let Some((hdr, payload)) = split_pes(pes) {
-                    last.record(hdr.pts, payload);
+                    if filter.accepts(hdr.extended_stream_id) {
+                        last.record(hdr.pts, payload);
+                    }
                 }
             };
 
             while let Some(pkt) = read_packet(&mut self.reader, self.packet_size, &mut buf)? {
-                if let Some(i) = self.streams.iter().position(|s| s.pid == pkt.pid) {
+                for (i, stream) in self.streams.iter().enumerate().filter(|s| s.1.pid == pkt.pid) {
                     completed.clear();
                     asms[i].push_packet(&pkt, &buf[pkt.payload.clone()], &mut completed);
 
                     for pes in completed.drain(..) {
-                        record(&pes, &mut last[i]);
+                        record(&pes, stream.filter, &mut last[i]);
                     }
                 }
             }
 
             for (i, asm) in asms.iter_mut().enumerate() {
                 if let Some(pes) = asm.flush() {
-                    record(&pes, &mut last[i]);
+                    record(&pes, self.streams[i].filter, &mut last[i]);
                 }
             }
 
@@ -725,7 +824,7 @@ impl<'s> MpegTsReader<'s> {
 
     /// Find the first PES packet that starts with a PTS, of the stream with `pid`, at or after the
     /// byte position `pos`. Returns the position of the transport stream packet and the PTS.
-    fn probe_pes(&mut self, pos: u64, pid: u16) -> Result<Option<(u64, u64)>> {
+    fn probe_pes(&mut self, pos: u64, pid: u16, filter: PesFilter) -> Result<Option<(u64, u64)>> {
         let size = self.packet_size as u64;
         let aligned = self.start_pos + pos.saturating_sub(self.start_pos).div_ceil(size) * size;
 
@@ -743,7 +842,10 @@ impl<'s> MpegTsReader<'s> {
                 continue;
             }
 
-            if let Some(pts) = parse_pes_header(&buf[pkt.payload.clone()]).and_then(|h| h.pts) {
+            if let Some(pts) = parse_pes_header(&buf[pkt.payload.clone()])
+                .filter(|h| filter.accepts(h.extended_stream_id))
+                .and_then(|h| h.pts)
+            {
                 return Ok(Some((pkt.pos, pts)));
             }
         }
@@ -776,7 +878,7 @@ impl<'s> MpegTsReader<'s> {
             return Ok(false);
         };
 
-        if let Some(stream) = self.streams.iter_mut().find(|s| s.pid == pkt.pid) {
+        for stream in self.streams.iter_mut().filter(|s| s.pid == pkt.pid) {
             let mut completed = vec![];
             stream.asm.push_packet(&pkt, &buf[pkt.payload.clone()], &mut completed);
 
@@ -902,7 +1004,7 @@ impl FormatReader for MpegTsReader<'_> {
 
         if self.reader.is_seekable() && self.reader.byte_len().is_some() {
             let len = self.reader.byte_len().unwrap_or(0);
-            let pid = self.streams[track_idx].pid;
+            let (pid, filter) = (self.streams[track_idx].pid, self.streams[track_idx].filter);
 
             let Some(base) = self.base_pts
             else {
@@ -914,8 +1016,9 @@ impl FormatReader for MpegTsReader<'_> {
             // Find the position of the last PES packet that is at or before the target.
             let start_pos = self.start_pos;
 
-            let pos =
-                bisect_pts(start_pos, len, base, target_clock, |pos| self.probe_pes(pos, pid))?;
+            let pos = bisect_pts(start_pos, len, base, target_clock, |pos| {
+                self.probe_pes(pos, pid, filter)
+            })?;
 
             self.reader.seek(SeekFrom::Start(pos))?;
             self.out.clear();

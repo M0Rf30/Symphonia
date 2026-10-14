@@ -38,7 +38,7 @@ struct Sbr {
 /// mp3PRO decoder: MPEG Layer III with Spectral Band Replication.
 ///
 /// The core is decoded as MPEG Layer III with the mp3PRO intensity stereo rule (see
-/// [`IntensityMode::Mp3Pro`]). If the core is an MPEG-2/2.5 stream with a sample rate below
+/// `IntensityMode::Mp3Pro`). If the core is an MPEG-2/2.5 stream with a sample rate below
 /// 32 kHz, the SBR data carried in the ancillary data of every frame reconstructs the high band,
 /// and the decoder outputs audio at twice the core sample rate. The SBR filter banks delay the
 /// output by 962 samples (at the output rate); the delay is not compensated. Otherwise, the

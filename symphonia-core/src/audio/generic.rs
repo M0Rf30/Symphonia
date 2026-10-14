@@ -677,9 +677,9 @@ impl_as_generic_audio_buffer_ref!(f64, GenericAudioBufferRef::F64);
 
 // Implement From for conversions between AudioBuffer and GenericAudioBuffer{Ref} for all
 // standard sample formats.
-macro_rules! impl_from_converions {
+macro_rules! impl_from_conversions {
     ($fmt:ty, $own:path, $ref:path) => {
-        // Infalliable conversion from AudioBuffer<S> to GenericAudioBuffer.
+        // Infallible conversion from AudioBuffer<S> to GenericAudioBuffer.
         impl From<AudioBuffer<$fmt>> for GenericAudioBuffer {
             fn from(value: AudioBuffer<$fmt>) -> Self {
                 $own(value)
@@ -698,7 +698,7 @@ macro_rules! impl_from_converions {
             }
         }
 
-        // Infalliable conversion from &AudioBuffer<S> to GenericAudioBufferRef.
+        // Infallible conversion from &AudioBuffer<S> to GenericAudioBufferRef.
         impl<'a> From<&'a AudioBuffer<$fmt>> for GenericAudioBufferRef<'a> {
             fn from(value: &'a AudioBuffer<$fmt>) -> Self {
                 $ref(value)
@@ -719,16 +719,16 @@ macro_rules! impl_from_converions {
     };
 }
 
-impl_from_converions!(u8, GenericAudioBuffer::U8, GenericAudioBufferRef::U8);
-impl_from_converions!(u16, GenericAudioBuffer::U16, GenericAudioBufferRef::U16);
-impl_from_converions!(u24, GenericAudioBuffer::U24, GenericAudioBufferRef::U24);
-impl_from_converions!(u32, GenericAudioBuffer::U32, GenericAudioBufferRef::U32);
-impl_from_converions!(i8, GenericAudioBuffer::S8, GenericAudioBufferRef::S8);
-impl_from_converions!(i16, GenericAudioBuffer::S16, GenericAudioBufferRef::S16);
-impl_from_converions!(i24, GenericAudioBuffer::S24, GenericAudioBufferRef::S24);
-impl_from_converions!(i32, GenericAudioBuffer::S32, GenericAudioBufferRef::S32);
-impl_from_converions!(f32, GenericAudioBuffer::F32, GenericAudioBufferRef::F32);
-impl_from_converions!(f64, GenericAudioBuffer::F64, GenericAudioBufferRef::F64);
+impl_from_conversions!(u8, GenericAudioBuffer::U8, GenericAudioBufferRef::U8);
+impl_from_conversions!(u16, GenericAudioBuffer::U16, GenericAudioBufferRef::U16);
+impl_from_conversions!(u24, GenericAudioBuffer::U24, GenericAudioBufferRef::U24);
+impl_from_conversions!(u32, GenericAudioBuffer::U32, GenericAudioBufferRef::U32);
+impl_from_conversions!(i8, GenericAudioBuffer::S8, GenericAudioBufferRef::S8);
+impl_from_conversions!(i16, GenericAudioBuffer::S16, GenericAudioBufferRef::S16);
+impl_from_conversions!(i24, GenericAudioBuffer::S24, GenericAudioBufferRef::S24);
+impl_from_conversions!(i32, GenericAudioBuffer::S32, GenericAudioBufferRef::S32);
+impl_from_conversions!(f32, GenericAudioBuffer::F32, GenericAudioBufferRef::F32);
+impl_from_conversions!(f64, GenericAudioBuffer::F64, GenericAudioBufferRef::F64);
 
 /// An owning wrapper for an [`AudioSlice`] of any standard sample format.
 ///

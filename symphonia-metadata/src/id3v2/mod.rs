@@ -140,7 +140,7 @@ fn parse_header_bytes(hdr: &[u8]) -> Option<HeaderBytes> {
     Some(HeaderBytes { major: *major, flags: *flags, size: decode_synchsafe(size) })
 }
 
-/// Read the header of an ID3v2 (verions 2.2+) tag.
+/// Read the header of an ID3v2 (versions 2.2+) tag.
 fn read_id3v2_header<B: ReadBytes>(reader: &mut B) -> Result<Header> {
     let marker = reader.read_triple_bytes()?;
 
@@ -502,7 +502,7 @@ pub(crate) fn read_id3v2<B: ReadBytes>(
     }
 
     // If the unsynchronisation flag is set in the header, all tag data must be passed through the
-    // unsynchronisation decoder before being read for verions < 4 of ID3v2. Otherwise, read the
+    // unsynchronisation decoder before being read for versions < 4 of ID3v2. Otherwise, read the
     // data as-is. Individual frames may be unsynchronised for major versions >= 4.
     let body: &[u8] = if header.unsynchronisation && header.major_version < 4 {
         decode_unsynchronisation(&mut data)
@@ -921,7 +921,7 @@ impl ChapterGroupBuilder {
         }
 
         // The remaining chapters are completely unreferenced. This is allowed per the ID3v2
-        // specification. To accomodate these chapters, a new top-level TOC is created with the
+        // specification. To accommodate these chapters, a new top-level TOC is created with the
         // original top-level nested underneath it with all the unreferenced chapters as siblings.
         if !self.chaps.is_empty() {
             // Collect all standalone ID3v2 chapters.
@@ -1123,7 +1123,7 @@ pub mod sub_fields {
     // CRM frames
 
     pub const CRM_OWNER: &str = "OWNER";
-    pub const CRM_DESRIPTION: &str = "DESCRIPTION";
+    pub const CRM_DESCRIPTION: &str = "DESCRIPTION";
 
     // ENCR frames
 

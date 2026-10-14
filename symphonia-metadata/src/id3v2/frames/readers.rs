@@ -567,7 +567,7 @@ pub fn read_crm_frame(mut reader: BufReader<'_>, frame: &FrameInfo<'_>) -> Resul
     let mut sub_fields = vec![RawTagSubField::new(CRM_OWNER, owner)];
 
     if let Some(desc) = desc {
-        sub_fields.push(RawTagSubField::new(CRM_DESRIPTION, desc));
+        sub_fields.push(RawTagSubField::new(CRM_DESCRIPTION, desc));
     }
 
     // Create the tag.
@@ -1005,7 +1005,7 @@ pub fn read_ufid_frame(mut reader: BufReader<'_>, frame: &FrameInfo<'_>) -> Resu
 
     // 64-bytes is the limit of the identifier.
     if id.len() > 64 {
-        return decode_error("ufid: ufid indentifier exceeds 64 bytes");
+        return decode_error("ufid: ufid identifier exceeds 64 bytes");
     }
 
     // The MusicBrainz recording ID is stored as an ASCII UUID string in a UFID frame owned by
@@ -1181,7 +1181,7 @@ fn map_raw_tag(raw: RawTag, parser: Option<RawTagParser>) -> FrameResult {
     FrameResult::Tag(Tag::new(raw))
 }
 
-// Loopup tables.
+// Lookup tables.
 
 // Mapping TXXX descriptions to raw tag parsers.
 lazy_static! {

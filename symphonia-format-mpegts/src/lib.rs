@@ -23,14 +23,32 @@
 //! a supported codec. Video, subtitle, and data streams, and audio streams with an unsupported
 //! codec, are ignored.
 //!
-//! | Stream type | Codec                            | Notes                              |
-//! |-------------|----------------------------------|------------------------------------|
-//! | `0x03/0x04` | MPEG-1/2 audio, layers 1, 2, 3   |                                    |
-//! | `0x0f`      | AAC in ADTS                      |                                    |
-//! | `0x11`      | AAC in LATM (with LOAS framing)  | Single program and layer           |
-//! | `0x80`      | Blu-ray LPCM, 16 and 24-bit      | 48, 96, 192 kHz; up to 7.1        |
-//! | `0x06`      | Opus                             | Registration or extension descriptor |
-//! | `0x06`      | AAC (ADTS, LATM), MPEG audio     | Only without descriptors; identified from the data |
+//! | Stream type            | Codec                                | Notes                                    |
+//! |------------------------|--------------------------------------|------------------------------------------|
+//! | `0x03/0x04`            | MPEG-1/2 audio, layers 1, 2, 3       |                                          |
+//! | `0x0f`                 | AAC in ADTS                          |                                          |
+//! | `0x11`                 | AAC in LATM (with LOAS framing)      | Single program and layer                 |
+//! | `0x80`                 | Blu-ray LPCM, 16 and 24-bit          | 48, 96, 192 kHz; up to 7.1               |
+//! | `0x81`                 | AC-3                                 | ATSC and Blu-ray                         |
+//! | `0x87`                 | E-AC-3                               | ATSC                                     |
+//! | `0x84`, `0xa1`         | E-AC-3                               | Blu-ray programs (`HDMV`/`HDPR`)         |
+//! | `0x82`, `0x85`, `0x86` | DTS, DTS-HD (core and extension)     | Blu-ray                                  |
+//! | `0x8a`                 | DTS                                  |                                          |
+//! | `0xa2`                 | DTS-HD (secondary)                   | Blu-ray programs (`HDMV`/`HDPR`)         |
+//! | `0x83`                 | Dolby TrueHD, and the AC-3 stream    | Blu-ray: two tracks, see below           |
+//! | `0x06`                 | Opus                                 | Registration or extension descriptor     |
+//! | `0x06`                 | AC-3, E-AC-3, DTS                    | DVB descriptors `0x6a`, `0x7a`, `0x7b`, or registration descriptors `AC-3`, `EAC3`, `DTS1`, `DTS2`, `DTS3` |
+//! | `0x06`                 | AAC (ADTS, LATM), MPEG audio         | Only without descriptors; identified from the data |
+//!
+//! A user private stream type (`0x80` or above) that is not listed is identified by the same
+//! descriptors as PES private data. The HLS sample encryption stream types (`0xc1`, `0xc2`) are
+//! not supported: their audio frames are encrypted.
+//!
+//! The PID of a Blu-ray TrueHD stream (`0x83`) carries a TrueHD stream and an AC-3 version of the
+//! same audio, in PES packets that are distinguished by the `stream_id_extension` of their PES
+//! extension (`0x76` is the AC-3 stream). The reader produces a track for each, as FFmpeg does. The
+//! TrueHD track has the track ID of the PID, and the AC-3 track has that of the PID plus `0x2000`.
+//! The AC-3 track is dropped if the PID has no PES packets of it.
 //!
 //! The 188 byte packet, the 192 byte BDAV (M2TS), and the 204 byte (Reed-Solomon) packet formats
 //! are supported. Scrambled packets are skipped. Duplicate packets are dropped, and a PES packet

@@ -198,7 +198,7 @@ impl<'s> MediaSourceStream<'s> {
         // The write position at which the writeback will start.
         let wb_pos = ring_pos.wrapping_sub(wb_len) & self.ring_mask;
 
-        // Split the ring buffer into the two continguous write regions.
+        // Split the ring buffer into the two contiguous write regions.
         let (wb1, wb0) = self.ring.split_at_mut(wb_pos);
 
         let src = &buf[read_len - wb_len..read_len];
@@ -305,7 +305,7 @@ impl io::Read for MediaSourceStream<'_> {
         // First, read as much as possible from the ring buffer.
         buf = self.read_from_buffer(buf);
 
-        // Then, if the remainder is large optimizible, read directly from the source into the
+        // Then, if the remainder is large optimizable, read directly from the source into the
         // remaining portion of `buf`. Note, to be true, `buf` must have length significantly larger
         // than 0, which means the ring buffer was emptied in the first step. Therefore, it is safe
         // to call `read_from_source` which panics if ring buffer is not empty.
@@ -366,7 +366,7 @@ impl ReadBytes for MediaSourceStream<'_> {
     #[inline(always)]
     fn read_byte(&mut self) -> io::Result<u8> {
         // This function, read_byte, is inlined for performance. To reduce code bloat, place the
-        // read-ahead buffer replenishment in a seperate function. Call overhead will be negligible
+        // read-ahead buffer replenishment in a separate function. Call overhead will be negligible
         // compared to the actual underlying read.
         if self.is_buffer_empty() {
             self.refill_buffer_or_eof()?;

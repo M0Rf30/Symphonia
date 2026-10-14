@@ -40,8 +40,8 @@ pub enum BlockSequence {
 /// Difference channel are stored.
 #[derive(Debug)]
 pub enum ChannelAssignment {
-    /// All channels are independantly coded and no decorrelation step is required.
-    Independant(u32),
+    /// All channels are independently coded and no decorrelation step is required.
+    Independent(u32),
     /// Channel 0 is the Left channel, and channel 1 is a Difference channel. The Right channel
     /// is restored by subtracting the Difference channel from the Left channel (R = L - D).
     LeftSide,
@@ -190,7 +190,7 @@ pub fn read_frame_header<B: ReadBytes>(reader: &mut B, sync: u16) -> Result<Fram
     };
 
     let channel_assignment = match channels_enc {
-        0x0..=0x7 => ChannelAssignment::Independant(channels_enc + 1),
+        0x0..=0x7 => ChannelAssignment::Independent(channels_enc + 1),
         0x8 => ChannelAssignment::LeftSide,
         0x9 => ChannelAssignment::RightSide,
         0xa => ChannelAssignment::MidSide,
@@ -199,7 +199,7 @@ pub fn read_frame_header<B: ReadBytes>(reader: &mut B, sync: u16) -> Result<Fram
         }
     };
 
-    // End of freame header, pop off CRC8 checksum.
+    // End of frame header, pop off CRC8 checksum.
     let crc8_computed = reader_crc8.monitor().crc();
 
     // Get expected CRC8 checksum from the header.

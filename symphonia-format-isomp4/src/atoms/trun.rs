@@ -87,9 +87,9 @@ impl TrunAtom {
             self.total_sample_duration
         }
         else {
-            // The duration of all samples in the track fragment are not explictly known.
+            // The duration of all samples in the track fragment are not explicitly known.
             if self.sample_count > 0 && self.is_first_sample_duration_present() {
-                // The first sample has an explictly recorded duration.
+                // The first sample has an explicitly recorded duration.
                 u64::from(self.sample_duration[0])
                     + u64::from(self.sample_count - 1) * u64::from(default_dur)
             }

@@ -113,7 +113,7 @@ impl SeekIndex {
                 return SeekSearchResult::Lower(self.points[upper]);
             }
 
-            // Desired timestamp is between the lower and upper indicies. Perform a binary
+            // Desired timestamp is between the lower and upper indices. Perform a binary
             // search to find a range of SeekPoints containing the desired timestamp. The binary
             // search exits when either two adjacent SeekPoints or a single SeekPoint is found.
             while upper - lower > 1 {

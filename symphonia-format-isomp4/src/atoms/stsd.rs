@@ -10,7 +10,8 @@ use core::str;
 use log::debug;
 use symphonia_core::audio::{Channels, Position};
 use symphonia_core::codecs::audio::well_known::{
-    CODEC_ID_ADPCM_IMA_QT, CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_MS,
+    CODEC_ID_AC3, CODEC_ID_ADPCM_IMA_QT, CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_MS, CODEC_ID_DCA,
+    CODEC_ID_EAC3, CODEC_ID_TRUEHD,
 };
 use symphonia_core::codecs::audio::well_known::{
     CODEC_ID_MP3, CODEC_ID_PCM_ALAW, CODEC_ID_PCM_MULAW,
@@ -34,9 +35,9 @@ use symphonia_core::codecs::{CodecParameters, CodecProfile};
 
 use crate::atoms::qt_meta::PayloadAtom;
 use crate::atoms::{
-    AlacAtom, Atom, AtomHeader, AtomIterator, AtomType, AvcCAtom, Dac3Atom, Dec3Atom, DoviAtom,
-    EsdsAtom, FlacAtom, HvcCAtom, OpusAtom, ReadAtom, Result, WaveAtom, decode_error,
-    unsupported_error,
+    AlacAtom, Atom, AtomHeader, AtomIterator, AtomType, AvcCAtom, Dac3Atom, DdtsAtom, Dec3Atom,
+    DmlpAtom, DoviAtom, EsdsAtom, FlacAtom, HvcCAtom, OpusAtom, ReadAtom, Result, WaveAtom,
+    decode_error, unsupported_error,
 };
 use crate::fp::FpU16;
 
@@ -77,6 +78,11 @@ impl Atom for StsdAtom {
             | AtomType::AudioSampleEntryAlac
             | AtomType::AudioSampleEntryAc3
             | AtomType::AudioSampleEntryEc3
+            | AtomType::AudioSampleEntryDtsc
+            | AtomType::AudioSampleEntryDtse
+            | AtomType::AudioSampleEntryDtsh
+            | AtomType::AudioSampleEntryDtsl
+            | AtomType::AudioSampleEntryMlpa
             | AtomType::AudioSampleEntryFlac
             | AtomType::AudioSampleEntryOpus
             | AtomType::AudioSampleEntryMp3
@@ -395,6 +401,13 @@ impl Atom for AudioSampleEntry {
             AtomType::AudioSampleEntryMsAdpcm | AtomType::AudioSampleEntryImaWav => {
                 entry.codec_id = CODEC_ID_NULL_AUDIO;
             }
+            // The codec is determined by the sample entry type, the codec-specific atom only
+            // refines the stream parameters.
+            AtomType::AudioSampleEntryDtsc
+            | AtomType::AudioSampleEntryDtse
+            | AtomType::AudioSampleEntryDtsh
+            | AtomType::AudioSampleEntryDtsl => entry.codec_id = CODEC_ID_DCA,
+            AtomType::AudioSampleEntryMlpa => entry.codec_id = CODEC_ID_TRUEHD,
             _ => (),
         }
 
@@ -443,6 +456,14 @@ impl Atom for AudioSampleEntry {
                     let atom = it.read_atom::<Dec3Atom>()?;
                     atom.fill_audio_sample_entry(&mut entry);
                 }
+                AtomType::DtsConfig => {
+                    let atom = it.read_atom::<DdtsAtom>()?;
+                    atom.fill_audio_sample_entry(&mut entry);
+                }
+                AtomType::MlpConfig => {
+                    let atom = it.read_atom::<DmlpAtom>()?;
+                    atom.fill_audio_sample_entry(&mut entry);
+                }
                 AtomType::FlacDsConfig => {
                     let atom = it.read_atom::<FlacAtom>()?;
                     atom.fill_audio_sample_entry(&mut entry);
@@ -471,6 +492,19 @@ impl Atom for AudioSampleEntry {
         // says otherwise.
         if is_pcm_codec && entry.little_endian == Some(true) && version < 2 {
             entry.codec_id = to_little_endian(entry.codec_id);
+        }
+
+        // The surround codecs signal their channels in the codec-specific atom. If it is missing
+        // (e.g., DTS or AC-3 in an `mp4a` entry with an `esds` atom), use the channel count of the
+        // sample entry.
+        if entry.channels.is_none()
+            && entry.num_channels > 0
+            && matches!(
+                entry.codec_id,
+                CODEC_ID_AC3 | CODEC_ID_EAC3 | CODEC_ID_DCA | CODEC_ID_TRUEHD
+            )
+        {
+            entry.channels = u16::try_from(entry.num_channels).ok().map(Channels::Discrete);
         }
 
         // A MP3 sample entry has no codec-specific atom.
@@ -681,7 +715,7 @@ fn lpcm_channels(num_channels: u32) -> Result<Channels> {
         return unsupported_error("isomp4: maximum 32 channels");
     }
 
-    // TODO: For LPCM, the channels are "auxilary". They do not have a speaker assignment. Symphonia
+    // TODO: For LPCM, the channels are "auxiliary". They do not have a speaker assignment. Symphonia
     // does not have a way to represent this yet.
     let channel_mask = !((!0 << 1) << (num_channels - 1));
 
@@ -1409,6 +1443,84 @@ mod tests {
         assert_eq!(ima4.codec, CODEC_ID_ADPCM_IMA_QT);
         assert_eq!(ima4.frames_per_block, Some(64));
         assert_eq!(ima4.max_frames_per_packet, Some(64));
+    }
+
+    #[test]
+    fn ac3_and_eac3_entries_signal_rate_and_channels() {
+        use symphonia_core::codecs::audio::well_known::{CODEC_ID_AC3, CODEC_ID_EAC3};
+
+        // fscod 1 (44.1 kHz), acmod 2 (stereo), no LFE. The sample entry says 6 channels.
+        let dac3 = atom(b"dac3", &[0x40, 0x10, 0x00]);
+        let params = audio_params(stsd_audio_entry(b"ac-3", 0, 6, 44_100 << 16, &dac3));
+        assert_eq!(params.codec, CODEC_ID_AC3);
+        assert_eq!(params.sample_rate, Some(44_100));
+        assert_eq!(params.channels.map(|c| c.count()), Some(2));
+
+        // 48 kHz 3/2 with LFE, and a dependent substream with Lrs/Rrs.
+        let dec3 = atom(b"dec3", &[0x14, 0x20, 0x20, 0x0f, 0x02, 0x80]);
+        let params = audio_params(stsd_audio_entry(b"ec-3", 0, 2, 48_000 << 16, &dec3));
+        assert_eq!(params.codec, CODEC_ID_EAC3);
+        assert_eq!(params.channels.map(|c| c.count()), Some(8));
+    }
+
+    #[test]
+    fn dts_entries_use_the_ddts_atom() {
+        use symphonia_core::codecs::audio::well_known::CODEC_ID_DCA;
+
+        // 96 kHz (above the range of the 16.16 sample rate), 1024 sample frames, 5.1 layout.
+        let mut ddts = Vec::new();
+        ddts.extend_from_slice(&96_000u32.to_be_bytes());
+        ddts.extend_from_slice(&[0; 8]); // Max and average bitrate.
+        ddts.push(24); // PCM sample depth.
+        ddts.extend_from_slice(&[0b01 << 6, 0, 0, 0]); // Frame duration and various fields.
+        ddts.extend_from_slice(&0x000fu16.to_be_bytes()); // Channel layout.
+        ddts.push(0); // Flags.
+
+        for entry_type in [b"dtsc", b"dtsh", b"dtsl", b"dtse"] {
+            let params = audio_params(stsd_audio_entry(
+                entry_type,
+                0,
+                2,
+                (96_000 & 0xffff) << 16,
+                &atom(b"ddts", &ddts),
+            ));
+            assert_eq!(params.codec, CODEC_ID_DCA);
+            assert_eq!(params.sample_rate, Some(96_000));
+            assert_eq!(params.channels.map(|c| c.count()), Some(6));
+            assert_eq!(params.max_frames_per_packet, Some(1024));
+            assert_eq!(params.bits_per_sample, Some(24));
+        }
+    }
+
+    #[test]
+    fn mlpa_entry_uses_the_dmlp_atom() {
+        use symphonia_core::codecs::audio::well_known::CODEC_ID_TRUEHD;
+
+        // 48 kHz, 5.1 channel assignment (0b01111), as written by ffmpeg.
+        let dmlp = atom(b"dmlp", &[0x00, 0x07, 0x80, 0x0f, 0x18, 0xfe, 0, 0, 0, 0]);
+        let params = audio_params(stsd_audio_entry(b"mlpa", 0, 2, 48_000 << 16, &dmlp));
+        assert_eq!(params.codec, CODEC_ID_TRUEHD);
+        assert_eq!(params.sample_rate, Some(48_000));
+        assert_eq!(params.channels.map(|c| c.count()), Some(6));
+    }
+
+    #[test]
+    fn dts_in_mp4a_esds_uses_the_sample_entry_channels() {
+        use symphonia_core::codecs::audio::well_known::CODEC_ID_DCA;
+
+        // Object type 0xa9 (DTS) without decoder specific info.
+        let dec_config = [0xa9, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut es = vec![0, 1, 0, 0x04, dec_config.len() as u8];
+        es.extend_from_slice(&dec_config);
+        es.extend_from_slice(&[0x06, 0x01, 0x02]);
+        let mut body = vec![0; 4];
+        body.extend_from_slice(&[0x03, es.len() as u8]);
+        body.extend_from_slice(&es);
+
+        let params =
+            audio_params(stsd_audio_entry(b"mp4a", 0, 6, 48_000 << 16, &atom(b"esds", &body)));
+        assert_eq!(params.codec, CODEC_ID_DCA);
+        assert_eq!(params.channels.map(|c| c.count()), Some(6));
     }
 
     #[test]

@@ -61,7 +61,7 @@ lazy_static! {
             windows[0][i] = (PI_36 * (i as f64 + 0.5)).sin() as f32;
         }
 
-        // Window for Start blocks (indicies 30..36 implictly 0.0).
+        // Window for Start blocks (indices 30..36 implicitly 0.0).
         for i in 0..18 {
             windows[1][i] = (PI_36 * (i as f64 + 0.5)).sin() as f32;
         }
@@ -77,7 +77,7 @@ lazy_static! {
             windows[2][i] = (PI_12 * (i as f64 + 0.5)).sin() as f32;
         }
 
-        // Window for End blocks (indicies 0..6 implicitly 0.0).
+        // Window for End blocks (indices 0..6 implicitly 0.0).
         for i in 6..12 {
             windows[3][i] = (PI_12 * ((i - 6) as f64 + 0.5)).sin() as f32;
         }
@@ -249,7 +249,7 @@ pub(super) fn antialias(channel: &mut GranuleChannel, samples: &mut [f32; 576]) 
     // advances forward from the boundary.
     //
     // For example, let B(li, ui) represent the butterfly calculation where li and ui are the
-    // indicies of the lower and upper samples respectively. If j is the index of the first sample
+    // indices of the lower and upper samples respectively. If j is the index of the first sample
     // of a sub-band, then the iterations are as follows:
     //
     // B(j-1,j), B(j-2,j+1), B(j-3,j+2), B(j-4,j+3), B(j-5,j+4), B(j-6,j+5), B(j-7,j+6), B(j-8,j+7)
@@ -267,7 +267,7 @@ pub(super) fn antialias(channel: &mut GranuleChannel, samples: &mut [f32; 576]) 
     //             * cs[i]
     //
     // Note that all butterfly calculations only involve two samples, and all iterations are
-    // independant of each other. This lends itself well for SIMD processing.
+    // independent of each other. This lends itself well for SIMD processing.
     for sb in (18..aa_end).step_by(18) {
         for i in 0..8 {
             let li = sb - 1 - i;
@@ -647,7 +647,7 @@ mod imdct36 {
         }
     }
 
-    /// Continutation of `imdct36`.
+    /// Continuation of `imdct36`.
     ///
     /// Step 2: Mapping N/2-point DCT-IV to N/2-point SDCT-II.
     fn dct_iv(x: &[f32; 18], y: &mut [f32; 18]) {
@@ -704,7 +704,7 @@ mod imdct36 {
         y[17] = (y[17] / 2.0) - y[16];
     }
 
-    /// Continutation of `imdct36`.
+    /// Continuation of `imdct36`.
     ///
     /// Step 3: Decompose N/2-point SDCT-II into two N/4-point SDCT-IIs.
     fn sdct_ii_18(x: &[f32; 18], y: &mut [f32; 18]) {
@@ -760,7 +760,7 @@ mod imdct36 {
         y[17] -= y[17 - 2];
     }
 
-    /// Continutation of `imdct36`.
+    /// Continuation of `imdct36`.
     ///
     /// Step 4: Computation of 9-point (N/4) SDCT-II.
     fn sdct_ii_9(x: &[f32; 9], y: &mut [f32]) {

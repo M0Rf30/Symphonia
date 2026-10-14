@@ -92,7 +92,7 @@ fn get_target_path(ctx: &TagContext) -> String {
         // The tag is associated with a target, generate a raw tag key with the target incorporated
         // into it.
         if let Some(target_name) = &target.name {
-            // A target type name is explictly provided.
+            // A target type name is explicitly provided.
             format!("{target_name}@")
         }
         else if let Some(target_name) = default_target_name(target.value, ctx.is_video) {

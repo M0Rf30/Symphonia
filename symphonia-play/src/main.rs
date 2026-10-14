@@ -158,7 +158,7 @@ fn run(args: &ArgMatches) -> Result<i32> {
         Box::new(ReadOnlySource::new(std::io::stdin())) as Box<dyn MediaSource>
     }
     else {
-        // Othwerise, get a Path from the path string.
+        // Otherwise, get a Path from the path string.
 
         // Provide the file extension as a hint.
         if let Some(extension) = path.extension() {

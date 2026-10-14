@@ -32,7 +32,7 @@ fn main() {
         .probe(&hint, mss, fmt_opts, meta_opts)
         .expect("unsupported format");
 
-    // Find the first audio track with a known (decodeable) codec.
+    // Find the first audio track with a known (decodable) codec.
     let track = format.default_track(TrackType::Audio).expect("no audio track");
 
     // Use the default options for the decoder.

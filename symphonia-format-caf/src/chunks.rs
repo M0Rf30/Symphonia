@@ -305,6 +305,8 @@ impl AudioDescription {
             AppleLossless => CODEC_ID_ALAC,
             Flac => CODEC_ID_FLAC,
             Opus => CODEC_ID_OPUS,
+            Ac3 => CODEC_ID_AC3,
+            Eac3 => CODEC_ID_EAC3,
             unsupported => {
                 error!("unsupported codec ({unsupported:?})");
                 return unsupported_error("caf: unsupported codec");
@@ -370,6 +372,10 @@ pub enum AudioDescriptionFormatId {
     AppleLossless,
     Flac,
     Opus,
+    /// Dolby Digital (`'ac-3'`).
+    Ac3,
+    /// Dolby Digital Plus (`'ec-3'`).
+    Eac3,
 }
 
 impl AudioDescriptionFormatId {
@@ -410,6 +416,8 @@ impl AudioDescriptionFormatId {
             // Additional formats from CoreAudioBaseTypes.h
             b"flac" => Flac,
             b"opus" => Opus,
+            b"ac-3" => Ac3,
+            b"ec-3" => Eac3,
             other => {
                 error!("unsupported format id ({other:?})");
                 return unsupported_error("caf: unsupported format id");
@@ -814,7 +822,7 @@ impl PacketTable {
 
         let desc = desc.as_ref().ok_or_else(|| {
             error!("missing audio description");
-            Error::DecodeError("caf: missing audio descripton")
+            Error::DecodeError("caf: missing audio description")
         })?;
 
         let total_packets = reader.read_be_i64()?;

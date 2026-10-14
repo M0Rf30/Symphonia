@@ -1358,7 +1358,7 @@ mod tests {
 
     #[test]
     fn verify_timebase_reduce() {
-        // Reduceable.
+        // Reducible.
         assert_eq!(TimeBase::try_new(42, 42).unwrap().reduce(), TimeBase::try_new(1, 1).unwrap());
         assert_eq!(TimeBase::try_new(8, 12).unwrap().reduce(), TimeBase::try_new(2, 3).unwrap());
         assert_eq!(TimeBase::try_new(100, 250).unwrap().reduce(), TimeBase::try_new(2, 5).unwrap());

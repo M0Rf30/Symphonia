@@ -14,6 +14,7 @@
 //! the directory with the sample files. It is skipped otherwise.
 
 #![cfg(all(
+    feature = "es",
     feature = "flv",
     feature = "mpegps",
     feature = "mpegts",
@@ -32,10 +33,10 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::default::formats::*;
 
 /// The formats of the new readers.
-const NEW_FORMATS: [&str; 3] = ["flv", "mpegps", "mpegts"];
+const NEW_FORMATS: [&str; 6] = ["flv", "mpegps", "mpegts", "ac3", "dts", "truehd"];
 
 /// The samples that are in the new formats, and the format they must be read by.
-static EXPECTED: [(&str, &str); 9] = [
+static EXPECTED: [(&str, &str); 16] = [
     ("unsupported/aac_in_flv.flv", "flv"),
     ("unsupported/mp3_in_flv.flv", "flv"),
     ("unsupported/mp2_in_mpegps.mpg", "mpegps"),
@@ -45,9 +46,17 @@ static EXPECTED: [(&str, &str); 9] = [
     ("aac/heaac_v1_in_flv.flv", "flv"),
     ("aac/heaac_v1_in_mpegts.ts", "mpegts"),
     ("aac/heaac_v2_in_mpegts.ts", "mpegts"),
-    // SWF ADPCM in FLV now opens. Nellymoser is claimed by the FLV reader, which does not open it.
+    // SWF ADPCM and Nellymoser in FLV.
     ("unsupported/adpcm_swf_flv.flv", "flv"),
-    ("unsupported/nellymoser_flv.flv", ""),
+    ("unsupported/nellymoser_flv.flv", "flv"),
+    // Raw elementary streams.
+    ("unsupported/ac3_5_1.ac3", "ac3"),
+    ("unsupported/ac3_stereo.ac3", "ac3"),
+    ("unsupported/eac3_5_1.eac3", "ac3"),
+    ("unsupported/eac3_stereo.eac3", "ac3"),
+    ("unsupported/dts_5_1.dts", "dts"),
+    ("unsupported/mlp_stereo.mlp", "truehd"),
+    ("unsupported/truehd_5_1.thd", "truehd"),
 ];
 
 fn files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -152,9 +161,7 @@ fn new_readers_do_not_take_over_other_formats() {
         if let Some(format) = expected {
             // The new formats are selected for their own files.
             match (&new, format) {
-                (Ok(name), f) if !f.is_empty() => assert_eq!(*name, f, "{rel}"),
-                // The reader that claims the file, but does not open it, fails the probe.
-                (Err(_), "") => (),
+                (Ok(name), f) => assert_eq!(*name, f, "{rel}"),
                 other => panic!("{rel}: unexpected probe result {other:?}"),
             }
 

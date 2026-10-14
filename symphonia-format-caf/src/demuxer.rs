@@ -286,7 +286,7 @@ impl FormatReader for CafReader<'_> {
 
                 // Calculate the duration from the start PTS. This is equal to the number of frames
                 // to the requested PTS. The seek is out-of-range if this is negative. To maintain
-                // determinstic packet timestamps, the seek must jump to a packet boundary before
+                // deterministic packet timestamps, the seek must jump to a packet boundary before
                 // the requested seek time, so align down to a packet boundary.
                 let dur_from_start = required_ts
                     .duration_from(*start_pts)
@@ -1742,6 +1742,31 @@ mod tests {
         assert_eq!(head[9], 2);
         assert_eq!(u16::from_le_bytes([head[10], head[11]]), 312);
         assert_eq!(u32::from_le_bytes([head[12], head[13], head[14], head[15]]), 48000);
+    }
+
+    #[test]
+    fn verify_ac3_and_eac3_are_mapped() {
+        use symphonia_core::codecs::audio::well_known::{CODEC_ID_AC3, CODEC_ID_EAC3};
+
+        for (format_id, codec) in [(b"ac-3", CODEC_ID_AC3), (b"ec-3", CODEC_ID_EAC3)] {
+            // Three packets of 1536 frames.
+            let file = make_file(
+                &[
+                    chunk(b"desc", &desc_body(format_id, 0, 0, 1536, 6, 0)),
+                    chunk(b"pakt", &pakt_body(3, 3 * 1536, 0, 0, &[10, 20, 30])),
+                ],
+                &[0u8; 60],
+            );
+            let mut reader = open(file).unwrap();
+            let params = audio_params(&reader);
+            assert_eq!(params.codec, codec);
+            assert_eq!(params.sample_rate, Some(48000));
+            assert_eq!(reader.tracks()[0].num_frames, Some(3 * 1536));
+
+            let packets = read_all(&mut reader);
+            assert_eq!(packets.iter().map(|p| p.4).collect::<Vec<_>>(), [10, 20, 30]);
+            assert_eq!(packets.iter().map(|p| p.0).collect::<Vec<_>>(), [0, 1536, 3072]);
+        }
     }
 
     #[test]

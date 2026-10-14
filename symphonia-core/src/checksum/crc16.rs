@@ -285,7 +285,7 @@ static CRC16_ANSI: [[u16; 256]; 8] =
     ]
 ];
 
-/// `Crc16Ansi` implements the CRC-16 algorithm using the ANSI polynominal.
+/// `Crc16Ansi` implements the CRC-16 algorithm using the ANSI polynomial.
 ///
 /// * Polynomial = 0x8005
 /// * RefIn = false
@@ -374,7 +374,7 @@ static CRC16_ANSI_LE: [u16; 256] =
     0x8201, 0x42c0, 0x4380, 0x8341, 0x4100, 0x81c1, 0x8081, 0x4040,
 ];
 
-/// `Crc16AnsiLe` implements the CRC-16 algorithm using the ANSI polynominal in little-endian byte
+/// `Crc16AnsiLe` implements the CRC-16 algorithm using the ANSI polynomial in little-endian byte
 /// order.
 ///
 /// * Polynomial = 0x8005

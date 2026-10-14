@@ -494,3 +494,113 @@ fn corrupt_streams_do_not_panic() {
         exercise(corrupt(&mux.out, &mut rng), track, &mut rng);
     }
 }
+
+/// AC-3 syncframes of 48 kHz, `frmsizecod` 20 (448 kbps-class header; only the header is parsed),
+/// 1536 samples each, the payload filled with the frame index.
+fn ac3_frames(n: usize) -> Vec<Vec<u8>> {
+    let size =
+        symphonia_common::mpeg::surround::Ac3Header::parse(&[0x0b, 0x77, 0, 0, 20, 0x40, 0x40, 0])
+            .expect("valid AC-3 header")
+            .frame_size;
+
+    (0..n)
+        .map(|i| {
+            let mut f = vec![i as u8; size];
+            f[..8].copy_from_slice(&[0x0b, 0x77, 0, 0, 20, 0x40, 0x40, 0]);
+            f
+        })
+        .collect()
+}
+
+/// Mux AC-3 as `sub`: with the 4-byte private stream 1 header, or raw if `sub` is `None`.
+fn mux_ac3(frames: &[Vec<u8>], sub: Option<u8>, chunk: usize) -> Vec<u8> {
+    let es = frames.concat();
+    let mut mux = PsMux::new(false);
+    mux.pack(0);
+
+    for (n, c) in es.chunks(chunk).enumerate() {
+        if n % 2 == 0 {
+            mux.pack(n as u64 * 3000);
+        }
+
+        // The PTS is that of the first frame that starts in the chunk, if any.
+        let first = (n * chunk).div_ceil(frames[0].len());
+        let pts = (first * frames[0].len() < (n + 1) * chunk)
+            .then(|| pts_of(first, 1536, 48_000, 90_000));
+
+        let mut payload = match sub {
+            Some(sub) => vec![sub, 1, 0, 0],
+            None => vec![],
+        };
+        payload.extend_from_slice(c);
+        mux.pes(0xbd, pts, &payload);
+    }
+
+    mux.out
+}
+
+#[test]
+fn ac3_in_private_stream_1() {
+    use symphonia_core::codecs::audio::well_known::CODEC_ID_AC3;
+
+    let frames = ac3_frames(60);
+
+    // The AC-3 and EVOB sub-streams, and raw AC-3 (which ffmpeg identifies as sub-stream 0x80).
+    for (sub, id) in
+        [(Some(0x80), 0xbd80), (Some(0x87), 0xbd87), (Some(0xc1), 0xbdc1), (None, 0xbd80)]
+    {
+        // Raw AC-3 is only recognised if the packet begins with the sync word: one frame each.
+        let out = mux_ac3(&frames, sub, if sub.is_some() { 1000 } else { frames[0].len() });
+        let mut reader = open(out.clone());
+
+        assert_eq!(reader.tracks().len(), 1);
+        assert_eq!(reader.tracks()[0].id, id);
+        assert_eq!(reader.tracks()[0].duration.unwrap().get(), 60 * 1536, "{sub:?}");
+
+        let params = audio_params(&reader, 0);
+        assert_eq!(params.codec, CODEC_ID_AC3);
+        assert_eq!(params.sample_rate, Some(48_000));
+
+        let packets = read_all(&mut reader);
+        assert_eq!(packets.len(), 60);
+
+        for (i, p) in packets.iter().enumerate() {
+            assert_eq!(p.pts.get(), i as i64 * 1536);
+            assert_eq!(p.dur.get(), 1536);
+            assert_eq!(p.data[..], frames[i][..]);
+        }
+
+        // Seeking lands on the frame that contains the timestamp.
+        for target in [0i64, 1, 1536, 40_000, 90_000, 20_000] {
+            let mut reader = open(out.clone());
+            let ts = Timestamp::new(target);
+            let seeked =
+                reader.seek(SeekMode::Accurate, SeekTo::Timestamp { ts, track_id: id }).unwrap();
+            // The frame containing the timestamp, or the one before it for the decoder pre-roll.
+            let actual = seeked.actual_ts.get();
+            assert_eq!(actual % 1536, 0);
+            assert!((target / 1536 * 1536 - 1536..=target / 1536 * 1536).contains(&actual));
+
+            let p = reader.next_packet().unwrap().unwrap();
+            assert_eq!(p.pts, seeked.actual_ts);
+            assert_eq!(p.data[..], frames[(actual / 1536) as usize][..]);
+        }
+    }
+}
+
+#[test]
+fn reserved_private_stream_1_sub_streams_are_ignored() {
+    // 0x90..0x97 is reserved for SDDS, and 0x20..0x3f are subtitles.
+    for sub in [0x90u8, 0x97, 0x21, 0xe0] {
+        let mut mux = PsMux::new(false);
+        mux.pack(0);
+
+        for f in ac3_frames(8) {
+            let mut p = vec![sub, 1, 0, 0];
+            p.extend_from_slice(&f);
+            mux.pes(0xbd, Some(90_000), &p);
+        }
+
+        assert!(MpegPsReader::try_new(mss(mux.out), FormatOptions::default()).is_err());
+    }
+}

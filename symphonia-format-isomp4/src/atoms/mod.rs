@@ -24,7 +24,9 @@ pub(crate) mod avcc;
 pub(crate) mod chpl;
 pub(crate) mod co64;
 pub(crate) mod dac3;
+pub(crate) mod ddts;
 pub(crate) mod dec3;
+pub(crate) mod dmlp;
 pub(crate) mod dovi;
 pub(crate) mod edts;
 pub(crate) mod elst;
@@ -75,7 +77,9 @@ pub use avcc::AvcCAtom;
 pub use chpl::ChplAtom;
 pub use co64::Co64Atom;
 pub use dac3::Dac3Atom;
+pub use ddts::DdtsAtom;
 pub use dec3::Dec3Atom;
+pub use dmlp::DmlpAtom;
 pub use dovi::DoviAtom;
 pub use edts::EdtsAtom;
 pub use elst::ElstAtom;
@@ -128,6 +132,11 @@ pub enum AtomType {
     ArtistTag,
     AudioSampleEntryAc3,
     AudioSampleEntryAlac,
+    AudioSampleEntryDtsc,
+    AudioSampleEntryDtse,
+    AudioSampleEntryDtsh,
+    AudioSampleEntryDtsl,
+    AudioSampleEntryMlpa,
     AudioSampleEntryALaw,
     AudioSampleEntryEc3,
     AudioSampleEntryF32,
@@ -172,6 +181,7 @@ pub enum AtomType {
     DescriptionTag,
     DiskNumberTag,
     DolbyVisionConfiguration,
+    DtsConfig,
     Eac3Config,
     Edit,
     EditList,
@@ -207,6 +217,7 @@ pub enum AtomType {
     Media,
     MediaData,
     MediaHeader,
+    MlpConfig,
     MediaInfo,
     MediaTypeTag,
     Meta,
@@ -309,6 +320,13 @@ impl From<[u8; 4]> for AtomType {
             b"ctts" => AtomType::CompositionTimeToSample,
             b"dac3" => AtomType::Ac3Config,
             b"dec3" => AtomType::Eac3Config,
+            b"ddts" => AtomType::DtsConfig,
+            b"dmlp" => AtomType::MlpConfig,
+            b"dtsc" => AtomType::AudioSampleEntryDtsc,
+            b"dtse" => AtomType::AudioSampleEntryDtse,
+            b"dtsh" => AtomType::AudioSampleEntryDtsh,
+            b"dtsl" => AtomType::AudioSampleEntryDtsl,
+            b"mlpa" => AtomType::AudioSampleEntryMlpa,
             b"data" => AtomType::MetaTagData,
             b"dfLa" => AtomType::FlacDsConfig,
             b"dOps" => AtomType::OpusDsConfig,
@@ -517,7 +535,7 @@ pub(crate) fn decode_error<T>(desc: &'static str) -> Result<T> {
     Err(AtomError::Other(symphonia_core::errors::Error::DecodeError(desc)))
 }
 
-/// Convenience function to create an unsupport feature error within an `AtomError`.
+/// Convenience function to create an unsupported feature error within an `AtomError`.
 pub(crate) fn unsupported_error<T>(feature: &'static str) -> Result<T> {
     Err(AtomError::Other(symphonia_core::errors::Error::Unsupported(feature)))
 }

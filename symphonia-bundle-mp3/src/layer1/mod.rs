@@ -170,7 +170,7 @@ impl Layer for Layer1 {
                     let bits = u32::from(alloc[ch][sb]);
 
                     if bits != 0 {
-                        // Read the raw sample value from the bistream.
+                        // Read the raw sample value from the bitstream.
                         let raw = bs.read_bits_leq32(bits)?;
 
                         // Dequantize the raw sample.
@@ -187,7 +187,7 @@ impl Layer for Layer1 {
                 let bits = u32::from(alloc[0][sb]);
 
                 if bits != 0 {
-                    // Read the raw sample value from the bistream.
+                    // Read the raw sample value from the bitstream.
                     let raw = bs.read_bits_leq32(bits)?;
 
                     // Dequantize the raw sample.
@@ -202,7 +202,7 @@ impl Layer for Layer1 {
         }
 
         // Each packet will yield 384 audio frames. After reserving frames, all steps must be
-        // infalliable.
+        // infallible.
         out.render_uninit(Some(384));
 
         for (ch, samples) in samples.iter().enumerate().take(num_channels) {

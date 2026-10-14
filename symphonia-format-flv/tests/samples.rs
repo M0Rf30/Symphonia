@@ -100,16 +100,27 @@ fn mp3_in_flv_sample() {
 }
 
 #[test]
-fn unsupported_codecs_are_rejected() {
-    for name in ["unsupported/nellymoser_flv.flv"] {
-        let Some(path) = sample(name)
-        else {
-            continue;
-        };
+fn nellymoser_in_flv_sample() {
+    let Some(path) = sample("unsupported/nellymoser_flv.flv")
+    else {
+        return;
+    };
 
-        let err = FlvReader::try_new(open_file(&path), FormatOptions::default()).err().unwrap();
-        assert!(matches!(err, symphonia_core::errors::Error::Unsupported(_)), "{name}: {err}");
+    let mut reader = FlvReader::try_new(open_file(&path), FormatOptions::default()).unwrap();
+    let params = audio_params(&reader, 0);
+
+    assert_eq!(params.codec, symphonia_core::codecs::audio::well_known::CODEC_ID_NELLYMOSER);
+    assert_eq!(params.sample_rate, Some(22_050));
+    assert_eq!(params.channels.as_ref().unwrap().count(), 1);
+
+    let packets = read_all(&mut reader);
+    let mut next = 0;
+    for p in &packets {
+        assert_eq!(p.pts.get(), next);
+        next += p.dur.get() as i64;
     }
+
+    assert!(next > 0);
 }
 
 #[test]

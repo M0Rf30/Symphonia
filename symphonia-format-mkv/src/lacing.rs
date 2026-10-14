@@ -183,7 +183,7 @@ pub(crate) fn extract_frames(
 
     // Get the track associated with the block. It's an error if the track doesn't exist.
     let track =
-        tracks.get(&track_num).ok_or(Error::DecodeError("mkv: unvalid track number for block"))?;
+        tracks.get(&track_num).ok_or(Error::DecodeError("mkv: invalid track number for block"))?;
 
     let mut pts = match calculate_block_pts(cluster_ts, block_rel_ts, track) {
         Some(pts) => track.snap_pts(pts),

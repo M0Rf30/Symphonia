@@ -18,7 +18,7 @@
 //!
 //! The filters have a combined delay of about 1 ms (43 frames at 44.1 kHz), which is
 //! compensated by dropping the output of the start of the stream, so that PCM frame `k` is
-//! aligned with DSD sample `k * R`. At the end of the stream, [`DsdDecimator::flush`] outputs the
+//! aligned with DSD sample `k * R`. At the end of the stream, [`DsdDecimator::flush_channel`] outputs the
 //! frames that the delay holds back.
 
 use crate::cic::CicFilter;
@@ -381,7 +381,7 @@ impl DsdDecimator {
         Ok(samples_produced)
     }
 
-    /// The number of frames [`flush`](Self::flush) produces: the frames that the delay of the
+    /// The number of frames [`flush_channel`](Self::flush_channel) produces: the frames that the delay of the
     /// filters has held back of the stream so far, a stream of `n` DSD samples being `n / R`
     /// frames long.
     pub fn pending_frames(&self) -> usize {

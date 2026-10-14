@@ -792,7 +792,7 @@ impl EbmlElement<MkvSchema> for BlockAdditionMappingElement {
                     block_add_id_type = it.read_u64()?;
                 }
                 MkvElement::BlockAddIdExtraData => {
-                    // Non-manadatory element. Interpret block addition type ID as FourCC.
+                    // Non-mandatory element. Interpret block addition type ID as FourCC.
                     match &u32::to_be_bytes(block_add_id_type.unwrap_or(0) as u32) {
                         b"dvcC" | b"dvvC" => {
                             extra_data = Some(VideoExtraData {
@@ -1246,7 +1246,7 @@ impl EbmlElement<MkvSchema> for CueTrackPositionsElement {
                 }
                 MkvElement::CueDuration => {
                     // Cue duration is not required but are so numerous we don't want to log them
-                    // as unexpected elements, or when they're skipped. Explictly skip to silence.
+                    // as unexpected elements, or when they're skipped. Explicitly skip to silence.
                     // logs.
                     it.skip_data()?;
                 }

@@ -150,6 +150,9 @@ pub struct PmtStream {
 pub struct Pmt {
     pub program_number: u16,
     pub pcr_pid: u16,
+    /// The format identifier of the registration descriptor of the program, if present. `HDMV` or
+    /// `HDPR` identify a Blu-ray stream.
+    pub registration: Option<[u8; 4]>,
     pub streams: Vec<PmtStream>,
 }
 
@@ -205,6 +208,10 @@ pub fn parse_pmt(section: &[u8]) -> Option<Pmt> {
     let program_info_len = usize::from(section[10] & 0xf) << 8 | usize::from(section[11]);
 
     let end = section.len() - 4;
+
+    let program_descriptors = section.get(12..(12 + program_info_len).min(end))?;
+    let registration = parse_descriptors(program_descriptors).registration;
+
     let mut i = 12 + program_info_len;
     let mut streams = vec![];
 
@@ -224,7 +231,7 @@ pub fn parse_pmt(section: &[u8]) -> Option<Pmt> {
         i += 5 + es_info_len;
     }
 
-    Some(Pmt { program_number, pcr_pid, streams })
+    Some(Pmt { program_number, pcr_pid, registration, streams })
 }
 
 #[cfg(test)]
@@ -271,6 +278,31 @@ mod tests {
         assert_eq!(pmt.streams[0].descriptors.language.as_deref(), Some("eng"));
         assert_eq!(pmt.streams[1].descriptors.registration, Some(*b"Opus"));
         assert_eq!(pmt.streams[1].descriptors.opus_channel_config, Some(2));
+    }
+
+    #[test]
+    fn verify_program_registration_and_ac3_dts_descriptors() {
+        // The program has the HDMV registration descriptor.
+        let mut body = vec![0xe1, 0x00, 0xf0, 0x06, 0x05, 0x04, b'H', b'D', b'M', b'V'];
+        body.extend_from_slice(&[0x83, 0xe1, 0x00, 0xf0, 0x00]);
+        // AC-3 (DVB), E-AC-3 (DVB), and DTS (DVB) descriptors, and a DTS1 registration.
+        body.extend_from_slice(&[0x06, 0xe1, 0x01, 0xf0, 0x03, 0x6a, 0x01, 0x00]);
+        body.extend_from_slice(&[0x06, 0xe1, 0x02, 0xf0, 0x03, 0x7a, 0x01, 0x00]);
+        body.extend_from_slice(&[0x06, 0xe1, 0x03, 0xf0, 0x03, 0x7b, 0x01, 0x00]);
+        body.extend_from_slice(&[0x06, 0xe1, 0x04, 0xf0, 0x06, 0x05, 0x04, b'D', b'T', b'S', b'1']);
+
+        let pmt = parse_pmt(&build_section(2, 1, &body)).unwrap();
+        assert_eq!(pmt.registration, Some(*b"HDMV"));
+        assert_eq!(pmt.streams.len(), 5);
+        assert_eq!(pmt.streams[0].descriptors, StreamDescriptors::default());
+        assert!(pmt.streams[1].descriptors.has_ac3);
+        assert!(pmt.streams[2].descriptors.has_eac3);
+        assert!(pmt.streams[3].descriptors.has_dts);
+        assert_eq!(pmt.streams[4].descriptors.registration, Some(*b"DTS1"));
+
+        // A program without a registration descriptor.
+        let pmt = parse_pmt(&build_section(2, 1, &[0xe1, 0x00, 0xf0, 0x00])).unwrap();
+        assert_eq!(pmt.registration, None);
     }
 
     #[test]

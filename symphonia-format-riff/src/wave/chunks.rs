@@ -12,10 +12,10 @@ use symphonia_core::audio::AmbisonicBFormat;
 use symphonia_core::audio::{ChannelLabel, Channels, Position};
 use symphonia_core::codecs::audio::AudioCodecId;
 use symphonia_core::codecs::audio::well_known::{
-    CODEC_ID_ADPCM_G722, CODEC_ID_ADPCM_G726, CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_MS,
-    CODEC_ID_ADPCM_YAMAHA, CODEC_ID_MP2, CODEC_ID_MP3, CODEC_ID_PCM_ALAW, CODEC_ID_PCM_F32LE,
-    CODEC_ID_PCM_F64LE, CODEC_ID_PCM_MULAW, CODEC_ID_PCM_S16LE, CODEC_ID_PCM_S24LE,
-    CODEC_ID_PCM_S32LE, CODEC_ID_PCM_U8,
+    CODEC_ID_AC3, CODEC_ID_ADPCM_G722, CODEC_ID_ADPCM_G726, CODEC_ID_ADPCM_IMA_WAV,
+    CODEC_ID_ADPCM_MS, CODEC_ID_ADPCM_YAMAHA, CODEC_ID_DCA, CODEC_ID_EAC3, CODEC_ID_MP2,
+    CODEC_ID_MP3, CODEC_ID_PCM_ALAW, CODEC_ID_PCM_F32LE, CODEC_ID_PCM_F64LE, CODEC_ID_PCM_MULAW,
+    CODEC_ID_PCM_S16LE, CODEC_ID_PCM_S24LE, CODEC_ID_PCM_S32LE, CODEC_ID_PCM_U8,
 };
 use symphonia_core::errors::{Error, Result, decode_error, unsupported_error};
 use symphonia_core::formats::Track;
@@ -25,9 +25,9 @@ use symphonia_core::meta::{MetadataBuilder, MetadataLog, MetadataRevision};
 use symphonia_metadata::embedded::riff;
 
 use crate::common::{
-    ByteOrder, ChunkParser, ChunksReader, FormatALaw, FormatAdpcm, FormatData, FormatExtensible,
-    FormatIeeeFloat, FormatMpeg, FormatMuLaw, FormatPcm, Id3Chunk, NullChunks, PacketInfo,
-    ParseChunk, ParseChunkTag,
+    ByteOrder, ChunkParser, ChunksReader, FormatALaw, FormatAdpcm, FormatData, FormatEs,
+    FormatExtensible, FormatIeeeFloat, FormatMpeg, FormatMuLaw, FormatPcm, Id3Chunk, NullChunks,
+    PacketInfo, ParseChunk, ParseChunkTag,
 };
 
 use log::info;
@@ -254,7 +254,7 @@ impl WaveFormatChunk {
         let mut sub_format_guid = [0u8; 16];
         reader.read_buf_exact(&mut sub_format_guid)?;
 
-        // These GUIDs identifiy the format of the data chunks. These definitions can be found in
+        // These GUIDs identify the format of the data chunks. These definitions can be found in
         // ksmedia.h of the Microsoft Windows Platform SDK.
         #[rustfmt::skip]
         const KSDATAFORMAT_SUBTYPE_PCM: [u8; 16] = [
@@ -291,6 +291,20 @@ impl WaveFormatChunk {
             0x03, 0x00, 0x00, 0x00, 0x21, 0x07, 0xd3, 0x11,
             0x86, 0x44, 0xc8, 0xc1, 0xca, 0x00, 0x00, 0x00,
         ];
+
+        // The compressed surround formats are stored as elementary streams that are framed from
+        // the data chunk. They are identified by either their own GUID, or a format tag embedded
+        // in the first four bytes of the standard base GUID.
+        if let Some((codec, spdif)) = es_codec_for_guid(&sub_format_guid) {
+            let channels = match fix_wave_channel_mask(channel_mask, num_channels)
+                .ok()
+                .and_then(Position::from_wave_channel_mask)
+            {
+                Some(positions) => Channels::Positioned(positions),
+                None => map_wave_channel_count(num_channels)?,
+            };
+            return Ok(FormatData::Es(FormatEs { channels, codec, spdif }));
+        }
 
         // Verify support based on the format GUID.
         let codec = match sub_format_guid {
@@ -447,6 +461,20 @@ impl WaveFormatChunk {
         Ok(FormatData::Mpeg(FormatMpeg { codec, channels }))
     }
 
+    fn read_es_fmt<B: ReadBytes>(
+        reader: &mut B,
+        num_channels: u16,
+        len: u32,
+        codec: AudioCodecId,
+        spdif: bool,
+    ) -> Result<FormatData> {
+        // Any extension is not needed: the stream is self-describing.
+        Self::skip_fmt_extension(reader, len)?;
+
+        let channels = map_wave_channel_count(num_channels)?;
+        Ok(FormatData::Es(FormatEs { channels, codec, spdif }))
+    }
+
     pub(crate) fn packet_info(&self) -> Result<PacketInfo> {
         match &self.format_data {
             FormatData::Pcm(pcm) => pcm.make_packet_info(),
@@ -456,6 +484,7 @@ impl WaveFormatChunk {
             FormatData::MuLaw(mulaw) => mulaw.make_packet_info(),
             FormatData::Extensible(ext) => ext.make_packet_info(),
             FormatData::Mpeg(mpeg) => mpeg.make_packet_info(),
+            FormatData::Es(es) => es.make_packet_info(),
         }
     }
 }
@@ -490,6 +519,9 @@ impl ParseChunk for WaveFormatChunk {
         const WAVE_FORMAT_YAMAHA_ADPCM: u16 = 0x0020;
         const WAVE_FORMAT_MPEG: u16 = 0x0050;
         const WAVE_FORMAT_MPEGLAYER3: u16 = 0x0055;
+        const WAVE_FORMAT_DOLBY_AC3_SPDIF: u16 = 0x0092;
+        const WAVE_FORMAT_DVM: u16 = 0x2000;
+        const WAVE_FORMAT_DTS2: u16 = 0x2001;
         const WAVE_FORMAT_EXTENSIBLE: u16 = 0xfffe;
 
         let format_data = match format {
@@ -576,6 +608,14 @@ impl ParseChunk for WaveFormatChunk {
             WAVE_FORMAT_MPEGLAYER3 => Self::read_mpeg_fmt(reader, num_channels, len, CODEC_ID_MP3),
             // The MPEG-1 Audio Layer I/II Format.
             WAVE_FORMAT_MPEG => Self::read_mpeg_fmt(reader, num_channels, len, CODEC_ID_MP2),
+            // Dolby AC-3 (`WAVE_FORMAT_DVM`) as raw frames.
+            WAVE_FORMAT_DVM => Self::read_es_fmt(reader, num_channels, len, CODEC_ID_AC3, false),
+            // Dolby AC-3 in IEC 61937 bursts.
+            WAVE_FORMAT_DOLBY_AC3_SPDIF => {
+                Self::read_es_fmt(reader, num_channels, len, CODEC_ID_AC3, true)
+            }
+            // DTS as raw frames.
+            WAVE_FORMAT_DTS2 => Self::read_es_fmt(reader, num_channels, len, CODEC_ID_DCA, false),
             // Unsupported format.
             _ => return unsupported_error("wav: unsupported wave format"),
         }?;
@@ -640,6 +680,12 @@ impl fmt::Display for WaveFormatChunk {
                 writeln!(f, "\tformat_data: Mpeg {{")?;
                 writeln!(f, "\t\tchannels: {},", mpeg.channels)?;
                 writeln!(f, "\t\tcodec: {},", mpeg.codec)?;
+            }
+            FormatData::Es(ref es) => {
+                writeln!(f, "\tformat_data: Es {{")?;
+                writeln!(f, "\t\tchannels: {},", es.channels)?;
+                writeln!(f, "\t\tcodec: {},", es.codec)?;
+                writeln!(f, "\t\tspdif: {},", es.spdif)?;
             }
         };
 
@@ -1074,6 +1120,42 @@ impl W64ChunksReader {
 }
 
 /// Corrects a WAVE channel mask that doesn't is not valid for the stated number of channels.
+/// Maps the sub-format GUID of a `WAVE_FORMAT_EXTENSIBLE` fmt chunk to a compressed surround
+/// codec and whether the payload is IEC 61937 wrapped.
+pub(super) fn es_codec_for_guid(guid: &[u8; 16]) -> Option<(AudioCodecId, bool)> {
+    // MEDIASUBTYPE_DOLBY_AC3 and KSDATAFORMAT_SUBTYPE_DOLBY_DIGITAL_PLUS, as listed by ffmpeg.
+    #[rustfmt::skip]
+    const GUID_AC3: [u8; 16] = [
+        0x2c, 0x80, 0x6d, 0xe0, 0x46, 0xdb, 0xcf, 0x11,
+        0xb4, 0xd1, 0x00, 0x80, 0x5f, 0x6c, 0xbb, 0xea,
+    ];
+    #[rustfmt::skip]
+    const GUID_EAC3: [u8; 16] = [
+        0xaf, 0x87, 0xfb, 0xa7, 0x02, 0x2d, 0xfb, 0x42,
+        0xa4, 0xd4, 0x05, 0xcd, 0x93, 0x84, 0x3b, 0xdd,
+    ];
+
+    if *guid == GUID_AC3 {
+        return Some((CODEC_ID_AC3, false));
+    }
+    if *guid == GUID_EAC3 {
+        return Some((CODEC_ID_EAC3, false));
+    }
+
+    // Base GUID: {tag-0000-0010-8000-00aa00389b71}.
+    let base = [0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71];
+    if guid[4..] != base {
+        return None;
+    }
+
+    match u32::from_le_bytes([guid[0], guid[1], guid[2], guid[3]]) {
+        0x2000 => Some((CODEC_ID_AC3, false)),
+        0x2001 => Some((CODEC_ID_DCA, false)),
+        0x0092 => Some((CODEC_ID_AC3, true)),
+        _ => None,
+    }
+}
+
 fn fix_wave_channel_mask(mut channel_mask: u32, num_channels: u16) -> Result<u32> {
     let channel_diff = i32::from(num_channels) - channel_mask.count_ones() as i32;
 
@@ -1317,7 +1399,7 @@ mod ds64_tests {
             0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, // dataSize64
             0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, // sampleCount64
             0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // tableLength = 1
-            0x01, 0x00, 0x00, 0x00, // table entry: "levl" + size
+            0x01, 0x00, 0x00, 0x00, // table entry: "level" + size
             b'l', b'e', b'v', b'l', 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00,
         ];
 

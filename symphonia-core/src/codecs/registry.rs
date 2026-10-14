@@ -346,7 +346,7 @@ impl CodecRegistry {
     }
 }
 
-/// Convience macro for declaring `CodecProfileInfo`.
+/// Convenience macro for declaring `CodecProfileInfo`.
 #[macro_export]
 macro_rules! codec_profile {
     ($id:expr, $short_name:expr, $long_name:expr) => {

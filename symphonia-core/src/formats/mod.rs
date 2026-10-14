@@ -131,7 +131,7 @@ pub struct ExternalFormatData {
     /// Optional metadata.
     ///
     /// When provided, the `FormatReader` will take the metadata revisions in this log and use them
-    /// as them as the first metdata revisions for the container.
+    /// as them as the first metadata revisions for the container.
     pub metadata: Option<MetadataLog>,
     /// Optional chapter information.
     pub chapters: Option<ChapterGroup>,
@@ -143,7 +143,7 @@ pub struct ExternalFormatData {
     pub sidecar: Option<SidecarSource>,
 }
 
-/// A cloneable, take-once handle to a caller-provided secondary [`MediaSource`] (a "sidecar"
+/// A cloneable, take-once handle to a caller-provided secondary [`MediaSource`](crate::io::MediaSource) (a "sidecar"
 /// file) that accompanies the primary source passed to a `FormatReader`.
 ///
 /// `FormatOptions` must be `Clone`, but a `MediaSource` generally cannot be, so the source is

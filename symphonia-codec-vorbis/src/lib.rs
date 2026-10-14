@@ -52,7 +52,7 @@ use window::Windows;
 pub struct VorbisDecoder {
     /// Decoder options.
     opts: AudioDecoderOptions,
-    /// Codec paramters.
+    /// Codec parameters.
     params: AudioCodecParameters,
     /// Identity header.
     ident: IdentHeader,
@@ -572,7 +572,7 @@ fn read_time_domain_transforms(bs: &mut BitReaderRtl<'_>) -> Result<()> {
     for _ in 0..count {
         // All these values are placeholders and must be 0.
         if bs.read_bits_leq32(16)? != 0 {
-            return decode_error("vorbis: invalid time domain tranform");
+            return decode_error("vorbis: invalid time domain transform");
         }
     }
 

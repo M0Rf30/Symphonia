@@ -17,7 +17,8 @@ use symphonia_common::mpeg::es::{
 use symphonia_core::audio::{Channels, Position};
 use symphonia_core::codecs::audio::AudioCodecParameters;
 use symphonia_core::codecs::audio::well_known::{
-    CODEC_ID_AC3, CODEC_ID_ADPCM_SWF, CODEC_ID_EAC3, CODEC_ID_FLAC, CODEC_ID_OPUS,
+    CODEC_ID_AC3, CODEC_ID_ADPCM_SWF, CODEC_ID_EAC3, CODEC_ID_FLAC, CODEC_ID_NELLYMOSER,
+    CODEC_ID_OPUS, CODEC_ID_SPEEX,
 };
 use symphonia_core::errors::{Result, decode_error, unsupported_error};
 
@@ -31,6 +32,13 @@ const AC3_FRAME_SAMPLES: u64 = 1536;
 /// The number of frames of a block of SWF ADPCM, which is its initial sample and 4095 coded samples.
 const SWF_ADPCM_BLOCK_FRAMES: u64 = 4096;
 
+/// The length in bytes of a block of Nellymoser, and the number of frames that it decodes to.
+const NELLYMOSER_BLOCK_BYTES: usize = 64;
+const NELLYMOSER_BLOCK_FRAMES: u64 = 256;
+
+/// The number of frames of a Speex frame of wideband (FLV Speex is always 16 kHz, 20 ms per tag).
+const SPEEX_FRAME_FRAMES: u64 = 320;
+
 /// The length of the STREAMINFO block of FLAC.
 const FLAC_STREAMINFO_LEN: usize = 34;
 
@@ -41,6 +49,8 @@ enum Codec {
     SwfAdpcm { channels: usize },
     Ac3,
     Eac3,
+    Nellymoser,
+    Speex,
 }
 
 /// A parser for tags that contain frames of Opus, FLAC, AC-3, or E-AC-3.
@@ -186,6 +196,42 @@ impl FramedEs {
         }
     }
 
+    /// Create a parser for mono Nellymoser audio of the sample rate `rate`. A tag is one or more
+    /// blocks of 64 bytes, each of 256 frames.
+    pub fn nellymoser(rate: u32) -> Self {
+        let mut params = AudioCodecParameters::new();
+        params
+            .for_codec(CODEC_ID_NELLYMOSER)
+            .with_sample_rate(rate)
+            .with_channels(Channels::Positioned(Position::FRONT_LEFT));
+
+        FramedEs {
+            codec: Codec::Nellymoser,
+            info: Some(EsInfo { params, rate }),
+            grid: 0,
+            pending: VecDeque::new(),
+            pushed: 0,
+        }
+    }
+
+    /// Create a parser for Speex audio, which in FLV is always 16 kHz mono, a tag is one 20 ms
+    /// frame, and there is no header.
+    pub fn speex() -> Self {
+        let mut params = AudioCodecParameters::new();
+        params
+            .for_codec(CODEC_ID_SPEEX)
+            .with_sample_rate(16_000)
+            .with_channels(Channels::Positioned(Position::FRONT_LEFT));
+
+        FramedEs {
+            codec: Codec::Speex,
+            info: Some(EsInfo { params, rate: 16_000 }),
+            grid: SPEEX_FRAME_FRAMES,
+            pending: VecDeque::new(),
+            pushed: 0,
+        }
+    }
+
     /// Create a parser for an AC-3 (or E-AC-3) stream. The stream info is found from the first
     /// frame.
     pub fn ac3(eac3: bool) -> Self {
@@ -226,6 +272,11 @@ impl FramedEs {
                 let dur = swf_adpcm_frames(data, channels);
                 (dur > 0).then_some(dur)
             }
+            Codec::Nellymoser => {
+                let blocks = (data.len() / NELLYMOSER_BLOCK_BYTES) as u64;
+                (blocks > 0).then_some(blocks * NELLYMOSER_BLOCK_FRAMES)
+            }
+            Codec::Speex => (!data.is_empty()).then_some(SPEEX_FRAME_FRAMES),
             Codec::Flac { max_block } => {
                 if data.is_empty() {
                     return None;
@@ -298,6 +349,10 @@ impl EsParser for FramedEs {
             Codec::Opus => target - OPUS_SEEK_PREROLL,
             // The transform overlaps with the previous frame.
             Codec::Ac3 | Codec::Eac3 => target - AC3_FRAME_SAMPLES as i64,
+            // The transform overlaps with the previous block.
+            Codec::Nellymoser => target - NELLYMOSER_BLOCK_FRAMES as i64,
+            // The synthesis filters and the pitch predictor have memory of the previous frame.
+            Codec::Speex => target - SPEEX_FRAME_FRAMES as i64,
             Codec::Flac { .. } | Codec::SwfAdpcm { .. } => target,
         }
     }
@@ -560,6 +615,25 @@ mod tests {
         // Not a frame.
         assert_eq!(flac_block_size(&[0xff, 0xf8, 0x09, 0x18, 0x00]), None);
         assert_eq!(flac_block_size(&[0x12, 0xf8, 0xc9, 0x18, 0x00]), None);
+    }
+
+    #[test]
+    fn verify_nellymoser_and_speex_durations() {
+        let mut es = FramedEs::nellymoser(22_050);
+        assert_eq!(es.info().unwrap().rate, 22_050);
+        es.push(&[0u8; 63]);
+        es.push(&[0u8; 128]);
+        assert_eq!(es.next_frame(false).unwrap().dur, 512);
+        assert!(es.next_frame(true).is_none());
+
+        let mut es = FramedEs::speex();
+        let info = es.info().unwrap();
+        assert_eq!(info.rate, 16_000);
+        assert!(info.params.extra_data.is_none());
+        es.push(&[1u8; 42]);
+        es.push(&[]);
+        assert_eq!(es.next_frame(false).unwrap().dur, 320);
+        assert!(es.next_frame(true).is_none());
     }
 
     #[test]

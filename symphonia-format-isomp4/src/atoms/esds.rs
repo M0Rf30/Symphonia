@@ -6,7 +6,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use symphonia_core::codecs::CodecId;
-use symphonia_core::codecs::audio::well_known::CODEC_ID_AAC;
+use symphonia_core::codecs::audio::well_known::{
+    CODEC_ID_AAC, CODEC_ID_AC3, CODEC_ID_DCA, CODEC_ID_EAC3,
+};
 use symphonia_core::codecs::video::{VIDEO_EXTRA_DATA_ID_NULL, VideoExtraData};
 use symphonia_core::errors::Error;
 use symphonia_core::io::BufReader;
@@ -78,7 +80,13 @@ impl EsdsAtom {
 
         if let Some(ds_config) = self.es_desc.dec_config.dec_specific_info {
             // Try to read the audio specific configuration and populate the audio sample entry.
-            if let Ok(asc) = AudioSpecificConfig::read(&ds_config.extra_data) {
+            // The decoder specific info of AC-3, E-AC-3, and DTS is not an audio specific
+            // configuration.
+            let is_asc = !matches!(entry.codec_id, CODEC_ID_AC3 | CODEC_ID_EAC3 | CODEC_ID_DCA);
+
+            if let Some(asc) =
+                is_asc.then(|| AudioSpecificConfig::read(&ds_config.extra_data).ok()).flatten()
+            {
                 entry.profile = get_audio_codec_profile(&asc);
 
                 if entry.codec_id == CODEC_ID_AAC {

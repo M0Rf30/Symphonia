@@ -1656,7 +1656,7 @@ fn is_maybe_vbri_tag(buf: &[u8], header: &FrameHeader) -> bool {
         return false;
     }
 
-    // The bytes preceeding the VBRI tag (mostly the side information) should be all 0.
+    // The bytes preceding the VBRI tag (mostly the side information) should be all 0.
     !buf[header.header_size()..VBRI_TAG_OFFSET].iter().any(|&b| b != 0)
 }
 

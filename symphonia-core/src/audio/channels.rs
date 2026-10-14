@@ -274,7 +274,7 @@ impl From<AmbisonicBFormat> for ChannelLabel {
 #[non_exhaustive]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Channels {
-    /// Channels are assigned explict speaker positions. A bit set to 1 indicates that the
+    /// Channels are assigned explicit speaker positions. A bit set to 1 indicates that the
     /// corresponding channel position is present.
     Positioned(Position),
     /// Channels 0 to the specified count (0..count) are discrete and independent channels.

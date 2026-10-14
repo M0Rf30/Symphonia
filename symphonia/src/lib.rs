@@ -28,6 +28,7 @@
 //! |----------|--------------|----------|---------|
 //! | AIFF     | `aiff`       | Yes      | No      |
 //! | CAF      | `caf`        | No       | No      |
+//! | Elementary streams (AC-3, E-AC-3, DTS, TrueHD/MLP) | `es` | No | No |
 //! | FLV (audio) | `flv`     | No       | No      |
 //! | ISO/MP4  | `isomp4`     | No       | No      |
 //! | MPEG-PS (audio) | `mpegps` | No    | No      |
@@ -49,14 +50,19 @@
 //! |----------|--------------|---------|---------|
 //! | AAC-LC, HE-AAC v1/v2, multichannel | `aac` | No | No |
 //! | ADPCM    | `adpcm`      | Yes     | Yes     |
+//! | AC-3, E-AC-3 | `ac3`     | No      | No      |
 //! | ALAC     | `alac`       | Yes     | No      |
+//! | DTS (core, XCH/XXCH/X96/XBR, XLL) | `dca` | No | No |
 //! | FLAC     | `flac`       | Yes     | Yes     |
 //! | MP1      | `mp1`, `mpa` | No      | No      |
 //! | MP2      | `mp2`, `mpa` | No      | No      |
 //! | MP3      | `mp3`, `mpa` | Yes     | No      |
 //! | Musepack | `musepack`   | Yes     | No      |
+//! | Nellymoser | `nellymoser` | No    | No      |
 //! | Opus     | `opus`       | Yes     | Yes     |
 //! | PCM      | `pcm`        | Yes     | Yes     |
+//! | Speex    | `speex`      | Yes     | No      |
+//! | TrueHD, MLP | `truehd`  | No      | No      |
 //! | Vorbis   | `vorbis`     | Yes     | Yes     |
 //!
 //! **Tip:** All codecs can be enabled with the `all-codecs` feature flag. Similarly, all MPEG
@@ -107,7 +113,7 @@
 //!
 //! ## Warnings
 //!
-//! * SemVer compatibilty is **not** guaranteed. Be prepared for build failures.
+//! * SemVer compatibility is **not** guaranteed. Be prepared for build failures.
 //! * Experimental features and their associated feature flags **may be removed at any time.**
 //! * Functionality **may change or break at any time.**
 //! * Again, **never** use in any production application.
@@ -143,16 +149,26 @@ pub mod default {
         pub use symphonia_bundle_musepack::MpcDecoder;
         #[cfg(feature = "aac")]
         pub use symphonia_codec_aac::AacDecoder;
+        #[cfg(feature = "ac3")]
+        pub use symphonia_codec_ac3::Ac3Decoder;
         #[cfg(feature = "adpcm")]
         pub use symphonia_codec_adpcm::AdpcmDecoder;
         #[cfg(feature = "alac")]
         pub use symphonia_codec_alac::AlacDecoder;
+        #[cfg(feature = "dca")]
+        pub use symphonia_codec_dca::DcaDecoder;
         #[cfg(feature = "dsd")]
         pub use symphonia_codec_dsd::DsdDecoder;
+        #[cfg(feature = "nellymoser")]
+        pub use symphonia_codec_nellymoser::NellymoserDecoder;
         #[cfg(feature = "opus")]
         pub use symphonia_codec_opus::OpusAudioDecoder;
         #[cfg(feature = "pcm")]
         pub use symphonia_codec_pcm::PcmDecoder;
+        #[cfg(feature = "speex")]
+        pub use symphonia_codec_speex::SpeexDecoder;
+        #[cfg(feature = "truehd")]
+        pub use symphonia_codec_truehd::TrueHdDecoder;
         #[cfg(feature = "vorbis")]
         pub use symphonia_codec_vorbis::VorbisDecoder;
         #[cfg(feature = "wavpack")]
@@ -189,6 +205,8 @@ pub mod default {
         pub use symphonia_format_caf::CafReader;
         #[cfg(feature = "dsd")]
         pub use symphonia_format_dsd::{CODEC_TYPE_DSD, DffReader, DsfReader};
+        #[cfg(feature = "es")]
+        pub use symphonia_format_es::{Ac3Reader, DtsReader, TrueHdReader};
         #[cfg(feature = "flv")]
         pub use symphonia_format_flv::FlvReader;
         #[cfg(feature = "isomp4")]
@@ -273,11 +291,17 @@ pub mod default {
         #[cfg(feature = "adpcm")]
         registry.register_audio_decoder::<codecs::AdpcmDecoder>();
 
+        #[cfg(feature = "ac3")]
+        registry.register_audio_decoder::<codecs::Ac3Decoder>();
+
         #[cfg(feature = "alac")]
         registry.register_audio_decoder::<codecs::AlacDecoder>();
 
         #[cfg(feature = "ape-format")]
         registry.register_audio_decoder::<codecs::ApeDecoder>();
+
+        #[cfg(feature = "dca")]
+        registry.register_audio_decoder::<codecs::DcaDecoder>();
 
         #[cfg(feature = "dsd")]
         registry.register_audio_decoder::<codecs::DsdDecoder>();
@@ -291,8 +315,17 @@ pub mod default {
         #[cfg(any(feature = "mp1", feature = "mp2", feature = "mp3"))]
         registry.register_audio_decoder::<codecs::MpaDecoder>();
 
+        #[cfg(feature = "nellymoser")]
+        registry.register_audio_decoder::<codecs::NellymoserDecoder>();
+
         #[cfg(feature = "pcm")]
         registry.register_audio_decoder::<codecs::PcmDecoder>();
+
+        #[cfg(feature = "speex")]
+        registry.register_audio_decoder::<codecs::SpeexDecoder>();
+
+        #[cfg(feature = "truehd")]
+        registry.register_audio_decoder::<codecs::TrueHdDecoder>();
 
         #[cfg(feature = "opus")]
         registry.register_audio_decoder::<codecs::OpusAudioDecoder>();
@@ -332,6 +365,15 @@ pub mod default {
 
         #[cfg(feature = "flac")]
         probe.register_format::<formats::FlacReader<'_>>();
+
+        #[cfg(feature = "es")]
+        probe.register_format::<formats::Ac3Reader<'_>>();
+
+        #[cfg(feature = "es")]
+        probe.register_format::<formats::DtsReader<'_>>();
+
+        #[cfg(feature = "es")]
+        probe.register_format::<formats::TrueHdReader<'_>>();
 
         #[cfg(feature = "flv")]
         probe.register_format::<formats::FlvReader<'_>>();

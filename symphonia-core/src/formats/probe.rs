@@ -183,7 +183,7 @@ type ScoreFn = fn(ScopedStream<&mut MediaSourceStream<'_>>) -> Result<Score>;
 struct GenericProbeMatch {
     /// The match specification.
     spec: ProbeDataMatchSpec,
-    /// A function to assign a likelyhood score that the media source, readable with scoped access
+    /// A function to assign a likelihood score that the media source, readable with scoped access
     /// via. the provided stream, is the start of a metadate or container format
     score: ScoreFn,
     /// Format or metadata reader specific match information.
@@ -318,7 +318,7 @@ pub trait ProbeableMetadata<'s>: MetadataReader + Scoreable {
 /// `MediaSourceStream` abstracts away such details. However, the embedder may have this information
 /// from a file path, HTTP header, email attachment metadata, etc. `Hint`s are optional, and won't
 /// lead the probe astray if they're wrong, but they may provide an informed initial guess and
-/// optimize the guessing process siginificantly especially as more formats are registered.
+/// optimize the guessing process significantly especially as more formats are registered.
 #[derive(Clone, Debug, Default)]
 pub struct Hint {
     extension: Option<String>,
@@ -608,7 +608,7 @@ impl Probe {
         // Probe the anchor points.
         for anchor in self.anchors.iter().copied().map(u64::from) {
             // Skip anchor if the anchor offset exceeds the source length, or intersects the last
-            // read preceeds the end of the last successful read.
+            // read precedes the end of the last successful read.
             if anchor > end || end - anchor < last_reader_end {
                 debug!("skipping trailing metadata offset -{anchor}");
                 continue;
@@ -645,7 +645,7 @@ impl Probe {
 
                     if !is_ok {
                         warn!(
-                            "skipping trailing '{}' metdata due to error while reading it",
+                            "skipping trailing '{}' metadata due to error while reading it",
                             reader.metadata_info().short_name
                         );
                     }
@@ -870,7 +870,7 @@ fn read_and_append_metadata<'s>(
     reader: &mut Box<dyn MetadataReader + 's>,
     fmt_opts: &mut FormatOptions,
 ) -> Result<()> {
-    // Read all metadata and get a metdata revision.
+    // Read all metadata and get a metadata revision.
     let metadata = reader.read_all()?;
 
     debug!("appending '{}' metadata", reader.metadata_info().short_name);

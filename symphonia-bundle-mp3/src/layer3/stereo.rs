@@ -95,7 +95,7 @@ lazy_static! {
 }
 
 lazy_static! {
-    /// (Left, right) channel coeffcients for decoding intensity stereo in MPEG1 bitstreams.
+    /// (Left, right) channel coefficients for decoding intensity stereo in MPEG1 bitstreams.
     ///
     /// These coefficients are derived from section 2.4.3.4.9.3 of ISO/IEC 11172-3.
     ///
@@ -379,7 +379,7 @@ fn process_intensity_short_block(
 
     // The intensity position for the final band (last three short windows) is not coded and is
     // copied from the previous band. Therefore, the number of coded scale-factors is 3 less than
-    // the number of scale-factor indicies (e.g., 35 for a mixed block with 8 long bands and 9 short
+    // the number of scale-factor indices (e.g., 35 for a mixed block with 8 long bands and 9 short
     // bands with 3 windows each, and 36 for a short block). The same applies to the invalid
     // intensity positions.
     let n_coded = sfi - 3;

@@ -513,7 +513,7 @@ pub fn print_pair_value(value: &str, lead: usize) {
             for (j, seg) in (0..)
                 .map(|_| {
                     // Try to wrap at the first whitespace character after 60 characters, or force
-                    // wrapping at 80 charaters. C0 control characters will be replaced with their
+                    // wrapping at 80 characters. C0 control characters will be replaced with their
                     // respective graphical symbols, while C1 control characters will be silently
                     // removed.
                     chars
@@ -767,7 +767,7 @@ fn fmt_tag(tag: &Tag) -> FormattedTag<'_> {
         StandardTag::Arranger(v) => FormattedTag::new("Arranger", &**v),
         StandardTag::ArtDirector(v) => FormattedTag::new("Art Directory", &**v),
         StandardTag::Artist(v) => FormattedTag::new("Artist", &**v),
-        StandardTag::AssistantDirector(v) => FormattedTag::new("Assisstant Director", &**v),
+        StandardTag::AssistantDirector(v) => FormattedTag::new("Assistant Director", &**v),
         StandardTag::Author(v) => FormattedTag::new("Author", &**v),
         StandardTag::Bpm(v) => FormattedTag::new("BPM", v.to_string()),
         StandardTag::CdToc(v) => FormattedTag::new("CD Table of Contents", &**v),

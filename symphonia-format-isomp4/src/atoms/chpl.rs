@@ -31,7 +31,7 @@ impl Atom for ChplAtom {
     fn read<R: ReadAtom>(it: &mut AtomIterator<R>, _header: &AtomHeader) -> Result<Self> {
         let (version, _) = it.read_extended_header()?;
 
-        // Version 1 has 4 reserved bytes preceeding the chapter count.
+        // Version 1 has 4 reserved bytes preceding the chapter count.
         if version == 1 {
             it.ignore_bytes(4)?;
         }

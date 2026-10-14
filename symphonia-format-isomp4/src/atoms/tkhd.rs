@@ -48,7 +48,7 @@ impl Atom for TkhdAtom {
             volume: Default::default(),
         };
 
-        // Version 0 uses 32-bit time values, verion 1 used 64-bit values.
+        // Version 0 uses 32-bit time values, version 1 used 64-bit values.
         if version > 1 {
             return decode_error("isomp4 (tkhd): invalid version");
         }

@@ -50,7 +50,7 @@ impl Validator {
         // Calculate the total size of all the samples in bytes.
         let buf_len = n_channels * n_frames * bytes_per_sample;
 
-        // Ensure the byte buffer length can accomodate all the samples.
+        // Ensure the byte buffer length can accommodate all the samples.
         if self.buf.len() < buf_len {
             self.buf.resize(buf_len, 0u8);
         }

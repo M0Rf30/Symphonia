@@ -42,8 +42,34 @@ pub struct PesHeader {
     pub pts: Option<u64>,
     /// The decode timestamp, if present.
     pub dts: Option<u64>,
+    /// The `stream_id_extension` of the PES extension (ISO/IEC 13818-1 §2.4.3.7), if present. The
+    /// stream ID is then `0xfd` (extended stream ID). Blu-ray distinguishes the TrueHD (`0x72`)
+    /// and the embedded AC-3 (`0x76`) parts of a combined stream with it.
+    pub extended_stream_id: Option<u8>,
     /// The offset of the first byte of the payload from the first byte of the start code.
     pub payload_offset: usize,
+}
+
+/// Parse the PES extension in the optional header data `ext`, which begins at the PES extension
+/// flags, and return the `stream_id_extension`, if the extension has one.
+fn parse_extended_stream_id(ext: &[u8]) -> Option<u8> {
+    let flags = *ext.first()?;
+
+    // The PES extension 2 flag (bit 0) must be set, and the pack header field flag (bit 6) clear
+    // as its size is not known.
+    if flags & 0x41 != 0x01 {
+        return None;
+    }
+
+    // Skip the PES private data (16 bytes), the program packet sequence counter (2 bytes), and the
+    // P-STD buffer (2 bytes).
+    let skip = usize::from((flags >> 4) & 0xb);
+    let skip = skip + (skip & 0x9);
+
+    // The PES extension field length, and the stream ID extension flag followed by the value.
+    let field = ext.get(1 + skip..1 + skip + 2)?;
+
+    (field[0] & 0x7f > 0 && field[1] & 0x80 == 0).then_some(field[1])
 }
 
 impl PesHeader {
@@ -96,7 +122,14 @@ pub fn parse_pes_header(buf: &[u8]) -> Option<PesHeader> {
     let packet_len = usize::from(u16::from_be_bytes([buf[4], buf[5]]));
 
     if !stream_id_has_header(stream_id) {
-        return Some(PesHeader { stream_id, packet_len, pts: None, dts: None, payload_offset: 6 });
+        return Some(PesHeader {
+            stream_id,
+            packet_len,
+            pts: None,
+            dts: None,
+            extended_stream_id: None,
+            payload_offset: 6,
+        });
     }
 
     let flags = *buf.get(6)?;
@@ -132,7 +165,24 @@ pub fn parse_pes_header(buf: &[u8]) -> Option<PesHeader> {
             return None;
         }
 
-        return Some(PesHeader { stream_id, packet_len, pts, dts, payload_offset });
+        // The PES extension, if its flag is set, follows the timestamps. As in FFmpeg, the other
+        // optional fields between them (ESCR, ES rate, DSM trick mode, additional copy info, and
+        // CRC) are assumed absent.
+        let extended_stream_id = if buf[7] & 0x01 != 0 {
+            buf.get(9 + ts_len..payload_offset).and_then(parse_extended_stream_id)
+        }
+        else {
+            None
+        };
+
+        return Some(PesHeader {
+            stream_id,
+            packet_len,
+            pts,
+            dts,
+            extended_stream_id,
+            payload_offset,
+        });
     }
 
     // MPEG-1 packet header: stuffing bytes, then an optional STD buffer size, then optional
@@ -177,7 +227,7 @@ pub fn parse_pes_header(buf: &[u8]) -> Option<PesHeader> {
         return None;
     }
 
-    Some(PesHeader { stream_id, packet_len, pts, dts, payload_offset: i })
+    Some(PesHeader { stream_id, packet_len, pts, dts, extended_stream_id: None, payload_offset: i })
 }
 
 /// Split a complete PES packet into the PES header and the payload. The payload is bounded by
@@ -257,6 +307,42 @@ mod tests {
         assert_eq!(hdr.dts, None);
         assert_eq!(hdr.payload_offset, 14);
         assert_eq!(hdr.payload_len(), Some(8));
+    }
+
+    #[test]
+    fn verify_stream_id_extension() {
+        // The Blu-ray form: PTS, then the PES extension 2 with the stream ID extension 0x76.
+        let mut pes = vec![0, 0, 1, 0xfd, 0x00, 0x20, 0x81, 0x81, 0x08];
+        pes.extend_from_slice(&write_timestamp(90_000, 0b0010));
+        pes.extend_from_slice(&[0x01, 0x81, 0x76, 1, 2, 3]);
+
+        let hdr = parse_pes_header(&pes).unwrap();
+        assert_eq!(hdr.extended_stream_id, Some(0x76));
+        assert_eq!(hdr.pts, Some(90_000));
+        assert_eq!(hdr.payload_offset, 17);
+
+        // With the PES private data (16 bytes) and the P-STD buffer (2 bytes) before it.
+        let mut pes = vec![0, 0, 1, 0xfd, 0x00, 0x40, 0x81, 0x81, 0x00];
+        let mut ext = vec![0b1001_0001];
+        ext.extend_from_slice(&[0xaa; 16]);
+        ext.extend_from_slice(&[0x60, 0x00, 0x81, 0x72]);
+        pes[8] = ext.len() as u8;
+        pes.extend_from_slice(&ext);
+        pes.extend_from_slice(&[0; 8]);
+        // The PTS is not present: the flags byte is 0x01.
+        pes[7] = 0x01;
+        assert_eq!(parse_pes_header(&pes).unwrap().extended_stream_id, Some(0x72));
+
+        // The stream ID extension flag is set, so there is no stream ID extension, or the
+        // extension has the pack header field flag.
+        let pes = [0, 0, 1, 0xfd, 0x00, 0x08, 0x81, 0x01, 0x03, 0x01, 0x81, 0xf6, 0, 0];
+        assert_eq!(parse_pes_header(&pes).unwrap().extended_stream_id, None);
+        let pes = [0, 0, 1, 0xfd, 0x00, 0x08, 0x81, 0x01, 0x03, 0x41, 0x81, 0x76, 0, 0];
+        assert_eq!(parse_pes_header(&pes).unwrap().extended_stream_id, None);
+
+        // No PES extension.
+        let pes = [0, 0, 1, 0xc0, 0x00, 0x08, 0x81, 0x00, 0x00, 0, 0, 0];
+        assert_eq!(parse_pes_header(&pes).unwrap().extended_stream_id, None);
     }
 
     #[test]

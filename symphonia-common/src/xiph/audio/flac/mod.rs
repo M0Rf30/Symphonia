@@ -170,7 +170,7 @@ impl StreamInfo {
             return decode_error("flac: stream bits per sample are out of bounds");
         }
 
-        // Read the total number of samples. All values are valid. A value of 0 indiciates a stream
+        // Read the total number of samples. All values are valid. A value of 0 indicates a stream
         // of unknown length.
         info.n_samples = match br.read_bits_leq64(36)? {
             0 => None,

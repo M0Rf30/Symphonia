@@ -365,15 +365,6 @@ impl AudioFlags {
     }
 }
 
-/// The name of an unsupported sound format.
-fn unsupported_format_name(format: u8) -> &'static str {
-    match format {
-        SOUND_NELLYMOSER_16K | SOUND_NELLYMOSER_8K | SOUND_NELLYMOSER => "nellymoser",
-        SOUND_SPEEX => "speex",
-        _ => "unknown",
-    }
-}
-
 /// Create the elementary stream for the audio of `unit`, and the number of samples to skip at the
 /// start of the stream. Returns `None` if the audio cannot be configured by this unit (an AAC
 /// tag that is not the sequence header).
@@ -426,6 +417,12 @@ fn make_es(unit: &AudioUnit<'_>) -> Result<Option<(EsTrack, u32)>> {
             Box::new(PcmEs::new(params, flags.channels().count()))
         }
         SOUND_ADPCM => Box::new(FramedEs::swf_adpcm(flags.rate, flags.channels())),
+        // Nellymoser is mono, and the sound rate field only gives the rate of format 6.
+        SOUND_NELLYMOSER_16K => Box::new(FramedEs::nellymoser(16_000)),
+        SOUND_NELLYMOSER_8K => Box::new(FramedEs::nellymoser(8_000)),
+        SOUND_NELLYMOSER => Box::new(FramedEs::nellymoser(flags.rate)),
+        // Speex is always 16 kHz mono, whatever the flags say.
+        SOUND_SPEEX => Box::new(FramedEs::speex()),
         SOUND_EX_HEADER => {
             let configures = unit.packet_type == PKT_SEQUENCE_START;
             let has_frames = unit.packet_type == PKT_CODED_FRAMES;
@@ -456,8 +453,7 @@ fn make_es(unit: &AudioUnit<'_>) -> Result<Option<(EsTrack, u32)>> {
             }
         }
         format => {
-            let name = unsupported_format_name(format);
-            warn!("flv: unsupported audio format {format} ({name})");
+            warn!("flv: unsupported audio format {format}");
             return unsupported_error("flv: unsupported audio codec");
         }
     };

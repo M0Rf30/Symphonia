@@ -15,8 +15,8 @@ use std::io::Cursor;
 
 use symphonia_core::codecs::audio::well_known::{
     CODEC_ID_AAC, CODEC_ID_AC3, CODEC_ID_ADPCM_SWF, CODEC_ID_EAC3, CODEC_ID_FLAC, CODEC_ID_MP2,
-    CODEC_ID_OPUS, CODEC_ID_PCM_ALAW, CODEC_ID_PCM_MULAW, CODEC_ID_PCM_S16BE, CODEC_ID_PCM_S16LE,
-    CODEC_ID_PCM_U8,
+    CODEC_ID_NELLYMOSER, CODEC_ID_OPUS, CODEC_ID_PCM_ALAW, CODEC_ID_PCM_MULAW, CODEC_ID_PCM_S16BE,
+    CODEC_ID_PCM_S16LE, CODEC_ID_PCM_U8, CODEC_ID_SPEEX,
 };
 use symphonia_core::errors::Error;
 use symphonia_core::formats::probe::{Hint, Probe, Score, Scoreable};
@@ -456,7 +456,7 @@ fn files_without_audio_are_rejected() {
 
     // Unsupported audio.
     let mut mux = FlvMux::new();
-    mux.audio(0, 0x6f, &[0u8; 100]);
+    mux.audio(0, 0xcf, &[0u8; 100]);
     let mss = MediaSourceStream::new(Box::new(Cursor::new(mux.out)), Default::default());
     let err = FlvReader::try_new(mss, FormatOptions::default()).err().unwrap();
     assert!(matches!(err, Error::Unsupported(_)));
@@ -757,6 +757,79 @@ fn swf_adpcm_blocks() {
         assert_eq!((p.pts.get(), p.dur.get()), (ts, frames));
         ts += frames as i64;
     }
+}
+
+#[test]
+fn nellymoser_rates_and_durations() {
+    // (flags, expected rate). Format 4: 16 kHz, 5: 8 kHz, 6: the sound rate field.
+    for (flags, rate) in [
+        (4u8 << 4 | 3 << 2 | 2, 16_000),
+        (5 << 4 | 3 << 2 | 2, 8_000),
+        (6 << 4 | 2, 5512),
+        (6 << 4 | 1 << 2 | 2, 11_025),
+        (6 << 4 | 2 << 2 | 2, 22_050),
+        (6 << 4 | 3 << 2 | 2, 44_100),
+    ] {
+        let mut mux = FlvMux::new();
+        let mut ts = 0u64;
+
+        for n in 0..10usize {
+            let blocks = 1 + n % 2;
+            mux.audio((ts * 1000 / u64::from(rate)) as u32, flags, &vec![0u8; 64 * blocks]);
+            ts += 256 * blocks as u64;
+        }
+
+        let mut reader = open(mux.out);
+        let params = audio_params(&reader, 0);
+        assert_eq!(params.codec, CODEC_ID_NELLYMOSER);
+        assert_eq!(params.sample_rate, Some(rate));
+        assert_eq!(params.channels.as_ref().unwrap().count(), 1);
+
+        let packets = read_all(&mut reader);
+        assert_eq!(packets.len(), 10);
+
+        let mut ts = 0;
+        for (n, p) in packets.iter().enumerate() {
+            let frames = 256 * (1 + n as i64 % 2);
+            assert_eq!((p.pts.get(), p.dur.get()), (ts, frames as u64));
+            ts += frames;
+        }
+    }
+}
+
+#[test]
+fn speex_is_16khz_mono() {
+    // The flags of FFmpeg's muxer: 11025 Hz, 16-bit, mono. The demuxer ignores the rate and
+    // channels.
+    let mut mux = FlvMux::new();
+
+    for n in 0..100u32 {
+        mux.audio(n * 20, 11 << 4 | 1 << 2 | 2, &[0x55u8; 42]);
+    }
+
+    let data = mux.out;
+    let mut reader = open(data.clone());
+    let params = audio_params(&reader, 0);
+    assert_eq!(params.codec, CODEC_ID_SPEEX);
+    assert_eq!(params.sample_rate, Some(16_000));
+    assert_eq!(params.channels.as_ref().unwrap().count(), 1);
+    assert!(params.extra_data.is_none());
+
+    let packets = read_all(&mut reader);
+    assert_eq!(packets.len(), 100);
+
+    for (n, p) in packets.iter().enumerate() {
+        assert_eq!((p.pts.get(), p.dur.get()), (n as i64 * 320, 320));
+    }
+
+    // Seeking starts a frame before the target, for the memory of the decoder.
+    let mut reader = open(data);
+    let target = 50 * 320 + 7;
+    let seeked = reader
+        .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(target), track_id: 0 })
+        .unwrap();
+    assert_eq!(seeked.actual_ts.get(), 49 * 320);
+    assert_eq!(reader.next_packet().unwrap().unwrap().pts, seeked.actual_ts);
 }
 
 /// Read the stream, and seek in it, without panicking or running forever.

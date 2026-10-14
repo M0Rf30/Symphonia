@@ -517,7 +517,7 @@ fn headerless_stream_info<B: ReadBytes + SeekBuffered>(reader: &mut B) -> Result
     };
 
     let num_channels = match header.channel_assignment {
-        ChannelAssignment::Independant(num) => num,
+        ChannelAssignment::Independent(num) => num,
         _ => 2,
     };
 

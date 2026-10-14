@@ -181,7 +181,7 @@ impl Residue {
                 let (ch0, ch1) = {
                     let mut iter = residue_channels.iter();
 
-                    // Get indicies of first two channels in the residue.
+                    // Get indices of first two channels in the residue.
                     let ch0 = iter.next().expect("residue_channels.count() == 2");
                     let ch1 = iter.next().expect("residue_channels.count() == 2");
 
@@ -438,7 +438,7 @@ impl Residue {
         }
     }
 
-    /// Ensures the interleave buffer for type 2 residues can accomodate `len` samples, and that the
+    /// Ensures the interleave buffer for type 2 residues can accommodate `len` samples, and that the
     /// buffer is zeroed.
     #[inline]
     fn prepare_type_2_format_buffer(&mut self, len: usize) {

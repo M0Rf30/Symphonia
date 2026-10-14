@@ -199,3 +199,54 @@ fn corrupt_samples_do_not_panic() {
         }
     }
 }
+
+/// The elementary streams of surround samples multiplexed into private stream 1 with the headers
+/// of DVD-Video and Blu-ray: the packets are the access units of the stream, which are contiguous.
+#[test]
+fn surround_in_private_stream_1() {
+    use symphonia_core::codecs::audio::well_known::{CODEC_ID_AC3, CODEC_ID_DCA, CODEC_ID_TRUEHD};
+
+    // The sample, the sub-stream ID, the bytes of header after the sub-stream ID and frame header
+    // count and first access unit pointer, and the codec.
+    let cases = [
+        ("unsupported/ac3_5_1.ac3", 0x81u8, 0usize, CODEC_ID_AC3),
+        ("unsupported/dts_5_1.dts", 0x88, 0, CODEC_ID_DCA),
+        ("unsupported/truehd_5_1.thd", 0xb0, 1, CODEC_ID_TRUEHD),
+        ("unsupported/mlp_stereo.mlp", 0xa8, 6, CODEC_ID_TRUEHD),
+    ];
+
+    for (name, sub, extra, codec) in cases {
+        let Some(path) = sample(name)
+        else {
+            continue;
+        };
+
+        let es = std::fs::read(path).unwrap();
+        let mut mux = PsMux::new(false);
+        mux.pack(0);
+
+        for (n, chunk) in es.chunks(2000).enumerate() {
+            if n % 2 == 0 {
+                mux.pack(n as u64 * 4000);
+            }
+
+            let mut payload = vec![sub, 1, 0, 0];
+            payload.extend(std::iter::repeat_n(0, extra));
+            payload.extend_from_slice(chunk);
+
+            // 4000 ticks of the 90 kHz clock per chunk: the exact timing is not significant.
+            mux.pes(0xbd, Some(90_000 + n as u64 * 4000), &payload);
+        }
+
+        let mut reader = open(mux.out);
+        assert_eq!(reader.tracks().len(), 1, "{name}");
+        assert_eq!(audio_params(&reader, 0).codec, codec, "{name}");
+
+        let packets = read_all(&mut reader);
+        let got: Vec<u8> = packets.iter().flat_map(|p| p.data.iter().copied()).collect();
+
+        // Everything but a partial trailing access unit.
+        assert!(es.starts_with(&got) && es.len() - got.len() < 4096, "{name}");
+        assert!(packets.iter().all(|p| p.dur.get() > 0), "{name}");
+    }
+}

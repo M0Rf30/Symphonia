@@ -125,7 +125,7 @@ use readers::*;
 // x   TXX    TXXX                                 User defined text information frame
 // x   UFI    UFID                                 Unique file identifier
 // x          USER          TermsOfUse             Terms of use
-// x   ULT    USLT          Lyrics                 Unsychronized lyric/text transcription
+// x   ULT    USLT          Lyrics                 Unsynchronized lyric/text transcription
 // x   WCM    WCOM          UrlPurchase            Commercial information
 // x   WCP    WCOP          UrlCopyright           Copyright/Legal information
 // x   WAF    WOAF          UrlOfficial            Official audio file webpage

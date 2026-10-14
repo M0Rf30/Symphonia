@@ -14,7 +14,7 @@ use symphonia_core::util::bits::sign_extend_leq64_to_i64;
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum EbmlError {
-    /// An IO error occured while reading, writing, or seeking the EBML document.
+    /// An IO error occurred while reading, writing, or seeking the EBML document.
     IoError(std::io::Error),
     /// The encoding of an EBML element ID was invalid.
     InvalidEbmlElementIdLength,
@@ -503,7 +503,7 @@ impl<R: ReadEbml, S: EbmlSchema> EbmlIterator<R, S> {
                 return Err(EbmlError::Overrun);
             }
             else if parent_end - pos < EbmlElementHeader::<S>::MIN_SIZE {
-                // Remaing byte is not enough for EbmlElementHeader MIN_SIZE of 2 bytes
+                // Remaining byte is not enough for EbmlElementHeader MIN_SIZE of 2 bytes
                 // Iteration of the current parent element is done.
                 return Ok(None);
             }

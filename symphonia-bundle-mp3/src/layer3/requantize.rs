@@ -225,7 +225,7 @@ pub(super) fn read_huffman_samples<B: ReadBitsLtr>(
     // Word on the street is that some encoders are poor at "stuffing" bits, resulting in part3_len
     // being ever so slightly too large. This causes the Huffman decode loop to decode the next few
     // bits as spectral samples. However, these bits are actually random data and are not real
-    // samples, therefore, undo them! The caller will be reponsible for re-aligning the bitstream
+    // samples, therefore, undo them! The caller will be responsible for re-aligning the bitstream
     // reader. Candy Pop confirms this.
     else if bits_read > part3_bits && i > big_values_len {
         info!("count1 overrun, malformed bitstream");
@@ -318,7 +318,7 @@ fn requantize_short(
     // Note: The samples in buf are the result of s(i)^(4/3) for each sample i.
     debug_assert!(bands.len() <= 40);
 
-    // Calculate the window-independant part of A: global_gain[gr] - 210.
+    // Calculate the window-independent part of A: global_gain[gr] - 210.
     let gain = i32::from(channel.global_gain) - 210;
 
     // Calculate A for each window.

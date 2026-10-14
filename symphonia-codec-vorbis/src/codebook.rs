@@ -230,7 +230,7 @@ impl VorbisCodebook {
 
         // The codebook dimensions cannot be 0 for VQ codebooks.
         if codebook_dimensions == 0 {
-            return decode_error("vorbis: codebook dimenion cannot be 0");
+            return decode_error("vorbis: codebook dimension cannot be 0");
         }
 
         // Limit the size of codebooks to something reasonable. This limits should never be seen in

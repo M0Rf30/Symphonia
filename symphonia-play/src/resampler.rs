@@ -35,7 +35,7 @@ where
             // The resampler will produce this many frames next.
             let len = self.resampler.output_frames_next();
 
-            // If required, grow the output buffer to accomodate the output.
+            // If required, grow the output buffer to accommodate the output.
             let begin = self.buf_out.frames();
             self.buf_out.grow_capacity(begin + len);
 
@@ -99,7 +99,7 @@ where
         // If required, grow the resampler input buffer capacity.
         self.buf_in.grow_capacity(begin + num_frames);
 
-        // Reserve space in the resampler input buffer to accomodate the new frames.
+        // Reserve space in the resampler input buffer to accommodate the new frames.
         self.buf_in.render_uninit(Some(num_frames));
 
         // Copy and convert the source buffer to resampler input buffer.

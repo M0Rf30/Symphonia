@@ -221,6 +221,7 @@ pub enum FormatData {
     ALaw(FormatALaw),
     MuLaw(FormatMuLaw),
     Mpeg(FormatMpeg),
+    Es(FormatEs),
 }
 
 pub struct FormatPcm {
@@ -415,6 +416,25 @@ impl FormatMpeg {
     }
 }
 
+/// A compressed elementary stream (AC-3, E-AC-3, DTS) stored in the data chunk, either as raw
+/// frames or wrapped in IEC 61937 (S/PDIF) bursts.
+pub struct FormatEs {
+    /// Channel layout stated by the fmt chunk. Superseded by the layout in the stream itself.
+    pub channels: Channels,
+    /// Codec ID.
+    pub codec: AudioCodecId,
+    /// True if the format tag states that the payload is S/PDIF wrapped.
+    pub spdif: bool,
+}
+
+impl FormatEs {
+    pub fn make_packet_info(&self) -> Result<PacketInfo> {
+        // Frames are framed from the elementary stream (see `wave::es`), so the block-based
+        // packet model is not used. A unit block keeps the shared duration helpers well-defined.
+        PacketInfo::without_blocks(1)
+    }
+}
+
 pub struct PacketInfo {
     pub block_size: NonZero<u64>,
     pub frames_per_block: NonZero<u64>,
@@ -596,6 +616,9 @@ pub fn append_format_params(
         }
         FormatData::Mpeg(mpeg) => {
             codec_params.for_codec(mpeg.codec).with_channels(mpeg.channels);
+        }
+        FormatData::Es(es) => {
+            codec_params.for_codec(es.codec).with_channels(es.channels);
         }
     }
 }

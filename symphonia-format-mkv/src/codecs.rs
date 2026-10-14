@@ -241,11 +241,10 @@ fn get_codec_id(track: &TrackElement) -> Option<CodecId> {
         "A_MPC" => CodecId::Audio(CODEC_ID_MUSEPACK),
         "A_AC3" | "A_AC3/BSID9" | "A_AC3/BSID10" => CodecId::Audio(CODEC_ID_AC3),
         "A_EAC3" => CodecId::Audio(CODEC_ID_EAC3),
-        "A_TRUEHD" => CodecId::Audio(CODEC_ID_TRUEHD),
+        // The TrueHD decoder handles both TrueHD and MLP access units.
+        "A_TRUEHD" | "A_MLP" => CodecId::Audio(CODEC_ID_TRUEHD),
         "A_ALAC" => CodecId::Audio(CODEC_ID_ALAC),
-        "A_DTS" => CodecId::Audio(CODEC_ID_DCA),
-        // A_DTS/EXPRESS
-        // A_DTS/LOSSLESS
+        "A_DTS" | "A_DTS/EXPRESS" | "A_DTS/LOSSLESS" => CodecId::Audio(CODEC_ID_DCA),
         "A_TTA1" => CodecId::Audio(CODEC_ID_TTA),
         "A_WAVPACK4" => CodecId::Audio(CODEC_ID_WAVPACK),
         "A_ATRAC/AT1" => CodecId::Audio(CODEC_ID_ATRAC1),
@@ -400,6 +399,38 @@ mod tests {
             seek_pre_roll: MatroskaTicks::default(),
             flags: Default::default(),
             content_encodings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn verify_surround_codec_ids() {
+        use symphonia_core::codecs::CodecParameters;
+        use symphonia_core::codecs::audio::well_known::{
+            CODEC_ID_AC3, CODEC_ID_DCA, CODEC_ID_EAC3, CODEC_ID_TRUEHD,
+        };
+
+        let cases = [
+            ("A_AC3", CODEC_ID_AC3),
+            ("A_AC3/BSID9", CODEC_ID_AC3),
+            ("A_AC3/BSID10", CODEC_ID_AC3),
+            ("A_EAC3", CODEC_ID_EAC3),
+            ("A_DTS", CODEC_ID_DCA),
+            ("A_DTS/EXPRESS", CODEC_ID_DCA),
+            ("A_DTS/LOSSLESS", CODEC_ID_DCA),
+            ("A_TRUEHD", CODEC_ID_TRUEHD),
+            ("A_MLP", CODEC_ID_TRUEHD),
+        ];
+
+        for (name, codec) in cases {
+            let mut track = audio_track(6, 48000.0);
+            track.codec_id = name.into();
+            let Ok(Some(CodecParameters::Audio(params))) = make_track_codec_params(track)
+            else {
+                panic!("no audio params for {name}");
+            };
+            assert_eq!(params.codec, codec, "{name}");
+            assert_eq!(params.sample_rate, Some(48000), "{name}");
+            assert_eq!(params.channels.map(|c| c.count()), Some(6), "{name}");
         }
     }
 

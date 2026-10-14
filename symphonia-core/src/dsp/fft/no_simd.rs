@@ -92,7 +92,7 @@ impl Fft {
     pub fn new(n: usize) -> Self {
         // The FFT size must be a power of two.
         assert!(n.is_power_of_two());
-        // The permutation table uses 16-bit indicies. Therefore, the absolute maximum FFT size is
+        // The permutation table uses 16-bit indices. Therefore, the absolute maximum FFT size is
         // limited to 2^16.
         assert!(n <= MAX_SIZE);
 
@@ -162,7 +162,7 @@ impl Ifft {
     pub fn new(n: usize) -> Self {
         // The FFT size must be a power of two.
         assert!(n.is_power_of_two());
-        // The permutation table uses 16-bit indicies. Therefore, the absolute maximum FFT size is
+        // The permutation table uses 16-bit indices. Therefore, the absolute maximum FFT size is
         // limited to 2^16.
         assert!(n <= MAX_SIZE);
 

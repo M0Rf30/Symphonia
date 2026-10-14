@@ -9,6 +9,7 @@ use std::io::{Seek, SeekFrom};
 
 use symphonia_core::codecs::CodecParameters;
 use symphonia_core::codecs::audio::AudioCodecParameters;
+use symphonia_core::codecs::audio::well_known::CODEC_ID_PCM_S16LE;
 use symphonia_core::errors::{Error, Result, SeekErrorKind};
 use symphonia_core::errors::{decode_error, seek_error, unsupported_error};
 use symphonia_core::formats::prelude::*;
@@ -26,8 +27,10 @@ use crate::common::{
     next_packet,
 };
 mod chunks;
+mod es;
 mod extras;
 mod mpeg;
+mod spdif;
 use chunks::*;
 use extras::WaveExtras;
 
@@ -90,6 +93,14 @@ pub struct WavReader<'s> {
     /// variable-length, so this index is the only way to seek to an exact frame. It is built
     /// lazily on the first seek (which requires scanning the entire data chunk).
     mpeg_frame_index: Option<Vec<mpeg::FrameIndexEntry>>,
+    /// The frame reader, if the data chunk holds a compressed surround stream (AC-3, E-AC-3,
+    /// DTS), raw or in IEC 61937 bursts.
+    es: Option<es::EsReader>,
+    /// The duration of the first frame of the compressed surround stream, used to pre-roll seeks.
+    es_preroll: u64,
+    /// The position and timestamp of every unit of the compressed surround stream. Built lazily
+    /// on the first seek.
+    es_index: Option<Vec<es::IndexEntry>>,
 }
 
 impl<'s> WavReader<'s> {
@@ -153,6 +164,11 @@ impl<'s> WavReader<'s> {
         let mut fact = None;
         let mut is_mpeg = false;
         let mut mpeg_avg_bytes_per_sec = 0u32;
+        // The format chunk's description of a compressed surround stream, if any, as the codec and
+        // if it is stated to be IEC 61937 wrapped.
+        let mut es_format = None;
+        // True if the data may be IEC 61937 bursts in a 16-bit stereo PCM carrier.
+        let mut spdif_candidate = false;
         let mut rf64_sizes = Rf64Sizes::default();
         let mut extras = WaveExtras::default();
         let mut sample_rate = 0u32;
@@ -211,6 +227,16 @@ impl<'s> WavReader<'s> {
                     if is_mpeg {
                         mpeg_avg_bytes_per_sec = format.avg_bytes_per_sec;
                     }
+
+                    es_format = match &format.format_data {
+                        FormatData::Es(es) => Some((es.codec, es.spdif)),
+                        _ => None,
+                    };
+
+                    spdif_candidate = matches!(
+                        &format.format_data,
+                        FormatData::Pcm(pcm) if pcm.codec == CODEC_ID_PCM_S16LE && format.num_channels == 2
+                    );
 
                     // The Format chunk contains the block_align field and possible additional
                     // information to handle packetization and seeking.
@@ -313,6 +339,66 @@ impl<'s> WavReader<'s> {
                         mss.seek_buffered(data_start_pos);
                     }
 
+                    // Compressed surround audio is framed from the elementary stream. The stream
+                    // is authoritative for the codec parameters.
+                    let mut es_reader = None;
+                    let mut es_first_len = 0u64;
+                    let mut es_preroll = 0u64;
+
+                    let es_end = data_end_pos.unwrap_or(u64::MAX);
+
+                    // Look for IEC 61937 bursts in a PCM carrier, or when the format tag states
+                    // they are present.
+                    let probe_spdif = match es_format {
+                        Some((_, spdif)) => spdif,
+                        None => spdif_candidate,
+                    };
+
+                    let es_spdif_codec = if probe_spdif {
+                        es::probe_spdif(&mut mss, data_start_pos, es_end)
+                    }
+                    else {
+                        None
+                    };
+
+                    let es_setup = match (es_spdif_codec, es_format) {
+                        (Some(codec), _) => Some((codec, true)),
+                        (None, Some((codec, _))) => Some((codec, false)),
+                        (None, None) => None,
+                    };
+
+                    if let Some((codec, spdif)) = es_setup {
+                        let Some(parser) = es::make_parser(codec)
+                        else {
+                            return unsupported_error("wav: unsupported compressed audio codec");
+                        };
+
+                        mss.ensure_seekback_buffer(es::SEEKBACK_LEN);
+
+                        let mut reader = es::EsReader::new(parser, spdif, data_start_pos);
+                        let first = reader.next_packet(&mut mss, es_end)?;
+
+                        match (first, reader.info()) {
+                            (Some(first), Some(info)) => {
+                                codec_params = info.params.clone();
+                                sample_rate = info.rate;
+                                es_first_len = first.data.len() as u64;
+                                es_preroll = first.dur.get();
+                            }
+                            _ if es_format.is_some() => {
+                                return decode_error("wav: no compressed audio frame found");
+                            }
+                            _ => (),
+                        }
+
+                        mss.seek_buffered(data_start_pos);
+
+                        if es_preroll > 0 {
+                            reader.restart_at(es::IndexEntry { pos: data_start_pos, ts: 0 });
+                            es_reader = Some(reader);
+                        }
+                    }
+
                     // Create the track.
                     let mut track = Track::new(0);
 
@@ -331,7 +417,26 @@ impl<'s> WavReader<'s> {
                     // length and the average byte rate (falling back to sampling actual frame
                     // sizes if the average byte rate is unknown).
                     if let Some(data_len) = data_len {
-                        if is_mpeg {
+                        if let Some(es) = &es_reader {
+                            let num_frames = if let Some(sample_count) = rf64_sizes.sample_count {
+                                sample_count
+                            }
+                            else if let Some(fact) = &fact {
+                                u64::from(fact.num_frames)
+                            }
+                            else if es.is_spdif() {
+                                // The bursts occupy the samples of a 16-bit stereo PCM stream.
+                                data_len / 4
+                            }
+                            else {
+                                // Assume constant frame size.
+                                data_len.saturating_mul(es_preroll) / es_first_len.max(1)
+                            };
+
+                            track.with_num_frames(num_frames);
+                            track.with_duration(Duration::from(num_frames));
+                        }
+                        else if is_mpeg {
                             let num_frames = if let Some(sample_count) = rf64_sizes.sample_count {
                                 Some(sample_count)
                             }
@@ -387,6 +492,9 @@ impl<'s> WavReader<'s> {
                         mpeg_ts: 0,
                         mpeg_samples_per_frame,
                         mpeg_frame_index: None,
+                        es: es_reader,
+                        es_preroll,
+                        es_index: None,
                     });
                 }
             }
@@ -445,6 +553,51 @@ impl<'s> WavReader<'s> {
             actual_ts,
             actual_ts.saturating_delta(required_ts)
         );
+
+        Ok(SeekedTo { track_id: 0, actual_ts, required_ts })
+    }
+}
+
+impl WavReader<'_> {
+    /// Seeks a compressed surround track to the unit (a frame or an IEC 61937 burst) containing
+    /// `required_ts`, starting early enough for the decoder to reproduce a continuous decode.
+    ///
+    /// The units are variable-length or spaced irregularly, so on the first seek the whole data
+    /// chunk is indexed.
+    fn seek_es(&mut self, required_ts: Timestamp) -> Result<SeekedTo> {
+        let data_end = self.data_end_pos.unwrap_or(u64::MAX);
+
+        let Some(es) = self.es.as_mut()
+        else {
+            return seek_error(SeekErrorKind::Unseekable);
+        };
+
+        if !self.reader.is_seekable() {
+            return seek_error(SeekErrorKind::Unseekable);
+        }
+
+        if self.es_index.is_none() {
+            self.es_index =
+                Some(es.build_index(&mut self.reader, self.data_start_pos, data_end)?);
+        }
+
+        let index = self.es_index.as_deref().unwrap_or_default();
+
+        let target = (required_ts.get() as u64).saturating_sub(self.es_preroll);
+
+        // The last unit that starts at or before the target.
+        let Some(entry) = index.iter().rev().find(|entry| entry.ts <= target).or(index.first())
+        else {
+            return seek_error(SeekErrorKind::OutOfRange);
+        };
+
+        let entry = *entry;
+
+        self.reader.seek(SeekFrom::Start(entry.pos))?;
+        es.restart_at(entry);
+
+        let actual_ts = Timestamp::try_from(entry.ts)
+            .map_err(|_| Error::SeekError(SeekErrorKind::OutOfRange))?;
 
         Ok(SeekedTo { track_id: 0, actual_ts, required_ts })
     }
@@ -540,6 +693,11 @@ impl FormatReader for WavReader<'_> {
     }
 
     fn next_packet(&mut self) -> Result<Option<Packet>> {
+        // Compressed surround audio is framed from the elementary stream.
+        if let Some(es) = &mut self.es {
+            return es.next_packet(&mut self.reader, self.data_end_pos.unwrap_or(u64::MAX));
+        }
+
         // MPEG audio in WAV is framed from the elementary stream, one MPEG frame per packet.
         if self.is_mpeg {
             return mpeg::next_packet(
@@ -613,12 +771,16 @@ impl FormatReader for WavReader<'_> {
             return self.seek_mpeg(required_ts);
         }
 
+        if self.es.is_some() {
+            return self.seek_es(required_ts);
+        }
+
         debug!("seeking to frame_ts={required_ts}");
 
         // WAVE is not internally packetized for PCM codecs. Packetization is simulated by trying to
         // read a constant number of samples or blocks every call to next_packet. Therefore, a
         // packet begins wherever the data stream is currently positioned. Since timestamps on
-        // packets should be determinstic, instead of seeking to the exact timestamp requested and
+        // packets should be deterministic, instead of seeking to the exact timestamp requested and
         // starting the next packet there, seek to a packet boundary. In this way, packets will have
         // the same timestamps regardless if the stream was seeked or not.
         let actual_ts = self.packet_info.get_actual_ts(required_ts);

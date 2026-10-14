@@ -36,7 +36,7 @@ pub fn probe_stream_start(
         return Ok(());
     }
 
-    // Scope the reader the prevent overruning the seekback region.
+    // Scope the reader the prevent overrunning the seekback region.
     let mut scoped_reader =
         ScopedStream::new(reader, OGG_PAGE_MAX_SIZE as u64 - (original_pos - byte_range_start));
 

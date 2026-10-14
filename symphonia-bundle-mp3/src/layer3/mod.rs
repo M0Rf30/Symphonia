@@ -27,11 +27,11 @@ use common::BlockType;
 
 use log::{debug, warn};
 
-/// `BitResevoir` implements the bit resevoir mechanism for main_data. Since frames have a
+/// `BitReservoir` implements the bit reservoir mechanism for main_data. Since frames have a
 /// deterministic length based on the bit-rate, low-complexity portions of the audio may not need
-/// every byte allocated to the frame. The bit resevoir mechanism allows these unused portions of
+/// every byte allocated to the frame. The bit reservoir mechanism allows these unused portions of
 /// frames to be used by future frames.
-pub struct BitResevoir {
+pub struct BitReservoir {
     buf: Box<[u8]>,
     len: usize,
     consumed: usize,
@@ -41,31 +41,31 @@ pub struct BitResevoir {
     buffered: usize,
 }
 
-impl BitResevoir {
+impl BitReservoir {
     pub fn new() -> Self {
-        BitResevoir { buf: vec![0u8; 2048].into_boxed_slice(), len: 0, consumed: 0, buffered: 0 }
+        BitReservoir { buf: vec![0u8; 2048].into_boxed_slice(), len: 0, consumed: 0, buffered: 0 }
     }
 
     pub fn fill(&mut self, pkt_main_data: &[u8], main_data_begin: usize) -> Result<u32> {
         let main_data_len = pkt_main_data.len();
 
         // The value `main_data_begin` indicates the number of bytes from the previous frame(s) to
-        // reuse. It must always be less than or equal to maximum amount of bytes the resevoir can
-        // hold taking into account the additional data being added to the resevoir.
+        // reuse. It must always be less than or equal to maximum amount of bytes the reservoir can
+        // hold taking into account the additional data being added to the reservoir.
         let main_data_end = main_data_begin + main_data_len;
 
         if main_data_end > self.buf.len() {
-            return decode_error("mpa: invalid main_data length, will exceed resevoir buffer");
+            return decode_error("mpa: invalid main_data length, will exceed reservoir buffer");
         }
 
         let unread = self.len - self.consumed;
 
-        // If the offset is less-than or equal to the amount of unread data in the resevoir, shift
-        // the re-used bytes to the beginning of the resevoir, then copy the main data of the
-        // current packet into the resevoir.
+        // If the offset is less-than or equal to the amount of unread data in the reservoir, shift
+        // the re-used bytes to the beginning of the reservoir, then copy the main data of the
+        // current packet into the reservoir.
         let underflow = if main_data_begin <= unread {
             // Shift all the re-used bytes as indicated by main_data_begin to the front of the
-            // resevoir.
+            // reservoir.
             self.buf.copy_within(self.len - main_data_begin..self.len, 0);
 
             // Copy the new main data from the packet buffer after the re-used bytes.
@@ -75,14 +75,14 @@ impl BitResevoir {
             0
         }
         else {
-            // Shift all the unread bytes to the front of the resevoir. Since this is an underflow
+            // Shift all the unread bytes to the front of the reservoir. Since this is an underflow
             // condition, all unread bytes will be unconditionally reused.
             self.buf.copy_within(self.len - unread..self.len, 0);
 
-            // If the offset is greater than the amount of data in the resevoir, then the stream is
+            // If the offset is greater than the amount of data in the reservoir, then the stream is
             // malformed. This can occur if the decoder is starting in the middle of a stream. This
             // is particularly common with online radio streams. In this case, copy the main data
-            // of the current packet into the resevoir, then return the number of bytes that are
+            // of the current packet into the reservoir, then return the number of bytes that are
             // missing.
             self.buf[unread..unread + main_data_len].copy_from_slice(pkt_main_data);
             self.len = unread + main_data_len;
@@ -130,7 +130,7 @@ impl BitResevoir {
 /// `FrameData` contains the side_info and main_data portions of a MPEG audio frame.
 #[derive(Default, Debug)]
 struct FrameData {
-    /// The byte offset into the bit resevoir indicating the location of the first bit of main_data.
+    /// The byte offset into the bit reservoir indicating the location of the first bit of main_data.
     /// If 0, main_data begins after the side_info of this frame.
     main_data_begin: u16,
     /// Scale factor selector information, per channel. Each channel has 4 groups of bands that may
@@ -138,7 +138,7 @@ struct FrameData {
     /// bits. Bands that share scale factors for both granules are indicated by a true. Otherwise,
     /// each granule must store its own set of scale factors.
     ///
-    /// Mapping of array indicies to bands [0..6, 6..11, 11..16, 16..21].
+    /// Mapping of array indices to bands [0..6, 6..11, 11..16, 16..21].
     scfsi: [[bool; 4]; 2],
     /// The granules.
     granules: [Granule; 2],
@@ -280,7 +280,7 @@ pub struct Layer3 {
     pub samples: [[[f32; 576]; 2]; 2],
     pub overlap: [[[f32; 18]; 32]; 2],
     pub synthesis: [synthesis::SynthesisState; 2],
-    pub resevoir: BitResevoir,
+    pub reservoir: BitReservoir,
     /// The intensity stereo rule for MPEG2/2.5 bitstreams.
     pub intensity_mode: IntensityMode,
 }
@@ -311,7 +311,7 @@ impl Layer3 {
         crc.process_buf_bytes(side_info);
 
         if crc.crc() != u16::from_be_bytes([crc_bytes[0], crc_bytes[1]]) {
-            self.resevoir.clear();
+            self.reservoir.clear();
             return decode_error("mpa: crc mismatch");
         }
 
@@ -323,7 +323,7 @@ impl Layer3 {
             samples: [[[0f32; 576]; 2]; 2],
             overlap: [[[0f32; 18]; 32]; 2],
             synthesis: Default::default(),
-            resevoir: BitResevoir::new(),
+            reservoir: BitReservoir::new(),
             intensity_mode,
         }
     }
@@ -333,7 +333,7 @@ impl Layer3 {
     /// buffered main data and therefore may include main data of following frames.
     #[cfg(feature = "mp3pro")]
     pub fn ancillary_data(&self) -> &[u8] {
-        self.resevoir.bytes_ref()
+        self.reservoir.bytes_ref()
     }
 
     /// Reads the main_data portion of a MPEG audio frame from a `BitStream` into `FrameData`.
@@ -343,13 +343,13 @@ impl Layer3 {
         underflow_bits: u32,
         frame_data: &mut FrameData,
     ) -> Result<usize> {
-        let main_data = self.resevoir.bytes_ref();
+        let main_data = self.reservoir.bytes_ref();
         let mut part2_3_begin = 0;
         let mut part2_3_skipped = 0;
 
         for gr in 0..header.n_granules() {
-            // If the resevoir underflowed (i.e., main_data_begin references bits not present in the
-            // resevoir) then skip the granule(s) the missing bits would belong to.
+            // If the reservoir underflowed (i.e., main_data_begin references bits not present in the
+            // reservoir) then skip the granule(s) the missing bits would belong to.
             if part2_3_skipped < underflow_bits {
                 // Zero the samples in the granule channel(s) and sum the part2/3 bits that were
                 // skipped.
@@ -465,25 +465,25 @@ impl Layer for Layer3 {
                 // A failure in reading this packet will cause a discontinuity in the codec
                 // bitstream. Therefore, clear the bit reservoir since it will not be valid for the
                 // next packet.
-                self.resevoir.clear();
+                self.reservoir.clear();
                 return Err(e);
             }
         };
 
-        // Buffer main data into the bit resevoir.
+        // Buffer main data into the bit reservoir.
         let underflow =
-            self.resevoir.fill(&buf[side_info_len..], frame_data.main_data_begin as usize)?;
+            self.reservoir.fill(&buf[side_info_len..], frame_data.main_data_begin as usize)?;
 
         // Read the main data (scale factors and spectral samples).
         match self.read_main_data(header, 8 * underflow, &mut frame_data) {
             Ok(len) => {
-                // Consume the bytes of main data read from the resevoir.
-                self.resevoir.consume(len);
+                // Consume the bytes of main data read from the reservoir.
+                self.reservoir.consume(len);
             }
             Err(e) => {
                 // The bit reservoir was likely filled with invalid data. Clear it for the next
                 // packet.
-                self.resevoir.clear();
+                self.reservoir.clear();
                 return Err(e);
             }
         }
@@ -504,10 +504,10 @@ impl Layer for Layer3 {
             }
 
             // Each granule will yield 576 samples. After reserving frames, all steps must be
-            // infalliable.
+            // infallible.
             out.render_uninit(Some(576));
 
-            // The next steps are independant of channel count.
+            // The next steps are independent of channel count.
             for ch in 0..header.n_channels() {
                 // Reorder the spectral samples in short blocks into sub-band order.
                 hybrid_synthesis::reorder(
@@ -552,7 +552,7 @@ impl Layer for Layer3 {
 
 #[cfg(test)]
 mod tests {
-    use super::{BitResevoir, IntensityMode, Layer3};
+    use super::{BitReservoir, IntensityMode, Layer3};
     use crate::common::{ChannelMode, Emphasis, FrameHeader, MpegLayer, MpegVersion};
 
     use std::sync::{Mutex, Once};
@@ -668,9 +668,9 @@ mod tests {
         // The first frame reuses 50 bytes the reservoir never had, then the second reuses 150
         // bytes of which 50 are not in the first frame.
         let warnings = logged_warnings(|| {
-            let mut resevoir = BitResevoir::new();
-            assert_eq!(resevoir.fill(&main_data, 50).unwrap(), 50);
-            assert_eq!(resevoir.fill(&main_data, 150).unwrap(), 50);
+            let mut reservoir = BitReservoir::new();
+            assert_eq!(reservoir.fill(&main_data, 50).unwrap(), 50);
+            assert_eq!(reservoir.fill(&main_data, 150).unwrap(), 50);
         });
 
         assert!(warnings.is_empty(), "{warnings:?}");
@@ -678,10 +678,10 @@ mod tests {
         // The second frame reuses 60 bytes after the first frame was read in full. The bytes
         // should be in the reservoir, but are not.
         let warnings = logged_warnings(|| {
-            let mut resevoir = BitResevoir::new();
-            assert_eq!(resevoir.fill(&main_data, 0).unwrap(), 0);
-            resevoir.consume(100);
-            assert_eq!(resevoir.fill(&main_data, 60).unwrap(), 60);
+            let mut reservoir = BitReservoir::new();
+            assert_eq!(reservoir.fill(&main_data, 0).unwrap(), 0);
+            reservoir.consume(100);
+            assert_eq!(reservoir.fill(&main_data, 60).unwrap(), 60);
         });
 
         assert_eq!(warnings.len(), 1, "{warnings:?}");
@@ -690,10 +690,10 @@ mod tests {
         // A new decoder state starts over.
         let warnings = logged_warnings(|| {
             let mut layer = Layer3::new(IntensityMode::Iso);
-            assert_eq!(layer.resevoir.fill(&main_data, 0).unwrap(), 0);
+            assert_eq!(layer.reservoir.fill(&main_data, 0).unwrap(), 0);
 
             let mut layer = Layer3::new(IntensityMode::Iso);
-            assert_eq!(layer.resevoir.fill(&main_data, 30).unwrap(), 30);
+            assert_eq!(layer.reservoir.fill(&main_data, 30).unwrap(), 30);
         });
 
         assert!(warnings.is_empty(), "{warnings:?}");

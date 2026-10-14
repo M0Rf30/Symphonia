@@ -40,7 +40,7 @@
 //! its state (SILK LPC/LTP history, CELT MDCT overlap, the post-filter, and the CELT inter-frame
 //! energy prediction). `symphonia-format-ogg` and `symphonia-format-mkv` seek back before the
 //! requested timestamp, and the caller decodes and discards the audio up to it after calling
-//! [`Self::reset`] (the decoder state itself is identical to libopus': decoding a stream from a
+//! `AudioDecoder::reset` (the decoder state itself is identical to libopus': decoding a stream from a
 //! cold start matches libopus exactly). The 80 ms recommended by the RFC only gets the output
 //! close to a continuous decode (the CELT energy predictor converges geometrically, about 6 dB
 //! of SNR per 20 ms frame), so the readers use more:

@@ -189,7 +189,7 @@ pub trait Audio<S: Sample> {
             .and_then(|idx| self.plane(idx))
     }
 
-    /// Try to get immutable slices to a pair of audio planes at the canonical buffer indicies
+    /// Try to get immutable slices to a pair of audio planes at the canonical buffer indices
     /// `idx0` and `idx1`.
     ///
     /// # Panics
@@ -246,7 +246,7 @@ pub trait Audio<S: Sample> {
 
     /// Copy all audio planes to discrete slices.
     ///
-    /// If the sample format of a slice differs a sampe format conversion will occur.
+    /// If the sample format of a slice differs a sample format conversion will occur.
     ///
     /// # Panics
     ///
@@ -338,7 +338,7 @@ pub trait AudioMut<S: Sample>: Audio<S> {
             .and_then(move |idx| self.plane_mut(idx))
     }
 
-    /// Try to get mutable slices to a pair of audio planes at the canonical buffer indicies `idx0`
+    /// Try to get mutable slices to a pair of audio planes at the canonical buffer indices `idx0`
     /// and `idx1`.
     ///
     /// # Panics

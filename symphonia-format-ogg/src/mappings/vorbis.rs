@@ -416,7 +416,7 @@ fn skip_time_domain_transforms(bs: &mut BitReaderRtl<'_>) -> Result<()> {
     for _ in 0..count {
         // All these values are placeholders and must be 0.
         if bs.read_bits_leq32(16)? != 0 {
-            return decode_error("ogg (vorbis): invalid time domain tranform");
+            return decode_error("ogg (vorbis): invalid time domain transform");
         }
     }
 
@@ -457,7 +457,7 @@ fn skip_floor1_setup(bs: &mut BitReaderRtl<'_>) -> Result<()> {
     // The number of partitions. 5-bit value, 0..31 range.
     let floor1_partitions = bs.read_bits_leq32(5)? as usize;
 
-    // Parition list of up-to 32 partitions (floor1_partitions), with each partition indicating
+    // Partition list of up-to 32 partitions (floor1_partitions), with each partition indicating
     // a 4-bit class (0..16) identifier.
     let mut floor1_partition_class_list = [0; 32];
     let mut floor1_classes_dimensions = [0; 16];

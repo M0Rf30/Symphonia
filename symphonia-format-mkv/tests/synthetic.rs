@@ -1722,6 +1722,52 @@ fn header_stripping_restores_the_stripped_bytes() {
 }
 
 #[test]
+fn surround_codecs_are_mapped_and_ac3_sync_word_is_restored() {
+    use symphonia_core::codecs::CodecParameters;
+    use symphonia_core::codecs::audio::well_known::{
+        CODEC_ID_AC3, CODEC_ID_DCA, CODEC_ID_EAC3, CODEC_ID_TRUEHD,
+    };
+
+    // mkvmerge strips the sync word of AC-3 and DTS frames.
+    for (codec, id) in [
+        ("A_AC3", CODEC_ID_AC3),
+        ("A_AC3/BSID9", CODEC_ID_AC3),
+        ("A_AC3/BSID10", CODEC_ID_AC3),
+        ("A_EAC3", CODEC_ID_EAC3),
+        ("A_DTS", CODEC_ID_DCA),
+        ("A_DTS/EXPRESS", CODEC_ID_DCA),
+        ("A_DTS/LOSSLESS", CODEC_ID_DCA),
+        ("A_TRUEHD", CODEC_ID_TRUEHD),
+        ("A_MLP", CODEC_ID_TRUEHD),
+    ] {
+        let track = Track {
+            codec,
+            sample_rate: 48000.0,
+            channels: 6,
+            bit_depth: None,
+            content_encodings: compression(3, Some(&[0x0b, 0x77]), 1),
+            ..Track::pcm()
+        };
+
+        let mut file = File::default();
+        file.clusters.push((0, vec![Block::with_data(0, vec![1, 2, 3, 4])]));
+
+        let mut reader = open(file.to_bytes(&track));
+
+        let Some(CodecParameters::Audio(params)) = &reader.tracks()[0].codec_params
+        else {
+            panic!("{codec}: expected audio codec parameters");
+        };
+        assert_eq!(params.codec, id, "{codec}");
+        assert_eq!(params.sample_rate, Some(48000), "{codec}");
+        assert_eq!(params.channels.as_ref().map(|c| c.count()), Some(6), "{codec}");
+
+        let packets = read_all(&mut reader);
+        assert_eq!(&packets[0].data[..], &[0x0b, 0x77, 1, 2, 3, 4], "{codec}");
+    }
+}
+
+#[test]
 fn zlib_compressed_frames_are_inflated() {
     let short = b"abcabcabcabc-the quick brown fox-abcabcabc";
     let long: Vec<u8> =

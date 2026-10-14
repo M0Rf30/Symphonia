@@ -30,7 +30,7 @@ struct QuantClass {
 struct SbQuantInfo {
     /// Bit allocation for the sub-band.
     nbal: u8,
-    /// Indicies into quantization class table. Valid for classes 0..2^nbal.
+    /// Indices into quantization class table. Valid for classes 0..2^nbal.
     classes: [u8; 16],
 }
 
@@ -183,7 +183,7 @@ fn dequantize(bs: &mut BitReaderLtr<'_>, class: &QuantClass) -> Result<[f32; 3]>
         nlevels.next_power_of_two().trailing_zeros()
     }
     else {
-        // Read individial raw samples from the bitstream.
+        // Read individual raw samples from the bitstream.
         let bits = u32::from(class.bits);
 
         for item in &mut raw {
@@ -345,27 +345,27 @@ impl Layer for Layer2 {
         for sb in 0..sb_info.sblimit {
             for ch in 0..num_channels {
                 if alloc[ch][sb] != 0 {
-                    let mut indicies = [bs.read_bits_leq32(6)? as u8; 3];
+                    let mut indices = [bs.read_bits_leq32(6)? as u8; 3];
 
                     match scfsi[ch][sb] {
                         0 => {
-                            indicies[1] = bs.read_bits_leq32(6)? as u8;
-                            indicies[2] = bs.read_bits_leq32(6)? as u8;
+                            indices[1] = bs.read_bits_leq32(6)? as u8;
+                            indices[2] = bs.read_bits_leq32(6)? as u8;
                         }
                         1 => {
-                            indicies[2] = bs.read_bits_leq32(6)? as u8;
+                            indices[2] = bs.read_bits_leq32(6)? as u8;
                         }
                         2 => (),
                         3 => {
-                            indicies[1] = bs.read_bits_leq32(6)? as u8;
-                            indicies[2] = indicies[1];
+                            indices[1] = bs.read_bits_leq32(6)? as u8;
+                            indices[2] = indices[1];
                         }
                         _ => unreachable!(),
                     }
 
-                    scalefacs[ch][0][sb] = indicies[0];
-                    scalefacs[ch][1][sb] = indicies[1];
-                    scalefacs[ch][2][sb] = indicies[2];
+                    scalefacs[ch][0][sb] = indices[0];
+                    scalefacs[ch][1][sb] = indices[1];
+                    scalefacs[ch][2][sb] = indices[2];
                 }
             }
         }
@@ -424,7 +424,7 @@ impl Layer for Layer2 {
         }
 
         // Each packet will yield 1152 audio frames. After reserving frames, all steps must be
-        // infalliable.
+        // infallible.
         out.render_uninit(Some(1152));
 
         for (ch, samples) in samples.iter().enumerate().take(num_channels) {

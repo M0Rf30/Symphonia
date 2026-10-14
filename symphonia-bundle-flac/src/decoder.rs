@@ -190,7 +190,7 @@ impl FlacDecoder {
         //     bits_per_sample,
         //     &header.channel_assignment);
 
-        // Reserve a writeable chunk in the buffer equal to the number of samples in the block.
+        // Reserve a writable chunk in the buffer equal to the number of samples in the block.
         if header.block_num_samples as usize > self.buf.capacity() {
             return decode_error("flac: allocation would overflow buffer");
         }
@@ -204,7 +204,7 @@ impl FlacDecoder {
 
             // Read each subframe based on the channel assignment into a planar buffer.
             match header.channel_assignment {
-                ChannelAssignment::Independant(channels) => {
+                ChannelAssignment::Independent(channels) => {
                     for i in 0..channels as usize {
                         read_subframe(
                             &mut bs,

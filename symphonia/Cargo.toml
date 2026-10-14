@@ -28,11 +28,14 @@ aac = ["dep:symphonia-codec-aac"]
 # Compute the complex QMF banks of SBR with an FFT: faster, but not bit for bit identical.
 aac-sbr-fft-qmf = ["aac", "symphonia-codec-aac/sbr-fft-qmf"]
 adpcm = ["dep:symphonia-codec-adpcm"]
+ac3 = ["dep:symphonia-codec-ac3"]
 alac = ["dep:symphonia-codec-alac"]
 ape-format = ["dep:symphonia-bundle-ape"]
+dca = ["dep:symphonia-codec-dca"]
 dsd = ["dep:symphonia-codec-dsd", "dep:symphonia-format-dsd"]
 flac = ["dep:symphonia-bundle-flac"]
 caf = ["dep:symphonia-format-caf"]
+es = ["dep:symphonia-format-es"]
 flv = ["dep:symphonia-format-flv"]
 isomp4 = ["dep:symphonia-format-isomp4"]
 mkv = ["dep:symphonia-format-mkv"]
@@ -43,9 +46,12 @@ mp1 = ["dep:symphonia-bundle-mp3", "symphonia-bundle-mp3/mp1"]
 mp2 = ["dep:symphonia-bundle-mp3", "symphonia-bundle-mp3/mp2"]
 mp3 = ["dep:symphonia-bundle-mp3", "symphonia-bundle-mp3/mp3"]
 mp3pro = ["mp3", "symphonia-bundle-mp3/mp3pro"]
+nellymoser = ["dep:symphonia-codec-nellymoser"]
 ogg = ["dep:symphonia-format-ogg"]
 opus = ["dep:symphonia-codec-opus"]
 pcm = ["dep:symphonia-codec-pcm"]
+speex = ["dep:symphonia-codec-speex"]
+truehd = ["dep:symphonia-codec-truehd"]
 aiff = ["dep:symphonia-format-riff", "symphonia-format-riff/aiff"]
 vorbis = ["dep:symphonia-codec-vorbis"]
 wav = ["dep:symphonia-format-riff", "symphonia-format-riff/wav"]
@@ -60,16 +66,21 @@ mpa = ["mp1", "mp2", "mp3"]
 # Enable all supported codecs.
 all-codecs = [
     "aac",
+    "ac3",
     "adpcm",
     "alac",
+    "dca",
     "dsd",
     "flac",
     "mp1",
     "mp2",
     "mp3",
     "musepack",
+    "nellymoser",
     "opus",
     "pcm",
+    "speex",
+    "truehd",
     "vorbis",
     "wavpack",
 ]
@@ -79,6 +90,7 @@ all-formats = [
     "caf",
     "ape-format",
     "dsd",
+    "es",
     "flv",
     "isomp4",
     "mkv",
@@ -156,6 +168,26 @@ optional = true
 workspace = true
 optional = true
 
+[dependencies.symphonia-codec-ac3]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-dca]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-nellymoser]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-speex]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-truehd]
+workspace = true
+optional = true
+
 [dependencies.symphonia-codec-alac]
 workspace = true
 optional = true
@@ -197,6 +229,10 @@ workspace = true
 optional = true
 
 [dependencies.symphonia-format-dsd]
+workspace = true
+optional = true
+
+[dependencies.symphonia-format-es]
 workspace = true
 optional = true
 

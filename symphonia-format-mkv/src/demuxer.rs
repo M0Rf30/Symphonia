@@ -433,7 +433,7 @@ impl<'s> MkvReader<'s> {
         }
 
         if is_seekable {
-            // All elements preceeding the element iterator's current position have already been
+            // All elements preceding the element iterator's current position have already been
             // read and do not need to be revisited.
             seek_positions.retain(|sp| sp.1 >= it.pos());
             // Make sure we don't jump backwards unnecessarily.

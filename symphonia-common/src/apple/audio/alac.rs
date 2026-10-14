@@ -37,12 +37,12 @@ impl MagicCookie {
             return unsupported_error("common (alac): magic cookie size too small");
         }
 
-        // The magic cookie may be preceeded by a FRMA atom. Skip over the FRMA atom.
+        // The magic cookie may be preceded by a FRMA atom. Skip over the FRMA atom.
         if buf[4..8] == *b"frma" {
             buf = &buf[12..];
         }
 
-        // The magic cookie may be preceeded by an ALAC atom. Skip over the ALAC atom.
+        // The magic cookie may be preceded by an ALAC atom. Skip over the ALAC atom.
         if buf[4..8] == *b"alac" {
             buf = &buf[12..];
         }
@@ -85,7 +85,7 @@ impl MagicCookie {
             return decode_error("common (alac): invalid number of channels");
         }
 
-        // If the magic cookie is 48 bytes, the channel layout is explictly set, otherwise select a
+        // If the magic cookie is 48 bytes, the channel layout is explicitly set, otherwise select a
         // channel layout from the number of channels.
         config.channels = if reader.byte_len() == 48 {
             // The first field is the size of the channel layout info. This should always be 24.

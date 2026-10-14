@@ -68,8 +68,10 @@ pub trait Mapper: Send + Sync {
         self.reset();
     }
 
-    /// Convert an absolute granular position to a timestamp.
-    fn absgp_to_ts(&self, absgp: u64) -> Timestamp {
+    /// Convert the absolute granular position of a page to a timestamp. `is_last_page` is true
+    /// if the page ends the logical stream (some codecs define the granule position of the last
+    /// page differently from all others).
+    fn absgp_to_ts(&self, absgp: u64, _is_last_page: bool) -> Timestamp {
         Timestamp::from(absgp as i64)
     }
 

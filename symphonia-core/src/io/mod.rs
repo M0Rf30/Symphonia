@@ -564,7 +564,7 @@ where
         // length.
         next_max_read_len = (2 * next_max_read_len).min(ABS_MAX_READ_LEN);
 
-        // Try to reserve memory for the amount being read. Return an error instead of panicing.
+        // Try to reserve memory for the amount being read. Return an error instead of panicking.
         // Use try_reserve_exact as an optimistic optimization for the single iteration case (the
         // vast majority of cases). If the underlying buffer is the exact size of the read, then
         // the implicit shrink_to_fit operation in into_boxed_slice should be a no-op.

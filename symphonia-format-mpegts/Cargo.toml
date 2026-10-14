@@ -22,7 +22,9 @@ symphonia-core = { workspace = true }
 [dev-dependencies]
 symphonia-testutil = { workspace = true }
 symphonia-bundle-mp3 = { workspace = true, features = ["mp1", "mp2", "mp3"] }
+symphonia-codec-dca = { workspace = true }
 symphonia-codec-opus = { workspace = true }
+symphonia-codec-truehd = { workspace = true }
 symphonia-format-ogg = { workspace = true }
 
 [lints]

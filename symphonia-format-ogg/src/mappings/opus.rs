@@ -143,7 +143,7 @@ impl PacketParser for OpusPacketParser {
                     m as u64
                 }
                 None => {
-                    // What to do here? I'd like to return an error but this is an infalliable
+                    // What to do here? I'd like to return an error but this is an infallible
                     // trait.
                     warn!("opus code 3 packet with no following byte containing number of frames");
                     return (Duration::ZERO, Duration::ZERO);
@@ -194,7 +194,7 @@ impl Mapper for OpusMapper {
         self.parser.silk_seen = silk_seen;
     }
 
-    fn absgp_to_ts(&self, absgp: u64) -> Timestamp {
+    fn absgp_to_ts(&self, absgp: u64, _is_last_page: bool) -> Timestamp {
         // RFC 7845 section 4: the granule position of an Opus page counts the pre-skip samples.
         // Remove them so that timestamp 0 is the first playable frame (as for the other codecs,
         // delay frames have negative timestamps), and the track's frame count excludes the

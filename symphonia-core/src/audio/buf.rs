@@ -33,7 +33,7 @@ const MAX_STACK_PLANE_SLICES: usize = 8; // Upto 7.1 audio.
 /// be manually requested.
 ///
 /// `AudioBuffer` stores each audio channel in separate audio planes. An audio plane is a
-/// continguous vector of audio samples. The samples across all audio planes at any one particular
+/// contiguous vector of audio samples. The samples across all audio planes at any one particular
 /// index form an audio frame. The order of audio planes, and thus the order of samples in an
 /// audio frame, is a canonical order based on the channels mask.
 ///
@@ -49,7 +49,7 @@ const MAX_STACK_PLANE_SLICES: usize = 8; // Upto 7.1 audio.
 ///     channel order. The audio buffer may be indexed by a position mask containing exactly one
 ///     position, or a canonical index.
 ///   * If [`Channels::Discrete`](super::Channels::Discrete), the total number of discrete channels
-///     (`n`) is specified. The audio buffer contains one audio plane for discrete channel indicies
+///     (`n`) is specified. The audio buffer contains one audio plane for discrete channel indices
 ///     `0..n`. The buffer may be indexed by a discrete channel index, `i`, in the range `0..n`.
 ///   * If [`Channels::Ambisonic`](super::Channels::Ambisonic), the Ambisonic order (`n`) is
 ///     specified. The audio buffer contains `m = (1 + n) ^ 2` audio planes, one for each Ambisonic
@@ -63,7 +63,7 @@ const MAX_STACK_PLANE_SLICES: usize = 8; // Upto 7.1 audio.
 ///
 /// ## Realtime Safety
 ///
-/// Unless explictly noted, `AudioBuffer` never allocates after instantiation.
+/// Unless explicitly noted, `AudioBuffer` never allocates after instantiation.
 #[derive(Clone, Default)]
 pub struct AudioBuffer<S: Sample> {
     spec: AudioSpec,

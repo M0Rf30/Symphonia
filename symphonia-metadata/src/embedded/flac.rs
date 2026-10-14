@@ -36,7 +36,7 @@ pub const FLAC_METADATA_INFO: MetadataInfo = MetadataInfo {
 };
 
 /// Converts a string of bytes to an ASCII string if all characters are within the printable ASCII
-/// range. If a null byte is encounted, the string terminates at that point.
+/// range. If a null byte is encountered, the string terminates at that point.
 fn printable_ascii_to_string(bytes: &[u8]) -> Option<String> {
     let mut result = String::with_capacity(bytes.len());
 
@@ -305,24 +305,24 @@ fn read_flac_cuesheet_track<B: ReadBytes>(
         }
     }
 
-    let n_indicies = reader.read_u8()? as usize;
+    let n_indices = reader.read_u8()? as usize;
 
-    // For CD-DA cuesheets, the track index cannot exceed 100 indicies.
-    if is_cdda && n_indicies > 100 {
-        return decode_error("flac: cuesheet track indicies cannot exceed 100 for CD-DA");
+    // For CD-DA cuesheets, the track index cannot exceed 100 indices.
+    if is_cdda && n_indices > 100 {
+        return decode_error("flac: cuesheet track indices cannot exceed 100 for CD-DA");
     }
 
-    // If the track contains indicies, then one chapter will be created per index, and a chapter
+    // If the track contains indices, then one chapter will be created per index, and a chapter
     // group returned.
-    if n_indicies > 0 {
+    if n_indices > 0 {
         let mut group = ChapterGroup {
-            items: Vec::with_capacity(n_indicies),
+            items: Vec::with_capacity(n_indices),
             tags: vec![isrc],
             visuals: vec![],
         };
 
         // Add each index as a chapter.
-        for _ in 0..n_indicies {
+        for _ in 0..n_indices {
             let index = read_flac_cuesheet_track_index(reader, is_cdda, n_offset_samples, tb)?;
 
             group.items.push(ChapterGroupItem::Chapter(index));
@@ -336,7 +336,7 @@ fn read_flac_cuesheet_track<B: ReadBytes>(
             i64::MAX
         });
 
-        // If the track has no indicies, return a single chapter.
+        // If the track has no indices, return a single chapter.
         let chapter = Chapter {
             start_time: tb.calc_time_saturating(Timestamp::from(start_ts)),
             end_time: None,

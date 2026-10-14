@@ -310,7 +310,7 @@ pub mod well_known {
 
         /// H.264 Baseline Profile (BP)
         pub const CODEC_PROFILE_H264_BASELINE: CodecProfile = CodecProfile(66);
-        /// H.264 Contrained Baseline Profile (CBP)
+        /// H.264 Constrained Baseline Profile (CBP)
         pub const CODEC_PROFILE_H264_CONSTRAINED_BASELINE: CodecProfile =
             CodecProfile(66 | 1 << (8 + 1)); // Constraint set 1
         /// H.264 Main Profile (MP)

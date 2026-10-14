@@ -18,9 +18,9 @@ pub fn plane_pair_by_buffer_index<S: Sample>(
     idx1: usize,
 ) -> Option<(&[S], &[S])> {
     // Both channels in the pair must be unique.
-    assert!(idx0 != idx1, "buffer indicies cannot be the same");
+    assert!(idx0 != idx1, "buffer indices cannot be the same");
 
-    // Neither of the plane indicies may exceed the number of planes.
+    // Neither of the plane indices may exceed the number of planes.
     let num_planes = planes.len();
 
     if idx0 < num_planes && idx1 < num_planes {
@@ -36,7 +36,7 @@ pub fn plane_pair_by_buffer_index<S: Sample>(
         }
     }
     else {
-        // Either one or both plane indicies are out of range.
+        // Either one or both plane indices are out of range.
         None
     }
 }
@@ -48,9 +48,9 @@ pub fn plane_pair_by_buffer_index_mut<S: Sample>(
     idx1: usize,
 ) -> Option<(&mut [S], &mut [S])> {
     // Both channels in the pair must be unique.
-    assert!(idx0 != idx1, "buffer indicies cannot be the same");
+    assert!(idx0 != idx1, "buffer indices cannot be the same");
 
-    // Neither of the plane indicies may exceed the number of planes.
+    // Neither of the plane indices may exceed the number of planes.
     let num_planes = planes.len();
 
     if idx0 < num_planes && idx1 < num_planes {
@@ -66,14 +66,14 @@ pub fn plane_pair_by_buffer_index_mut<S: Sample>(
         }
     }
     else {
-        // Either one or both plane indicies are out of range.
+        // Either one or both plane indices are out of range.
         None
     }
 }
 
 /// Get a sub-range of the range `bound` specified by relative range, `range`.
 ///
-/// Panics if the start or end indicies are out-of-bounds, or overflows the underlying `usize`.
+/// Panics if the start or end indices are out-of-bounds, or overflows the underlying `usize`.
 pub fn get_sub_range<R>(range: R, bound: &Range<usize>) -> Range<usize>
 where
     R: RangeBounds<usize>,
@@ -103,7 +103,7 @@ where
         Bound::Unbounded => len,
     };
 
-    // Validate the sub-range indicies form a valid range and do not exceed the bounding range.
+    // Validate the sub-range indices form a valid range and do not exceed the bounding range.
     assert!(start <= end, "audio buffer slice index start {start} is beyond end {end}");
     assert!(end <= len, "audio buffer slice end {end} index is out of range {len}");
 

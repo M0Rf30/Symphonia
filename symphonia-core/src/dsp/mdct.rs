@@ -103,17 +103,17 @@ impl Imdct {
             // populate each of the 4 output vectors.
             let val = w * x.conj();
 
-            // Forward and reverse order indicies that will be populated.
+            // Forward and reverse order indices that will be populated.
             let fi = 2 * i;
             let ri = n2 - 1 - 2 * i;
 
-            // The odd indicies in vec0 are populated reverse order.
+            // The odd indices in vec0 are populated reverse order.
             vec0[ri] = -val.im;
-            // The even indicies in vec1 are populated forward order.
+            // The even indices in vec1 are populated forward order.
             vec1[fi] = val.im;
-            // The odd indicies in vec2 are populated reverse order.
+            // The odd indices in vec2 are populated reverse order.
             vec2[ri] = val.re;
-            // The even indicies in vec3 are populated forward order.
+            // The even indices in vec3 are populated forward order.
             vec3[fi] = val.re;
         }
 
@@ -122,17 +122,17 @@ impl Imdct {
             // output vectors.
             let val = w * x.conj();
 
-            // Forward and reverse order indicies that will be populated.
+            // Forward and reverse order indices that will be populated.
             let fi = 2 * i;
             let ri = n2 - 1 - 2 * i;
 
-            // The even indicies in vec0 are populated in forward order.
+            // The even indices in vec0 are populated in forward order.
             vec0[fi] = -val.re;
-            // The odd indicies in vec1 are populated in reverse order.
+            // The odd indices in vec1 are populated in reverse order.
             vec1[ri] = val.re;
-            // The even indicies in vec2 are populated in forward order.
+            // The even indices in vec2 are populated in forward order.
             vec2[fi] = val.im;
-            // The odd indicies in vec3 are populated in reverse order.
+            // The odd indices in vec3 are populated in reverse order.
             vec3[ri] = val.im;
         }
 
@@ -142,7 +142,7 @@ impl Imdct {
         //
         // Additionally, note that vectors 0 and 3 are reversed copies (+ negation for vector 0) of
         // vectors 1 and 2, respectively. Pulling these copies out into a separate loop using
-        // iterators yielded no measureable difference either.
+        // iterators yielded no measurable difference either.
     }
 }
 

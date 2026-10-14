@@ -26,8 +26,13 @@
 //! |-------------------|----------------------------------------------|
 //! | `0xc0` - `0xdf`   | MPEG-1/2 audio, layers 1, 2, 3               |
 //! | `0xbd` / `0xa0`..`0xa7` | DVD-Video LPCM (16, 20 and 24-bit, 48 and 96 kHz) |
+//! | `0xbd` / `0x80`..`0x87`, `0xc0`..`0xcf`, or raw | AC-3, E-AC-3 |
+//! | `0xbd` / `0x88`..`0x8f`, `0x98`..`0x9f` | DTS (core, and the DTS-HD extension) |
+//! | `0xbd` / `0xa0`..`0xaf` (not LPCM) | MLP |
+//! | `0xbd` / `0xb0`..`0xbf` | Dolby TrueHD |
 //!
-//! AC-3, DTS, and other audio carried in private stream 1 is ignored. Both the MPEG-2 and the
+//! The private stream 1 sub-streams are classified as in FFmpeg. Subtitle and other
+//! private stream 1 sub-streams are ignored. Both the MPEG-2 and the
 //! MPEG-1 forms of the pack and PES headers are supported, as is the zero padding that follows the
 //! packets in the sectors of a Video CD.
 //!

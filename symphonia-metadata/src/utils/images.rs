@@ -252,7 +252,7 @@ fn parse_bitmap(mut reader: BufReader<'_>) -> Result<ImageInfo> {
         }
         // BI_RLE8 = 0x1 (run-length encoded)
         1 => {
-            // Run-length encoded pixel values storing indicies into the RGBQUAD color table.
+            // Run-length encoded pixel values storing indices into the RGBQUAD color table.
             // Pixel data is stored as a (count, index) byte-pair.
             ColorMode::Indexed(ColorPaletteInfo {
                 bits_per_pixel: non_zero(8),
@@ -261,7 +261,7 @@ fn parse_bitmap(mut reader: BufReader<'_>) -> Result<ImageInfo> {
         }
         // BI_RLE4 = 0x2 (run-length encoded)
         2 => {
-            // Run-length encoded pixel values storing indicies into the RGBQUAD color table.
+            // Run-length encoded pixel values storing indices into the RGBQUAD color table.
             // Pixel data is stored as a (count, index[0] | index[1]) byte-pair.
             ColorMode::Indexed(ColorPaletteInfo {
                 bits_per_pixel: non_zero(4),

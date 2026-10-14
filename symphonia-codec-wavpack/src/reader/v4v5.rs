@@ -10,7 +10,7 @@
 //!
 //! Ported from `open_utils.c` (`WavpackOpenFileInputEx64()`, `read_next_header()`,
 //! `read_wvc_block()`, `match_wvc_header()`, `seek_eof_information()`) of the WavPack reference
-//! implementation (https://github.com/dbry/WavPack, BSD licence).
+//! implementation (<https://github.com/dbry/WavPack>, BSD licence).
 
 use std::io::{ErrorKind, Seek, SeekFrom};
 

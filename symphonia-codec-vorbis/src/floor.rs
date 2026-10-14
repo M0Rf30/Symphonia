@@ -245,7 +245,7 @@ impl Floor for Floor0 {
                 i += min(order - i0, vq.len());
 
                 // Add the value of last coefficient from the previous iteration to each scalar
-                // value read from the VQ vector and append those valeus to the coefficient vector.
+                // value read from the VQ vector and append those values to the coefficient vector.
                 for (c, &vq) in self.coeffs[i0..i].iter_mut().zip(vq) {
                     *c = last + vq;
                 }
@@ -301,8 +301,8 @@ impl Floor for Floor0 {
 
             let mut iter = self.coeffs[..usize::from(self.setup.floor0_order)].chunks_exact(2);
 
-            // Calculate p using coefficients with odd indicies, and q using coefficients with even
-            // indicies.
+            // Calculate p using coefficients with odd indices, and q using coefficients with even
+            // indices.
             for coeffs in &mut iter {
                 p *= coeffs[1] - two_cos_omega;
                 q *= coeffs[0] - two_cos_omega;
@@ -456,7 +456,7 @@ impl Floor1 {
         // The number of partitions. 5-bit value, 0..31 range.
         let floor1_partitions = bs.read_bits_leq32(5)? as usize;
 
-        // Parition list of up-to 32 partitions (floor1_partitions), with each partition indicating
+        // Partition list of up-to 32 partitions (floor1_partitions), with each partition indicating
         // a 4-bit class (0..16) identifier.
         let mut floor1_partition_class_list = [0; 32];
 

@@ -242,7 +242,7 @@ impl ElementChannel {
             // Value of the output sample before prediction (the residual or difference).
             let mut res = out[i];
 
-            // Value of the sample preceeding the first past sample.
+            // Value of the sample preceding the first past sample.
             let past0 = out[i - order - 1];
 
             // Run the FIR filter.
@@ -307,7 +307,7 @@ impl ElementChannel {
 
 /// Apple Lossless Audio Codec (ALAC) decoder.
 pub struct AlacDecoder {
-    /// Codec paramters.
+    /// Codec parameters.
     params: AudioCodecParameters,
     /// A temporary buffer to store the tail bits while decoding an element with a bit-shift > 0. If
     /// `config.num_channels` > 1, then this buffer must be 2x the frame length.

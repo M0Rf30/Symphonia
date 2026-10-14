@@ -10,7 +10,7 @@
 //!
 //! Ported from `wavpack.h`, `open_utils.c` (`read_next_header()`, `read_metadata_buff()`,
 //! `WavpackVerifySingleBlock()`) of the WavPack reference implementation
-//! (https://github.com/dbry/WavPack, BSD licence).
+//! (<https://github.com/dbry/WavPack>, BSD licence).
 
 /// The size of the block header (`WavpackHeader`) in bytes.
 pub(crate) const HEADER_LEN: usize = 32;

@@ -107,11 +107,27 @@ impl TsMux {
     }
 
     pub fn psi(&mut self, pmt_pid: u16, streams: &[StreamSpec]) {
+        self.psi_with_program_descriptors(pmt_pid, &[], streams);
+    }
+
+    /// As `psi`, with the descriptors of the program (program info).
+    pub fn psi_with_program_descriptors(
+        &mut self,
+        pmt_pid: u16,
+        program_descriptors: &[u8],
+        streams: &[StreamSpec],
+    ) {
         let pat = build_section(0, 1, &[0x00, 0x01, 0xe0 | (pmt_pid >> 8) as u8, pmt_pid as u8]);
         self.section(0, &pat);
 
         let pcr_pid = streams[0].pid;
-        let mut body = vec![0xe0 | (pcr_pid >> 8) as u8, pcr_pid as u8, 0xf0, 0x00];
+        let mut body = vec![
+            0xe0 | (pcr_pid >> 8) as u8,
+            pcr_pid as u8,
+            0xf0 | (program_descriptors.len() >> 8) as u8,
+            program_descriptors.len() as u8,
+        ];
+        body.extend_from_slice(program_descriptors);
 
         for s in streams {
             body.extend_from_slice(&[
@@ -129,17 +145,35 @@ impl TsMux {
     }
 
     pub fn pes(&mut self, pid: u16, stream_id: u8, pts: Option<u64>, payload: &[u8]) {
+        self.pes_with_extension(pid, stream_id, pts, None, payload);
+    }
+
+    /// As `pes`, with a PES extension that has the stream ID extension `ext_id`, if given (as in
+    /// Blu-ray, with the stream ID 0xfd).
+    pub fn pes_with_extension(
+        &mut self,
+        pid: u16,
+        stream_id: u8,
+        pts: Option<u64>,
+        ext_id: Option<u8>,
+        payload: &[u8],
+    ) {
         let mut pes = vec![0, 0, 1, stream_id];
-        let hdr_data: Vec<u8> = match pts {
+        let mut hdr_data: Vec<u8> = match pts {
             Some(pts) => write_timestamp(pts, 0b0010).to_vec(),
             None => vec![],
         };
+
+        if let Some(id) = ext_id {
+            // PES extension flag 2, marker bit and length 1, and the stream ID extension.
+            hdr_data.extend_from_slice(&[0x01, 0x81, id]);
+        }
 
         let len = 3 + hdr_data.len() + payload.len();
         assert!(len <= 0xffff);
         pes.extend_from_slice(&(len as u16).to_be_bytes());
         pes.push(0x80);
-        pes.push(if pts.is_some() { 0x80 } else { 0x00 });
+        pes.push(if pts.is_some() { 0x80 } else { 0x00 } | u8::from(ext_id.is_some()));
         pes.push(hdr_data.len() as u8);
         pes.extend_from_slice(&hdr_data);
         pes.extend_from_slice(payload);
@@ -209,6 +243,8 @@ pub fn registry() -> CodecRegistry {
     reg.register_audio_decoder::<symphonia_codec_aac::AacDecoder>();
     reg.register_audio_decoder::<symphonia_bundle_mp3::MpaDecoder>();
     reg.register_audio_decoder::<symphonia_codec_opus::OpusAudioDecoder>();
+    reg.register_audio_decoder::<symphonia_codec_dca::DcaDecoder>();
+    reg.register_audio_decoder::<symphonia_codec_truehd::TrueHdDecoder>();
     reg
 }
 
@@ -264,7 +300,8 @@ pub fn check_seeks(
         let mut first = true;
         let mut compared = 0;
 
-        for _ in 0..120 {
+        // Enough packets to cover the pre-roll of TrueHD (128 packets), and compare more.
+        for _ in 0..400 {
             let Some(packet) = reader.next_packet().unwrap()
             else {
                 break;
@@ -275,7 +312,10 @@ pub fn check_seeks(
             }
 
             if first {
-                assert_eq!(packet.pts, seeked.actual_ts, "first packet is the actual ts");
+                assert_eq!(
+                    packet.pts, seeked.actual_ts,
+                    "first packet is the actual ts (target {target})"
+                );
                 first = false;
             }
 
@@ -286,7 +326,7 @@ pub fn check_seeks(
 
                 match (tolerance, got) {
                     (Some(tol), Some(got)) => {
-                        assert_eq!(got.len(), want.len());
+                        assert_eq!(got.len(), want.len(), "target {target} pts {}", packet.pts);
                         let diff =
                             got.iter().zip(want).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
                         assert!(diff <= tol, "target {target} pts {}: diff {diff}", packet.pts);

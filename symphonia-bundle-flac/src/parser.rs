@@ -204,7 +204,7 @@ impl PacketBuilder {
             }
             else if first.state.total_len > self.get_max_avg_frame_size() {
                 warn!(
-                    "dropping fragment: packet would exeed 4x average historical size of {} bytes",
+                    "dropping fragment: packet would exceed 4x average historical size of {} bytes",
                     self.get_max_avg_frame_size()
                 );
                 true
@@ -236,8 +236,8 @@ impl PacketBuilder {
             // The fragment does not have a CRC that matches the expected CRC.
             //
             // For each existing fragment, update its running CRC with the payload of the new
-            // fragment. If an exisiting fragment, denoted as F, after having it's running CRC
-            // updated matches the expected CRC of the new fragment. Then all fragments preceeding F
+            // fragment. If an existing fragment, denoted as F, after having it's running CRC
+            // updated matches the expected CRC of the new fragment. Then all fragments preceding F
             // are discarded, and all fragments from F up-to and including the new fragment are
             // merged to form a packet.
             let start = self.frags.iter_mut().position(|f| f.update(&frag));
@@ -720,7 +720,7 @@ fn strict_frame_header_check(
 
     // Channel assignments.
     let num_frame_channels = match header.channel_assignment {
-        ChannelAssignment::Independant(num) => num,
+        ChannelAssignment::Independent(num) => num,
         ChannelAssignment::LeftSide => 2,
         ChannelAssignment::MidSide => 2,
         ChannelAssignment::RightSide => 2,
@@ -743,7 +743,7 @@ fn may_contain_sync_preamble(buf: &[u8]) -> bool {
     bits::contains_ones_byte_u64(u64::from_ne_bytes(win))
 }
 
-/// Scan for frame synchronization premable, and if one is found, return the position of it in
+/// Scan for frame synchronization preamble, and if one is found, return the position of it in
 /// buf.
 fn scan_for_sync_preamble(buf: &[u8]) -> Option<(usize, u16)> {
     for (p, chunk) in buf.chunks_exact(8).enumerate() {
@@ -758,7 +758,7 @@ fn scan_for_sync_preamble(buf: &[u8]) -> Option<(usize, u16)> {
         let mut sync = 0u16;
 
         // Starting from the beginning of this chunk, read up-to 9 bytes to find the synchronization
-        // preamble. 9 bytes must be read to ensure that if the premable started on the last byte
+        // preamble. 9 bytes must be read to ensure that if the preamble started on the last byte
         // of a chunk, then it will be found.
         for (i, byte) in buf[8 * p..].iter().take(8 + 1).enumerate() {
             sync = (sync << 8) | u16::from(*byte);

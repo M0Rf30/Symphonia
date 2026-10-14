@@ -647,7 +647,7 @@ impl FormatReader for AdtsReader<'_> {
             }
 
             if self.reader.is_seekable() {
-                // Successfuly seeked to the start of the stream, reset the next packet timestamp.
+                // Successfully seeked to the start of the stream, reset the next packet timestamp.
                 self.next_packet_ts = Timestamp::from(0);
                 self.pending.clear();
             }
@@ -777,7 +777,7 @@ fn approximate_frame_count(mut source: &mut MediaSourceStream<'_>) -> Result<Opt
                     parsed_n_frames += u64::from(header.raw_data_blocks);
                     n_bytes += u64::from(header.frame_len);
 
-                    // skip frame payload to avoid seaching the sync word in the audio data
+                    // skip frame payload to avoid searching the sync word in the audio data
                     if source.ignore_bytes(header.payload_len() as u64).is_err() {
                         break;
                     }

@@ -200,6 +200,9 @@ impl CommonChunk {
             FormatData::Mpeg(_) => {
                 unsupported_error("aiff: packet info not implemented for format Mpeg")
             }
+            FormatData::Es(_) => {
+                unsupported_error("aiff: packet info not implemented for format Es")
+            }
         }
     }
 }
@@ -258,6 +261,9 @@ impl fmt::Display for CommonChunk {
             }
             FormatData::Mpeg(_) => {
                 writeln!(f, "\tformat_data: Mpeg DISPLAY UNSUPPORTED {{")?;
+            }
+            FormatData::Es(_) => {
+                writeln!(f, "\tformat_data: Es DISPLAY UNSUPPORTED {{")?;
             }
         };
 

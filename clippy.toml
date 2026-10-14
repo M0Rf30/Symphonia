@@ -7,7 +7,7 @@
 #
 # Justification:
 #   Where possible, expressing an algorithm as closely as possible to the specification is
-#   preferrable. Rewriting using range syntax provides marginal benefit, but could be confusing.
+#   preferable. Rewriting using range syntax provides marginal benefit, but could be confusing.
 #
 # --------------------------------------------------------------------------------------------------
 #

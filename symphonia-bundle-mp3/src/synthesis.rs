@@ -141,7 +141,7 @@ static SYNTHESIS_D: [f32; 512] = [
      0.000015259,  0.000015259,  0.000015259,  0.000015259,
 ];
 
-/// `SynthesisState` maintains the persistant state of sub-band synthesis.
+/// `SynthesisState` maintains the persistent state of sub-band synthesis.
 pub struct SynthesisState {
     v_vec: [[f32; 64]; 16],
     v_front: usize,
@@ -199,7 +199,7 @@ pub fn synthesis(state: &mut SynthesisState, n_frames: usize, in_samples: &[f32]
         //         vector thus allowing the use of an efficient DCT algorithm.
         //
         // The mappings above can be found graphically by plotting each row of the cosine
-        // coefficient matricies of both the DCT and MDCT side-by side. The mapping becomes readily
+        // coefficient matrices of both the DCT and MDCT side-by side. The mapping becomes readily
         // apparent, and so too do the exceptions.
         //
         // Using the observations above, if we apply a 32-point DCT transform to the input vector,
@@ -226,7 +226,7 @@ pub fn synthesis(state: &mut SynthesisState, n_frames: usize, in_samples: &[f32]
         //              .               +----------+   +--------+     .     +---------+
         //
         // Note however that the mappings in the previous step have exceptions for boundary samples.
-        // These exceptions can be seen when plotting the coefficient matricies as mentioned above.
+        // These exceptions can be seen when plotting the coefficient matrices as mentioned above.
         // The mapping for boundary samples are as follows:
         //
         //     1) v_vec[ 0] =  d_vec[16]
@@ -235,7 +235,7 @@ pub fn synthesis(state: &mut SynthesisState, n_frames: usize, in_samples: &[f32]
         //     4) v_vec[16] =  0.0
         //
         // The final algorithm written below performs the copy and flip operations of each 16 sample
-        // quadrant in seperate loops to assist auto-vectorization. The boundary samples are
+        // quadrant in separate loops to assist auto-vectorization. The boundary samples are
         // excluded from these loops and handled manually afterwards.
         //
         // [1] K. Konstantinides, "Fast subband filtering in MPEG audio coding", Signal Processing
@@ -338,7 +338,7 @@ pub fn synthesis(state: &mut SynthesisState, n_frames: usize, in_samples: &[f32]
 /// Performs a 32-point Discrete Cosine Transform (DCT) using Byeong Gi Lee's fast algorithm
 /// published in article [1] without inverse square-root 2 scaling.
 ///
-/// This is a straight-forward implemention of the recursive algorithm, flattened into a single
+/// This is a straight-forward implementation of the recursive algorithm, flattened into a single
 /// function body to avoid the overhead of function calls and the stack.
 ///
 /// [1] B.G. Lee, "A new algorithm to compute the discrete cosine transform", IEEE Transactions

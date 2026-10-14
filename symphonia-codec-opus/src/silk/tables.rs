@@ -9,7 +9,7 @@
 //! `silk/tables_other.c`, `silk/tables_pitch_lag.c`, `silk/tables_LTP.c`, `silk/tables_gain.c`,
 //! `silk/table_LSF_cos.c`, `silk/tables_pulses_per_block.c`, and the decoder-relevant pitch-lag
 //! codebooks of `silk/pitch_est_tables.c` (BSD-3-Clause), see NOTICE. Encoder-only tables (e.g.
-//! `*_BITS_Q5` bit-cost tables, `Lag_range_stage3*`, `nb_cbk_searchs_stage3`) are omitted.
+//! `*_BITS_Q5` bit-cost tables, `Lag_range_stage3*`, `nb_cbk_searches_stage3`) are omitted.
 
 #![allow(dead_code)]
 

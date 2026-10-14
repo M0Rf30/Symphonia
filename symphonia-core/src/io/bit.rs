@@ -128,7 +128,7 @@ pub mod vlc {
         u32
     );
 
-    /// The concerete type for a codebook entry. May be either a Jump or Value entry.
+    /// The concrete type for a codebook entry. May be either a Jump or Value entry.
     #[derive(Copy, Clone)]
     pub(super) enum Entry<E: CodebookEntry> {
         /// A jump entry indicates to the decoder that the next codebook entry should be looked-up
@@ -200,7 +200,7 @@ pub mod vlc {
     struct CodebookBlock<E: CodebookEntry> {
         /// The number of prefix bits the block consumes.
         width: u8,
-        /// Map of unique child block prefixes to indicies in the codebook table.
+        /// Map of unique child block prefixes to indices in the codebook table.
         nodes: BTreeMap<u16, usize>,
         /// Codebook value entries whose codewords terminate in this block.
         values: Vec<CodebookValue<E>>,
@@ -272,7 +272,7 @@ pub mod vlc {
                 // The starting index of the current block.
                 let table_base = table.len();
 
-                // Resize the table to accomodate all entries within the block.
+                // Resize the table to accommodate all entries within the block.
                 table.resize(table_base + block_len, Default::default());
 
                 // Push child blocks onto the queue and record the jump entries in the table. Jumps
@@ -521,7 +521,7 @@ pub trait ReadBitsLtr: private::FetchBitsLtr {
             }
 
             if num_bits > 0 {
-                // Shift out in two parts to prevent panicing when num_bits == 64.
+                // Shift out in two parts to prevent panicking when num_bits == 64.
                 self.consume_bits(num_bits - 1);
                 self.consume_bits(1);
             }
@@ -568,7 +568,7 @@ pub trait ReadBitsLtr: private::FetchBitsLtr {
     fn read_bits_leq32(&mut self, mut bit_width: u32) -> io::Result<u32> {
         debug_assert!(bit_width <= u32::BITS);
 
-        // Shift in two 32-bit operations instead of a single 64-bit operation to avoid panicing
+        // Shift in two 32-bit operations instead of a single 64-bit operation to avoid panicking
         // when bit_width == 0 (and thus shifting right 64-bits). This is preferred to branching
         // the bit_width == 0 case, since reading up-to 32-bits at a time is a hot code-path.
         let mut bits = (self.get_bits() >> u32::BITS) >> (u32::BITS - bit_width);
@@ -621,7 +621,7 @@ pub trait ReadBitsLtr: private::FetchBitsLtr {
                 bits |= self.get_bits() >> (u64::BITS - bit_width);
             }
 
-            // Shift in two parts to prevent panicing when bit_width == 64.
+            // Shift in two parts to prevent panicking when bit_width == 64.
             self.consume_bits(bit_width - 1);
             self.consume_bits(1);
 
@@ -986,7 +986,7 @@ pub trait ReadBitsRtl: private::FetchBitsRtl {
             }
 
             if num_bits > 0 {
-                // Shift out in two parts to prevent panicing when num_bits == 64.
+                // Shift out in two parts to prevent panicking when num_bits == 64.
                 self.consume_bits(num_bits - 1);
                 self.consume_bits(1);
             }
@@ -1086,11 +1086,11 @@ pub trait ReadBitsRtl: private::FetchBitsRtl {
                 bits |= self.get_bits() << (bit_width - bits_needed);
             }
 
-            // Shift in two parts to prevent panicing when bit_width == 64.
+            // Shift in two parts to prevent panicking when bit_width == 64.
             self.consume_bits(bits_needed - 1);
             self.consume_bits(1);
 
-            // Generate the mask in two parts to prevent panicing when bit_width == 64.
+            // Generate the mask in two parts to prevent panicking when bit_width == 64.
             let mask = !((!0 << (bit_width - 1)) << 1);
 
             Ok(bits & mask)

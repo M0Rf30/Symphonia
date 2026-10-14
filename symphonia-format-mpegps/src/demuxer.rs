@@ -10,6 +10,7 @@ use std::io::{ErrorKind, Seek, SeekFrom};
 
 use symphonia_common::mpeg::es::{EsParser, EsTrack, MpaEs};
 use symphonia_common::mpeg::pes::{parse_pes_header, split_pes};
+use symphonia_common::mpeg::surround::{Ac3Es, DcaEs, TrueHdEs};
 use symphonia_common::mpeg::timeline::ticks_to_clock;
 use symphonia_common::mpeg::track::{
     PROBE_SCAN_LEN, SeekPlan, bisect_pts, build_audio_track, check_forward_only, earliest_base,
@@ -143,9 +144,11 @@ fn examine(buf: &[u8], eof: bool) -> Option<(usize, bool)> {
                     PRIVATE_STREAM_1 => {
                         // The sub-stream ID is after the PES header.
                         if let Some(hdr) = parse_pes_header(rest) {
-                            audio |= rest
-                                .get(hdr.payload_offset)
-                                .is_some_and(|sub| (0xa0..=0xa7).contains(sub));
+                            audio |= rest.get(hdr.payload_offset..).is_some_and(|p| {
+                                p.first().is_some_and(|&b| {
+                                    (0x80..=0xcf).contains(&b) && !(0x90..=0x97).contains(&b)
+                                }) || p.starts_with(&[0x0b, 0x77])
+                            });
                         }
                     }
                     _ => (),
@@ -216,6 +219,44 @@ fn next_start_code<B: ReadBytes>(reader: &mut B) -> Result<Option<(u8, u64)>> {
     }
 }
 
+/// The key flag of a stream of MLP in the sub-streams `0xa0`..`0xaf` (those of LPCM have none).
+const KEY_MLP: u32 = 0x1_0000;
+
+/// Classify a private stream 1 payload as ffmpeg's `mpegps_read_packet` does. Returns the stream
+/// key and the payload to give the parser: the payload of DVD LPCM keeps its headers, the
+/// payload of the other codecs is the elementary stream with the private stream header removed.
+fn private_stream_1(payload: &[u8]) -> Option<(u32, &[u8])> {
+    let sub = *payload.first()?;
+
+    // Raw AC-3 without a private stream header.
+    if payload.starts_with(&[0x0b, 0x77]) {
+        return Some((u32::from(PRIVATE_STREAM_1) << 8 | 0x80, payload));
+    }
+
+    let key = u32::from(PRIVATE_STREAM_1) << 8 | u32::from(sub);
+
+    match sub {
+        // AC-3, DTS, and AC-3/E-AC-3 (EVOB): the sub-stream ID, the number of frame headers, and
+        // the first access unit pointer.
+        0x80..=0x8f | 0x98..=0x9f | 0xc0..=0xcf => payload.get(4..).map(|p| (key, p)),
+        // The (DVD-Video LPCM) or MLP. DVD LPCM has 0x80 as the last byte of the audio header.
+        0xa0..=0xaf => {
+            if payload.len() < 7 {
+                None
+            }
+            else if payload[6] == 0x80 {
+                (sub <= 0xa7).then_some((key, payload))
+            }
+            else {
+                payload.get(10..).map(|p| (key | KEY_MLP, p))
+            }
+        }
+        // TrueHD: a further byte of header.
+        0xb0..=0xbf => payload.get(5..).map(|p| (key, p)),
+        _ => None,
+    }
+}
+
 /// Read the next PES packet of an audio stream, skipping the packets of other streams, and pack
 /// and system headers. Returns the position of the PES packet.
 fn next_audio_pes<B: ReadBytes>(reader: &mut B) -> Result<Option<(u64, Item)>> {
@@ -260,13 +301,12 @@ fn next_audio_pes<B: ReadBytes>(reader: &mut B) -> Result<Option<(u64, Item)>> {
             continue;
         };
 
-        let key = match code {
-            PRIVATE_STREAM_1 => match payload.first() {
-                // DVD LPCM.
-                Some(&sub) if (0xa0..=0xa7).contains(&sub) => u32::from(code) << 8 | u32::from(sub),
-                _ => continue,
+        let (key, payload) = match code {
+            PRIVATE_STREAM_1 => match private_stream_1(payload) {
+                Some(kp) => kp,
+                None => continue,
             },
-            _ => u32::from(code),
+            _ => (u32::from(code), payload),
         };
 
         return Ok(Some((pos, Item::Pes { key, pts: hdr.pts, payload: payload.to_vec() })));
@@ -297,7 +337,16 @@ pub struct MpegPsReader<'s> {
 
 /// Create the parser for a stream key (the stream ID, or the stream ID and sub-stream ID).
 fn make_parser(key: u32) -> Box<dyn EsParser> {
-    if key > 0xff { Box::new(LpcmEs::new()) } else { Box::new(MpaEs::new()) }
+    if key <= 0xff {
+        return Box::new(MpaEs::new());
+    }
+
+    match key & 0xff {
+        0x80..=0x87 | 0xc0..=0xcf => Box::new(Ac3Es::new()),
+        0x88..=0x8f | 0x98..=0x9f => Box::new(DcaEs::new()),
+        0xa0..=0xaf if key & KEY_MLP == 0 => Box::new(LpcmEs::new()),
+        _ => Box::new(TrueHdEs::new()),
+    }
 }
 
 impl<'s> MpegPsReader<'s> {
@@ -354,7 +403,7 @@ impl<'s> MpegPsReader<'s> {
 
                 self.streams.push(Stream {
                     id: key,
-                    es: EsTrack::new(key, make_parser(key)),
+                    es: EsTrack::new(key & 0xffff, make_parser(key)),
                     first_pts: None,
                 });
 
@@ -444,7 +493,7 @@ impl<'s> MpegPsReader<'s> {
 
         for (i, stream) in self.streams.iter().enumerate() {
             let mut track = build_audio_track(
-                stream.id,
+                stream.id & 0xffff,
                 &stream.es,
                 stream.first_pts,
                 base,
@@ -526,7 +575,7 @@ impl<'s> MpegPsReader<'s> {
                 return Ok(None);
             };
 
-            if k != key {
+            if k & 0xffff != key {
                 continue;
             }
 

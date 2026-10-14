@@ -217,7 +217,7 @@ impl LogicalStream {
         if num_prev_packets < self.packets.len() {
             // The page's timestamp is one past the last valid frame in the last completed packet
             // in this page.
-            let page_end_ts = self.mapper.absgp_to_ts(page.header.absgp);
+            let page_end_ts = self.mapper.absgp_to_ts(page.header.absgp, page.header.is_last_page);
 
             // Update previous page information with the timestamp.
             let prev_page = self
@@ -399,7 +399,7 @@ impl LogicalStream {
         }
 
         // Map the absolute granule position to a timestamp.
-        let page_end_ts = self.mapper.absgp_to_ts(page.header.absgp);
+        let page_end_ts = self.mapper.absgp_to_ts(page.header.absgp, page.header.is_last_page);
 
         // For single page streams, the first page is also the last page. If the page is
         // explicitly marked as the last page, then we assume the stream starts and ends on the
@@ -501,9 +501,9 @@ impl LogicalStream {
         }
 
         // Map the absolute granule position to a timestamp.
-        let page_end_ts = self.mapper.absgp_to_ts(page.header.absgp);
+        let page_end_ts = self.mapper.absgp_to_ts(page.header.absgp, page.header.is_last_page);
 
-        // The end delay can only be determined if this is the last page, and the timstamp of the
+        // The end delay can only be determined if this is the last page, and the timestamp of the
         // second last page is known, or this is the only page of the stream.
         let end_delay = if page.header.is_last_page && !partial_first {
             if let Some(last_bound) = &state.bound {
@@ -608,7 +608,7 @@ impl LogicalStream {
             }
         }
 
-        let page_end_ts = self.mapper.absgp_to_ts(page.header.absgp);
+        let page_end_ts = self.mapper.absgp_to_ts(page.header.absgp, page.header.is_last_page);
 
         // Map the absolute granule position to a timestamp.
         let page_start_ts_raw = page_end_ts.saturating_sub(total_pkt_dur);

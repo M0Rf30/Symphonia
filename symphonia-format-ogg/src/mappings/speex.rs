@@ -10,6 +10,11 @@
 //! The header layout is the `SpeexHeader` structure of libspeex (`speex_header.h`), and the
 //! stream layout (header packet, Vorbis comment packet, `extra_headers` additional header
 //! packets, then audio packets) is described by the Speex manual, "Ogg file format".
+//!
+//! Timeline: timestamp 0 is the first source sample, which is decoded sample
+//! `encoder_lookahead + decoder_lookahead` (what `speexdec` outputs from). The granule positions
+//! already exclude the encoder lookahead, and (except the clamped final one of `speexenc`) lag the
+//! source timeline by the decoder lookahead. See `SpeexMapper::absgp_to_ts`.
 
 use crate::common::SideData;
 
@@ -22,7 +27,7 @@ use symphonia_core::errors::Result;
 use symphonia_core::formats::Track;
 use symphonia_core::io::BufReader;
 use symphonia_core::meta::MetadataBuilder;
-use symphonia_core::units::Duration;
+use symphonia_core::units::{Duration, Timestamp};
 use symphonia_metadata::embedded::vorbis::{self, VORBIS_COMMENT_METADATA_INFO};
 
 use symphonia_core::audio::{Channels, Position};
@@ -40,9 +45,13 @@ const SPEEX_MAX_EXTRA_HEADERS: u32 = 1 << 16;
 /// The mapper-relevant fields of the Speex header packet.
 #[derive(Copy, Clone)]
 struct SpeexHeader {
-    /// The encoder lookahead, in samples. The granule position of every page excludes this many
-    /// leading samples (see `encoder_lookahead`).
-    lookahead: u32,
+    /// The sample rate in Hz.
+    rate: u32,
+    /// The algorithmic delay of the decoder, in samples (see `decoder_lookahead`).
+    decoder_lookahead: u32,
+    /// The delay of the whole encode-decode chain, in samples: the encoder lookahead (excluded
+    /// from the granule positions) plus the decoder lookahead.
+    chain_delay: u32,
     /// Samples per channel in one Speex frame (160 narrowband, 320 wideband, 640 ultra-wideband).
     frame_size: u32,
     /// Frames in each Ogg audio packet.
@@ -58,16 +67,29 @@ impl SpeexHeader {
     }
 }
 
-/// The encoder lookahead of each Speex mode (`speex_encoder_ctl(SPEEX_GET_LOOKAHEAD)`: narrowband
-/// 40, wideband `2 * 40 + 63`, ultra-wideband `2 * 143 + 63` samples). `speexenc` and libavformat
-/// both subtract it from the granule position, so the first audio packet of a stream starts at
-/// `-lookahead` and these samples are the start delay. Verified against `speexenc` 1.2.1 output
-/// (first page granule = `n * frame_size - lookahead`) and `libspeex` itself.
+/// The lookahead of the encoder of each Speex mode (`speex_encoder_ctl(SPEEX_GET_LOOKAHEAD)`:
+/// narrowband 40, wideband `2 * 40 + 63`, ultra-wideband `2 * 143 + 63` samples). `speexenc` and
+/// libavformat both subtract it from the granule positions, so the first audio packet of a stream
+/// starts at `-encoder_lookahead` in the granule timeline.
 fn encoder_lookahead(mode: u32) -> u32 {
     match mode {
         0 => 40,
         1 => 143,
         2 => 349,
+        _ => 0,
+    }
+}
+
+/// The lookahead of the decoder of each Speex mode (`speex_decoder_ctl(SPEEX_GET_LOOKAHEAD)`:
+/// narrowband 40, wideband `2 * 40`, ultra-wideband `2 * 2 * 40` samples). The granule positions
+/// do not account for it: the decoded sample `n` of a stream is the source sample
+/// `n - encoder_lookahead - decoder_lookahead`. `speexdec` discards both, the first from the
+/// granule position of the first page and the second from the decoder.
+fn decoder_lookahead(mode: u32) -> u32 {
+    match mode {
+        0 => 40,
+        1 => 80,
+        2 => 160,
         _ => 0,
     }
 }
@@ -111,7 +133,9 @@ pub fn detect(serial: u32, buf: &[u8]) -> Result<Option<Box<dyn Mapper>>> {
     };
 
     let header = SpeexHeader {
-        lookahead: encoder_lookahead(mode),
+        rate,
+        decoder_lookahead: decoder_lookahead(mode),
+        chain_delay: encoder_lookahead(mode) + decoder_lookahead(mode),
         frame_size,
         // The manual requires at least one frame per packet; treat 0 as 1 like libspeex does when
         // decoding a packet (it always decodes at least one frame).
@@ -130,7 +154,7 @@ pub fn detect(serial: u32, buf: &[u8]) -> Result<Option<Box<dyn Mapper>>> {
 
     let mut track = Track::new(serial);
 
-    track.with_codec_params(CodecParameters::Audio(codec_params)).with_delay(header.lookahead);
+    track.with_codec_params(CodecParameters::Audio(codec_params)).with_delay(header.chain_delay);
 
     Ok(Some(Box::new(SpeexMapper {
         track,
@@ -142,8 +166,10 @@ pub fn detect(serial: u32, buf: &[u8]) -> Result<Option<Box<dyn Mapper>>> {
 
 /// Every Speex audio packet decodes to `frames_per_packet * frame_size` samples. A final packet
 /// that carries fewer frames (padded with a terminator) is trimmed to the page's granule
-/// position by the logical stream, exactly like the padding of other codecs. The encoder
-/// lookahead is reported as the discard of the first packets of the stream.
+/// position by the logical stream, exactly like the padding of other codecs. The decoder
+/// lookahead is reported as the discard of the first packets of the stream. The encoder lookahead
+/// is not: it is already excluded from the granule positions, so that the first packet starts at
+/// a negative timestamp and the logical stream discards the samples before timestamp 0.
 struct SpeexPacketParser {
     dur: u64,
     /// The start delay that has not yet been reported as discard.
@@ -154,7 +180,7 @@ impl SpeexPacketParser {
     fn new(header: SpeexHeader) -> Self {
         SpeexPacketParser {
             dur: header.packet_dur(),
-            remaining_discard: u64::from(header.lookahead),
+            remaining_discard: u64::from(header.decoder_lookahead),
         }
     }
 }
@@ -190,13 +216,38 @@ impl Mapper for SpeexMapper {
         self.parser = SpeexPacketParser::new(self.header);
     }
 
+    fn absgp_to_ts(&self, absgp: u64, is_last_page: bool) -> Timestamp {
+        // Timestamp 0 is the first source sample, i.e. decoded sample `chain_delay`. A granule
+        // position `g` marks the decoded sample `g + encoder_lookahead`, which is the source
+        // sample `g - decoder_lookahead`.
+        //
+        // The exception is the granule position of the last page. `speexenc` clamps it to the
+        // number of source samples, so it already is a timestamp (and `speexdec` ends the stream
+        // there). A stream by another muxer, whose last granule position follows the same rule as
+        // the other pages, is not trimmed by this: its end timestamp lies beyond the decoded data.
+        let absgp = absgp as i64;
+
+        if is_last_page {
+            Timestamp::new(absgp)
+        }
+        else {
+            Timestamp::new(absgp.saturating_sub(i64::from(self.header.decoder_lookahead)))
+        }
+    }
+
     fn max_rap_period(&self) -> Duration {
-        // The Speex decoder carries the excitation history of the adaptive codebook (at most one
-        // narrowband frame, 20 ms, back), and the synthesis filter memory. A packet is the
-        // smallest unit that can be decoded, so seeks land `frames_per_packet` frames early, with
-        // at least two frames, so that the decoder reaches a settled state by the target.
-        let frames = self.header.frames_per_packet.max(2);
-        Duration::new(u64::from(self.header.frame_size) * u64::from(frames))
+        // Every Speex packet is decodable on its own, but the decoder is not memoryless: the
+        // adaptive codebook (long-term predictor) and the synthesis filters recurse over the
+        // past. After a seek the decoder starts from a blank state and converges to the state
+        // of a continuous decode geometrically. Measured on constant bit-rate speexenc streams with libspeex-exact output over
+        // many seek targets (narrowband, wideband, ultra-wideband, mono and stereo, 1 and 2 frames per
+        // packet): the output is within 1 LSB of a continuous decode after at most 0.7 s, and
+        // within 16 LSB after 0.5 s. So decode and discard one second before the seek target.
+        // (A bit-exact match is not reachable with any pre-roll: the noise-excited submodes
+        // and the packet-loss concealment of libspeex draw from a pseudo-random generator
+        // (`st->seed`) that runs from the start of the stream, so a stream with such frames
+        // differs from a continuous decode for as long as the effect of such a frame lasts.)
+        Duration::new(u64::from(self.header.rate))
     }
 
     fn track(&self) -> &Track {
@@ -275,8 +326,9 @@ mod tests {
         match mapper.map_packet(&[0xff; 20]).unwrap() {
             MapResult::StreamData { dur, discard } => {
                 assert_eq!(dur, Duration::new(960));
-                // The wideband encoder lookahead is discarded from the start.
-                assert_eq!(discard, Duration::new(143));
+                // The wideband decoder lookahead is discarded from the start. (The encoder
+                // lookahead is excluded by the granule positions.)
+                assert_eq!(discard, Duration::new(80));
             }
             _ => panic!("expected stream data"),
         }
@@ -285,6 +337,45 @@ mod tests {
         match mapper.map_packet(&[0xff; 20]).unwrap() {
             MapResult::StreamData { discard, .. } => assert_eq!(discard, Duration::ZERO),
             _ => panic!("expected stream data"),
+        }
+    }
+
+    /// A header of the given `mode` (0 narrowband, 1 wideband, 2 ultra-wideband) and `rate`.
+    fn mode_header(mode: u32, rate: u32) -> Vec<u8> {
+        let mut h = header(160, 1, 0);
+        h[36..40].copy_from_slice(&rate.to_le_bytes());
+        h[40..44].copy_from_slice(&mode.to_le_bytes());
+        h
+    }
+
+    #[test]
+    fn lookahead_and_timeline_by_mode() {
+        // (mode, rate, encoder lookahead, decoder lookahead), from `SPEEX_GET_LOOKAHEAD` of the
+        // libspeex 1.2.1 encoders and decoders.
+        for (mode, rate, enc, dec) in [(0, 8000, 40, 40), (1, 16000, 143, 80), (2, 32000, 349, 160)]
+        {
+            let mut mapper = detect(1, &mode_header(mode, rate)).unwrap().expect("speex mapper");
+
+            // The track starts with the delay of the whole encode-decode chain.
+            assert_eq!(mapper.track().delay, Some(enc + dec), "mode {mode}");
+
+            // A non-final granule position counts decoded samples without the encoder lookahead,
+            // so it lags the source timeline by the decoder lookahead.
+            assert_eq!(mapper.absgp_to_ts(10_000, false), Timestamp::new(10_000 - i64::from(dec)));
+            // The final granule position of `speexenc` is the number of source samples.
+            assert_eq!(mapper.absgp_to_ts(10_000, true), Timestamp::new(10_000));
+
+            // One second is decoded and discarded before a seek target.
+            assert_eq!(mapper.max_rap_period(), Duration::new(u64::from(rate)));
+
+            // Only the decoder lookahead is a codec discard.
+            mapper.map_packet(&[0u8; 8]).unwrap();
+            match mapper.map_packet(&[0xff; 20]).unwrap() {
+                MapResult::StreamData { discard, .. } => {
+                    assert_eq!(discard, Duration::new(u64::from(dec)))
+                }
+                _ => panic!("expected stream data"),
+            }
         }
     }
 

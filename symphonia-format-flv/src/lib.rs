@@ -29,10 +29,9 @@
 //! | 3            | Linear PCM, little-endian, 8-bit unsigned, or 16-bit signed |
 //! | 7, 8         | G.711 A-law, mu-law (8 kHz)                            |
 //! | 1            | SWF ADPCM, a tag is one or more blocks of 4096 frames   |
+//! | 4, 5, 6      | Nellymoser, mono, 16 kHz, 8 kHz, or (format 6) the rate of the sound rate field |
+//! | 11           | Speex, 16 kHz mono, a tag is one 20 ms frame, without a header |
 //! | 9            | Enhanced RTMP audio (see below)                        |
-//!
-//! Nellymoser and Speex (sound formats 4, 5, 6, and 11) are not supported, as Symphonia does not
-//! have decoders for them, and a file with such audio is not opened.
 //!
 //! ## Enhanced RTMP
 //!

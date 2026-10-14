@@ -5,7 +5,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-/// Startng indicies of each scale factor band at various sampling rates for long blocks.
+/// Starting indices of each scale factor band at various sampling rates for long blocks.
 pub static SFB_LONG_BANDS: [[usize; 23]; 9] = [
     // 44.1 kHz, MPEG version 1, derived from ISO/IEC 11172-3 Table B.8
     [
@@ -54,7 +54,7 @@ pub static SFB_LONG_BANDS: [[usize; 23]; 9] = [
     ],
 ];
 
-/// Starting indicies of each scale factor band at various sampling rates for short blocks. Each
+/// Starting indices of each scale factor band at various sampling rates for short blocks. Each
 /// value must be multiplied by 3 since there are three equal length windows per short scale factor
 /// band.
 pub static SFB_SHORT_BANDS: [[usize; 40]; 9] = [
@@ -167,7 +167,7 @@ pub const SFB_MIXED_BANDS: [&[usize]; 9] = [
     ],
 ];
 
-/// The index of the first window in the first short band of a mixed block. All bands preceeding
+/// The index of the first window in the first short band of a mixed block. All bands preceding
 /// the switch point are long bands.
 pub const SFB_MIXED_SWITCH_POINT: [usize; 9] = [8, 8, 8, 6, 6, 6, 6, 6, 3];
 

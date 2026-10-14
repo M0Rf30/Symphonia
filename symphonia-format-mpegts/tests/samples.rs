@@ -407,6 +407,281 @@ fn opus_in_mpegts_matches_ogg_reader() {
     }
 }
 
+/// The offsets and sizes of the frames of an elementary stream with `frame_len(data)` the size
+/// of the frame at the start of `data`.
+fn frame_starts(es: &[u8], frame_len: impl Fn(&[u8]) -> Option<usize>) -> Vec<usize> {
+    let mut starts = vec![];
+    let mut pos = 0;
+
+    while let Some(len) = es.get(pos..).and_then(&frame_len) {
+        starts.push(pos);
+        pos += len;
+    }
+
+    assert_eq!(pos, es.len(), "the stream is all frames");
+    starts
+}
+
+/// Multiplex the elementary stream `es` with frames beginning at `starts`, `group` frames at a
+/// time, cyclically, into whole PES packets (as TrueHD requires, since it cannot be resynchronised
+/// in the middle of a major sync period), the PTS of which is that of the first frame.
+fn mux_frame_groups(
+    mux: &mut TsMux,
+    pid: u16,
+    es: &[u8],
+    starts: &[usize],
+    pts_of: impl Fn(usize) -> u64,
+    groups: &[usize],
+    psi: &[StreamSpec],
+) {
+    let mut first = 0;
+
+    for (n, &group) in groups.iter().cycle().enumerate() {
+        if first >= starts.len() {
+            break;
+        }
+
+        if n % 32 == 0 {
+            mux.psi(0x1000, psi);
+        }
+
+        let end = (first + group).min(starts.len());
+        let to = starts.get(end).copied().unwrap_or(es.len());
+        mux.pes(pid, 0xbd, Some(pts_of(first)), &es[starts[first]..to]);
+        first = end;
+    }
+}
+
+/// Multiplex the elementary stream in the file `name`, the frames of which have `samples` samples
+/// at the rate of 48 kHz, as the stream type `stream_type`, and check that the packets are the
+/// frames, the timestamps, the duration, and the seeks. If `aligned`, the PES packets begin and
+/// end on frame boundaries, otherwise they have arbitrary sizes.
+fn check_surround_es(
+    name: &str,
+    stream_type: u8,
+    samples: u64,
+    aligned: bool,
+    frame_len: impl Fn(&[u8]) -> Option<usize>,
+    codec: symphonia_core::codecs::audio::AudioCodecId,
+    tolerance: Option<f32>,
+) {
+    let Some(path) = sample(name)
+    else {
+        return;
+    };
+
+    let es = std::fs::read(path).unwrap();
+    let starts = frame_starts(&es, frame_len);
+    let base = (1u64 << 33) - 45_000;
+    let specs = [StreamSpec { stream_type, pid: 0x101, descriptors: vec![] }];
+
+    let build = |packet_size: usize, sizes: &[usize]| {
+        let mut mux = TsMux::new(packet_size);
+        let pts_of = |k| ticks_to_pts(k as u64 * samples, 48_000, base);
+
+        if aligned {
+            mux_frame_groups(&mut mux, 0x101, &es, &starts, pts_of, sizes, &specs);
+        }
+        else {
+            mux_es(&mut mux, 0x101, 0xbd, &es, &starts, pts_of, sizes, &specs);
+        }
+
+        mux.out
+    };
+
+    let size_sets: [&[usize]; 2] =
+        if aligned { [&[3], &[1, 8, 5, 2]] } else { [&[1400], &[333, 5000, 17, 2900]] };
+
+    for sizes in size_sets {
+        let mut reader = open(build(188, sizes));
+        assert_eq!(reader.tracks().len(), 1, "{name}");
+        assert_eq!(audio_params(&reader, 0).codec, codec, "{name}");
+
+        let packets = read_all(&mut reader);
+        assert_eq!(packets.len(), starts.len(), "{name}");
+        assert_eq!(packets.iter().flat_map(|p| p.data.iter().copied()).collect::<Vec<_>>(), es);
+
+        for (i, p) in packets.iter().enumerate() {
+            assert_eq!(p.pts.get(), (i as u64 * samples) as i64, "{name} packet {i}");
+            assert_eq!(p.dur.get(), samples, "{name} packet {i}");
+        }
+
+        assert_eq!(
+            reader.tracks()[0].duration.unwrap().get(),
+            starts.len() as u64 * samples,
+            "{name}"
+        );
+    }
+
+    let out = build(192, size_sets[0]);
+    let n = starts.len() as i64 * samples as i64;
+
+    if tolerance.is_some() {
+        check_seeks(
+            || Box::new(open(out.clone())),
+            0,
+            &[0, 1, samples as i64, n / 3, n / 7, n - 5000, n / 2 + 77, n / 3 - 1],
+            tolerance,
+        );
+    }
+}
+
+#[test]
+fn ac3_in_mpegts_matches_the_elementary_stream() {
+    let ac3 =
+        |d: &[u8]| symphonia_common::mpeg::surround::Ac3Header::parse(d).map(|h| h.frame_size);
+
+    for (name, stream_type, codec) in [
+        ("unsupported/ac3_5_1.ac3", 0x81, symphonia_core::codecs::audio::well_known::CODEC_ID_AC3),
+        (
+            "unsupported/ac3_stereo.ac3",
+            0x81,
+            symphonia_core::codecs::audio::well_known::CODEC_ID_AC3,
+        ),
+        (
+            "unsupported/eac3_5_1.eac3",
+            0x87,
+            symphonia_core::codecs::audio::well_known::CODEC_ID_EAC3,
+        ),
+        (
+            "unsupported/eac3_stereo.eac3",
+            0x87,
+            symphonia_core::codecs::audio::well_known::CODEC_ID_EAC3,
+        ),
+    ] {
+        check_surround_es(name, stream_type, 1536, false, ac3, codec, None);
+    }
+}
+
+#[test]
+fn dts_in_mpegts_matches_the_elementary_stream() {
+    // The DTS core of the sample has frames of 512 samples (the decoder is lossy).
+    check_surround_es(
+        "unsupported/dts_5_1.dts",
+        0x82,
+        512,
+        false,
+        |d| symphonia_common::mpeg::surround::DcaHeader::parse(d).map(|h| h.frame_size),
+        symphonia_core::codecs::audio::well_known::CODEC_ID_DCA,
+        Some(1e-5),
+    );
+}
+
+#[test]
+fn truehd_in_mpegts_matches_the_elementary_stream() {
+    // The access units of the TrueHD stream, which are 40 samples.
+    check_surround_es(
+        "unsupported/truehd_5_1.thd",
+        0x83,
+        40,
+        true,
+        |d| {
+            let len = (usize::from(*d.first()? & 0xf) << 8 | usize::from(*d.get(1)?)) * 2;
+            (len >= 4 && len <= d.len()).then_some(len)
+        },
+        symphonia_core::codecs::audio::well_known::CODEC_ID_TRUEHD,
+        // Lossless: seeking is exact.
+        Some(0.0),
+    );
+}
+
+#[test]
+fn bluray_truehd_with_embedded_ac3_matches_the_elementary_streams() {
+    let (Some(thd_path), Some(ac3_path)) =
+        (sample("unsupported/truehd_5_1.thd"), sample("unsupported/ac3_5_1.ac3"))
+    else {
+        return;
+    };
+
+    let thd = std::fs::read(thd_path).unwrap();
+    let ac3 = std::fs::read(ac3_path).unwrap();
+
+    let thd_aus = frame_starts(&thd, |d| {
+        let len = (usize::from(*d.first()? & 0xf) << 8 | usize::from(*d.get(1)?)) * 2;
+        (len >= 4 && len <= d.len()).then_some(len)
+    });
+    let ac3_frames = frame_starts(&ac3, |d| {
+        symphonia_common::mpeg::surround::Ac3Header::parse(d).map(|h| h.frame_size)
+    });
+
+    // Five AC-3 frames (7680 samples) are 192 TrueHD access units. The access units are in PES
+    // packets of 96, the AC-3 frames are in PES packets of 1.
+    let groups = (thd_aus.len() / 192).min(ac3_frames.len() / 5);
+    let (n_aus, n_frames) = (groups * 192, groups * 5);
+    let base = 126_000;
+    let pid = 0x1100;
+
+    let au_end = |i: usize| thd_aus.get(i).copied().unwrap_or(thd.len());
+    let frame_end = |i: usize| ac3_frames.get(i).copied().unwrap_or(ac3.len());
+
+    let mut mux = TsMux::new(192);
+    let psi = |mux: &mut TsMux| {
+        mux.psi_with_program_descriptors(
+            0x1000,
+            &[0x05, 0x04, b'H', b'D', b'M', b'V'],
+            &[StreamSpec { stream_type: 0x83, pid, descriptors: vec![] }],
+        );
+    };
+
+    psi(&mut mux);
+
+    let mut fi = 0;
+
+    for half in 0..groups * 2 {
+        if half % 40 == 0 {
+            psi(&mut mux);
+        }
+
+        let first = half * 96;
+        mux.pes_with_extension(
+            pid,
+            0xfd,
+            Some(base + first as u64 * 75),
+            Some(0x72),
+            &thd[thd_aus[first]..au_end(first + 96)],
+        );
+
+        for _ in 0..if half % 2 == 0 { 3 } else { 2 } {
+            mux.pes_with_extension(
+                pid,
+                0xfd,
+                Some(base + fi as u64 * 2880),
+                Some(0x76),
+                &ac3[ac3_frames[fi]..frame_end(fi + 1)],
+            );
+            fi += 1;
+        }
+    }
+
+    assert_eq!(fi, n_frames);
+
+    let out = mux.out;
+    let mut reader = open(out.clone());
+    assert_eq!(reader.tracks().len(), 2);
+
+    let ids: Vec<u32> = reader.tracks().iter().map(|t| t.id).collect();
+    assert_eq!(ids, [0x1100, 0x3100]);
+    assert_eq!(reader.tracks()[0].duration.unwrap().get(), n_aus as u64 * 40);
+    assert_eq!(reader.tracks()[1].duration.unwrap().get(), n_frames as u64 * 1536);
+
+    let packets = read_all(&mut reader);
+
+    let data = |id: u32| -> Vec<u8> {
+        packets.iter().filter(|p| p.track_id == id).flat_map(|p| p.data.iter().copied()).collect()
+    };
+
+    assert_eq!(data(0x1100), thd[..au_end(n_aus)]);
+    assert_eq!(data(0x3100), ac3[..frame_end(n_frames)]);
+
+    // The lossless stream seeks exactly.
+    check_seeks(
+        || Box::new(open(out.clone())),
+        0,
+        &[0, 1, 40, n_aus as i64 * 40 / 3, n_aus as i64 * 40 - 5000, n_aus as i64 * 20 + 3],
+        Some(0.0),
+    );
+}
+
 #[test]
 fn seek_by_time() {
     let Some(path) = sample("unsupported/aac_in_mpegts.ts")

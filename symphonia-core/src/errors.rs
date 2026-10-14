@@ -41,13 +41,13 @@ impl SeekErrorKind {
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum Error {
-    /// An IO error occured while reading, writing, or seeking the stream.
+    /// An IO error occurred while reading, writing, or seeking the stream.
     IoError(std::io::Error),
     /// The stream contained malformed data and could not be decoded or demuxed.
     DecodeError(&'static str),
     /// The stream could not be seeked.
     SeekError(SeekErrorKind),
-    /// An unsupported container or codec feature was encounted.
+    /// An unsupported container or codec feature was encountered.
     Unsupported(&'static str),
     /// A default or user-defined limit was reached while decoding or demuxing the stream. Limits
     /// are used to prevent denial-of-service attacks from malicious streams.
@@ -110,7 +110,7 @@ pub fn seek_error<T>(kind: SeekErrorKind) -> Result<T> {
     Err(Error::SeekError(kind))
 }
 
-/// Convenience function to create an unsupport feature error.
+/// Convenience function to create an unsupported feature error.
 pub fn unsupported_error<T>(feature: &'static str) -> Result<T> {
     Err(Error::Unsupported(feature))
 }

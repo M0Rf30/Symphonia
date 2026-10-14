@@ -1,0 +1,22 @@
+[package]
+name = "symphonia-format-es"
+description = "Pure Rust raw AC-3, E-AC-3, DTS, and TrueHD/MLP elementary stream demuxers (a part of project Symphonia)."
+authors = ["M0Rf30 <morf3089@gmail.com>"]
+readme = "README.md"
+categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
+keywords = ["audio", "media", "demuxer", "ac3", "dts"]
+# Common package metadata located in workspace Cargo.toml.
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+log = { workspace = true }
+symphonia-common = { workspace = true }
+symphonia-core = { workspace = true }
+
+[lints]
+workspace = true
