@@ -747,6 +747,33 @@ fn opus_silk_seek_backs_off_by_10_seconds() {
     assert_eq!(seeked.actual_ts.get(), 0 - 312);
 }
 
+/// A TrueHD decoder can only start at an access unit with a major sync, which may be up to 128
+/// access units (of 40 samples at 48 kHz) apart. A seek must start that far before the target, or
+/// the decoder's first output comes after it.
+#[test]
+fn truehd_seek_backs_off_past_a_major_sync_interval() {
+    let track = Track {
+        codec: "A_TRUEHD",
+        sample_rate: 48000.0,
+        channels: 2,
+        bit_depth: None,
+        codec_delay: 0,
+        seek_pre_roll: 0,
+        default_duration: None,
+        codec_private: None,
+        content_encodings: Vec::new(),
+    };
+
+    // 10s of blocks, one every millisecond.
+    let mut file = File::default();
+    file.clusters.push((0, (0..10_000).map(|i| Block::filled(i, 100, 0)).collect()));
+    let mut reader = open(file.to_bytes(&track));
+
+    let seeked = seek_time(&mut reader, 5_000).unwrap();
+    assert_eq!(seeked.required_ts.get(), 240_000);
+    assert!(seeked.actual_ts.get() <= 240_000 - 128 * 40);
+}
+
 #[test]
 fn live_streams_end_cleanly() {
     let mut file = pcm_file();

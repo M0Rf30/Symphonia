@@ -87,6 +87,10 @@ fn fixed_block_samples(codec_id: &str, codec_private: Option<&[u8]>) -> Option<u
 /// reservoir of MPEG audio, the lapped transforms of AAC and Vorbis) need to decode a number of
 /// frames preceding the seek target before their output is correct. Only Opus is required to
 /// signal this to the demuxer (`SeekPreRoll`), so muxers do not write it for other codecs.
+///
+/// A TrueHD decoder can only start at an access unit with a major sync, which encoders write at
+/// most 128 access units apart (FFmpeg `mlpenc.c`, `MAX_HEADER_INTERVAL`): 116.1 ms at the
+/// shortest access unit rate, 1102.5 Hz (44.1 kHz family).
 fn default_seek_pre_roll(codec_id: &str) -> MatroskaTicks {
     const MILLIS: u64 = 1_000_000;
 
@@ -94,6 +98,7 @@ fn default_seek_pre_roll(codec_id: &str) -> MatroskaTicks {
         id if id.starts_with("A_MPEG/L") || id.starts_with("A_AAC") || id == "A_VORBIS" => {
             MatroskaTicks::from(200 * MILLIS)
         }
+        "A_TRUEHD" | "A_MLP" => MatroskaTicks::from(117 * MILLIS),
         _ => MatroskaTicks::from(0),
     }
 }
