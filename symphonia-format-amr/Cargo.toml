@@ -1,0 +1,25 @@
+[package]
+name = "symphonia-format-amr"
+description = "Pure Rust AMR-NB and AMR-WB storage format (.amr, .awb) demuxer (a part of project Symphonia)."
+authors = ["M0Rf30 <morf3089@gmail.com>"]
+readme = "README.md"
+categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
+keywords = ["audio", "media", "demuxer", "amr", "3gpp"]
+# Common package metadata located in workspace Cargo.toml.
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+log = { workspace = true }
+symphonia-core = { workspace = true }
+
+[dev-dependencies]
+symphonia-format-isomp4 = { workspace = true }
+symphonia-testutil = { workspace = true }
+
+[lints]
+workspace = true
