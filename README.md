@@ -78,6 +78,7 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | Format   | Status    | Gapless* | Feature Flag | Default | Crate                       |
 |----------|-----------|----------|--------------|---------|-----------------------------|
 | AIFF     | Excellent | Yes      | `aiff`       | No      | [`symphonia-format-riff`]   |
+| ASF/WMA (`.wma`, `.asf`, audio only) | Great | No | `asf` | No | [`symphonia-format-asf`] |
 | APE      | Excellent | Yes      | `ape-format` | No      | [`symphonia-bundle-ape`]      |
 | CAF      | Excellent | Yes      | `caf`        | No      | [`symphonia-format-caf`]    |
 | DSD (DSF, DFF) | Great | Yes    | `dsd`        | No      | [`symphonia-format-dsd`]      |
@@ -139,6 +140,7 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | TrueSpeech                   | Excellent | No      | `truespeech` | No      | [`symphonia-codec-truespeech`]|
 | Vorbis                       | Excellent | Yes     | `vorbis`     | Yes     | [`symphonia-codec-vorbis`] |
 | WavPack                      | Great     | Yes     | `wavpack`    | No      | [`symphonia-codec-wavpack`]  |
+| WMA 1, WMA 2                 | Great     | Yes     | `wma`        | No      | [`symphonia-codec-wma`]      |
 
 A `symphonia-bundle-*` package is a combination of a decoder and a native demuxer.
 
@@ -160,6 +162,8 @@ mp3PRO streams decode as plain MP3 by default. The `mp3pro` feature adds `Mp3Pro
 [`symphonia-codec-nellymoser`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-nellymoser
 | GSM 06.10, Microsoft GSM     | Excellent | No      | `gsm`        | No      | [`symphonia-codec-gsm`]      |
 [`symphonia-codec-imc`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-imc
+[`symphonia-codec-wma`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-wma
+[`symphonia-format-asf`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-asf
 [`symphonia-codec-speex`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-speex
 [`symphonia-codec-truehd`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-truehd
 [`symphonia-codec-truespeech`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-truespeech

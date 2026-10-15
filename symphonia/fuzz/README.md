@@ -29,6 +29,8 @@ These targets bypass the demuxer and feed data directly to the codec implementat
 * **`decode_truehd`**: Dolby TrueHD and MLP
 * **`decode_speex`**: Speex (with and without an Ogg header)
 * **`decode_nellymoser`**: Nellymoser
+* **`decode_wma`**: Windows Media Audio 1 and 2 (the first byte selects the version, channels,
+  stream flags and sample rate)
 
 The last five targets read the input as a sequence of packets, each prefixed by its
 16-bit little-endian length (`fuzz_audio_decoder_packets`), so state carried between packets is
@@ -48,6 +50,7 @@ These targets instantiate a specific `FormatReader` directly, bypassing probing.
 * **`demux_mpegts`**: MPEG-TS
 * **`demux_mpegps`**: MPEG-PS
 * **`demux_flv`**: FLV
+* **`demux_asf`**: ASF (`.wma`, `.asf`)
 * **`demux_dsf`**: DSF
 * **`demux_dff`**: DFF
 * **`demux_mp3`**: MPEG Audio (MP1/MP2/MP3) elementary stream

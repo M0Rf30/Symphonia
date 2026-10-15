@@ -23,7 +23,9 @@ use symphonia_core::codecs::audio::well_known::{
     CODEC_ID_PCM_S32LE, CODEC_ID_PCM_U8, CODEC_ID_TRUESPEECH,
 };
 use symphonia_core::codecs::audio::well_known::{CODEC_ID_IAC, CODEC_ID_IMC};
-use symphonia_core::codecs::audio::well_known::{CODEC_ID_WMAV1, CODEC_ID_WMAV2};
+use symphonia_core::codecs::audio::well_known::{
+    CODEC_ID_WMALOSSLESS, CODEC_ID_WMAPRO, CODEC_ID_WMAV1, CODEC_ID_WMAV2,
+};
 use symphonia_core::errors::{Error, Result, decode_error, unsupported_error};
 use symphonia_core::formats::Track;
 use symphonia_core::io::{MediaSource, MediaSourceStream, ReadBytes};
@@ -605,6 +607,8 @@ impl ParseChunk for WaveFormatChunk {
         const WAVE_FORMAT_GSM610: u16 = 0x0031;
         const WAVE_FORMAT_WMAV1: u16 = 0x0160;
         const WAVE_FORMAT_WMAV2: u16 = 0x0161;
+        const WAVE_FORMAT_WMAPRO: u16 = 0x0162;
+        const WAVE_FORMAT_WMALOSSLESS: u16 = 0x0163;
         const WAVE_FORMAT_MSNAUDIO: u16 = 0x0032;
         const WAVE_FORMAT_GSM_MS_ALT: u16 = 0x1500;
         const WAVE_FORMAT_G729A: u16 = 0x0083;
@@ -668,11 +672,14 @@ impl ParseChunk for WaveFormatChunk {
                 len,
                 CODEC_ID_ADPCM_IMA_WAV,
             ),
-            // Windows Media Audio 1 and 2. The WMA decoder needs the whole `WAVEFORMATEX`: the
-            // average byte rate and the encoder flags of the extension are not available
-            // elsewhere. FFmpeg: `wmav1`/`wmav2`. WMA Pro (0x0162), Lossless (0x0163) and Voice
-            // (0x000a) are other codecs and are not decoded.
-            WAVE_FORMAT_WMAV1 | WAVE_FORMAT_WMAV2 => {
+            // Windows Media Audio 1, 2, Pro and Lossless. The decoders need the whole
+            // `WAVEFORMATEX`: the average byte rate and the encoder flags of the extension are not
+            // available elsewhere. FFmpeg: `wmav1`/`wmav2`/`wmapro`/`wmalossless`. Only v1 and v2
+            // have a decoder.
+            WAVE_FORMAT_WMAV1
+            | WAVE_FORMAT_WMAV2
+            | WAVE_FORMAT_WMAPRO
+            | WAVE_FORMAT_WMALOSSLESS => {
                 let extension = if len >= 18 {
                     let extra_size = u64::from(reader.read_u16()?);
                     if extra_size > u64::from(len - 18) {
@@ -697,11 +704,11 @@ impl ParseChunk for WaveFormatChunk {
                     block_align,
                     bits_per_sample,
                     channels,
-                    codec: if format == WAVE_FORMAT_WMAV1 {
-                        CODEC_ID_WMAV1
-                    }
-                    else {
-                        CODEC_ID_WMAV2
+                    codec: match format {
+                        WAVE_FORMAT_WMAV1 => CODEC_ID_WMAV1,
+                        WAVE_FORMAT_WMAV2 => CODEC_ID_WMAV2,
+                        WAVE_FORMAT_WMAPRO => CODEC_ID_WMAPRO,
+                        _ => CODEC_ID_WMALOSSLESS,
                     },
                     extra_data: Some(extra_data.into_boxed_slice()),
                 }))

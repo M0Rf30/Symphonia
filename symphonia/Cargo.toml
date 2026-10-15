@@ -55,6 +55,8 @@ pcm = ["dep:symphonia-codec-pcm"]
 speex = ["dep:symphonia-codec-speex"]
 truehd = ["dep:symphonia-codec-truehd"]
 truespeech = ["dep:symphonia-codec-truespeech"]
+wma = ["dep:symphonia-codec-wma"]
+asf = ["dep:symphonia-format-asf"]
 aiff = ["dep:symphonia-format-riff", "symphonia-format-riff/aiff"]
 vorbis = ["dep:symphonia-codec-vorbis"]
 wav = ["dep:symphonia-format-riff", "symphonia-format-riff/wav"]
@@ -86,6 +88,7 @@ all-codecs = [
     "speex",
     "truehd",
     "truespeech",
+    "wma",
     "vorbis",
     "wavpack",
 ]
@@ -103,6 +106,7 @@ all-formats = [
     "mpegts",
     "musepack",
     "ogg",
+    "asf",
     "aiff",
     "gsm",
     "wav",
@@ -179,6 +183,14 @@ workspace = true
 optional = true
 
 [dependencies.symphonia-codec-dca]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-wma]
+workspace = true
+optional = true
+
+[dependencies.symphonia-format-asf]
 workspace = true
 optional = true
 

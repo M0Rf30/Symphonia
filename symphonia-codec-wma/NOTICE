@@ -1,0 +1,13 @@
+This crate (`symphonia-codec-wma`) is a pure-Rust Windows Media Audio version 1 and 2 decoder. It is
+licensed under the Mozilla Public License, v. 2.0, like the rest of Project Symphonia.
+
+WMA has no public specification. The decoder is a port of FFmpeg's `libavcodec/wmadec.c`,
+`libavcodec/wma.c` and `libavcodec/wma_common.c`; the constant tables (`src/tables.rs`, extracted
+programmatically) are those of `libavcodec/wmadata.h`, `libavcodec/wma_freqs.c`, and the AAC scale
+factor Huffman table of `libavcodec/aactab.c` that WMA reuses for its exponents. These files are
+distributed under the GNU Lesser General Public License, version 2.1 or later.
+
+Copyright (c) 2002-2007 The FFmpeg Project
+Copyright (c) 2003 Fabrice Bellard (aactab.c: Copyright (c) 2008 Konstantin Shishkov)
+
+The LGPL-2.1+ terms apply to those derived portions.

@@ -23,8 +23,10 @@ members = [
     "symphonia-codec-pcm",
     "symphonia-codec-vorbis",
     "symphonia-codec-wavpack",
+    "symphonia-codec-wma",
     "symphonia-common",
     "symphonia-core",
+    "symphonia-format-asf",
     "symphonia-format-dsd",
     "symphonia-format-es",
     "symphonia-format-flv",
@@ -73,9 +75,11 @@ symphonia-codec-opus = { version = "0.6.1", path = "symphonia-codec-opus", defau
 symphonia-codec-pcm = { version = "0.6.1", path = "symphonia-codec-pcm", default-features = false }
 symphonia-codec-vorbis = { version = "0.6.1", path = "symphonia-codec-vorbis", default-features = false }
 symphonia-codec-wavpack = { version = "0.6.1", path = "symphonia-codec-wavpack", default-features = false }
+symphonia-codec-wma = { version = "0.6.1", path = "symphonia-codec-wma", default-features = false }
 symphonia-common = { version = "0.6.1", path = "symphonia-common", default-features = false }
 symphonia-core = { version = "0.6.1", path = "symphonia-core", default-features = false }
 symphonia-format-caf = { version = "0.6.1", path = "symphonia-format-caf", default-features = false }
+symphonia-format-asf = { version = "0.6.1", path = "symphonia-format-asf", default-features = false }
 symphonia-format-dsd = { version = "0.6.1", path = "symphonia-format-dsd", default-features = false }
 symphonia-format-es = { version = "0.6.1", path = "symphonia-format-es", default-features = false }
 symphonia-format-flv = { version = "0.6.1", path = "symphonia-format-flv", default-features = false }

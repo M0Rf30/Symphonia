@@ -1,0 +1,25 @@
+[package]
+name = "symphonia-format-asf"
+description = "Pure Rust ASF (Advanced Systems Format, .wma/.asf) demuxer (a part of project Symphonia)."
+authors = ["M0Rf30 <morf3089@gmail.com>"]
+readme = "README.md"
+categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
+keywords = ["audio", "media", "demuxer", "asf", "wma"]
+# Common package metadata located in workspace Cargo.toml.
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+log = { workspace = true }
+symphonia-core = { workspace = true }
+symphonia-metadata = { workspace = true }
+
+[dev-dependencies]
+symphonia-codec-wma = { workspace = true }
+
+[lints]
+workspace = true

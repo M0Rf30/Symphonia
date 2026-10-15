@@ -27,6 +27,7 @@
 //! | Format   | Feature Flag | Gapless* | Default |
 //! |----------|--------------|----------|---------|
 //! | AIFF     | `aiff`       | Yes      | No      |
+//! | ASF/WMA (`.wma`, `.asf`) | `asf` | Yes   | No      |
 //! | CAF      | `caf`        | No       | No      |
 //! | Elementary streams (AC-3, E-AC-3, DTS, TrueHD/MLP) | `es` | No | No |
 //! | FLV (audio) | `flv`     | No       | No      |
@@ -61,6 +62,7 @@
 //! | Nellymoser | `nellymoser` | No    | No      |
 //! | IMC, IAC | `imc`        | No      | No      |
 //! | TrueSpeech | `truespeech` | No    | No      |
+//! | Windows Media Audio 1/2 | `wma` | Yes | No    |
 //! | Opus     | `opus`       | Yes     | Yes     |
 //! | PCM      | `pcm`        | Yes     | Yes     |
 //! | Speex    | `speex`      | Yes     | No      |
@@ -168,6 +170,9 @@ pub mod default {
         pub use symphonia_codec_imc::ImcDecoder;
         #[cfg(feature = "truespeech")]
         pub use symphonia_codec_truespeech::TrueSpeechDecoder;
+        #[cfg(feature = "wma")]
+        pub use symphonia_codec_wma::WmaDecoder;
+        #[cfg(feature = "ilbc")]
         #[cfg(feature = "opus")]
         pub use symphonia_codec_opus::OpusAudioDecoder;
         #[cfg(feature = "pcm")]
@@ -214,6 +219,8 @@ pub mod default {
         pub use symphonia_format_caf::CafReader;
         #[cfg(feature = "dsd")]
         pub use symphonia_format_dsd::{CODEC_TYPE_DSD, DffReader, DsfReader};
+        #[cfg(feature = "asf")]
+        pub use symphonia_format_asf::AsfReader;
         #[cfg(feature = "es")]
         pub use symphonia_format_es::{Ac3Reader, DtsReader, TrueHdReader};
         #[cfg(feature = "flv")]
@@ -333,6 +340,9 @@ pub mod default {
         #[cfg(feature = "truespeech")]
         registry.register_audio_decoder::<codecs::TrueSpeechDecoder>();
 
+        #[cfg(feature = "wma")]
+        registry.register_audio_decoder::<codecs::WmaDecoder>();
+
         #[cfg(feature = "pcm")]
         registry.register_audio_decoder::<codecs::PcmDecoder>();
 
@@ -392,6 +402,9 @@ pub mod default {
 
         #[cfg(feature = "flv")]
         probe.register_format::<formats::FlvReader<'_>>();
+
+        #[cfg(feature = "asf")]
+        probe.register_format::<formats::AsfReader<'_>>();
 
         #[cfg(feature = "mpegps")]
         probe.register_format::<formats::MpegPsReader<'_>>();

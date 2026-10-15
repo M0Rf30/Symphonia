@@ -24,7 +24,9 @@ use symphonia_core::codecs::audio::well_known::{
     CODEC_ID_TRUESPEECH,
 };
 use symphonia_core::codecs::audio::well_known::{CODEC_ID_IAC, CODEC_ID_IMC};
-use symphonia_core::codecs::audio::well_known::{CODEC_ID_WMAV1, CODEC_ID_WMAV2};
+use symphonia_core::codecs::audio::well_known::{
+    CODEC_ID_WMALOSSLESS, CODEC_ID_WMAPRO, CODEC_ID_WMAV1, CODEC_ID_WMAV2,
+};
 use symphonia_core::codecs::audio::{AudioCodecId, AudioCodecParameters};
 use symphonia_core::errors::{Error, Result, decode_error, unsupported_error};
 use symphonia_core::formats::prelude::*;
@@ -394,7 +396,7 @@ impl FormatAdpcm {
                 }
                 PacketInfo::with_blocks(self.block_align, 6)
             }
-            CODEC_ID_WMAV1 | CODEC_ID_WMAV2 => {
+            CODEC_ID_WMAV1 | CODEC_ID_WMAV2 | CODEC_ID_WMAPRO | CODEC_ID_WMALOSSLESS => {
                 // A block is one packet of `nBlockAlign` bytes. The number of frames it yields
                 // varies with the bit reservoir, so the CBR average is used:
                 // `nBlockAlign * nSamplesPerSec / nAvgBytesPerSec`, from the `WAVEFORMATEX`.

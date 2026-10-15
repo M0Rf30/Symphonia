@@ -1997,4 +1997,30 @@ mod tests {
             assert_eq!(params.sample_rate, Some(codec_rate));
         }
     }
+
+    #[test]
+    fn wma_keeps_the_waveformat_for_the_decoder() {
+        use symphonia_core::codecs::audio::well_known::{CODEC_ID_WMAV1, CODEC_ID_WMAV2};
+
+        for (tag, codec, ext) in
+            [(0x0160u16, CODEC_ID_WMAV1, &[0u8, 0, 0, 0][..]), (0x0161, CODEC_ID_WMAV2, &[0u8; 6])]
+        {
+            let mut fmt = Vec::new();
+            fmt.extend_from_slice(&tag.to_le_bytes());
+            fmt.extend_from_slice(&2u16.to_le_bytes());
+            fmt.extend_from_slice(&44100u32.to_le_bytes());
+            fmt.extend_from_slice(&12000u32.to_le_bytes());
+            fmt.extend_from_slice(&743u16.to_le_bytes());
+            fmt.extend_from_slice(&16u16.to_le_bytes());
+            fmt.extend_from_slice(&(ext.len() as u16).to_le_bytes());
+            fmt.extend_from_slice(ext);
+            let data = vec![0u8; 743 * 4];
+            let reader =
+                open_wav(riff_wave(None, &[chunk(b"fmt ", &fmt), chunk(b"data", &data)])).unwrap();
+            let params = reader.tracks()[0].codec_params.as_ref().and_then(|p| p.audio()).unwrap();
+            assert_eq!(params.codec, codec);
+            // The whole `WAVEFORMATEX` is passed on.
+            assert_eq!(params.extra_data.as_deref(), Some(&fmt[..]));
+        }
+    }
 }

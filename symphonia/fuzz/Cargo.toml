@@ -268,3 +268,15 @@ name = "decode_gsm"
 path = "fuzz_targets/decode_gsm.rs"
 test = false
 doc = false
+[[bin]]
+name = "decode_wma"
+path = "fuzz_targets/decode_wma.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_asf"
+path = "fuzz_targets/demux_asf.rs"
+test = false
+doc = false
+
