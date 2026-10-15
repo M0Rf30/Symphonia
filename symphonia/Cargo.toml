@@ -35,6 +35,7 @@ dca = ["dep:symphonia-codec-dca"]
 dsd = ["dep:symphonia-codec-dsd", "dep:symphonia-format-dsd"]
 flac = ["dep:symphonia-bundle-flac"]
 gsm = ["dep:symphonia-codec-gsm"]
+amr = ["dep:symphonia-format-amr"]
 caf = ["dep:symphonia-format-caf"]
 es = ["dep:symphonia-format-es"]
 flv = ["dep:symphonia-format-flv"]
@@ -45,7 +46,19 @@ mpegts = ["dep:symphonia-format-mpegts"]
 musepack = ["dep:symphonia-bundle-musepack"]
 mp1 = ["dep:symphonia-bundle-mp3", "symphonia-bundle-mp3/mp1"]
 mp2 = ["dep:symphonia-bundle-mp3", "symphonia-bundle-mp3/mp2"]
+mace = ["dep:symphonia-codec-mace"]
+qcp = ["dep:symphonia-format-qcp"]
+amrwb = ["dep:symphonia-codec-amrwb"]
+amrnb = ["dep:symphonia-codec-amrnb"]
+evrc = ["dep:symphonia-codec-evrc"]
+qcelp = ["dep:symphonia-codec-qcelp"]
+siren = ["dep:symphonia-codec-siren"]
 mp3 = ["dep:symphonia-bundle-mp3", "symphonia-bundle-mp3/mp3"]
+vqf = ["dep:symphonia-format-vqf"]
+twinvq = ["dep:symphonia-codec-twinvq"]
+g7231 = ["dep:symphonia-codec-g7231"]
+g729 = ["dep:symphonia-codec-g729"]
+ilbc = ["dep:symphonia-codec-ilbc"]
 mp3pro = ["mp3", "symphonia-bundle-mp3/mp3pro"]
 nellymoser = ["dep:symphonia-codec-nellymoser"]
 imc = ["dep:symphonia-codec-imc"]
@@ -66,13 +79,24 @@ id3v1 = ["symphonia-metadata/id3v1"]
 id3v2 = ["symphonia-metadata/id3v2"]
 
 # MPEG audio codecs.
+    "mace",
 mpa = ["mp1", "mp2", "mp3"]
+    "evrc",
+    "amrwb",
+    "amrnb",
+    "qcelp",
+    "siren",
 
+    "twinvq",
+    "g7231",
+    "g729",
+    "ilbc",
 # Enable all supported codecs.
 all-codecs = [
     "aac",
     "ac3",
     "adpcm",
+    "amr",
     "alac",
     "dca",
     "dsd",
@@ -81,6 +105,8 @@ all-codecs = [
     "mp2",
     "mp3",
     "musepack",
+    "vqf",
+    "qcp",
     "nellymoser",
     "imc",
     "opus",
@@ -159,6 +185,9 @@ optional = true
 workspace = true
 optional = true
 
+[dependencies.symphonia-codec-mace]
+workspace = true
+optional = true
 [dependencies.symphonia-bundle-flac]
 workspace = true
 optional = true
@@ -168,6 +197,36 @@ workspace = true
 optional = true
 [dependencies.symphonia-bundle-mp3]
 workspace = true
+[dependencies.symphonia-codec-evrc]
+workspace = true
+optional = true
+[dependencies.symphonia-codec-qcelp]
+[dependencies.symphonia-codec-amrwb]
+workspace = true
+optional = true
+[dependencies.symphonia-codec-amrnb]
+[dependencies.symphonia-codec-g7231]
+workspace = true
+optional = true
+[dependencies.symphonia-codec-g729]
+[dependencies.symphonia-codec-siren]
+workspace = true
+optional = true
+workspace = true
+optional = true
+[dependencies.symphonia-codec-ilbc]
+workspace = true
+optional = true
+[dependencies.symphonia-format-vqf]
+workspace = true
+optional = true
+[dependencies.symphonia-codec-twinvq]
+workspace = true
+optional = true
+workspace = true
+optional = true
+workspace = true
+optional = true
 optional = true
 
 [dependencies.symphonia-codec-aac]
@@ -198,11 +257,17 @@ optional = true
 workspace = true
 optional = true
 
+[dependencies.symphonia-format-amr]
+workspace = true
+optional = true
 [dependencies.symphonia-codec-imc]
 workspace = true
 optional = true
 
 [dependencies.symphonia-codec-truespeech]
+[dependencies.symphonia-format-qcp]
+workspace = true
+optional = true
 workspace = true
 optional = true
 

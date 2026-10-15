@@ -13,15 +13,28 @@ members = [
     "symphonia-codec-speex",
     "symphonia-codec-nellymoser",
     "symphonia-codec-imc",
+    "symphonia-codec-amrwb",
+    "symphonia-format-vqf",
+    "symphonia-codec-twinvq",
+    "symphonia-codec-g729",
+    "symphonia-codec-g7231",
+    "symphonia-codec-ilbc",
+    "symphonia-codec-amrnb",
+    "symphonia-codec-evrc",
+    "symphonia-codec-qcelp",
+    "symphonia-codec-mace",
+    "symphonia-codec-siren",
     "symphonia-codec-gsm",
     "symphonia-codec-truespeech",
     "symphonia-codec-truehd",
     "symphonia-codec-dca",
+    "symphonia-format-amr",
     "symphonia-codec-ac3",
     "symphonia-codec-dsd",
     "symphonia-codec-opus",
     "symphonia-codec-pcm",
     "symphonia-codec-vorbis",
+    "symphonia-format-qcp",
     "symphonia-codec-wavpack",
     "symphonia-codec-wma",
     "symphonia-common",
@@ -51,17 +64,30 @@ license-file = "LICENSE"
 repository = "https://github.com/M0Rf30/Symphonia"
 rust-version = "1.85"
 version = "0.6.1"
+symphonia-codec-mace = { version = "0.6.1", path = "symphonia-codec-mace", default-features = false }
+symphonia-codec-evrc = { version = "0.6.1", path = "symphonia-codec-evrc", default-features = false }
+symphonia-codec-amrwb = { version = "0.6.1", path = "symphonia-codec-amrwb", default-features = false }
+symphonia-format-vqf = { version = "0.6.1", path = "symphonia-format-vqf", default-features = false }
+symphonia-codec-siren = { version = "0.6.1", path = "symphonia-codec-siren", default-features = false }
+symphonia-codec-twinvq = { version = "0.6.1", path = "symphonia-codec-twinvq", default-features = false }
+symphonia-codec-g7231 = { version = "0.6.1", path = "symphonia-codec-g7231", default-features = false }
+symphonia-codec-ilbc = { version = "0.6.1", path = "symphonia-codec-ilbc", default-features = false }
+symphonia-codec-g729 = { version = "0.6.1", path = "symphonia-codec-g729", default-features = false }
+symphonia-codec-amrnb = { version = "0.6.1", path = "symphonia-codec-amrnb", default-features = false }
+symphonia-codec-qcelp = { version = "0.6.1", path = "symphonia-codec-qcelp", default-features = false }
 
 [workspace.dependencies]
 lazy_static = "1.4.0"
 log = "0.4"
 smallvec = "1.13.1"
+symphonia-format-amr = { version = "0.6.1", path = "symphonia-format-amr", default-features = false }
 symphonia-bundle-ape = { version = "0.6.1", path = "symphonia-bundle-ape", default-features = false }
 symphonia-bundle-flac = { version = "0.6.1", path = "symphonia-bundle-flac", default-features = false }
 symphonia-bundle-mp3 = { version = "0.6.1", path = "symphonia-bundle-mp3", default-features = false }
 symphonia-bundle-musepack = { version = "0.6.1", path = "symphonia-bundle-musepack", default-features = false }
 symphonia-codec-aac = { version = "0.6.1", path = "symphonia-codec-aac", default-features = false }
 symphonia-codec-adpcm = { version = "0.6.1", path = "symphonia-codec-adpcm", default-features = false }
+symphonia-format-qcp = { version = "0.6.1", path = "symphonia-format-qcp", default-features = false }
 symphonia-codec-ac3 = { version = "0.6.1", path = "symphonia-codec-ac3", default-features = false }
 symphonia-codec-dca = { version = "0.6.1", path = "symphonia-codec-dca", default-features = false }
 symphonia-codec-truehd = { version = "0.6.1", path = "symphonia-codec-truehd", default-features = false }

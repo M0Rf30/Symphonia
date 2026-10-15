@@ -27,6 +27,8 @@
 //! | Format   | Feature Flag | Gapless* | Default |
 //! |----------|--------------|----------|---------|
 //! | AIFF     | `aiff`       | Yes      | No      |
+//! | QCP (`.qcp`) | `qcp`    | No      | No      |
+//! | AMR (`.amr`, `.awb`) | `amr` | No   | No      |
 //! | ASF/WMA (`.wma`, `.asf`) | `asf` | Yes   | No      |
 //! | CAF      | `caf`        | No       | No      |
 //! | Elementary streams (AC-3, E-AC-3, DTS, TrueHD/MLP) | `es` | No | No |
@@ -56,6 +58,16 @@
 //! | DTS (core, XCH/XXCH/X96/XBR, XLL) | `dca` | No | No |
 //! | FLAC     | `flac`       | Yes     | Yes     |
 //! | MP1      | `mp1`, `mpa` | No      | No      |
+//! | MACE 3:1, 6:1 | `mace`    | No      | No      |
+//! | EVRC     | `evrc`         | No      | No      |
+//! | AMR-WB   | `amrwb`      | No      | No      |
+//! | TwinVQ (VQF) | `twinvq`   | No      | No      |
+//! | G.723.1  | `g7231`      | No      | No      |
+//! | G.729    | `g729`       | No      | No      |
+//! | iLBC     | `ilbc`       | No      | No      |
+//! | Siren, G.722.1, MSN Siren | `siren` | No | No |
+//! | AMR-NB   | `amrnb`      | No      | No      |
+//! | QCELP (13K) | `qcelp`     | No      | No      |
 //! | MP2      | `mp2`, `mpa` | No      | No      |
 //! | MP3      | `mp3`, `mpa` | Yes     | No      |
 //! | Musepack | `musepack`   | Yes     | No      |
@@ -151,6 +163,25 @@ pub mod default {
         #[cfg(any(feature = "mp1", feature = "mp2", feature = "mp3"))]
         pub use symphonia_bundle_mp3::MpaDecoder;
         #[cfg(feature = "musepack")]
+        #[cfg(feature = "mace")]
+        pub use symphonia_codec_mace::MaceDecoder;
+        #[cfg(feature = "evrc")]
+        pub use symphonia_codec_evrc::EvrcDecoder;
+        #[cfg(feature = "amrwb")]
+        pub use symphonia_codec_amrwb::AmrWbDecoder;
+        #[cfg(feature = "twinvq")]
+        pub use symphonia_codec_twinvq::TwinVqDecoder;
+        #[cfg(feature = "amrnb")]
+        #[cfg(feature = "g7231")]
+        pub use symphonia_codec_g7231::G7231Decoder;
+        #[cfg(feature = "g729")]
+        pub use symphonia_codec_g729::G729Decoder;
+        pub use symphonia_codec_ilbc::IlbcDecoder;
+        pub use symphonia_codec_amrnb::AmrNbDecoder;
+        #[cfg(feature = "siren")]
+        pub use symphonia_codec_siren::SirenDecoder;
+        #[cfg(feature = "qcelp")]
+        pub use symphonia_codec_qcelp::QcelpDecoder;
         pub use symphonia_bundle_musepack::MpcDecoder;
         #[cfg(feature = "aac")]
         pub use symphonia_codec_aac::AacDecoder;
@@ -187,6 +218,10 @@ pub mod default {
         pub use symphonia_codec_wavpack::WavPackDecoder;
     }
 
+        #[cfg(feature = "vqf")]
+        pub use symphonia_format_vqf::VqfReader;
+        #[cfg(feature = "amr")]
+        pub use symphonia_format_amr::AmrReader;
     pub mod formats {
         //! The `formats` module re-exports all enabled Symphonia format readers.
 
@@ -199,6 +234,8 @@ pub mod default {
         #[cfg(feature = "musepack")]
         pub use symphonia_bundle_musepack::MpcReader;
         #[cfg(feature = "aac")]
+        #[cfg(feature = "qcp")]
+        pub use symphonia_format_qcp::QcpReader;
         #[cfg(feature = "gsm")]
         pub use symphonia_codec_gsm::GsmDecoder;
         pub use symphonia_codec_aac::AdifReader;
@@ -293,7 +330,27 @@ pub mod default {
     /// function.
     pub fn get_probe() -> &'static Probe {
         &PROBE
+        #[cfg(feature = "mace")]
+        registry.register_audio_decoder::<codecs::MaceDecoder>();
     }
+        #[cfg(feature = "evrc")]
+        registry.register_audio_decoder::<codecs::EvrcDecoder>();
+        #[cfg(feature = "qcelp")]
+        #[cfg(feature = "amrwb")]
+        registry.register_audio_decoder::<codecs::AmrWbDecoder>();
+        #[cfg(feature = "amrnb")]
+        #[cfg(feature = "twinvq")]
+        registry.register_audio_decoder::<codecs::TwinVqDecoder>();
+        registry.register_audio_decoder::<codecs::AmrNbDecoder>();
+        #[cfg(feature = "g7231")]
+        registry.register_audio_decoder::<codecs::G7231Decoder>();
+        #[cfg(feature = "g729")]
+        registry.register_audio_decoder::<codecs::G729Decoder>();
+        #[cfg(feature = "ilbc")]
+        registry.register_audio_decoder::<codecs::IlbcDecoder>();
+        #[cfg(feature = "siren")]
+        registry.register_audio_decoder::<codecs::SirenDecoder>();
+        registry.register_audio_decoder::<codecs::QcelpDecoder>();
 
     /// Registers all the codecs selected by the `feature` flags in the includer's `Cargo.toml` on
     /// the provided `CodecRegistry`. If `features` is not set, the default set of Symphonia codecs
@@ -333,6 +390,12 @@ pub mod default {
 
         #[cfg(feature = "nellymoser")]
         registry.register_audio_decoder::<codecs::NellymoserDecoder>();
+        #[cfg(feature = "vqf")]
+        probe.register_format::<formats::VqfReader<'_>>();
+        #[cfg(feature = "qcp")]
+        probe.register_format::<formats::QcpReader<'_>>();
+        #[cfg(feature = "amr")]
+        probe.register_format::<formats::AmrReader<'_>>();
 
         #[cfg(feature = "imc")]
         registry.register_audio_decoder::<codecs::ImcDecoder>();
