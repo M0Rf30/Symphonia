@@ -1,0 +1,16 @@
+This crate (`symphonia-codec-amrnb`) is a pure-Rust AMR-NB (Adaptive Multi-Rate narrowband) speech
+decoder. It is licensed under the Mozilla Public License, v. 2.0, like the rest of Project
+Symphonia.
+
+The algorithm is specified by 3GPP TS 26.071 / 26.090 / 26.091 / 26.092 / 26.073 (the ANSI-C
+reference codec). This implementation is a port of FFmpeg's floating point AMR-NB decoder:
+`libavcodec/amrnbdec.c`, `amrnbdata.h` and the shared CELP code it uses (`lsp.c`, `celp_filters.c`,
+`celp_math.c`, `acelp_filters.c`, `acelp_vectors.c`, `acelp_pitch_delay.c`). The codebook, gain,
+LSF, window and filter tables in `src/` were taken from those files. FFmpeg is distributed under
+the GNU Lesser General Public License, version 2.1 or later.
+
+Copyright (c) 2006-2007 Robert Swain
+Copyright (c) 2009 Colin McQuillan
+Copyright (c) 2007 Vladimir Voroshilov (shared `acelp_*` code)
+
+The LGPL-2.1+ terms apply to those derived portions.
