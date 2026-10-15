@@ -1,0 +1,15 @@
+This crate (`symphonia-codec-qcelp`) is a pure-Rust QCELP 13K (PureVoice) decoder. It is licensed
+under the Mozilla Public License, v. 2.0, like the rest of Project Symphonia.
+
+The decoder is a port of FFmpeg's QCELP decoder (`libavcodec/qcelpdec.c`, `libavcodec/qcelpdata.h`),
+which implements TIA/EIA/IS-733 ("High Rate Speech Service Option 17 for Wideband Spread Spectrum
+Communication Systems"). The bitmaps, the LSP vector quantization tables, the codebooks and the gain
+table (`src/tables.rs`) are extracted programmatically from FFmpeg's `qcelpdata.h`. The LSP to LPC
+conversion follows `libavcodec/lsp.c` (`ff_acelp_lspd2lpc`), and the filters follow
+`libavcodec/celp_filters.c`, `libavcodec/acelp_filters.c` and `libavcodec/acelp_vectors.c`. These
+files are distributed under the GNU Lesser General Public License, version 2.1 or later.
+
+Copyright (c) 2007 Reynaldo H. Verdejo Pinochet
+FFmpeg merging spearheaded by Kenan Gillet; development mentored by Benjamin Larson.
+
+The LGPL-2.1+ terms apply to those derived portions.
