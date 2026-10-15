@@ -23,8 +23,8 @@
 //!
 //! * AC-3 (ETSI TS 102 366, main body): all audio coding modes, LFE, coupling, rematrixing,
 //!   dynamic range control (as transmitted), and block switching. Bit stream identifications 0 to
-//!   10 are decoded, including the alternate bit stream syntax (6) and the half and quarter
-//!   sample rate variants (9 and 10).
+//!   8 are decoded, including the alternate bit stream syntax (6); 9 and 10 are muted (see
+//!   Notes).
 //! * E-AC-3 (Annex E): independent substreams and the dependent substreams of substream 0
 //!   (e.g., 7.1), adaptive hybrid transform, spectral extension, enhanced coupling, all frame
 //!   sizes of 1, 2, 3 and 6 audio blocks, and the custom channel map.
@@ -32,8 +32,36 @@
 //! # Output
 //!
 //! Planar 32-bit floating-point samples in the range -1.0 to +1.0, one plane per channel
-//! ordered by ascending [`Position`] bit (the Symphonia canonical channel order). Down-mixing is
-//! not performed.
+//! ordered by ascending [`Position`] bit (the Symphonia canonical channel order).
+//!
+//! # Down-mix
+//!
+//! [`AudioDecoderOptions::downmix`] selects a down-mix to stereo (Lo/Ro or Lt/Rt) or mono as
+//! specified by ETSI TS 102 366 clause 7.8. The default is to output every channel.
+//!
+//! * The centre and surround levels are the `cmixlev` and `surmixlev` fields of AC-3 streams and
+//!   the Lo/Ro and Lt/Rt mixing metadata of E-AC-3 streams and of AC-3 streams with the
+//!   alternate bit stream syntax (`bsid` 6, ATSC A/52 Annex D). Without metadata the Lo/Ro levels
+//!   are -4.5 dB (centre) and -6 dB (surround) and the Lt/Rt levels are -3 dB. Lt/Rt always
+//!   uses the Lt/Rt metadata, regardless of `dmixmod`.
+//! * The coefficients are scaled so that the gains into an output sum to at most 1. Mono is
+//!   `(Lo + Ro) / 2`.
+//! * The LFE channel is mixed in only if an E-AC-3 stream signals `lfemixlevcod` (Annex E clause
+//!   3.9), otherwise it is dropped.
+//! * Dual mono (1+1) streams are output as stereo (both channels) or, for mono, as the sum of
+//!   both channels at -6 dB each. A mono programme is output unchanged for a stereo down-mix.
+//! * The rear surround pair and the back centre of 6.1 and 7.1 programmes are mixed like
+//!   surround channels. Other channel locations of E-AC-3 programmes (Lc/Rc, Ts, Lw/Rw,
+//!   Vhl/Vhr, Vhc, Lts/Rts, LFE2) are dropped, since the specification does not define their
+//!   down-mix.
+//!
+//! # Dual mono
+//!
+//! In the 1+1 mode `dynrng` applies to channel 1 and `dynrng2` to channel 2 (clause 7.7.1.2). The
+//! specification does not say which applies to the LFE channel; this decoder uses `dynrng` as for
+//! every other mode. FFmpeg applies `dynrng2` to the LFE channel of a 1+1 programme (an artefact
+//! of how it indexes the two words), so the LFE channel differs from FFmpeg's by the ratio of
+//! the two gains when the words differ.
 //!
 //! # Packets
 //!
@@ -46,12 +74,17 @@
 //! * Programme selection: independent substreams with a `substreamid` other than 0 (other
 //!   programmes) and the dependent substreams attached to them are skipped; programme 0 is
 //!   decoded. `blkstrtinfo` is parsed and skipped (it only aids splicing).
-//! * Transient pre-noise processing (E.2.7) is applied per frame. Corrections reaching into a
-//!   frame that was already emitted are clipped. The spec gives no window shape or bit
-//!   allocation details for it; a raised-cosine cross-fade is used. Unverified: no reference
-//!   decoder or stream is available.
-//! * E-AC-3 reduced sample rates (`fscod` 3 with `fscod2`, ATSC A/52:2018 Annex E) are decoded
-//!   with the half-rate bit allocation indexing used for AC-3 `bsid` 9 and 10. Unverified.
+//! * Transient pre-noise processing (clause E.3.7) is applied per frame, following the pseudo
+//!   code of clause E.3.7.2. Corrections reaching into a frame that was already emitted are
+//!   clipped. The specification allows any pair of constant amplitude cross-fade windows; a
+//!   raised-cosine (Hanning) pair is used. No reference decoder applies the processing (FFmpeg
+//!   parses and discards the data), so the output is checked against the equations of the
+//!   specification, not against another decoder.
+//! * E-AC-3 reduced sample rates (`fscod` 3 with `fscod2`) select the hearing threshold of the
+//!   48, 44.1 or 32 kHz rate that is halved, with the half-rate band indexing and decay times of
+//!   `bsid` 9 and 10. The specification does not state this, and no reference decoder decodes
+//!   reduced rates (FFmpeg: "Reduced sampling rate is not implemented"), so only the framing is
+//!   verified.
 //! * AC-3 syncframes with `bsid` 9 or 10 are muted (decoded as silence of the signalled
 //!   duration), as ETSI TS 102 366 clauses 4.4.1.3 and E.1.3.1.6 require.
 
@@ -61,6 +94,7 @@ mod core;
 mod ext;
 mod header;
 mod imdct;
+mod mix;
 mod tables;
 mod transient;
 
@@ -71,7 +105,7 @@ use symphonia_core::audio::{
 use symphonia_core::codecs::CodecInfo;
 use symphonia_core::codecs::audio::well_known::{CODEC_ID_AC3, CODEC_ID_EAC3};
 use symphonia_core::codecs::audio::{
-    AudioCodecParameters, AudioDecoder, AudioDecoderOptions, FinalizeResult,
+    AudioCodecParameters, AudioDecoder, AudioDecoderOptions, Downmix, FinalizeResult,
 };
 use symphonia_core::codecs::registry::{RegisterableAudioDecoder, SupportedAudioCodec};
 use symphonia_core::errors::{Result, decode_error, unsupported_error};
@@ -286,6 +320,15 @@ impl Ac3Decoder {
             }
         }
 
+        // A mono programme is not up-mixed to stereo.
+        let mono_programme = au.indep.fbw_channels() == 1 && au.dep.is_none();
+        if self.opts.downmix != Downmix::None
+            && !(mono_programme && self.opts.downmix != Downmix::Mono)
+        {
+            self.emit_downmixed(&au.indep, &ent[..cnt], n);
+            return;
+        }
+
         // Determine the channel order of the output planes.
         let quad = au.indep.acmod == 6;
         let mut positions = Position::empty();
@@ -323,6 +366,54 @@ impl Ac3Decoder {
             let src = &self.cores[usize::from(e.1)].pcm[usize::from(e.2)][..n];
             if let Some(plane) = self.buf.plane_mut(i) {
                 plane[start..start + n].copy_from_slice(src);
+            }
+        }
+    }
+
+    /// Appends the access unit to the output buffer mixed down to stereo or mono. `ent` lists the
+    /// (location, core, pcm row) of every channel.
+    fn emit_downmixed(&mut self, indep: &FrameHeader, ent: &[(u8, u8, u8)], n: usize) {
+        let mut locs = [0u8; MAX_AU_CHANNELS];
+        for (l, e) in locs.iter_mut().zip(ent) {
+            *l = e.0;
+        }
+
+        let mut gains = [(0.0f32, 0.0f32); MAX_AU_CHANNELS];
+        let nout = mix::gains(self.opts.downmix, &indep.mix, &locs[..ent.len()], &mut gains);
+
+        let channels = if nout == 1 {
+            Channels::Positioned(Position::FRONT_CENTER)
+        }
+        else {
+            Channels::Positioned(Position::FRONT_LEFT | Position::FRONT_RIGHT)
+        };
+
+        let spec = AudioSpec::new(indep.sample_rate, channels);
+        if self.buf.spec() != &spec {
+            self.buf = AudioBuffer::new(spec, n);
+        }
+
+        let start = self.buf.frames();
+        self.buf.grow_capacity(start + n);
+        self.buf.render_uninit(Some(n));
+
+        for out in 0..nout {
+            let Some(plane) = self.buf.plane_mut(out)
+            else {
+                continue;
+            };
+            let plane = &mut plane[start..start + n];
+            plane.fill(0.0);
+
+            for (e, g) in ent.iter().zip(&gains) {
+                let gain = if out == 0 { g.0 } else { g.1 };
+                if gain == 0.0 {
+                    continue;
+                }
+                let src = &self.cores[usize::from(e.1)].pcm[usize::from(e.2)][..n];
+                for (o, &s) in plane.iter_mut().zip(src) {
+                    *o += gain * s;
+                }
             }
         }
     }

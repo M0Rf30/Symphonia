@@ -45,6 +45,53 @@ pub const STRMTYP_INDEPENDENT: u8 = 0;
 pub const STRMTYP_DEPENDENT: u8 = 1;
 pub const STRMTYP_CONVERT: u8 = 2;
 
+/// Center mix levels indexed by `cmixlev` (ETSI TS 102 366 Table 5.9). The reserved code selects
+/// the intermediate value (-4.5 dB).
+const CMIXLEV: [f32; 4] = [0.707, 0.595, 0.500, 0.595];
+
+/// Surround mix levels indexed by `surmixlev` (Table 5.10). The reserved code selects the
+/// intermediate value (-6 dB).
+const SURMIXLEV: [f32; 4] = [0.707, 0.500, 0.0, 0.500];
+
+/// Center mix levels indexed by `ltrtcmixlev` and `lorocmixlev` (ATSC A/52 Tables D2.3, D2.5).
+const CMIXLEV3: [f32; 8] = [1.414, 1.189, 1.000, 0.841, 0.707, 0.595, 0.500, 0.0];
+
+/// Surround mix levels indexed by `ltrtsurmixlev` and `lorosurmixlev` (Tables D2.4, D2.6). The
+/// reserved codes select 0.841.
+const SURMIXLEV3: [f32; 8] = [0.841, 0.841, 0.841, 0.841, 0.707, 0.595, 0.500, 0.0];
+
+/// The linear down-mix levels signalled by a frame (ETSI TS 102 366 clause 7.8).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MixLevels {
+    /// Center level of the Lo/Ro down-mix.
+    pub loro_center: f32,
+    /// Surround level of the Lo/Ro down-mix.
+    pub loro_surround: f32,
+    /// Center level of the Lt/Rt down-mix.
+    pub ltrt_center: f32,
+    /// Surround level of the Lt/Rt down-mix.
+    pub ltrt_surround: f32,
+    /// The level at which the LFE channel is mixed into a stereo or mono down-mix (E-AC-3
+    /// `lfemixlevcod`, Annex E clause 3.9), if signalled.
+    pub lfe: Option<f32>,
+}
+
+impl Default for MixLevels {
+    /// The levels used if a frame carries no mixing metadata. The Lt/Rt levels are the fixed
+    /// -3 dB of clause 7.8.2. The Lo/Ro levels are the intermediate codes of Tables 5.9 and 5.10;
+    /// ATSC A/52 gives no default for E-AC-3, which has no `cmixlev` and `surmixlev`, and FFmpeg
+    /// (libavcodec/ac3_parser.c) uses the same values.
+    fn default() -> Self {
+        MixLevels {
+            loro_center: CMIXLEV[1],
+            loro_surround: SURMIXLEV[1],
+            ltrt_center: 0.707,
+            ltrt_surround: 0.707,
+            lfe: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct FrameHeader {
     pub eac3: bool,
@@ -64,6 +111,8 @@ pub struct FrameHeader {
     pub muted: bool,
     /// The custom channel map of a dependent substream, if present.
     pub chanmap: Option<u16>,
+    /// The down-mix levels.
+    pub mix: MixLevels,
     /// The bit offset of the first bit after the bit stream information.
     pub header_bits: usize,
 }
@@ -120,11 +169,13 @@ fn parse_ac3(br: &mut BitReader<'_>, bsid: u8) -> Result<FrameHeader, HeaderErro
 
     let acmod = br.get(3) as u8;
 
+    let mut mix = MixLevels::default();
+
     if (acmod & 1) != 0 && acmod != 1 {
-        br.skip(2); // cmixlev
+        mix.loro_center = CMIXLEV[br.get(2) as usize];
     }
     if (acmod & 4) != 0 {
-        br.skip(2); // surmixlev
+        mix.loro_surround = SURMIXLEV[br.get(2) as usize];
     }
     if acmod == 2 {
         br.skip(2); // dsurmod
@@ -148,10 +199,19 @@ fn parse_ac3(br: &mut BitReader<'_>, bsid: u8) -> Result<FrameHeader, HeaderErro
 
     br.skip(2); // copyrightb, origbs
 
-    // timecod1e and timecod2e, or xbsi1e and xbsi2e of the alternate bit stream syntax (bsid 6).
-    // Both pairs of optional fields are 14 bits wide.
+    // timecod1e and timecod2e, or xbsi1e and xbsi2e of the alternate bit stream syntax (bsid 6,
+    // ATSC A/52 Annex D). Both pairs of optional fields are 14 bits wide.
     if br.bit() {
-        br.skip(14);
+        if bsid == 6 {
+            br.skip(2); // dmixmod
+            mix.ltrt_center = CMIXLEV3[br.get(3) as usize];
+            mix.ltrt_surround = SURMIXLEV3[br.get(3) as usize];
+            mix.loro_center = CMIXLEV3[br.get(3) as usize];
+            mix.loro_surround = SURMIXLEV3[br.get(3) as usize];
+        }
+        else {
+            br.skip(14);
+        }
     }
     if br.bit() {
         br.skip(14);
@@ -179,6 +239,7 @@ fn parse_ac3(br: &mut BitReader<'_>, bsid: u8) -> Result<FrameHeader, HeaderErro
         // ETSI TS 102 366 clauses 4.4.1.2 and E.1.3.1.6: bsid 9 and 10 shall be muted.
         muted: bsid > 8,
         chanmap: None,
+        mix,
         header_bits: br.pos(),
     })
 }
@@ -233,18 +294,23 @@ fn parse_eac3(br: &mut BitReader<'_>) -> Result<FrameHeader, HeaderError> {
     }
 
     // mixmdate
+    let mut mix = MixLevels::default();
     if br.bit() {
         if acmod > 2 {
             br.skip(2); // dmixmod
             if (acmod & 1) != 0 {
-                br.skip(6); // ltrtcmixlev, lorocmixlev
+                mix.ltrt_center = CMIXLEV3[br.get(3) as usize];
+                mix.loro_center = CMIXLEV3[br.get(3) as usize];
             }
             if (acmod & 4) != 0 {
-                br.skip(6); // ltrtsurmixlev, lorosurmixlev
+                mix.ltrt_surround = SURMIXLEV3[br.get(3) as usize];
+                mix.loro_surround = SURMIXLEV3[br.get(3) as usize];
             }
         }
         if lfeon && br.bit() {
-            br.skip(5); // lfemixlevcod
+            // LFE mix level: 10 - lfemixlevcod dB, less 4.5 dB (Annex E clauses 2.3.1.11 and 3.9).
+            let code = br.get(5);
+            mix.lfe = Some(10f32.powf((5.5 - code as f32) / 20.0));
         }
         if strmtyp == STRMTYP_INDEPENDENT {
             for _ in 0..two {
@@ -335,6 +401,7 @@ fn parse_eac3(br: &mut BitReader<'_>) -> Result<FrameHeader, HeaderError> {
         num_blocks,
         muted: false,
         chanmap,
+        mix,
         header_bits: br.pos(),
     })
 }

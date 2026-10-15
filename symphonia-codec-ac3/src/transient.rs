@@ -5,7 +5,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! E-AC-3 transient pre-noise processing (ETSI TS 102 366 clause E.2.7).
+//! E-AC-3 transient pre-noise processing (ETSI TS 102 366 clause E.3.7).
 //!
 //! The encoder transmits, per full bandwidth channel and frame, the location of a transient and a
 //! time scaling length. The decoder overwrites the audio before the transient (the pre-noise)
@@ -19,7 +19,7 @@
 use crate::core::MAX_BLOCKS;
 use crate::imdct::BLOCK_SIZE;
 
-/// Time scaling synthesis system parameters (clause E.2.7.2).
+/// Time scaling synthesis system parameters (clause E.3.7.2).
 const TC1: i64 = 256;
 const TC2: i64 = 128;
 

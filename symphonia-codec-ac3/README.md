@@ -8,10 +8,18 @@ Supported: all channel modes with LFE, block switching, coupling, rematrixing, d
 control, E-AC-3 spectral extension, adaptive hybrid transform, enhanced coupling, dependent
 substreams with custom channel maps, transient pre-noise processing, E-AC-3 reduced sample rates,
 and byte-swapped AC-3. Programme 0 of multi-programme E-AC-3 is decoded. AC-3 `bsid` 9 and 10 are
-muted as the specification requires. Output is planar `f32`. Downmixing is not performed.
+muted as the specification requires. Output is planar `f32`.
 
-Verified against FFmpeg (with its known deviations from ETSI TS 102 366 corrected) except for
-transient pre-noise processing and reduced sample rates, which no reference decoder implements.
+Down-mix to stereo (Lo/Ro or Lt/Rt) or mono (ETSI TS 102 366 clause 7.8) is selected with
+`AudioDecoderOptions::downmix`, using the `cmixlev`/`surmixlev` and Annex D/E mixing metadata of
+the stream. The default is to output every channel.
+
+Verified against FFmpeg (with its known deviations from ETSI TS 102 366 corrected) with committed
+reference PCM fixtures. Two features have no reference decoder: transient pre-noise processing
+(FFmpeg parses and discards the data; checked against the specification's equations) and E-AC-3
+reduced sample rates (FFmpeg rejects them; only the framing is checked). In 1+1 mode the LFE
+channel follows `dynrng`, whereas FFmpeg applies `dynrng2` to it; the mono down-mix is
+`(Lo + Ro) / 2` as specified, whereas FFmpeg scales by 0.707.
 
 ## License
 

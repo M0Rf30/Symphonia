@@ -9,7 +9,9 @@ All constant tables in `src/tables.rs` (bit-allocation tables, quantizer tables,
 and band tables, E-AC-3 vector-quantization and gain-adaptive-quantization tables, spectral extension
 attenuation table, enhanced coupling amplitude table, default band structures, channel-map locations)
 are extracted programmatically from the machine-readable text of ETSI TS 102 366 V1.3.1 / V1.4.1. They
-were not typed in by hand.
+were not typed in by hand. The down-mix level tables in `src/header.rs` (Tables 5.9 and 5.10 and Annex
+D Tables D2.3 to D2.6) are transcribed from the specification, and `src/mix.rs` implements the
+equations of clause 7.8 (Lo/Ro, Lt/Rt, mono) with Annex E clause 3.9 for the LFE channel.
 
 Algorithms derived from FFmpeg
 ------------------------------
