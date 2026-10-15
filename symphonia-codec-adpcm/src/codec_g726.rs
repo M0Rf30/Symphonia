@@ -201,14 +201,29 @@ impl G726Decoder {
 
     /// Decodes `out.len()` samples from `data`. State persists across calls; the bit position
     /// restarts at the byte boundary of each call.
+    #[cfg(test)]
     pub(crate) fn decode(&mut self, data: &[u8], out: &mut [i32]) -> Result<()> {
+        self.decode_channel(data, 0, 1, out)
+    }
+
+    /// Decodes `out.len()` samples of channel `ch` of `channels` from `data`, in which the codes
+    /// of the channels alternate (code `i` of the channel is code `i * channels + ch` of the
+    /// stream). State persists across calls; the bit position restarts at the byte boundary of
+    /// each call.
+    pub(crate) fn decode_channel(
+        &mut self,
+        data: &[u8],
+        ch: usize,
+        channels: usize,
+        out: &mut [i32],
+    ) -> Result<()> {
         let bits = self.code_size as usize;
-        if data.len() * 8 < out.len() * bits {
+        if ch >= channels || data.len() * 8 < out.len() * channels * bits {
             return decode_error("adpcm (g726): not enough data for requested samples");
         }
 
         let mask = (1u32 << bits) - 1;
-        let mut bitpos = 0usize;
+        let mut bitpos = ch * bits;
 
         for o in out.iter_mut() {
             let byte = bitpos >> 3;
@@ -224,7 +239,7 @@ impl G726Decoder {
                 let v = lo | (hi << 8);
                 (v >> shift) & mask
             };
-            bitpos += bits;
+            bitpos += channels * bits;
 
             *o = i32::from(self.decode_code(code as usize)) << 16;
         }

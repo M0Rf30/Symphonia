@@ -21,6 +21,10 @@ Changes since upstream `v0.6.1`.
   (`symphonia-codec-speex`), Nellymoser Asao (`symphonia-codec-nellymoser`), mp3PRO
   (`symphonia-bundle-mp3`, feature `mp3pro`), DSD and DST (`symphonia-codec-dsd`), and a native
   Opus decoder with a CELT-only encoder (`symphonia-codec-opus`).
+- Decoder: GSM 06.10 full-rate and Microsoft GSM 6.10 (`symphonia-codec-gsm`, feature `gsm`),
+- Decoder: GSM 06.10 full-rate and Microsoft GSM 6.10 (`symphonia-codec-gsm`, feature `gsm`),
+  mapped from WAVE `0x0031`/`0x0032`/`0x1500`, AIFF-C `GSM `, CAF `agsm`/`ms\0\x31`, QuickTime
+  `agsm`/`ms\0\x31` and Matroska `A_MS/ACM`.
 - Bundles: Musepack SV4 to SV8 (`symphonia-bundle-musepack`); Monkey's Audio legacy versions and
   multichannel 32-bit streams (`symphonia-bundle-ape`).
 - AAC: SBR, parametric stereo, coupling channels, pulse data, AAC-LD and AAC-ELD with low delay

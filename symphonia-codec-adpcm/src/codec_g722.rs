@@ -261,8 +261,21 @@ impl G722Decoder {
 
     /// Decodes `data.len()` codewords into `out`, which must hold exactly two samples per input
     /// byte. Samples are signed 16-bit values shifted left by 16 into an `i32`.
+    #[cfg(test)]
     pub(crate) fn decode(&mut self, data: &[u8], out: &mut [i32]) -> Result<()> {
-        if out.len() != data.len() * 2 {
+        self.decode_channel(data, 0, 1, out)
+    }
+
+    /// Decodes the codewords of channel `ch` of `channels` (byte `i * channels + ch` of `data`)
+    /// into `out`, which must hold exactly two samples per codeword.
+    pub(crate) fn decode_channel(
+        &mut self,
+        data: &[u8],
+        ch: usize,
+        channels: usize,
+        out: &mut [i32],
+    ) -> Result<()> {
+        if ch >= channels || out.len() != data.iter().skip(ch).step_by(channels).count() * 2 {
             return decode_error("adpcm (g722): output buffer must hold two samples per byte");
         }
 
@@ -270,7 +283,7 @@ impl G722Decoder {
         // The 6 - skip lower sub-band bits sit directly under the 2 higher sub-band bits.
         let low_mask = (1usize << (6 - skip)) - 1;
 
-        for (i, &byte) in data.iter().enumerate() {
+        for (i, &byte) in data.iter().skip(ch).step_by(channels).enumerate() {
             let ihigh = usize::from(byte >> 6);
             let ilow = (usize::from(byte) >> skip) & low_mask;
 

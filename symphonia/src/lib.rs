@@ -66,6 +66,7 @@
 //! | Speex    | `speex`      | Yes     | No      |
 //! | TrueHD, MLP | `truehd`  | No      | No      |
 //! | Vorbis   | `vorbis`     | Yes     | Yes     |
+//! | GSM 06.10, Microsoft GSM | `gsm` | No | No |
 //!
 //! **Tip:** All codecs can be enabled with the `all-codecs` feature flag. Similarly, all MPEG
 //! audio codecs can be enabled with the `mpa` feature flag.
@@ -193,6 +194,8 @@ pub mod default {
         #[cfg(feature = "musepack")]
         pub use symphonia_bundle_musepack::MpcReader;
         #[cfg(feature = "aac")]
+        #[cfg(feature = "gsm")]
+        pub use symphonia_codec_gsm::GsmDecoder;
         pub use symphonia_codec_aac::AdifReader;
         #[cfg(feature = "aac")]
         pub use symphonia_codec_aac::AdtsReader;
@@ -400,6 +403,8 @@ pub mod default {
         probe.register_format::<formats::IsoMp4Reader<'_>>();
 
         #[cfg(feature = "musepack")]
+        #[cfg(feature = "gsm")]
+        registry.register_audio_decoder::<codecs::GsmDecoder>();
         probe.register_format::<formats::MpcReader<'_>>();
 
         #[cfg(any(feature = "mp1", feature = "mp2", feature = "mp3"))]

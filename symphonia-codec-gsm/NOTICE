@@ -1,0 +1,21 @@
+This crate (`symphonia-codec-gsm`) is a pure-Rust GSM 06.10 full-rate speech decoder (also the
+Microsoft "GSM 6.10" WAVE variant, tag 0x0031). It is licensed under the Mozilla Public License,
+v. 2.0, like the rest of Project Symphonia.
+
+The algorithm and the constants (`src/synth.rs`: LAR decoding table MIC/B/INVA, the long-term
+gain table QLB, the APCM normalisation table FAC, the integer arithmetic primitives) are those of
+ETSI EN 300 961 / GSM 06.10 clause 4 (the fixed-point reference description), written with the
+structure of the `libgsm` library by Jutta Degener and Carsten Bormann (Technische Universitaet
+Berlin; licence retained below) as the reference for the exact operation order and saturation
+behaviour. The APCM inverse-quantisation table that FFmpeg
+(`libavcodec/gsmdec_data.c`, LGPL-2.1+) stores precomputed is computed here from the clause 4
+formulas instead; the output was verified bit-for-bit against both FFmpeg's `gsm`/`gsm_ms`
+decoders and libgsm.
+
+libgsm licence:
+
+  Copyright 1992, 1993, 1994 by Jutta Degener and Carsten Bormann, Technische Universitaet
+  Berlin. Any use of this software is permitted provided that this notice is not removed and that
+  neither the authors nor the Technische Universitaet Berlin are deemed to have made any
+  representations as to the suitability of this software for any purpose nor are held
+  responsible for any defects of this software. THERE IS ABSOLUTELY NO WARRANTY FOR THIS SOFTWARE.

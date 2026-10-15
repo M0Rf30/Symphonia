@@ -45,6 +45,20 @@ impl AdpcmImaBlockStatus {
         self.expand_code(nibble.get_nibble(byte), 4)
     }
 
+    /// Expands one 4-bit code with the multiply form of the IMA step: `((2 * magnitude + 1) *
+    /// step) >> 3`. This is FFmpeg's `adpcm_ima_expand_nibble(.., shift = 3)`, which the Duck
+    /// DK3/DK4, Westwood and Xbox decoders use; it rounds differently from [`Self::expand_code`].
+    pub(crate) fn expand_direct(&mut self, code: u8) -> i32 {
+        let step = IMA_STEP_TABLE[self.step_index as usize];
+        let magnitude = i32::from(code & 7);
+        let diff = ((2 * magnitude + 1) * step) >> 3;
+        let predictor = if code & 8 != 0 { self.predictor - diff } else { self.predictor + diff };
+        self.predictor = clamp_i16(predictor) as i32;
+        self.step_index =
+            (self.step_index + IMA_INDEX_TABLES[2][usize::from(code & 7)]).clamp(0, 88);
+        from_i16_shift!(self.predictor)
+    }
+
     /// Expands one `bits_per_sample` (2 to 5) bit code and returns the new sample as an i32
     /// holding a 16-bit sample in its upper half.
     pub(crate) fn expand_code(&mut self, code: u8, bits_per_sample: u32) -> i32 {

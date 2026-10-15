@@ -22,21 +22,29 @@ use symphonia_core::audio::{
     AsGenericAudioBufferRef, Audio, AudioBuffer, AudioMut, AudioSpec, GenericAudioBufferRef,
 };
 use symphonia_core::codecs::audio::well_known::{
-    CODEC_ID_ADPCM_G722, CODEC_ID_ADPCM_G726, CODEC_ID_ADPCM_G726LE, CODEC_ID_ADPCM_IMA_QT,
-    CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_MS, CODEC_ID_ADPCM_SWF, CODEC_ID_ADPCM_YAMAHA,
+    CODEC_ID_ADPCM_ADX, CODEC_ID_ADPCM_CT, CODEC_ID_ADPCM_G722, CODEC_ID_ADPCM_G726,
+    CODEC_ID_ADPCM_G726LE, CODEC_ID_ADPCM_IMA_DK3, CODEC_ID_ADPCM_IMA_DK4, CODEC_ID_ADPCM_IMA_OKI,
+    CODEC_ID_ADPCM_IMA_QT, CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_IMA_WS, CODEC_ID_ADPCM_IMA_XBOX,
+    CODEC_ID_ADPCM_MS, CODEC_ID_ADPCM_SBPRO_2, CODEC_ID_ADPCM_SBPRO_3, CODEC_ID_ADPCM_SBPRO_4,
+    CODEC_ID_ADPCM_SWF, CODEC_ID_ADPCM_YAMAHA, CODEC_ID_DPCM_8SVX_EXP, CODEC_ID_DPCM_8SVX_FIB,
 };
 use symphonia_core::codecs::audio::{AudioCodecId, AudioCodecParameters, AudioDecoderOptions};
 use symphonia_core::codecs::audio::{AudioDecoder, FinalizeResult};
 use symphonia_core::errors::{Error, Result, decode_error, unsupported_error};
 use symphonia_core::packet::PacketRef;
 
+mod codec_8svx;
+mod codec_adx;
 mod codec_g722;
 mod codec_g726;
+mod codec_ima_dk;
 mod codec_ima_qt;
 mod codec_ima_wav;
+mod codec_ima_ws;
 mod codec_ms;
+mod codec_nibble;
+mod codec_sbpro;
 mod codec_swf;
-mod codec_yamaha;
 mod common;
 mod common_ima;
 
@@ -51,6 +59,18 @@ fn is_supported_adpcm_codec(codec_id: AudioCodecId) -> bool {
             | CODEC_ID_ADPCM_G726LE
             | CODEC_ID_ADPCM_SWF
             | CODEC_ID_ADPCM_YAMAHA
+            | CODEC_ID_ADPCM_CT
+            | CODEC_ID_ADPCM_IMA_OKI
+            | CODEC_ID_ADPCM_IMA_DK3
+            | CODEC_ID_ADPCM_IMA_DK4
+            | CODEC_ID_ADPCM_IMA_XBOX
+            | CODEC_ID_ADPCM_IMA_WS
+            | CODEC_ID_ADPCM_ADX
+            | CODEC_ID_ADPCM_SBPRO_4
+            | CODEC_ID_ADPCM_SBPRO_3
+            | CODEC_ID_ADPCM_SBPRO_2
+            | CODEC_ID_DPCM_8SVX_FIB
+            | CODEC_ID_DPCM_8SVX_EXP
     )
 }
 
@@ -67,11 +87,29 @@ enum InnerDecoder {
     ImaQt {
         state: [codec_ima_qt::QtChannelState; 2],
     },
-    Yamaha(codec_yamaha::YamahaDecoder),
+    /// Yamaha, Creative and OKI: headerless 4-bit codes with the state carried between packets.
+    Nibble(codec_nibble::NibbleDecoder),
+    /// Duck DK3 (stereo), DK4 and Xbox IMA ADPCM; their blocks hold the whole state.
+    ImaDk3,
+    ImaDk4,
+    ImaXbox,
+    /// Westwood IMA ADPCM with the state carried between packets.
+    ImaWs(codec_ima_ws::ImaWsDecoder),
+    /// CRI ADX with the filter of its stream header.
+    Adx(codec_adx::AdxDecoder),
     Swf,
-    G722(codec_g722::G722Decoder),
-    G726(codec_g726::G726Decoder),
+    /// Sound Blaster Pro ADPCM with the state carried between packets.
+    Sbpro(codec_sbpro::SbproDecoder),
+    /// IFF 8SVX delta coding; the packet is the whole body.
+    EightSvx(codec_8svx::EightSvxDecoder),
+    /// One decoder per channel; the codewords of the channels alternate.
+    G722(Vec<codec_g722::G722Decoder>),
+    G726(Vec<codec_g726::G726Decoder>),
 }
+
+/// The most channels of the sample interleaved codecs that FFmpeg does not decode beyond mono or
+/// stereo: ITU-T G.722 and G.726 and the headerless 4-bit codecs.
+const MAX_INTERLEAVED_CHANNELS: usize = codec_nibble::MAX_CHANNELS;
 
 /// Adaptive Differential Pulse Code Modulation (ADPCM) decoder.
 pub struct AdpcmDecoder {
@@ -96,7 +134,12 @@ impl AdpcmDecoder {
         // The block based codecs need the block size.
         let block_based = matches!(
             params.codec,
-            CODEC_ID_ADPCM_MS | CODEC_ID_ADPCM_IMA_WAV | CODEC_ID_ADPCM_IMA_QT
+            CODEC_ID_ADPCM_MS
+                | CODEC_ID_ADPCM_IMA_WAV
+                | CODEC_ID_ADPCM_IMA_QT
+                | CODEC_ID_ADPCM_IMA_DK3
+                | CODEC_ID_ADPCM_IMA_DK4
+                | CODEC_ID_ADPCM_IMA_XBOX
         );
 
         if block_based && params.frames_per_block.is_none_or(|v| v == 0) {
@@ -120,14 +163,28 @@ impl AdpcmDecoder {
             None => return unsupported_error("adpcm: channels or channel_layout is required"),
         };
 
-        // Only IMA WAV defines a layout for more than two channels, and the ITU codecs are mono.
+        // Only IMA WAV and Microsoft ADPCM define a layout for more than two channels (as FFmpeg
+        // does for the latter: up to 6), and the ITU codecs are mono.
         let max_channels = match params.codec {
             CODEC_ID_ADPCM_IMA_WAV => codec_ima_wav::MAX_CHANNELS,
-            CODEC_ID_ADPCM_G722 | CODEC_ID_ADPCM_G726 | CODEC_ID_ADPCM_G726LE => 1,
+            CODEC_ID_ADPCM_MS => 6,
+            CODEC_ID_ADPCM_ADX => codec_adx::MAX_CHANNELS,
+            CODEC_ID_ADPCM_G722
+            | CODEC_ID_ADPCM_G726
+            | CODEC_ID_ADPCM_G726LE
+            | CODEC_ID_ADPCM_YAMAHA
+            | CODEC_ID_ADPCM_CT
+            | CODEC_ID_ADPCM_IMA_OKI => MAX_INTERLEAVED_CHANNELS,
+            CODEC_ID_ADPCM_SBPRO_4 | CODEC_ID_ADPCM_SBPRO_3 | CODEC_ID_ADPCM_SBPRO_2 => 1,
+            CODEC_ID_DPCM_8SVX_FIB | CODEC_ID_DPCM_8SVX_EXP => codec_8svx::MAX_CHANNELS,
             _ => 2,
         };
         if channel_count > max_channels {
             return unsupported_error("adpcm: unsupported number of channels");
+        }
+        // DK3 codes a sum and a difference channel.
+        if params.codec == CODEC_ID_ADPCM_IMA_DK3 && channel_count != 2 {
+            return unsupported_error("adpcm (ima-dk3): only stereo is supported");
         }
 
         let bits = params.bits_per_coded_sample;
@@ -149,19 +206,64 @@ impl AdpcmDecoder {
             CODEC_ID_ADPCM_IMA_QT => InnerDecoder::ImaQt {
                 state: [codec_ima_qt::new_state(), codec_ima_qt::new_state()],
             },
-            CODEC_ID_ADPCM_YAMAHA => InnerDecoder::Yamaha(codec_yamaha::YamahaDecoder::new()),
+            CODEC_ID_ADPCM_YAMAHA => {
+                InnerDecoder::Nibble(codec_nibble::NibbleDecoder::new(codec_nibble::Kind::Yamaha))
+            }
+            CODEC_ID_ADPCM_CT => {
+                InnerDecoder::Nibble(codec_nibble::NibbleDecoder::new(codec_nibble::Kind::Creative))
+            }
+            CODEC_ID_ADPCM_IMA_OKI => {
+                InnerDecoder::Nibble(codec_nibble::NibbleDecoder::new(codec_nibble::Kind::Oki))
+            }
+            CODEC_ID_ADPCM_IMA_DK3 => InnerDecoder::ImaDk3,
+            CODEC_ID_ADPCM_IMA_DK4 => InnerDecoder::ImaDk4,
+            CODEC_ID_ADPCM_IMA_XBOX => {
+                if bits.unwrap_or(4) != 4 {
+                    return unsupported_error("adpcm (ima-xbox): bits per sample must be 4");
+                }
+                InnerDecoder::ImaXbox
+            }
+            CODEC_ID_ADPCM_IMA_WS => InnerDecoder::ImaWs(codec_ima_ws::ImaWsDecoder::new()),
+            CODEC_ID_ADPCM_ADX => {
+                let header = params.extra_data.as_deref().unwrap_or_default();
+                InnerDecoder::Adx(codec_adx::AdxDecoder::try_new(header, channel_count)?)
+            }
             CODEC_ID_ADPCM_SWF => InnerDecoder::Swf,
+            CODEC_ID_ADPCM_SBPRO_4 => {
+                InnerDecoder::Sbpro(codec_sbpro::SbproDecoder::new(codec_sbpro::Kind::Bits4))
+            }
+            CODEC_ID_ADPCM_SBPRO_3 => {
+                InnerDecoder::Sbpro(codec_sbpro::SbproDecoder::new(codec_sbpro::Kind::Bits3))
+            }
+            CODEC_ID_ADPCM_SBPRO_2 => {
+                InnerDecoder::Sbpro(codec_sbpro::SbproDecoder::new(codec_sbpro::Kind::Bits2))
+            }
+            CODEC_ID_DPCM_8SVX_FIB => {
+                InnerDecoder::EightSvx(codec_8svx::EightSvxDecoder::new(false))
+            }
+            CODEC_ID_DPCM_8SVX_EXP => {
+                InnerDecoder::EightSvx(codec_8svx::EightSvxDecoder::new(true))
+            }
             CODEC_ID_ADPCM_G722 => match bits.unwrap_or(8) {
                 bits_per_codeword @ 6..=8 => {
-                    InnerDecoder::G722(codec_g722::G722Decoder::new(bits_per_codeword))
+                    InnerDecoder::G722(vec![
+                        codec_g722::G722Decoder::new(bits_per_codeword);
+                        channel_count
+                    ])
                 }
                 _ => return unsupported_error("adpcm (g722): bits per codeword must be 6 to 8"),
             },
             CODEC_ID_ADPCM_G726 | CODEC_ID_ADPCM_G726LE => match bits {
-                Some(bits_per_sample @ 2..=5) => InnerDecoder::G726(codec_g726::G726Decoder::new(
-                    bits_per_sample,
-                    params.codec == CODEC_ID_ADPCM_G726,
-                )),
+                Some(bits_per_sample @ 2..=5) => InnerDecoder::G726(
+                    (0..channel_count)
+                        .map(|_| {
+                            codec_g726::G726Decoder::new(
+                                bits_per_sample,
+                                params.codec == CODEC_ID_ADPCM_G726,
+                            )
+                        })
+                        .collect(),
+                ),
                 _ => return unsupported_error("adpcm (g726): bits per sample must be 2 to 5"),
             },
             _ => return unsupported_error("adpcm: codec is unsupported"),
@@ -184,9 +286,11 @@ impl AdpcmDecoder {
         // The ITU codecs are sample (not block) based: the number of frames is given by the size
         // of the packet.
         match &mut self.inner_decoder {
-            InnerDecoder::Yamaha(dec) => {
+            InnerDecoder::ImaWs(dec) => {
+                // A byte is 2 codes of one channel: 2 frames per byte for mono, and 2 frames per
+                // pair of bytes for stereo. A trailing odd byte of a stereo packet is dropped.
                 let channels = self.buf.spec().channels().count();
-                let num_frames = if channels == 1 { 2 * data.len() } else { data.len() };
+                let num_frames = 2 * (data.len() / channels);
                 if num_frames > self.buf.capacity() {
                     return decode_error("adpcm: packet exceeds maximum frames per packet");
                 }
@@ -195,6 +299,36 @@ impl AdpcmDecoder {
                 if channels == 1 {
                     let out = self.buf.plane_mut(0).ok_or(Error::DecodeError("adpcm: no plane"))?;
                     dec.decode_mono(data, out);
+                }
+                else {
+                    let (l, r) = self
+                        .buf
+                        .plane_pair_mut(0, 1)
+                        .ok_or(Error::DecodeError("adpcm: no planes"))?;
+                    dec.decode_stereo(data, l, r);
+                }
+                return self.finish(packet);
+            }
+            InnerDecoder::Nibble(dec) => {
+                let channels = self.buf.spec().channels().count();
+                // 2 codes per byte, so 2 frames per byte for mono and 2 * len / channels frames
+                // for the others.
+                let num_frames = 2 * data.len() / channels;
+                if num_frames > self.buf.capacity() {
+                    return decode_error("adpcm: packet exceeds maximum frames per packet");
+                }
+                self.buf.clear();
+                self.buf.render_uninit(Some(num_frames));
+                if channels == 1 {
+                    let out = self.buf.plane_mut(0).ok_or(Error::DecodeError("adpcm: no plane"))?;
+                    dec.decode_mono(data, out);
+                }
+                else if channels > 2 {
+                    for ch in 0..channels {
+                        let out =
+                            self.buf.plane_mut(ch).ok_or(Error::DecodeError("adpcm: no plane"))?;
+                        dec.decode_channel(data, ch, channels, out);
+                    }
                 }
                 else {
                     let (l, r) = self
@@ -226,18 +360,7 @@ impl AdpcmDecoder {
                 }
                 return self.finish(packet);
             }
-            InnerDecoder::G722(dec) => {
-                let num_frames = 2 * data.len();
-                if num_frames > self.buf.capacity() {
-                    return decode_error("adpcm: packet exceeds maximum frames per packet");
-                }
-                self.buf.clear();
-                self.buf.render_uninit(Some(num_frames));
-                let out = self.buf.plane_mut(0).ok_or(Error::DecodeError("adpcm: no plane"))?;
-                dec.decode(data, out)?;
-                return self.finish(packet);
-            }
-            InnerDecoder::G726(dec) => {
+            InnerDecoder::Sbpro(dec) => {
                 let num_frames = dec.frames_in(data.len());
                 if num_frames > self.buf.capacity() {
                     return decode_error("adpcm: packet exceeds maximum frames per packet");
@@ -245,7 +368,71 @@ impl AdpcmDecoder {
                 self.buf.clear();
                 self.buf.render_uninit(Some(num_frames));
                 let out = self.buf.plane_mut(0).ok_or(Error::DecodeError("adpcm: no plane"))?;
-                dec.decode(data, out)?;
+                dec.decode(data, out);
+                return self.finish(packet);
+            }
+            InnerDecoder::EightSvx(dec) => {
+                let channels = self.buf.spec().channels().count();
+                if !codec_8svx::EightSvxDecoder::is_valid(data.len(), channels) {
+                    return decode_error("adpcm (8svx): packet is too small");
+                }
+                let num_frames = codec_8svx::EightSvxDecoder::frames_in(data.len(), channels);
+                if num_frames > self.buf.capacity() {
+                    return decode_error("adpcm: packet exceeds maximum frames per packet");
+                }
+                self.buf.clear();
+                self.buf.render_uninit(Some(num_frames));
+                for ch in 0..channels {
+                    let out =
+                        self.buf.plane_mut(ch).ok_or(Error::DecodeError("adpcm: no plane"))?;
+                    dec.decode_channel(data, channels, ch, out);
+                }
+                return self.finish(packet);
+            }
+            InnerDecoder::G722(decs) => {
+                // A codeword (2 frames) per channel; a trailing incomplete group is dropped.
+                let channels = decs.len();
+                let num_frames = 2 * (data.len() / channels);
+                if num_frames > self.buf.capacity() {
+                    return decode_error("adpcm: packet exceeds maximum frames per packet");
+                }
+                let data = &data[..num_frames / 2 * channels];
+                self.buf.clear();
+                self.buf.render_uninit(Some(num_frames));
+                for (ch, dec) in decs.iter_mut().enumerate() {
+                    let out =
+                        self.buf.plane_mut(ch).ok_or(Error::DecodeError("adpcm: no plane"))?;
+                    dec.decode_channel(data, ch, channels, out)?;
+                }
+                return self.finish(packet);
+            }
+            InnerDecoder::G726(decs) => {
+                let channels = decs.len();
+                let num_frames = decs[0].frames_in(data.len()) / channels;
+                if num_frames > self.buf.capacity() {
+                    return decode_error("adpcm: packet exceeds maximum frames per packet");
+                }
+                self.buf.clear();
+                self.buf.render_uninit(Some(num_frames));
+                for (ch, dec) in decs.iter_mut().enumerate() {
+                    let out =
+                        self.buf.plane_mut(ch).ok_or(Error::DecodeError("adpcm: no plane"))?;
+                    dec.decode_channel(data, ch, channels, out)?;
+                }
+                return self.finish(packet);
+            }
+            InnerDecoder::Adx(dec) => {
+                let num_frames = dec.begin(data)?;
+                if num_frames > self.buf.capacity() {
+                    return decode_error("adpcm: packet exceeds maximum frames per packet");
+                }
+                self.buf.clear();
+                self.buf.render_uninit(Some(num_frames));
+                for ch in 0..self.buf.spec().channels().count() {
+                    let out =
+                        self.buf.plane_mut(ch).ok_or(Error::DecodeError("adpcm: no plane"))?;
+                    dec.decode_channel(data, ch, out);
+                }
                 return self.finish(packet);
             }
             _ => (),
@@ -305,8 +492,57 @@ impl AdpcmDecoder {
                         codec_ms::decode_stereo(&mut stream, [l, r], frames_per_block, coeffs)?;
                     }
                 }
-                _ => return unsupported_error("adpcm (ms): unsupported number of channels"),
+                _ => {
+                    for block_id in 0..block_count {
+                        codec_ms::decode_planar(
+                            &mut stream,
+                            &mut self.buf,
+                            channel_count,
+                            frames_per_block * block_id,
+                            frames_per_block,
+                            coeffs,
+                        )?;
+                    }
+                }
             },
+            InnerDecoder::ImaDk3 => {
+                let block_bytes = data.len().checked_div(block_count).unwrap_or(0);
+                for block_id in 0..block_count {
+                    codec_ima_dk::decode_dk3(
+                        &mut stream,
+                        &mut self.buf,
+                        frames_per_block * block_id,
+                        frames_per_block,
+                        block_bytes,
+                    )?;
+                }
+            }
+            InnerDecoder::ImaDk4 => {
+                let block_bytes = data.len().checked_div(block_count).unwrap_or(0);
+                for block_id in 0..block_count {
+                    codec_ima_dk::decode_dk4(
+                        &mut stream,
+                        &mut self.buf,
+                        channel_count,
+                        frames_per_block * block_id,
+                        frames_per_block,
+                        block_bytes,
+                    )?;
+                }
+            }
+            InnerDecoder::ImaXbox => {
+                let block_bytes = data.len().checked_div(block_count).unwrap_or(0);
+                for block_id in 0..block_count {
+                    codec_ima_dk::decode_xbox(
+                        &mut stream,
+                        &mut self.buf,
+                        channel_count,
+                        frames_per_block * block_id,
+                        frames_per_block,
+                        block_bytes,
+                    )?;
+                }
+            }
             InnerDecoder::ImaQt { state } => match channel_count {
                 1 => {
                     let buffer =
@@ -330,8 +566,12 @@ impl AdpcmDecoder {
                 }
                 _ => return unsupported_error("adpcm (ima-qt): unsupported number of channels"),
             },
-            InnerDecoder::Yamaha(_)
+            InnerDecoder::Nibble(_)
+            | InnerDecoder::ImaWs(_)
             | InnerDecoder::Swf
+            | InnerDecoder::Adx(_)
+            | InnerDecoder::Sbpro(_)
+            | InnerDecoder::EightSvx(_)
             | InnerDecoder::G722(_)
             | InnerDecoder::G726(_) => unreachable!(),
         }
@@ -355,10 +595,19 @@ impl AudioDecoder for AdpcmDecoder {
             InnerDecoder::ImaQt { state } => {
                 *state = [codec_ima_qt::new_state(), codec_ima_qt::new_state()]
             }
-            InnerDecoder::Yamaha(dec) => dec.reset(),
-            InnerDecoder::G722(dec) => dec.reset(),
-            InnerDecoder::G726(dec) => dec.reset(),
-            InnerDecoder::Ms { .. } | InnerDecoder::ImaWav { .. } | InnerDecoder::Swf => (),
+            InnerDecoder::Nibble(dec) => dec.reset(),
+            InnerDecoder::ImaWs(dec) => dec.reset(),
+            InnerDecoder::Adx(dec) => dec.reset(),
+            InnerDecoder::Sbpro(dec) => dec.reset(),
+            InnerDecoder::G722(decs) => decs.iter_mut().for_each(|dec| dec.reset()),
+            InnerDecoder::G726(decs) => decs.iter_mut().for_each(|dec| dec.reset()),
+            InnerDecoder::EightSvx(_)
+            | InnerDecoder::Ms { .. }
+            | InnerDecoder::ImaWav { .. }
+            | InnerDecoder::ImaDk3
+            | InnerDecoder::ImaDk4
+            | InnerDecoder::ImaXbox
+            | InnerDecoder::Swf => (),
         }
     }
 
@@ -412,12 +661,39 @@ impl RegisterableAudioDecoder for AdpcmDecoder {
             support_audio_codec!(CODEC_ID_ADPCM_IMA_QT, "adpcm_ima_qt", "ADPCM IMA QT"),
             support_audio_codec!(CODEC_ID_ADPCM_YAMAHA, "adpcm_yamaha", "Yamaha ADPCM"),
             support_audio_codec!(CODEC_ID_ADPCM_SWF, "adpcm_swf", "Shockwave Flash ADPCM"),
+            support_audio_codec!(CODEC_ID_ADPCM_CT, "adpcm_ct", "Creative Technology ADPCM"),
+            support_audio_codec!(
+                CODEC_ID_ADPCM_SBPRO_4,
+                "adpcm_sbpro_4",
+                "Sound Blaster Pro 4-bit ADPCM"
+            ),
+            support_audio_codec!(
+                CODEC_ID_ADPCM_SBPRO_3,
+                "adpcm_sbpro_3",
+                "Sound Blaster Pro 2.6-bit ADPCM"
+            ),
+            support_audio_codec!(
+                CODEC_ID_ADPCM_SBPRO_2,
+                "adpcm_sbpro_2",
+                "Sound Blaster Pro 2-bit ADPCM"
+            ),
+            support_audio_codec!(CODEC_ID_DPCM_8SVX_FIB, "8svx_fib", "8SVX Fibonacci-delta"),
+            support_audio_codec!(CODEC_ID_DPCM_8SVX_EXP, "8svx_exp", "8SVX exponential-delta"),
+            support_audio_codec!(CODEC_ID_ADPCM_IMA_DK3, "adpcm_ima_dk3", "ADPCM IMA Duck DK3"),
+            support_audio_codec!(CODEC_ID_ADPCM_IMA_DK4, "adpcm_ima_dk4", "ADPCM IMA Duck DK4"),
+            support_audio_codec!(CODEC_ID_ADPCM_IMA_OKI, "adpcm_ima_oki", "ADPCM IMA Dialogic OKI"),
+            support_audio_codec!(CODEC_ID_ADPCM_IMA_XBOX, "adpcm_ima_xbox", "ADPCM IMA Xbox"),
+            support_audio_codec!(CODEC_ID_ADPCM_IMA_WS, "adpcm_ima_ws", "ADPCM IMA Westwood"),
+            support_audio_codec!(CODEC_ID_ADPCM_ADX, "adpcm_adx", "CRI ADX ADPCM"),
             support_audio_codec!(CODEC_ID_ADPCM_G722, "adpcm_g722", "ITU-T G.722 ADPCM"),
             support_audio_codec!(CODEC_ID_ADPCM_G726, "adpcm_g726", "ITU-T G.726 ADPCM"),
             support_audio_codec!(CODEC_ID_ADPCM_G726LE, "adpcm_g726le", "ITU-T G.726 ADPCM (LE)"),
         ]
     }
 }
+
+#[cfg(test)]
+mod tests_ffmpeg;
 
 #[cfg(test)]
 mod tests {

@@ -158,6 +158,7 @@ mp3PRO streams decode as plain MP3 by default. The `mp3pro` feature adds `Mp3Pro
 [`symphonia-codec-dca`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-dca
 [`symphonia-codec-dsd`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-dsd
 [`symphonia-codec-nellymoser`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-nellymoser
+| GSM 06.10, Microsoft GSM     | Excellent | No      | `gsm`        | No      | [`symphonia-codec-gsm`]      |
 [`symphonia-codec-imc`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-imc
 [`symphonia-codec-speex`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-speex
 [`symphonia-codec-truehd`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-truehd
@@ -189,6 +190,7 @@ For metadata formats that are standalone and not part of the media container, a 
 
 ### Known Unsupported Codecs and Containers
 
+[`symphonia-codec-gsm`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-gsm
 Codecs and containers without a row in the tables above are not implemented. Known gaps:
 
 * Video and subtitle codecs: no video or subtitle decoder exists in this repository.

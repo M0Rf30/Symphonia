@@ -438,6 +438,28 @@ pub mod well_known {
     pub const CODEC_ID_ADPCM_YAMAHA: AudioCodecId = AudioCodecId(0x206);
     /// Shockwave Flash (SWF) ADPCM
     pub const CODEC_ID_ADPCM_SWF: AudioCodecId = AudioCodecId(0x207);
+    /// Creative Technology (CT) 4-bit ADPCM
+    pub const CODEC_ID_ADPCM_CT: AudioCodecId = AudioCodecId(0x208);
+    /// Sound Blaster Pro 4-bit ADPCM
+    pub const CODEC_ID_ADPCM_SBPRO_4: AudioCodecId = AudioCodecId(0x209);
+    /// Sound Blaster Pro 2.6-bit ADPCM
+    pub const CODEC_ID_ADPCM_SBPRO_3: AudioCodecId = AudioCodecId(0x20a);
+    /// Sound Blaster Pro 2-bit ADPCM
+    pub const CODEC_ID_ADPCM_SBPRO_2: AudioCodecId = AudioCodecId(0x20b);
+    /// IFF 8SVX Fibonacci-delta compressed audio
+    pub const CODEC_ID_DPCM_8SVX_FIB: AudioCodecId = AudioCodecId(0x20c);
+    /// IFF 8SVX exponential-delta compressed audio
+    pub const CODEC_ID_DPCM_8SVX_EXP: AudioCodecId = AudioCodecId(0x20d);
+    /// ADPCM IMA Duck DK3
+    pub const CODEC_ID_ADPCM_IMA_DK3: AudioCodecId = AudioCodecId(0x210);
+    /// ADPCM IMA Duck DK4
+    pub const CODEC_ID_ADPCM_IMA_DK4: AudioCodecId = AudioCodecId(0x211);
+    /// ADPCM IMA Dialogic OKI
+    pub const CODEC_ID_ADPCM_IMA_OKI: AudioCodecId = AudioCodecId(0x212);
+    /// ADPCM IMA Xbox
+    pub const CODEC_ID_ADPCM_IMA_XBOX: AudioCodecId = AudioCodecId(0x213);
+    /// ADPCM IMA Westwood
+    pub const CODEC_ID_ADPCM_IMA_WS: AudioCodecId = AudioCodecId(0x214);
 
     // Compressed lossy audio codecs
     //------------------------------
@@ -552,3 +574,7 @@ pub mod well_known {
         pub const CODEC_PROFILE_AAC_USAC: CodecProfile = CodecProfile(41);
     }
 }
+    /// GSM 06.10 full-rate (ETSI EN 300 961, 33-byte frames)
+    pub const CODEC_ID_GSM: AudioCodecId = AudioCodecId(0x1140);
+    /// Microsoft GSM 6.10 (WAVE format tag 0x0031, 65-byte blocks of two frames)
+    pub const CODEC_ID_GSM_MS: AudioCodecId = AudioCodecId(0x1141);

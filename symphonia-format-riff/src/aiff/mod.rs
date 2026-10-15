@@ -671,6 +671,26 @@ mod tests {
     }
 
     #[test]
+    fn gsm_is_block_based() {
+        // 3 blocks of 33 bytes, one 160-frame GSM frame each.
+        let mut reader =
+            open(form(b"AIFC", &[comm(1, 480, 16, Some(b"GSM ")), ssnd(&[0xd0; 3 * 33])])).unwrap();
+        let track = &reader.tracks()[0];
+        let params = track.codec_params.as_ref().and_then(|p| p.audio()).unwrap();
+        assert_eq!(params.codec, symphonia_core::codecs::audio::well_known::CODEC_ID_GSM);
+        assert_eq!(params.frames_per_block, Some(160));
+        assert_eq!(track.num_frames, Some(480));
+        let packet = reader.next_packet().unwrap().expect("packet");
+        assert_eq!(packet.dur.get(), 480);
+        assert_eq!(packet.data.len(), 99);
+    }
+
+    #[test]
+    fn gsm_must_be_mono() {
+        assert!(open(form(b"AIFC", &[comm(2, 160, 16, Some(b"GSM ")), ssnd(&[0; 66])])).is_err());
+    }
+
+    #[test]
     fn markers_become_chapters() {
         let mut mark = 1u16.to_be_bytes().to_vec();
         mark.extend_from_slice(&1i16.to_be_bytes());

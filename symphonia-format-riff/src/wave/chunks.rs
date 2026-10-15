@@ -11,14 +11,19 @@ use std::io::{Seek, SeekFrom};
 use symphonia_core::audio::AmbisonicBFormat;
 use symphonia_core::audio::{ChannelLabel, Channels, Position};
 use symphonia_core::codecs::audio::AudioCodecId;
-use symphonia_core::codecs::audio::well_known::{CODEC_ID_IAC, CODEC_ID_IMC};
+use symphonia_core::codecs::audio::well_known::CODEC_ID_ATRAC3;
+use symphonia_core::codecs::audio::well_known::CODEC_ID_G729;
+use symphonia_core::codecs::audio::well_known::CODEC_ID_MSN_SIREN;
 use symphonia_core::codecs::audio::well_known::{
-    CODEC_ID_AC3, CODEC_ID_ADPCM_G722, CODEC_ID_ADPCM_G726, CODEC_ID_ADPCM_IMA_WAV,
-    CODEC_ID_ADPCM_MS, CODEC_ID_ADPCM_YAMAHA, CODEC_ID_DCA, CODEC_ID_EAC3, CODEC_ID_MP2,
-    CODEC_ID_MP3, CODEC_ID_PCM_ALAW, CODEC_ID_PCM_F32LE, CODEC_ID_PCM_F64LE, CODEC_ID_PCM_MULAW,
-    CODEC_ID_PCM_S16LE, CODEC_ID_PCM_S24LE, CODEC_ID_PCM_S32LE, CODEC_ID_PCM_U8,
-    CODEC_ID_TRUESPEECH,
+    CODEC_ID_AC3, CODEC_ID_ADPCM_CT, CODEC_ID_ADPCM_G722, CODEC_ID_ADPCM_G726,
+    CODEC_ID_ADPCM_IMA_DK3, CODEC_ID_ADPCM_IMA_DK4, CODEC_ID_ADPCM_IMA_OKI, CODEC_ID_ADPCM_IMA_WAV,
+    CODEC_ID_ADPCM_IMA_XBOX, CODEC_ID_ADPCM_MS, CODEC_ID_ADPCM_YAMAHA, CODEC_ID_DCA, CODEC_ID_EAC3,
+    CODEC_ID_GSM_MS, CODEC_ID_MP2, CODEC_ID_MP3, CODEC_ID_PCM_ALAW, CODEC_ID_PCM_F32LE,
+    CODEC_ID_PCM_F64LE, CODEC_ID_PCM_MULAW, CODEC_ID_PCM_S16LE, CODEC_ID_PCM_S24LE,
+    CODEC_ID_PCM_S32LE, CODEC_ID_PCM_U8, CODEC_ID_TRUESPEECH,
 };
+use symphonia_core::codecs::audio::well_known::{CODEC_ID_IAC, CODEC_ID_IMC};
+use symphonia_core::codecs::audio::well_known::{CODEC_ID_WMAV1, CODEC_ID_WMAV2};
 use symphonia_core::errors::{Error, Result, decode_error, unsupported_error};
 use symphonia_core::formats::Track;
 use symphonia_core::io::{MediaSource, MediaSourceStream, ReadBytes};
@@ -172,11 +177,57 @@ impl WaveFormatChunk {
         let extra_data = reader.read_boxed_slice_exact(extra_size as usize)?;
 
         let channels = map_wave_channel_count(num_channels)?;
+
+        // Multichannel Microsoft ADPCM stores every channel as an independent mono block, and
+        // `nBlockAlign` is the size of one of them. This follows FFmpeg's `wav_read_header`, which
+        // multiplies the block align by the channel count for more than 2 channels. Mono and
+        // stereo blocks are interleaved and `nBlockAlign` is the whole block.
+        let block_align = if codec == CODEC_ID_ADPCM_MS && num_channels > 2 {
+            let Some(block_align) = block_align.checked_mul(num_channels)
+            else {
+                return decode_error("wav: block align too large for fmt_adpcm");
+            };
+            block_align
+        }
+        else {
+            block_align
+        };
+
         Ok(FormatData::Adpcm(FormatAdpcm {
             block_align,
             bits_per_sample,
             channels,
             codec,
+            extra_data: Some(extra_data),
+        }))
+    }
+
+    /// Sony ATRAC3 (`WAVE_FORMAT_SONY_ATRAC3`). The extension must be present as the decoder
+    /// depends on the coding mode in it.
+    fn read_atrac3_fmt<B: ReadBytes>(
+        reader: &mut B,
+        block_align: u16,
+        num_channels: u16,
+        len: u32,
+    ) -> Result<FormatData> {
+        if len < 18 {
+            return decode_error("wav: malformed fmt_atrac3 chunk");
+        }
+
+        let extra_size = u64::from(reader.read_u16()?);
+
+        if extra_size == 0 || extra_size > u64::from(len - 18) {
+            return decode_error("wav: malformed fmt_atrac3 chunk");
+        }
+
+        let extra_data = reader.read_boxed_slice_exact(extra_size as usize)?;
+        let channels = map_wave_channel_count(num_channels)?;
+
+        Ok(FormatData::Adpcm(FormatAdpcm {
+            block_align,
+            bits_per_sample: 0,
+            channels,
+            codec: CODEC_ID_ATRAC3,
             extra_data: Some(extra_data),
         }))
     }
@@ -223,6 +274,7 @@ impl WaveFormatChunk {
 
     fn read_ext_fmt<B: ReadBytes>(
         reader: &mut B,
+        block_align: u16,
         bits_per_sample: u16,
         num_channels: u16,
         len: u32,
@@ -234,8 +286,9 @@ impl WaveFormatChunk {
 
         let extra_size = reader.read_u16()?;
 
-        // The size of the extra data for the Extensible format is exactly 22 bytes.
-        if extra_size != 22 {
+        // The size of the extra data for the Extensible format is exactly 22 bytes, except for
+        // ATRAC3 which appends its own extension (checked below).
+        if extra_size < 22 || u32::from(extra_size) > len - 18 {
             return decode_error("wav: extra data size not 22 bytes for fmt_ext chunk");
         }
 
@@ -268,6 +321,11 @@ impl WaveFormatChunk {
         //     0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
         //     0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71,
         // ];
+        // The last 12 bytes of the base GUID that embeds a format tag in its first 4 bytes.
+        #[rustfmt::skip]
+        const ATRAC3_GUID_SUFFIX: [u8; 12] = [
+            0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71,
+        ];
         #[rustfmt::skip]
         const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: [u8; 16] = [
             0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
@@ -293,6 +351,35 @@ impl WaveFormatChunk {
             0x03, 0x00, 0x00, 0x00, 0x21, 0x07, 0xd3, 0x11,
             0x86, 0x44, 0xc8, 0xc1, 0xca, 0x00, 0x00, 0x00,
         ];
+
+        // ATRAC3 is the base GUID with format tag 0x0270, followed by the same 14-byte extension
+        // as in the plain format (FFmpeg `ff_get_wav_header`).
+        if sub_format_guid[..4] == [0x70, 0x02, 0x00, 0x00]
+            && sub_format_guid[4..] == ATRAC3_GUID_SUFFIX
+        {
+            let extra_data = reader.read_boxed_slice_exact(usize::from(extra_size) - 22)?;
+            if extra_data.is_empty() {
+                return decode_error("wav: malformed fmt_ext atrac3 chunk");
+            }
+            let channels = match fix_wave_channel_mask(channel_mask, num_channels)
+                .ok()
+                .and_then(Position::from_wave_channel_mask)
+            {
+                Some(positions) => Channels::Positioned(positions),
+                None => map_wave_channel_count(num_channels)?,
+            };
+            return Ok(FormatData::Adpcm(FormatAdpcm {
+                block_align,
+                bits_per_sample: 0,
+                channels,
+                codec: CODEC_ID_ATRAC3,
+                extra_data: Some(extra_data),
+            }));
+        }
+
+        if extra_size != 22 {
+            return decode_error("wav: extra data size not 22 bytes for fmt_ext chunk");
+        }
 
         // The compressed surround formats are stored as elementary streams that are framed from
         // the data chunk. They are identified by either their own GUID, or a format tag embedded
@@ -515,11 +602,28 @@ impl ParseChunk for WaveFormatChunk {
         const WAVE_FORMAT_MULAW: u16 = 0x0007;
         const WAVE_FORMAT_ADPCM_IMA: u16 = 0x0011;
         const WAVE_FORMAT_DSPGROUP_TRUESPEECH: u16 = 0x0022;
+        const WAVE_FORMAT_GSM610: u16 = 0x0031;
+        const WAVE_FORMAT_WMAV1: u16 = 0x0160;
+        const WAVE_FORMAT_WMAV2: u16 = 0x0161;
+        const WAVE_FORMAT_MSNAUDIO: u16 = 0x0032;
+        const WAVE_FORMAT_GSM_MS_ALT: u16 = 0x1500;
+        const WAVE_FORMAT_G729A: u16 = 0x0083;
+        const WAVE_FORMAT_G729_ALT: u16 = 0x2222;
+        const WAVE_FORMAT_G729_ALT2: u16 = 0x729a;
         const WAVE_FORMAT_G723_ADPCM: u16 = 0x0014;
+        const WAVE_FORMAT_ANTEX_G721: u16 = 0x0040;
+        const WAVE_FORMAT_OKI_ADPCM: u16 = 0x0010;
+        const WAVE_FORMAT_DIALOGIC_OKI_ADPCM: u16 = 0x0017;
+        const WAVE_FORMAT_DK4_ADPCM: u16 = 0x0061;
+        const WAVE_FORMAT_DK3_ADPCM: u16 = 0x0062;
+        const WAVE_FORMAT_XBOX_ADPCM: u16 = 0x0069;
+        const WAVE_FORMAT_CREATIVE_ADPCM: u16 = 0x0200;
         const WAVE_FORMAT_G726: u16 = 0x0045;
         const WAVE_FORMAT_G726_ADPCM: u16 = 0x0064;
         const WAVE_FORMAT_G722: u16 = 0x028f;
+        const WAVE_FORMAT_MSN_SIREN: u16 = 0x028e;
         const WAVE_FORMAT_YAMAHA_ADPCM: u16 = 0x0020;
+        const WAVE_FORMAT_SONY_ATRAC3: u16 = 0x0270;
         const WAVE_FORMAT_IMC: u16 = 0x0401;
         const WAVE_FORMAT_IAC: u16 = 0x0402;
         const WAVE_FORMAT_MPEG: u16 = 0x0050;
@@ -549,7 +653,7 @@ impl ParseChunk for WaveFormatChunk {
             }
             // The Extensible Wave Format
             WAVE_FORMAT_EXTENSIBLE => {
-                Self::read_ext_fmt(reader, bits_per_sample, num_channels, len)
+                Self::read_ext_fmt(reader, block_align, bits_per_sample, num_channels, len)
             }
             // The Alaw Wave Format.
             WAVE_FORMAT_ALAW => Self::read_alaw_pcm_fmt(reader, num_channels, len),
@@ -564,6 +668,44 @@ impl ParseChunk for WaveFormatChunk {
                 len,
                 CODEC_ID_ADPCM_IMA_WAV,
             ),
+            // Windows Media Audio 1 and 2. The WMA decoder needs the whole `WAVEFORMATEX`: the
+            // average byte rate and the encoder flags of the extension are not available
+            // elsewhere. FFmpeg: `wmav1`/`wmav2`. WMA Pro (0x0162), Lossless (0x0163) and Voice
+            // (0x000a) are other codecs and are not decoded.
+            WAVE_FORMAT_WMAV1 | WAVE_FORMAT_WMAV2 => {
+                let extension = if len >= 18 {
+                    let extra_size = u64::from(reader.read_u16()?);
+                    if extra_size > u64::from(len - 18) {
+                        return decode_error("wav: malformed fmt_wma chunk");
+                    }
+                    reader.read_boxed_slice_exact(extra_size as usize)?
+                }
+                else {
+                    Box::default()
+                };
+                let mut extra_data = Vec::with_capacity(18 + extension.len());
+                extra_data.extend_from_slice(&format.to_le_bytes());
+                extra_data.extend_from_slice(&num_channels.to_le_bytes());
+                extra_data.extend_from_slice(&sample_rate.to_le_bytes());
+                extra_data.extend_from_slice(&avg_bytes_per_sec.to_le_bytes());
+                extra_data.extend_from_slice(&block_align.to_le_bytes());
+                extra_data.extend_from_slice(&bits_per_sample.to_le_bytes());
+                extra_data.extend_from_slice(&(extension.len() as u16).to_le_bytes());
+                extra_data.extend_from_slice(&extension);
+                let channels = map_wave_channel_count(num_channels)?;
+                Ok(FormatData::Adpcm(FormatAdpcm {
+                    block_align,
+                    bits_per_sample,
+                    channels,
+                    codec: if format == WAVE_FORMAT_WMAV1 {
+                        CODEC_ID_WMAV1
+                    }
+                    else {
+                        CODEC_ID_WMAV2
+                    },
+                    extra_data: Some(extra_data.into_boxed_slice()),
+                }))
+            }
             // DSP Group TrueSpeech: 8 kHz mono, 240 samples per 32-byte frame. `WAVEFORMATEX`
             // extension (revision, samples per block, reserved) is passed on verbatim.
             WAVE_FORMAT_DSPGROUP_TRUESPEECH => {
@@ -586,9 +728,53 @@ impl ParseChunk for WaveFormatChunk {
                     extra_data,
                 }))
             }
+            // MSN Siren (Windows Live Messenger): mono, 16 kHz, 320 samples per 40-byte frame. The
+            // `WAVEFORMATEX` extension only repeats the samples per frame. FFmpeg: `MSNSIREN`.
+            WAVE_FORMAT_MSN_SIREN => {
+                Self::skip_fmt_extension(reader, len)?;
+                let channels = map_wave_channel_count(num_channels)?;
+                Ok(FormatData::Adpcm(FormatAdpcm {
+                    block_align,
+                    bits_per_sample,
+                    channels,
+                    codec: CODEC_ID_MSN_SIREN,
+                    extra_data: None,
+                }))
+            }
+            // ITU-T G.729 / G.729A: 8 kHz mono, 80 samples per 10-byte frame (an 8-byte block is a
+            // G.729 Annex D frame). The `WAVEFORMATEX` extension, if any, is not needed. 0x2222
+            // and 0x729a are the other tags that FFmpeg (`ff_codec_wav_tags`) maps to it.
+            WAVE_FORMAT_G729A | WAVE_FORMAT_G729_ALT | WAVE_FORMAT_G729_ALT2 => {
+                Self::skip_fmt_extension(reader, len)?;
+                let channels = map_wave_channel_count(num_channels)?;
+                Ok(FormatData::Adpcm(FormatAdpcm {
+                    block_align,
+                    bits_per_sample,
+                    channels,
+                    codec: CODEC_ID_G729,
+                    extra_data: None,
+                }))
+            }
+            // Microsoft GSM 6.10 (WAV49): mono, 320 samples per 65-byte block. The `WAVEFORMATEX`
+            // extension only repeats the samples per block. 0x0032 (MSN Audio) and 0x1500 are
+            // the other tags that FFmpeg (`ff_codec_wav_tags`) maps to it.
+            WAVE_FORMAT_GSM610 | WAVE_FORMAT_MSNAUDIO | WAVE_FORMAT_GSM_MS_ALT => {
+                Self::skip_fmt_extension(reader, len)?;
+                let channels = map_wave_channel_count(num_channels)?;
+                Ok(FormatData::Adpcm(FormatAdpcm {
+                    block_align,
+                    bits_per_sample,
+                    channels,
+                    codec: CODEC_ID_GSM_MS,
+                    extra_data: None,
+                }))
+            }
             // G.726 ADPCM (ITU-T), 2 to 5 bits per sample. 0x0014 and 0x0064 are the other tags
             // that are used for it.
-            WAVE_FORMAT_G726 | WAVE_FORMAT_G723_ADPCM | WAVE_FORMAT_G726_ADPCM => {
+            WAVE_FORMAT_G726
+            | WAVE_FORMAT_G723_ADPCM
+            | WAVE_FORMAT_G726_ADPCM
+            | WAVE_FORMAT_ANTEX_G721 => {
                 if !(2..=5).contains(&bits_per_sample) {
                     return decode_error("wav: bits per sample for g726 must be 2 to 5 bits");
                 }
@@ -599,6 +785,33 @@ impl ParseChunk for WaveFormatChunk {
                     bits_per_sample,
                     channels,
                     codec: CODEC_ID_ADPCM_G726,
+                    extra_data: None,
+                }))
+            }
+            // The 4-bit ADPCM codecs without a codec specific extension, as FFmpeg maps them
+            // (`ff_codec_wav_tags`): Creative, Dialogic OKI, Duck DK3 and DK4, and Xbox IMA. The
+            // block layout alone decides the samples per block. FFmpeg's decoders for these never
+            // look at the bits per sample field, so it isn't checked here either.
+            WAVE_FORMAT_CREATIVE_ADPCM
+            | WAVE_FORMAT_OKI_ADPCM
+            | WAVE_FORMAT_DIALOGIC_OKI_ADPCM
+            | WAVE_FORMAT_DK4_ADPCM
+            | WAVE_FORMAT_DK3_ADPCM
+            | WAVE_FORMAT_XBOX_ADPCM => {
+                Self::skip_fmt_extension(reader, len)?;
+                let codec = match format {
+                    WAVE_FORMAT_CREATIVE_ADPCM => CODEC_ID_ADPCM_CT,
+                    WAVE_FORMAT_DK4_ADPCM => CODEC_ID_ADPCM_IMA_DK4,
+                    WAVE_FORMAT_DK3_ADPCM => CODEC_ID_ADPCM_IMA_DK3,
+                    WAVE_FORMAT_XBOX_ADPCM => CODEC_ID_ADPCM_IMA_XBOX,
+                    _ => CODEC_ID_ADPCM_IMA_OKI,
+                };
+                let channels = map_wave_channel_count(num_channels)?;
+                Ok(FormatData::Adpcm(FormatAdpcm {
+                    block_align,
+                    bits_per_sample: 4,
+                    channels,
+                    codec,
                     extra_data: None,
                 }))
             }
@@ -615,6 +828,11 @@ impl ParseChunk for WaveFormatChunk {
                     codec: if format == WAVE_FORMAT_IMC { CODEC_ID_IMC } else { CODEC_ID_IAC },
                     extra_data: None,
                 }))
+            }
+            // Sony ATRAC3. The 14-byte `WAVEFORMATEX` extension (version, samples per block,
+            // coding mode, ...) is passed on verbatim; the decoder validates the block align.
+            WAVE_FORMAT_SONY_ATRAC3 => {
+                Self::read_atrac3_fmt(reader, block_align, num_channels, len)
             }
             // Yamaha ADPCM, 4 bits per sample.
             WAVE_FORMAT_YAMAHA_ADPCM => {
@@ -1270,11 +1488,11 @@ fn map_wave_channel_count(count: u16) -> Result<Channels> {
 fn test_map_wave_channel_count() {
     assert!(map_wave_channel_count(0).is_err());
 
-    for i in 1..27 {
+    for i in 1..29 {
         assert!(map_wave_channel_count(i).is_ok());
     }
 
-    for i in 27..u16::MAX {
+    for i in 29..u16::MAX {
         assert!(map_wave_channel_count(i).is_err());
     }
 }

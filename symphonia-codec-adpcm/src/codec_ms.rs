@@ -5,7 +5,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use symphonia_core::errors::{Result, unsupported_error};
+use symphonia_core::audio::AudioMut;
+use symphonia_core::errors::{Result, decode_error, unsupported_error};
 use symphonia_core::io::ReadBytes;
 use symphonia_core::util::clamp::clamp_i16;
 
@@ -161,6 +162,38 @@ pub(crate) fn decode_stereo<B: ReadBytes>(
         let nibbles = stream.read_u8()?;
         buffers[0][frame] = left_status.expand_nibble(nibbles, Nibble::Upper);
         buffers[1][frame] = right_status.expand_nibble(nibbles, Nibble::Lower);
+    }
+    Ok(())
+}
+
+/// Decodes one block of 3 or more channels. Unlike mono and stereo blocks, FFmpeg lays the
+/// channels out one after the other: each channel is a complete mono block (preamble, then the
+/// codes of that channel), and channel `n + 1` starts where channel `n` ends.
+pub(crate) fn decode_planar<B: ReadBytes, A: AudioMut<i32>>(
+    stream: &mut B,
+    buf: &mut A,
+    channels: usize,
+    frame_offset: usize,
+    frames_per_block: usize,
+    coeffs: &[[i32; 2]],
+) -> Result<()> {
+    if frames_per_block < 2 {
+        return decode_error("adpcm (ms): frames per block must be at least 2");
+    }
+    for ch in 0..channels {
+        let Some(plane) = buf.plane_mut(ch)
+        else {
+            return decode_error("adpcm (ms): missing audio plane");
+        };
+        let out = &mut plane[frame_offset..frame_offset + frames_per_block];
+        let mut status = AdpcmMsBlockStatus::read_mono_preamble(stream, coeffs)?;
+        out[0] = from_i16_shift!(status.sample2);
+        out[1] = from_i16_shift!(status.sample1);
+        for pair in out[2..].chunks_exact_mut(2) {
+            let nibbles = stream.read_u8()?;
+            pair[0] = status.expand_nibble(nibbles, Nibble::Upper);
+            pair[1] = status.expand_nibble(nibbles, Nibble::Lower);
+        }
     }
     Ok(())
 }

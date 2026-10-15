@@ -14,10 +14,11 @@ use log::debug;
 use symphonia_core::audio::{Channels, layouts};
 use symphonia_core::codecs::audio::AudioCodecId;
 use symphonia_core::codecs::audio::well_known::{
-    CODEC_ID_ADPCM_IMA_QT, CODEC_ID_PCM_ALAW, CODEC_ID_PCM_F32BE, CODEC_ID_PCM_F64BE,
-    CODEC_ID_PCM_MULAW, CODEC_ID_PCM_S8, CODEC_ID_PCM_S16BE, CODEC_ID_PCM_S16LE,
-    CODEC_ID_PCM_S24BE, CODEC_ID_PCM_S24LE, CODEC_ID_PCM_S32BE, CODEC_ID_PCM_S32LE,
-    CODEC_ID_PCM_U8,
+    CODEC_ID_ADPCM_G722, CODEC_ID_ADPCM_G726LE, CODEC_ID_ADPCM_IMA_QT, CODEC_ID_ADPCM_IMA_WS,
+    CODEC_ID_GSM, CODEC_ID_MACE3, CODEC_ID_MACE6, CODEC_ID_PCM_ALAW, CODEC_ID_PCM_F32BE,
+    CODEC_ID_PCM_F64BE, CODEC_ID_PCM_MULAW, CODEC_ID_PCM_S8, CODEC_ID_PCM_S16BE,
+    CODEC_ID_PCM_S16LE, CODEC_ID_PCM_S24BE, CODEC_ID_PCM_S24LE, CODEC_ID_PCM_S32BE,
+    CODEC_ID_PCM_S32LE, CODEC_ID_PCM_U8,
 };
 use symphonia_core::errors::{Result, decode_error, unsupported_error};
 use symphonia_core::io::ReadBytes;
@@ -148,6 +149,59 @@ impl CommonChunk {
             bits_per_sample: 4,
             channels,
             codec: CODEC_ID_ADPCM_IMA_QT,
+            extra_data: None,
+        }))
+    }
+
+    /// The AIFF-C codecs that FFmpeg's `ff_codec_aiff_tags` maps and whose frames need no extra
+    /// parameters: ITU-T G.722 (`G722`), G.726 (`G726`, always 5 bits per sample, little-endian
+    /// bit packing) and Westwood IMA ADPCM (`ADP4`). FFmpeg's `aiff_read_header` uses a block
+    /// align of 1 byte per channel for all of them.
+    fn read_headerless_adpcm_fmt(codec: AudioCodecId, num_channels: u16) -> Result<FormatData> {
+        let channels = map_aiff_channel_count(num_channels)?;
+        let bits_per_sample = match codec {
+            CODEC_ID_ADPCM_G726LE => 5,
+            CODEC_ID_ADPCM_G722 => 8,
+            _ => 4,
+        };
+        Ok(FormatData::Adpcm(FormatAdpcm {
+            block_align: num_channels,
+            bits_per_sample,
+            channels,
+            codec,
+            extra_data: None,
+        }))
+    }
+
+    /// GSM 06.10 full-rate (`GSM `): mono, 33-byte blocks of one 160-sample frame, as FFmpeg's
+    /// `aiff_read_header` sets up.
+    fn read_gsm_fmt(num_channels: u16) -> Result<FormatData> {
+        if num_channels != 1 {
+            return unsupported_error("aiff: gsm supports only 1 channel");
+        }
+        let channels = map_aiff_channel_count(num_channels)?;
+        Ok(FormatData::Adpcm(FormatAdpcm {
+            block_align: 33,
+            bits_per_sample: 0,
+            channels,
+            codec: CODEC_ID_GSM,
+            extra_data: None,
+        }))
+    }
+
+    /// Apple MACE 3:1 (`MAC3`) and 6:1 (`MAC6`). A block of 6 frames is 2 (MACE 3:1) or 1 (MACE
+    /// 6:1) bytes per channel, with the channels interleaved byte-wise.
+    fn read_mace_fmt(codec: AudioCodecId, num_channels: u16) -> Result<FormatData> {
+        let channels = map_aiff_channel_count(num_channels)?;
+        if num_channels > 2 {
+            return unsupported_error("aiff: mace supports at most 2 channels");
+        }
+        let bytes_per_channel = if codec == CODEC_ID_MACE3 { 2 } else { 1 };
+        Ok(FormatData::Adpcm(FormatAdpcm {
+            block_align: bytes_per_channel * num_channels,
+            bits_per_sample: 8,
+            channels,
+            codec,
             extra_data: None,
         }))
     }
@@ -298,6 +352,12 @@ impl CommonChunkParser for ChunkParser<CommonChunk> {
             b"sowt" | b"SOWT" => CommonChunk::read_sowt_fmt(sample_size, num_channels),
             b"twos" | b"TWOS" => CommonChunk::read_twos_fmt(sample_size, num_channels),
             b"ima4" | b"IMA4" => CommonChunk::read_ima4_fmt(sample_size, num_channels),
+            b"G722" => CommonChunk::read_headerless_adpcm_fmt(CODEC_ID_ADPCM_G722, num_channels),
+            b"G726" => CommonChunk::read_headerless_adpcm_fmt(CODEC_ID_ADPCM_G726LE, num_channels),
+            b"ADP4" => CommonChunk::read_headerless_adpcm_fmt(CODEC_ID_ADPCM_IMA_WS, num_channels),
+            b"GSM " => CommonChunk::read_gsm_fmt(num_channels),
+            b"MAC3" => CommonChunk::read_mace_fmt(CODEC_ID_MACE3, num_channels),
+            b"MAC6" => CommonChunk::read_mace_fmt(CODEC_ID_MACE6, num_channels),
             b"raw " | b"RAW " => CommonChunk::read_raw_fmt(sample_size, num_channels),
             _ => return unsupported_error("aifc: compression type not supported"),
         }?;

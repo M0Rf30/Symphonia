@@ -34,6 +34,7 @@ ape-format = ["dep:symphonia-bundle-ape"]
 dca = ["dep:symphonia-codec-dca"]
 dsd = ["dep:symphonia-codec-dsd", "dep:symphonia-format-dsd"]
 flac = ["dep:symphonia-bundle-flac"]
+gsm = ["dep:symphonia-codec-gsm"]
 caf = ["dep:symphonia-format-caf"]
 es = ["dep:symphonia-format-es"]
 flv = ["dep:symphonia-format-flv"]
@@ -103,6 +104,7 @@ all-formats = [
     "musepack",
     "ogg",
     "aiff",
+    "gsm",
     "wav",
 ]
 
@@ -265,3 +267,7 @@ symphonia-testutil = { workspace = true }
 
 [lints]
 workspace = true
+[dependencies.symphonia-codec-gsm]
+workspace = true
+optional = true
+

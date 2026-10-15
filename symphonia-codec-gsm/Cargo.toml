@@ -1,0 +1,27 @@
+[package]
+name = "symphonia-codec-gsm"
+description = "Pure Rust GSM 06.10 (full-rate and Microsoft) decoder (a part of project Symphonia)."
+authors = ["Philip Deljanov <philip.deljanov@gmail.com>"]
+readme = "README.md"
+categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
+keywords = ["audio", "codec", "decoder", "gsm"]
+# Common package metadata located in workspace Cargo.toml.
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+symphonia-core = { workspace = true }
+
+[dev-dependencies]
+symphonia-format-caf = { workspace = true }
+symphonia-format-isomp4 = { workspace = true }
+symphonia-format-mkv = { workspace = true }
+symphonia-format-riff = { workspace = true, features = ["aiff", "wav"] }
+symphonia-testutil = { workspace = true }
+
+[lints]
+workspace = true

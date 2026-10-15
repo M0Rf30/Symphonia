@@ -12,12 +12,19 @@ use std::marker::PhantomData;
 use std::num::NonZero;
 
 use symphonia_core::audio::Channels;
+use symphonia_core::codecs::audio::well_known::CODEC_ID_ATRAC3;
+use symphonia_core::codecs::audio::well_known::CODEC_ID_G729;
+use symphonia_core::codecs::audio::well_known::CODEC_ID_MSN_SIREN;
 use symphonia_core::codecs::audio::well_known::{
-    CODEC_ID_ADPCM_G722, CODEC_ID_ADPCM_G726, CODEC_ID_ADPCM_G726LE, CODEC_ID_ADPCM_IMA_QT,
-    CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_MS, CODEC_ID_ADPCM_YAMAHA, CODEC_ID_PCM_F32BE,
-    CODEC_ID_PCM_F32LE, CODEC_ID_PCM_F64BE, CODEC_ID_PCM_F64LE, CODEC_ID_TRUESPEECH,
+    CODEC_ID_ADPCM_CT, CODEC_ID_ADPCM_G722, CODEC_ID_ADPCM_G726, CODEC_ID_ADPCM_G726LE,
+    CODEC_ID_ADPCM_IMA_DK3, CODEC_ID_ADPCM_IMA_DK4, CODEC_ID_ADPCM_IMA_OKI, CODEC_ID_ADPCM_IMA_QT,
+    CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_IMA_WS, CODEC_ID_ADPCM_IMA_XBOX, CODEC_ID_ADPCM_MS,
+    CODEC_ID_ADPCM_YAMAHA, CODEC_ID_GSM, CODEC_ID_GSM_MS, CODEC_ID_MACE3, CODEC_ID_MACE6,
+    CODEC_ID_PCM_F32BE, CODEC_ID_PCM_F32LE, CODEC_ID_PCM_F64BE, CODEC_ID_PCM_F64LE,
+    CODEC_ID_TRUESPEECH,
 };
 use symphonia_core::codecs::audio::well_known::{CODEC_ID_IAC, CODEC_ID_IMC};
+use symphonia_core::codecs::audio::well_known::{CODEC_ID_WMAV1, CODEC_ID_WMAV2};
 use symphonia_core::codecs::audio::{AudioCodecId, AudioCodecParameters};
 use symphonia_core::errors::{Error, Result, decode_error, unsupported_error};
 use symphonia_core::formats::prelude::*;
@@ -244,6 +251,10 @@ impl FormatPcm {
     }
 }
 
+/// The most channels of the sample interleaved ADPCM codecs (G.722, G.726, Yamaha, Creative, OKI).
+/// It is the limit of `symphonia-codec-adpcm`.
+const ITU_MAX_CHANNELS: u16 = 8;
+
 pub struct FormatAdpcm {
     pub block_align: u16,
     /// The number of bits per sample. At the moment only 4bit is supported.
@@ -293,29 +304,79 @@ impl FormatAdpcm {
                 PacketInfo::with_blocks(self.block_align, frames_per_block)
             }
             CODEC_ID_ADPCM_G726 | CODEC_ID_ADPCM_G726LE => {
-                // A mono bitstream of `bits_per_sample` bits per sample. 8 samples always make a
-                // whole number of bytes (`bits_per_sample` bytes).
-                if num_channels != 1 {
-                    return unsupported_error("riff (adpcm_g726): only mono is supported");
+                // A bitstream of `bits_per_sample` bit codes. The codes of the channels alternate
+                // (sample interleaved), as FFmpeg does not decode more than one channel. 8 frames
+                // always make a whole number of bytes (`bits_per_sample` bytes per channel).
+                if num_channels == 0 || num_channels > ITU_MAX_CHANNELS {
+                    return unsupported_error("riff (adpcm_g726): too many channels");
                 }
-                PacketInfo::with_blocks(self.bits_per_sample, 8)
+                PacketInfo::with_blocks(self.bits_per_sample * num_channels, 8)
             }
-            CODEC_ID_ADPCM_YAMAHA => {
-                // 4 bits per sample, so a byte holds 2 mono frames or 1 stereo frame.
+            CODEC_ID_ADPCM_YAMAHA | CODEC_ID_ADPCM_CT | CODEC_ID_ADPCM_IMA_OKI => {
+                // 4 bits per sample, the codes of the channels alternate. A byte holds 2 mono
+                // frames or 1 stereo frame; for more channels, `n` bytes hold 2 frames.
                 match num_channels {
                     1 => PacketInfo::with_blocks(1, 2),
                     2 => PacketInfo::with_blocks(1, 1),
-                    _ => {
-                        unsupported_error("riff (adpcm_yamaha): only mono and stereo are supported")
-                    }
+                    3..=ITU_MAX_CHANNELS => PacketInfo::with_blocks(num_channels, 2),
+                    _ => unsupported_error("riff (adpcm): too many channels"),
                 }
             }
-            CODEC_ID_ADPCM_G722 => {
-                // Two 4-bit codes per byte, mono.
-                if num_channels != 1 {
-                    return unsupported_error("riff (adpcm_g722): only mono is supported");
+            CODEC_ID_ADPCM_IMA_WS => match num_channels {
+                // A byte is 2 mono frames. Stereo bytes alternate between the channels, so 2 bytes
+                // are 2 frames.
+                1 => PacketInfo::with_blocks(1, 2),
+                2 => PacketInfo::with_blocks(2, 2),
+                _ => unsupported_error("riff (adpcm_ima_ws): only mono and stereo are supported"),
+            },
+            CODEC_ID_ADPCM_IMA_DK4 => {
+                // Per channel a 4-byte header holding the first frame, then 2 codes per byte.
+                if num_channels > 2 {
+                    return unsupported_error("riff (adpcm_ima_dk4): at most 2 channels");
                 }
-                PacketInfo::with_blocks(1, 2)
+                // Don't allow underflow to occur.
+                if 4 * num_channels > self.block_align {
+                    return decode_error("riff (adpcm_ima_dk4): block align too small");
+                }
+                let data_len = u64::from(self.block_align - 4 * num_channels);
+                PacketInfo::with_blocks(
+                    self.block_align,
+                    1 + data_len * 2 / u64::from(num_channels),
+                )
+            }
+            CODEC_ID_ADPCM_IMA_DK3 => {
+                if num_channels != 2 {
+                    return unsupported_error("riff (adpcm_ima_dk3): only stereo is supported");
+                }
+                // A 16-byte header, then 3 codes (1.5 bytes) per 2 frames.
+                if self.block_align < 16 {
+                    return decode_error("riff (adpcm_ima_dk3): block align too small");
+                }
+                let data_len = u64::from(self.block_align - 16);
+                PacketInfo::with_blocks(self.block_align, data_len * 2 / 3 * 2)
+            }
+            CODEC_ID_ADPCM_IMA_XBOX => {
+                // Per channel a 4-byte header holding the first frame, then groups of 4 bytes (8
+                // codes). The last code of a block is not part of the output.
+                if num_channels > 2 {
+                    return unsupported_error("riff (adpcm_ima_xbox): at most 2 channels");
+                }
+                if 4 * num_channels > self.block_align {
+                    return decode_error("riff (adpcm_ima_xbox): block align too small");
+                }
+                let data_len = u64::from(self.block_align - 4 * num_channels);
+                PacketInfo::with_blocks(
+                    self.block_align,
+                    data_len / (4 * u64::from(num_channels)) * 8,
+                )
+            }
+            CODEC_ID_ADPCM_G722 => {
+                // One codeword (2 frames) per byte and channel; the codewords of the channels
+                // alternate.
+                if num_channels == 0 || num_channels > ITU_MAX_CHANNELS {
+                    return unsupported_error("riff (adpcm_g722): too many channels");
+                }
+                PacketInfo::with_blocks(num_channels, 2)
             }
             CODEC_ID_ADPCM_IMA_QT => {
                 // Every channel is an independent block of 64 frames and 34 bytes, and the blocks
@@ -324,6 +385,33 @@ impl FormatAdpcm {
                     return decode_error("riff (adpcm_ima_qt): invalid block align");
                 }
                 PacketInfo::with_blocks(self.block_align, 64)
+            }
+            CODEC_ID_MACE3 | CODEC_ID_MACE6 => {
+                // 6 frames per block; 2 (MACE 3:1) or 1 (MACE 6:1) bytes per channel.
+                let bytes_per_channel = if self.codec == CODEC_ID_MACE3 { 2 } else { 1 };
+                if bytes_per_channel * num_channels != self.block_align {
+                    return decode_error("riff (mace): invalid block align");
+                }
+                PacketInfo::with_blocks(self.block_align, 6)
+            }
+            CODEC_ID_WMAV1 | CODEC_ID_WMAV2 => {
+                // A block is one packet of `nBlockAlign` bytes. The number of frames it yields
+                // varies with the bit reservoir, so the CBR average is used:
+                // `nBlockAlign * nSamplesPerSec / nAvgBytesPerSec`, from the `WAVEFORMATEX`.
+                let (Some(rate), Some(avg)) = (
+                    self.extra_data.as_deref().and_then(|d| d.get(4..8)),
+                    self.extra_data.as_deref().and_then(|d| d.get(8..12)),
+                )
+                else {
+                    return decode_error("riff (wma): missing waveformat");
+                };
+                let rate = u64::from(u32::from_le_bytes([rate[0], rate[1], rate[2], rate[3]]));
+                let avg = u64::from(u32::from_le_bytes([avg[0], avg[1], avg[2], avg[3]]));
+                if avg == 0 {
+                    return decode_error("riff (wma): invalid average byte rate");
+                }
+                let frames = (u64::from(self.block_align) * rate + avg / 2) / avg;
+                PacketInfo::with_blocks(self.block_align, frames.max(1))
             }
             CODEC_ID_TRUESPEECH => {
                 // Mono; every 32-byte frame holds 240 samples. A block holds one or more frames.
@@ -334,6 +422,54 @@ impl FormatAdpcm {
                     return decode_error("riff (truespeech): invalid block align");
                 }
                 PacketInfo::with_blocks(self.block_align, u64::from(self.block_align / 32) * 240)
+            }
+            CODEC_ID_GSM => {
+                // GSM 06.10 full-rate: mono; every 33-byte block holds one 160-sample frame.
+                if num_channels != 1 {
+                    return unsupported_error("riff (gsm): only mono is supported");
+                }
+                if self.block_align == 0 || self.block_align % 33 != 0 {
+                    return decode_error("riff (gsm): invalid block align");
+                }
+                PacketInfo::with_blocks(self.block_align, u64::from(self.block_align / 33) * 160)
+            }
+            CODEC_ID_MSN_SIREN => {
+                // MSN Siren: mono; every 40-byte frame (16 kbps at 16 kHz) holds 320 samples. A
+                // wave block holds one or more of them.
+                if num_channels != 1 {
+                    return unsupported_error("riff (msn_siren): only mono is supported");
+                }
+                if self.block_align == 0 || self.block_align % 40 != 0 {
+                    return decode_error("riff (msn_siren): invalid block align");
+                }
+                PacketInfo::with_blocks(self.block_align, u64::from(self.block_align / 40) * 320)
+            }
+            CODEC_ID_GSM_MS => {
+                // Microsoft GSM 6.10: mono; every 65-byte block holds two 160-sample frames. A
+                // wave block holds one or more of them.
+                if num_channels != 1 {
+                    return unsupported_error("riff (gsm_ms): only mono is supported");
+                }
+                if self.block_align == 0 || self.block_align % 65 != 0 {
+                    return decode_error("riff (gsm_ms): invalid block align");
+                }
+                PacketInfo::with_blocks(self.block_align, u64::from(self.block_align / 65) * 320)
+            }
+            CODEC_ID_G729 => {
+                // Mono; every 10-byte frame holds 80 samples. A block holds one or more of them,
+                // or is a single 8-byte G.729 Annex D frame.
+                if num_channels != 1 {
+                    return unsupported_error("riff (g729): only mono is supported");
+                }
+                if self.block_align == 8 {
+                    PacketInfo::with_blocks(self.block_align, 80)
+                }
+                else if self.block_align != 0 && self.block_align % 10 == 0 {
+                    PacketInfo::with_blocks(self.block_align, u64::from(self.block_align / 10) * 80)
+                }
+                else {
+                    decode_error("riff (g729): invalid block align")
+                }
             }
             CODEC_ID_IMC | CODEC_ID_IAC => {
                 // Every channel is an independent 64-byte block of 256 frames; IMC is mono, IAC
@@ -348,6 +484,14 @@ impl FormatAdpcm {
                 }
                 let frames = u64::from(self.block_align / frame_bytes) * 256;
                 PacketInfo::with_blocks(self.block_align, frames)
+            }
+            CODEC_ID_ATRAC3 => {
+                // Every block is one frame of 1024 samples per channel. The decoder validates the
+                // block size against the extra data.
+                if self.block_align == 0 {
+                    return decode_error("riff (atrac3): invalid block align");
+                }
+                PacketInfo::with_blocks(self.block_align, 1024)
             }
             _ => unimplemented!("incomplete new adpcm codec"),
         }

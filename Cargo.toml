@@ -13,6 +13,7 @@ members = [
     "symphonia-codec-speex",
     "symphonia-codec-nellymoser",
     "symphonia-codec-imc",
+    "symphonia-codec-gsm",
     "symphonia-codec-truespeech",
     "symphonia-codec-truehd",
     "symphonia-codec-dca",
@@ -101,3 +102,4 @@ unwrap_used = "warn"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+symphonia-codec-gsm = { version = "0.6.1", path = "symphonia-codec-gsm", default-features = false }

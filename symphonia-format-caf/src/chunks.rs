@@ -294,7 +294,13 @@ impl AudioDescription {
                 }
             }
             AppleIMA4 => CODEC_ID_ADPCM_IMA_QT,
+            AmrNb => CODEC_ID_AMR_NB,
+            Ilbc => CODEC_ID_ILBC,
+            MACE3 => CODEC_ID_MACE3,
+            MACE6 => CODEC_ID_MACE6,
             MsAdpcm => CODEC_ID_ADPCM_MS,
+            Gsm => CODEC_ID_GSM,
+            MsGsm => CODEC_ID_GSM_MS,
             ImaAdpcmWav => CODEC_ID_ADPCM_IMA_WAV,
             MPEG4AAC => CODEC_ID_AAC,
             ULaw => CODEC_ID_PCM_MULAW,
@@ -307,10 +313,6 @@ impl AudioDescription {
             Opus => CODEC_ID_OPUS,
             Ac3 => CODEC_ID_AC3,
             Eac3 => CODEC_ID_EAC3,
-            unsupported => {
-                error!("unsupported codec ({unsupported:?})");
-                return unsupported_error("caf: unsupported codec");
-            }
         };
 
         Ok(result)
@@ -357,6 +359,14 @@ pub enum AudioDescriptionFormatId {
         little_endian: bool,
     },
     AppleIMA4,
+    /// AMR narrowband (`'samr'`, as in FFmpeg's `ff_codec_caf_tags`).
+    AmrNb,
+    /// iLBC (`'ilbc'`; 38-byte packets of 160 frames or 50-byte packets of 240 frames).
+    Ilbc,
+    /// GSM 06.10 full-rate (`'agsm'`, 33-byte packets of 160 frames).
+    Gsm,
+    /// Microsoft GSM 6.10 (`'ms\0\x31'`, 65-byte packets of 320 frames).
+    MsGsm,
     /// Microsoft ADPCM (`'ms\0\x02'`).
     MsAdpcm,
     /// IMA ADPCM in the WAVE block layout (`'ms\0\x11'`).
@@ -393,6 +403,8 @@ impl AudioDescriptionFormatId {
                 return Ok(LinearPCM { floating_point, little_endian });
             }
             b"ima4" => AppleIMA4,
+            b"samr" => AmrNb,
+            b"ilbc" => Ilbc,
             b"aac " => {
                 if format_flags != 2 {
                     warn!("undocumented AAC object type ({format_flags})");
@@ -403,6 +415,8 @@ impl AudioDescriptionFormatId {
             // with SBR, ELD v2). The audio object type is carried by the magic cookie's audio
             // specific config, so they all decode as AAC.
             b"aach" | b"aacp" | b"aacl" | b"aace" | b"aacf" | b"aacg" => return Ok(MPEG4AAC),
+            b"agsm" => Gsm,
+            b"ms\x00\x31" => MsGsm,
             b"ms\x00\x02" => MsAdpcm,
             b"ms\x00\x11" => ImaAdpcmWav,
             b"MAC3" => MACE3,

@@ -263,3 +263,8 @@ name = "demux_es"
 path = "fuzz_targets/demux_es.rs"
 test = false
 doc = false
+[[bin]]
+name = "decode_gsm"
+path = "fuzz_targets/decode_gsm.rs"
+test = false
+doc = false
