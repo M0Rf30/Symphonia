@@ -86,8 +86,8 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | ISO/MP4  | Excellent | Yes      | `isomp4`     | No      | [`symphonia-format-isomp4`] |
 | MKV/WebM | Excellent | Yes      | `mkv`        | Yes     | [`symphonia-format-mkv`]    |
 | Musepack | Excellent | Yes      | `musepack`   | No      | [`symphonia-bundle-musepack`] |
-| MPEG-PS (audio only) | Great | No  | `mpegps`     | No      | [`symphonia-format-mpegps`] |
-| MPEG-TS (audio only) | Great | No  | `mpegts`     | No      | [`symphonia-format-mpegts`] |
+| MPEG-PS (audio only) | Great | Yes\*\*\*\*\* | `mpegps`     | No      | [`symphonia-format-mpegps`] |
+| MPEG-TS (audio only) | Great | Yes\*\*\*\*\* | `mpegts`     | No      | [`symphonia-format-mpegts`] |
 | OGG      | Excellent | Yes      | `ogg`        | Yes     | [`symphonia-format-ogg`]    |
 | Wave     | Excellent | Yes      | `wav`        | Yes     | [`symphonia-format-riff`]   |
 
@@ -96,6 +96,8 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 \*\* Raw elementary streams have no container timing: their duration is estimated (AC-3, DTS) or unknown (TrueHD/MLP), unless `prebuild_seek_index` is set and the source is seekable, in which case the stream is scanned and the duration is exact.
 
 \*\*\* FLV carries no end padding: only the leading decoder delay (e.g. Opus pre-skip) is trimmed.
+
+\*\*\*\*\* MPEG-PS and MPEG-TS carry no gapless metadata of their own: the trims are those of the codec, where the stream has them (the Opus pre-skip and end trim of the TS access unit headers, the LAME/Xing encoder delay and padding of MP3 streams that keep the tag frame). AAC (ADTS/LATM) streams have no priming information, so none is trimmed.
 
 [`symphonia-format-caf`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-caf
 [`symphonia-format-flv`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-flv
