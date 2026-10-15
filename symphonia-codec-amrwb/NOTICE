@@ -1,0 +1,15 @@
+This crate (`symphonia-codec-amrwb`) is a pure-Rust AMR-WB (Adaptive Multi-Rate Wideband, ITU-T
+G.722.2) speech decoder. It is licensed under the Mozilla Public License, v. 2.0, like the rest of
+Project Symphonia.
+
+The algorithm is specified by 3GPP TS 26.190 / 26.173 / 26.201 (ITU-T G.722.2). This implementation
+follows the structure of FFmpeg's AMR-WB decoder: `libavcodec/amrwbdec.c`, `amrwbdata.h` and the
+shared CELP code it uses (`lsp.c`, `celp_filters.c`, `celp_math.c`, `acelp_filters.c`,
+`acelp_vectors.c`, `acelp_pitch_delay.c`). The codebook, ISF, window and bit-reordering tables in
+`src/tables.rs` were taken from those files. FFmpeg is distributed under the GNU Lesser General
+Public License, version 2.1 or later.
+
+Copyright (c) 2010 Marcelo Galvao Povoa
+Copyright (c) 2007 Vladimir Voroshilov (shared `acelp_*` code)
+
+The LGPL-2.1+ terms apply to those derived portions.
