@@ -1,0 +1,13 @@
+This crate (`symphonia-codec-mace`) is a pure-Rust Apple MACE 3:1 and 6:1 decoder. It is licensed
+under the Mozilla Public License, v. 2.0, like the rest of Project Symphonia.
+
+MACE has no public specification. The step-size and quantizer tables (`src/tables.rs`), the
+adaptation and clipping logic (including the "broken" clip to -32767 that keeps the output
+identical to the original binary decoder), and the block layout follow FFmpeg's
+`libavcodec/mace.c`, which is distributed under the GNU Lesser General Public License, version 2.1
+or later.
+
+Copyright (c) 2002 Laszlo Torok <torokl@alpha.dfmk.hu>
+Adapted to libavcodec by Francois Revol <revol@free.fr>
+
+The LGPL-2.1+ terms apply to those derived portions.
