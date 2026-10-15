@@ -7,7 +7,7 @@
 
 use symphonia_core::codecs::CodecId;
 use symphonia_core::codecs::audio::well_known::{
-    CODEC_ID_AAC, CODEC_ID_AC3, CODEC_ID_DCA, CODEC_ID_EAC3,
+    CODEC_ID_AAC, CODEC_ID_AC3, CODEC_ID_ALS, CODEC_ID_DCA, CODEC_ID_EAC3,
 };
 use symphonia_core::codecs::video::{VIDEO_EXTRA_DATA_ID_NULL, VideoExtraData};
 use symphonia_core::errors::Error;
@@ -82,7 +82,21 @@ impl EsdsAtom {
             // Try to read the audio specific configuration and populate the audio sample entry.
             // The decoder specific info of AC-3, E-AC-3, and DTS is not an audio specific
             // configuration.
-            let is_asc = !matches!(entry.codec_id, CODEC_ID_AC3 | CODEC_ID_EAC3 | CODEC_ID_DCA);
+            let mut is_asc = !matches!(entry.codec_id, CODEC_ID_AC3 | CODEC_ID_EAC3 | CODEC_ID_DCA);
+
+            // MPEG-4 ALS shares the MPEG-4 audio object type indication with AAC. It is told
+            // apart by audio object type 36 (escape value 31, then 36 - 32 = 4 in 6 bits) at the
+            // start of the audio specific config, which is followed by the ALSSpecificConfig.
+            // The ALS decoder takes the stream parameters from the latter, so do not interpret
+            // the audio specific config here. ISO14496-3 1.6.2.1 and 11.2.
+            if self.es_desc.dec_config.object_type_indication == 0x40
+                && ds_config.extra_data.len() >= 2
+                && ds_config.extra_data[0] >> 3 == 31
+                && ((ds_config.extra_data[0] & 7) << 3 | ds_config.extra_data[1] >> 5) == 4
+            {
+                entry.codec_id = CODEC_ID_ALS;
+                is_asc = false;
+            }
 
             if let Some(asc) =
                 is_asc.then(|| AudioSpecificConfig::read(&ds_config.extra_data).ok()).flatten()

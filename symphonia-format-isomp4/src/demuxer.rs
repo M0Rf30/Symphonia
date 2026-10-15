@@ -748,7 +748,6 @@ impl<'s> IsoMp4Reader<'s> {
 
         let is_seekable = mss.is_seekable();
 
-        let mut ftyp = None;
         let mut moov = None;
 
         // Get the total length of the stream, if possible.
@@ -775,7 +774,7 @@ impl<'s> IsoMp4Reader<'s> {
             // Top-level atoms.
             match header.atom_type() {
                 AtomType::FileType => {
-                    ftyp = Some(it.read_atom::<FtypAtom>()?);
+                    it.read_atom::<FtypAtom>()?;
                 }
                 AtomType::Movie => {
                     moov = Some(it.read_atom::<MoovAtom>()?);
@@ -806,13 +805,13 @@ impl<'s> IsoMp4Reader<'s> {
                 }
                 AtomType::MediaData | AtomType::MovieFragment => {
                     // The mdat atom contains the codec bitstream data. For fragmented streams, a
-                    // moof + mdat pair is required. If the ftyp and moov atoms have been read, then
+                    // moof + mdat pair is required. If the moov atom has been read, then
                     // the top-level atom scan can exit here and begin playback immediately as an
                     // optimization. If not, then the scan must continue.
                     //
                     // The scan must also exit if the source is unseekable because in that case
                     // the format reader cannot skip past these atoms without dropping packets.
-                    let is_playable = moov.is_some() && ftyp.is_some();
+                    let is_playable = moov.is_some();
 
                     if is_playable || !is_seekable {
                         if !is_playable {
@@ -842,9 +841,7 @@ impl<'s> IsoMp4Reader<'s> {
             }
         }
 
-        if ftyp.is_none() {
-            return unsupported_error("isomp4: missing ftyp atom");
-        }
+        // The ftyp atom is optional: classic QuickTime movies do not have one.
 
         if moov.is_none() {
             return unsupported_error("isomp4: missing moov atom");
@@ -1296,6 +1293,25 @@ impl ProbeableFormat<'_> for IsoMp4Reader<'_> {
             &["mp4", "m4a", "m4p", "m4b", "m4r", "m4v", "mov"],
             &["video/mp4", "audio/m4a"],
             &[b"ftyp"] // Top-level atoms
+        ),
+        // Classic QuickTime movies have no ftyp atom, and start with another top-level atom.
+        support_format!(
+            ISOMP4_FORMAT_INFO,
+            &["mov"],
+            &["video/quicktime"],
+            &[b"moov"]
+        ),
+        support_format!(
+            ISOMP4_FORMAT_INFO,
+            &["mov"],
+            &["video/quicktime"],
+            &[b"wide"]
+        ),
+        support_format!(
+            ISOMP4_FORMAT_INFO,
+            &["mov"],
+            &["video/quicktime"],
+            &[b"mdat"]
         )]
     }
 }

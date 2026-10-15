@@ -10,8 +10,10 @@ use core::str;
 use log::{debug, warn};
 use symphonia_core::audio::{Channels, Position};
 use symphonia_core::codecs::audio::well_known::{
-    CODEC_ID_AC3, CODEC_ID_ADPCM_IMA_QT, CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_MS, CODEC_ID_DCA,
-    CODEC_ID_EAC3, CODEC_ID_TRUEHD,
+    CODEC_ID_AC3, CODEC_ID_ADPCM_IMA_QT, CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_MS,
+    CODEC_ID_AMR_NB, CODEC_ID_AMR_WB, CODEC_ID_DCA, CODEC_ID_EAC3, CODEC_ID_GSM, CODEC_ID_GSM_MS,
+    CODEC_ID_ILBC, CODEC_ID_MACE3, CODEC_ID_MACE6, CODEC_ID_QDM2, CODEC_ID_QDMC,
+    CODEC_ID_TRUEHD,
 };
 use symphonia_core::codecs::audio::well_known::{
     CODEC_ID_MP3, CODEC_ID_PCM_ALAW, CODEC_ID_PCM_MULAW,
@@ -35,9 +37,9 @@ use symphonia_core::codecs::{CodecParameters, CodecProfile};
 
 use crate::atoms::qt_meta::PayloadAtom;
 use crate::atoms::{
-    AlacAtom, Atom, AtomHeader, AtomIterator, AtomType, AvcCAtom, Dac3Atom, DdtsAtom, Dec3Atom,
-    DmlpAtom, DoviAtom, EsdsAtom, FlacAtom, HvcCAtom, OpusAtom, ReadAtom, Result, WaveAtom,
-    decode_error, unsupported_error,
+    AlacAtom, Atom, AtomHeader, AtomIterator, AtomType, AvcCAtom, Dac3Atom, DamrAtom, DdtsAtom,
+    Dec3Atom, DmlpAtom, DoviAtom, EsdsAtom, FlacAtom, HvcCAtom, OpusAtom, ReadAtom, Result,
+    WaveAtom, decode_error, unsupported_error,
 };
 use crate::fp::FpU16;
 
@@ -98,9 +100,18 @@ impl Atom for StsdAtom {
             | AtomType::AudioSampleEntryF32
             | AtomType::AudioSampleEntryF64
             | AtomType::AudioSampleEntryIma4
+            | AtomType::AudioSampleEntrySamr
+            | AtomType::AudioSampleEntrySawb
+            | AtomType::AudioSampleEntryIlbc
+            | AtomType::AudioSampleEntryMace3
+            | AtomType::AudioSampleEntryMace6
+            | AtomType::AudioSampleEntryQdm2
+            | AtomType::AudioSampleEntryQdmc
             | AtomType::AudioSampleEntryIpcm
             | AtomType::AudioSampleEntryFpcm
             | AtomType::AudioSampleEntryMsAdpcm
+            | AtomType::AudioSampleEntryAgsm
+            | AtomType::AudioSampleEntryMsGsm
             | AtomType::AudioSampleEntryImaWav => {
                 let entry = it.read_atom::<AudioSampleEntry>()?;
                 SampleEntry::Audio(entry)
@@ -139,10 +150,7 @@ impl Atom for StsdAtom {
                                 | b"mha2"
                                 | b"mhm1"
                                 | b"mhm2"
-                                | b"samr"
-                                | b"sawb"
-                                | b"QDM2"
-                                | b"QDMC"
+                                | b"sawp"
                         ) =>
                     {
                         warn!(
@@ -166,6 +174,22 @@ impl StsdAtom {
         matches!(&self.sample_entry, SampleEntry::Audio(entry) if entry.is_pcm_frames)
     }
 
+    /// Gets the block size in bytes and the number of frames of the blocks of QuickTime MACE
+    /// data, if this is such a track.
+    pub(crate) fn mace_block(&self) -> Option<(u32, u32)> {
+        match &self.sample_entry {
+            SampleEntry::Audio(entry)
+                if matches!(entry.codec_id, CODEC_ID_MACE3 | CODEC_ID_MACE6) =>
+            {
+                Some((entry.block_align?, u32::try_from(entry.frames_per_block?).ok()?))
+                    .filter(|(bytes, frames)| *bytes > 0 && *frames > 0)
+            }
+            _ => None,
+        }
+    }
+
+    /// Gets the block size in bytes and the number of frames of the blocks of QuickTime ADPCM
+    /// (Microsoft, IMA WAV) data, if this is such a track.
     /// Gets the block size in bytes and the number of frames of the blocks of QuickTime ADPCM
     /// (Microsoft, IMA WAV) data, if this is such a track.
     pub(crate) fn adpcm_block(&self) -> Option<(u32, u32)> {
@@ -283,6 +307,9 @@ impl Atom for AudioSampleEntry {
 
         let is_pcm_codec = is_pcm_codec(header.atom_type);
 
+        // The samples per packet field of a version 1 entry (0 if absent).
+        let mut v1_samples_per_packet = 0u32;
+
         match version {
             0 => {
                 // Version 0.
@@ -326,7 +353,7 @@ impl Atom for AudioSampleEntry {
 
                 // The number of frames (ISO/MP4 samples) per packet. For PCM codecs, this is
                 // always 1.
-                let _frames_per_packet = it.read_u32()?;
+                v1_samples_per_packet = it.read_u32()?;
 
                 // The number of bytes per PCM audio sample. This value supersedes sample_size. For
                 // non-PCM codecs, this value is not useful.
@@ -424,6 +451,63 @@ impl Atom for AudioSampleEntry {
                 entry.frames_per_packet = Some(64);
                 entry.channels = Some(lpcm_channels(entry.num_channels)?);
             }
+            // QuickTime MACE 3:1 / 6:1: blocks of 6 frames, 2 (3:1) or 1 (6:1) bytes per channel.
+            AtomType::AudioSampleEntryMace3 | AtomType::AudioSampleEntryMace6 => {
+                let is_mace3 = header.atom_type == AtomType::AudioSampleEntryMace3;
+                entry.codec_id = if is_mace3 { CODEC_ID_MACE3 } else { CODEC_ID_MACE6 };
+                entry.bits_per_coded_sample = Some(8);
+                entry.frames_per_block = Some(6);
+                entry.frames_per_packet = Some(6);
+                entry.block_align = Some(entry.num_channels * if is_mace3 { 2 } else { 1 });
+                entry.channels = Some(lpcm_channels(entry.num_channels)?);
+            }
+            // QuickTime QDesign Music Codec 2 / 1. The decoder parameters are in the `wave` atom.
+            AtomType::AudioSampleEntryQdm2 | AtomType::AudioSampleEntryQdmc => {
+                entry.codec_id = if header.atom_type == AtomType::AudioSampleEntryQdm2 {
+                    CODEC_ID_QDM2
+                }
+                else {
+                    CODEC_ID_QDMC
+                };
+            }
+            // 3GPP AMR-NB / AMR-WB: 20 ms frames (160 / 320 samples) of mono audio. The channel
+            // count and sample rate of the sample entry are fixed by the codec: the entry of
+            // 3GP files stores other values (as in FFmpeg's `mov_finalize_stsd_codec`).
+            AtomType::AudioSampleEntrySamr | AtomType::AudioSampleEntrySawb => {
+                let is_nb = header.atom_type == AtomType::AudioSampleEntrySamr;
+                entry.codec_id = if is_nb { CODEC_ID_AMR_NB } else { CODEC_ID_AMR_WB };
+                entry.sample_rate = if is_nb { 8000.0 } else { 16000.0 };
+                entry.num_channels = 1;
+                entry.channels = Some(Channels::Positioned(Position::FRONT_LEFT));
+                entry.frames_per_packet = Some(if is_nb { 160 } else { 320 });
+            }
+            // GSM 06.10 full-rate (`agsm`: 33-byte blocks of 160 frames) and Microsoft GSM 6.10
+            // (`ms\0\x31`: 65-byte blocks of 320 frames), both mono as FFmpeg's `mov.c` demuxes
+            // them. One sample is one block.
+            AtomType::AudioSampleEntryAgsm | AtomType::AudioSampleEntryMsGsm => {
+                let is_fr = header.atom_type == AtomType::AudioSampleEntryAgsm;
+                let (codec_id, block_align, frames) =
+                    if is_fr { (CODEC_ID_GSM, 33, 160) } else { (CODEC_ID_GSM_MS, 65, 320) };
+                entry.codec_id = codec_id;
+                entry.num_channels = 1;
+                entry.channels = Some(Channels::Positioned(Position::FRONT_LEFT));
+                entry.block_align = Some(block_align);
+                entry.frames_per_block = Some(frames);
+                entry.frames_per_packet = Some(frames);
+            }
+            // iLBC: mono 8 kHz audio in 38-byte (20 ms, 160 samples) or 50-byte (30 ms, 240
+            // samples) packets. The mode is taken from the samples per packet field of a
+            // version 1 entry; otherwise (e.g., FFmpeg writes 0) the decoder detects it from the
+            // packet size.
+            AtomType::AudioSampleEntryIlbc => {
+                entry.codec_id = CODEC_ID_ILBC;
+                entry.sample_rate = 8000.0;
+                entry.num_channels = 1;
+                entry.channels = Some(Channels::Positioned(Position::FRONT_LEFT));
+                if matches!(v1_samples_per_packet, 160 | 240) {
+                    entry.frames_per_packet = Some(u64::from(v1_samples_per_packet));
+                }
+            }
             // The codec is determined by the WAVEFORMATEX in the `wave` atom.
             AtomType::AudioSampleEntryMsAdpcm | AtomType::AudioSampleEntryImaWav => {
                 entry.codec_id = CODEC_ID_NULL_AUDIO;
@@ -471,6 +555,21 @@ impl Atom for AudioSampleEntry {
                     let atom = it.read_atom::<EsdsAtom>()?;
                     atom.fill_audio_sample_entry(&mut entry)?;
                 }
+                AtomType::AmrConfig
+                    if matches!(
+                        header.atom_type,
+                        AtomType::AudioSampleEntrySamr | AtomType::AudioSampleEntrySawb
+                    ) =>
+                {
+                    let atom = it.read_atom::<DamrAtom>()?;
+
+                    // A sample holds `frames_per_sample` frames of 160 / 320 samples.
+                    if let Some(len) = entry.frames_per_packet {
+                        entry.frames_per_packet = Some(len * atom.frames_per_sample());
+                    }
+
+                    atom.fill_audio_sample_entry(&mut entry);
+                }
                 AtomType::Ac3Config => {
                     let atom = it.read_atom::<Dac3Atom>()?;
                     atom.fill_audio_sample_entry(&mut entry);
@@ -498,6 +597,14 @@ impl Atom for AudioSampleEntry {
                 AtomType::OpusDsConfig => {
                     let atom = it.read_atom::<OpusAtom>()?;
                     atom.fill_audio_sample_entry(&mut entry);
+                }
+                AtomType::AudioSampleEntryQtWave
+                    if matches!(entry.codec_id, CODEC_ID_QDM2 | CODEC_ID_QDMC) =>
+                {
+                    // The QDesign decoders parse the `wave` atom (the `frma` and `QDCA` atoms)
+                    // themselves, so the payload is the extra data.
+                    let atom = it.read_atom::<PayloadAtom>()?;
+                    entry.extra_data = Some(atom.data);
                 }
                 AtomType::AudioSampleEntryQtWave => {
                     // The QuickTime WAVE (aka. siDecompressionParam) atom may contain many
@@ -1387,6 +1494,36 @@ mod tests {
     }
 
     #[test]
+    fn amr_sample_entries_with_damr() {
+        use symphonia_core::audio::{Channels, Position};
+        use symphonia_core::codecs::audio::well_known::{CODEC_ID_AMR_NB, CODEC_ID_AMR_WB};
+
+        // vendor, version, mode set (0x81ff), mode change period, frames per sample.
+        let damr = [b'S', b'Y', b'M', b'P', 1, 0x81, 0xff, 1, 2];
+
+        // The sample entries of 3GP files store a stereo channel count and arbitrary rates.
+        for (fourcc, codec, rate, frame_len) in
+            [(b"samr", CODEC_ID_AMR_NB, 8000, 160), (b"sawb", CODEC_ID_AMR_WB, 16000, 320)]
+        {
+            let extra = atom(b"damr", &damr);
+            let params = audio_params(stsd_audio_entry(fourcc, 0, 2, 44_100 << 16, &extra));
+
+            assert_eq!(params.codec, codec);
+            assert_eq!(params.sample_rate, Some(rate));
+            assert_eq!(params.channels, Some(Channels::Positioned(Position::FRONT_LEFT)));
+            // Two frames per sample.
+            assert_eq!(params.max_frames_per_packet, Some(frame_len * 2));
+            assert_eq!(params.extra_data.as_deref(), Some(&damr[..]));
+        }
+
+        // The `damr` atom is optional for the codec parameters.
+        let params = audio_params(stsd_audio_entry(b"samr", 0, 1, 8000 << 16, &[]));
+        assert_eq!(params.codec, CODEC_ID_AMR_NB);
+        assert_eq!(params.max_frames_per_packet, Some(160));
+        assert!(params.extra_data.is_none());
+    }
+
+    #[test]
     fn opus_dops_is_converted_to_opus_head() {
         use symphonia_core::codecs::audio::well_known::CODEC_ID_OPUS;
 
@@ -1470,6 +1607,22 @@ mod tests {
         assert_eq!(ima4.codec, CODEC_ID_ADPCM_IMA_QT);
         assert_eq!(ima4.frames_per_block, Some(64));
         assert_eq!(ima4.max_frames_per_packet, Some(64));
+    }
+
+    #[test]
+    fn gsm_entries_are_mapped() {
+        use symphonia_core::codecs::audio::well_known::{CODEC_ID_GSM, CODEC_ID_GSM_MS};
+
+        for (fourcc, codec, frames) in
+            [(b"agsm", CODEC_ID_GSM, 160), (b"ms\x001", CODEC_ID_GSM_MS, 320)]
+        {
+            let params = audio_params(stsd_audio_entry(fourcc, 0, 2, 8_000 << 16, &[]));
+            assert_eq!(params.codec, codec);
+            assert_eq!(params.sample_rate, Some(8_000));
+            assert_eq!(params.channels.map(|c| c.count()), Some(1));
+            assert_eq!(params.frames_per_block, Some(frames));
+            assert_eq!(params.max_frames_per_packet, Some(frames));
+        }
     }
 
     #[test]

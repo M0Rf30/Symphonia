@@ -71,6 +71,30 @@ impl StblAtom {
         }
     }
 
+    /// QuickTime describes MACE audio with one sample per frame (a nominal size of 1), but
+    /// the data is coded in blocks of 6 frames. Group the samples such that one sample is one
+    /// block.
+    fn regroup_mace_blocks(&mut self) {
+        let Some((block_align, frames)) = self.stsd.mace_block()
+        else {
+            return;
+        };
+
+        if !matches!(self.stsz.sample_sizes, SampleSize::Constant(_))
+            || self.stsz.sample_count % frames != 0
+        {
+            return;
+        }
+
+        // Validate before the first change.
+        let mut stts = self.stts.clone();
+        if stts.regroup(frames) && self.stsc.regroup(frames) {
+            self.stts = stts;
+            self.stsz.sample_count /= frames;
+            self.stsz.sample_sizes = SampleSize::Constant(block_align);
+        }
+    }
+
     fn regroup_adpcm_blocks(&mut self) {
         let Some((block_align, frames)) = self.stsd.adpcm_block()
         else {
@@ -162,6 +186,7 @@ impl Atom for StblAtom {
 
         let mut stbl = StblAtom { stsd, stts, stsc, stsz, stco, co64 };
         stbl.regroup_adpcm_blocks();
+        stbl.regroup_mace_blocks();
         stbl.regroup_pcm_frames();
         Ok(stbl)
     }

@@ -24,6 +24,7 @@ pub(crate) mod avcc;
 pub(crate) mod chpl;
 pub(crate) mod co64;
 pub(crate) mod dac3;
+pub(crate) mod damr;
 pub(crate) mod ddts;
 pub(crate) mod dec3;
 pub(crate) mod dmlp;
@@ -77,6 +78,7 @@ pub use avcc::AvcCAtom;
 pub use chpl::ChplAtom;
 pub use co64::Co64Atom;
 pub use dac3::Dac3Atom;
+pub use damr::DamrAtom;
 pub use ddts::DdtsAtom;
 pub use dec3::Dec3Atom;
 pub use dmlp::DmlpAtom;
@@ -125,6 +127,10 @@ pub use wave::WaveAtom;
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum AtomType {
     Ac3Config,
+    AmrConfig,
+    AudioSampleEntrySamr,
+    AudioSampleEntrySawb,
+    AudioSampleEntryIlbc,
     AdvisoryTag,
     AlbumArtistTag,
     AlbumTag,
@@ -144,10 +150,16 @@ pub enum AtomType {
     AudioSampleEntryFlac,
     AudioSampleEntryFpcm,
     AudioSampleEntryIma4,
+    AudioSampleEntryMace3,
+    AudioSampleEntryMace6,
+    AudioSampleEntryQdm2,
+    AudioSampleEntryQdmc,
     AudioSampleEntryIpcm,
     PcmConfiguration,
     AudioSampleEntryImaWav,
     AudioSampleEntryMsAdpcm,
+    AudioSampleEntryAgsm,
+    AudioSampleEntryMsGsm,
     AudioSampleEntryLpcm,
     AudioSampleEntryMp3,
     AudioSampleEntryMp4a,
@@ -319,6 +331,10 @@ impl From<[u8; 4]> for AtomType {
             b"co64" => AtomType::ChunkOffset64,
             b"ctts" => AtomType::CompositionTimeToSample,
             b"dac3" => AtomType::Ac3Config,
+            b"damr" => AtomType::AmrConfig,
+            b"samr" => AtomType::AudioSampleEntrySamr,
+            b"sawb" => AtomType::AudioSampleEntrySawb,
+            b"ilbc" => AtomType::AudioSampleEntryIlbc,
             b"dec3" => AtomType::Eac3Config,
             b"ddts" => AtomType::DtsConfig,
             b"dmlp" => AtomType::MlpConfig,
@@ -342,8 +358,14 @@ impl From<[u8; 4]> for AtomType {
             b"ipcm" => AtomType::AudioSampleEntryIpcm,
             b"pcmC" => AtomType::PcmConfiguration,
             b"ima4" => AtomType::AudioSampleEntryIma4,
+            b"MAC3" => AtomType::AudioSampleEntryMace3,
+            b"MAC6" => AtomType::AudioSampleEntryMace6,
+            b"QDM2" => AtomType::AudioSampleEntryQdm2,
+            b"QDMC" => AtomType::AudioSampleEntryQdmc,
             b"ms\x00\x02" => AtomType::AudioSampleEntryMsAdpcm,
             b"ms\x00\x11" => AtomType::AudioSampleEntryImaWav,
+            b"agsm" => AtomType::AudioSampleEntryAgsm,
+            b"ms\x00\x31" => AtomType::AudioSampleEntryMsGsm,
             b"fl32" => AtomType::AudioSampleEntryF32,
             b"fl64" => AtomType::AudioSampleEntryF64,
             b"fLaC" => AtomType::AudioSampleEntryFlac,
