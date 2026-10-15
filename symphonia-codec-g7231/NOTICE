@@ -1,0 +1,23 @@
+This crate (`symphonia-codec-g7231`) is a pure-Rust G.723.1 decoder. It is licensed under the
+Mozilla Public License, v. 2.0, like the rest of Project Symphonia.
+
+It is a bit-exact fixed-point port of the FFmpeg G.723.1 decoder: `libavcodec/g723_1dec.c`,
+`libavcodec/g723_1.c` and `libavcodec/g723_1.h`, together with the helpers they use from
+`libavcodec/celp_math.c`, `libavcodec/celp_filters.c`, `libavcodec/acelp_vectors.c` and
+`libavutil/common.h`. The LSP, gain, combinatorial and pitch tables (`src/tables.rs`) were
+extracted programmatically from those files. The algorithm is defined by ITU-T Recommendation
+G.723.1 ("Dual rate speech coder for multimedia communications transmitting at 5.3 and 6.3
+kbit/s") and its Annex A (silence compression); FFmpeg's implementation reproduces the Recommendation's
+tables and fixed-point arithmetic.
+
+FFmpeg's G.723.1 code is distributed under the GNU Lesser General Public License, version 2.1 or
+later:
+
+Copyright (c) 2006 Benjamin Larsson
+Copyright (c) 2010 Mohamed Naufal Basheer
+
+The LGPL-2.1+ terms apply to those derived portions.
+
+Where this port deviates from FFmpeg: the decoder is mono only (FFmpeg additionally accepts a
+non-standard two-channel layout), and the postfilter is always enabled (FFmpeg exposes a
+`postfilter` option).
