@@ -152,6 +152,13 @@ pub trait EsParser: Send + Sync {
     /// Discard all buffered data and synchronisation state (after a seek).
     fn clear(&mut self);
 
+    /// Discard all buffered data and synchronisation state to parse the stream from its very start
+    /// again. Parsers that have state that only holds at the start of the stream (e.g. the
+    /// encoder delay) reset it.
+    fn restart(&mut self) {
+        self.clear();
+    }
+
     /// The stream information. `None` until enough of the stream has been parsed.
     fn info(&self) -> Option<&EsInfo>;
 
@@ -176,11 +183,41 @@ pub struct MpaEs {
     frame_len: u64,
     layer: u8,
     pushed: u64,
+    /// The gapless information of the Xing/Info tag frame at the start of the stream.
+    gapless: Option<mpa::MpaGapless>,
+    /// The index of the next audio frame, counting from the start of the stream.
+    index: u64,
+    /// True until the first `clear`: after a seek, the frame index is not known, so the encoder
+    /// delay and padding cannot be applied.
+    from_start: bool,
 }
 
 impl MpaEs {
     pub fn new() -> Self {
-        Default::default()
+        MpaEs { from_start: true, ..Default::default() }
+    }
+
+    /// The samples to trim from the start and end of the audio frame `index` of `block` samples,
+    /// from the encoder delay and padding of the stream. The delay and padding may span several
+    /// frames.
+    fn trim(&self, index: u64, block: u64) -> (u64, u64) {
+        let Some(g) = self.gapless.filter(|_| self.from_start)
+        else {
+            return (0, 0);
+        };
+
+        let start = u64::from(g.delay).saturating_sub(index * block).min(block);
+
+        // Frames beyond the frame count (a stream with trailing frames) are not trimmed.
+        let end = match g.num_frames {
+            Some(n) if index < u64::from(n) => {
+                let after = u64::from(n) - 1 - index;
+                u64::from(g.padding).saturating_sub(after * block).min(block - start)
+            }
+            _ => 0,
+        };
+
+        (start, end)
     }
 }
 
@@ -194,8 +231,11 @@ impl EsParser for MpaEs {
         loop {
             let frame = self.framer.next_frame(flush)?;
 
-            // Skip Xing/Info/VBRI frames.
+            // Skip Xing/Info/VBRI frames. The tag of the first frame has the encoder delay.
             if frame.info.is_info_frame(&frame.data) {
+                if self.from_start && self.index == 0 && self.gapless.is_none() {
+                    self.gapless = frame.info.xing_gapless(&frame.data);
+                }
                 continue;
             }
 
@@ -211,18 +251,30 @@ impl EsParser for MpaEs {
                 self.layer = frame.info.layer;
             }
 
+            let block = u64::from(frame.info.samples_per_frame);
+            let (trim_start, trim_end) = self.trim(self.index, block);
+            self.index += 1;
+
             return Some(EsFrame {
                 start: frame.start,
                 data: frame.data.into_boxed_slice(),
-                dur: u64::from(frame.info.samples_per_frame),
-                trim_start: 0,
-                trim_end: 0,
+                dur: block - trim_start - trim_end,
+                trim_start,
+                trim_end,
             });
         }
     }
 
     fn clear(&mut self) {
         self.framer.clear();
+        self.from_start = false;
+    }
+
+    fn restart(&mut self) {
+        self.framer.clear();
+        self.from_start = true;
+        self.gapless = None;
+        self.index = 0;
     }
 
     fn info(&self) -> Option<&EsInfo> {
@@ -1028,6 +1080,8 @@ pub struct EsTrack {
     pending: VecDeque<Pending>,
     /// The number of ticks trimmed from the start of the first frame of the stream.
     lead_in: Option<u64>,
+    /// True once the first frame that has samples after trimming has been parsed.
+    lead_in_done: bool,
 }
 
 impl EsTrack {
@@ -1041,6 +1095,7 @@ impl EsTrack {
             pushed: 0,
             pending: VecDeque::new(),
             lead_in: None,
+            lead_in_done: false,
         }
     }
 
@@ -1094,8 +1149,11 @@ impl EsTrack {
                 self.anchors.pop_front();
             }
 
-            if self.lead_in.is_none() {
-                self.lead_in = Some(frame.trim_start);
+            // The encoder delay may span several frames, the leading ones of which are trimmed
+            // completely.
+            if !self.lead_in_done {
+                self.lead_in = Some(self.lead_in.unwrap_or(0) + frame.trim_start);
+                self.lead_in_done = frame.dur > 0;
             }
 
             self.pending.push_back(Pending { frame, pts });
@@ -1116,7 +1174,7 @@ impl EsTrack {
     pub fn init_timeline(&mut self, base: Option<u64>) {
         let rate = self.info().map_or(1, |i| i.rate);
         self.timeline = Timeline::new(rate);
-        self.timeline.set_grid(self.parser.frame_grid());
+        self.timeline.set_grid_with_lead_in(self.parser.frame_grid(), self.lead_in.unwrap_or(0));
 
         if let Some(base) = base {
             self.timeline.set_base(base);
@@ -1148,6 +1206,15 @@ impl EsTrack {
         packet.dts = Timestamp::new(ts);
 
         Some(packet)
+    }
+
+    /// Discard all buffered data to read the stream from its very start again, as after a seek to
+    /// the first PES packet.
+    pub fn rewind(&mut self) {
+        self.parser.restart();
+        self.anchors.clear();
+        self.pending.clear();
+        self.timeline.discontinuity(0);
     }
 
     /// Discard all buffered data after a seek, to continue at the PES packet with the PTS
@@ -1188,6 +1255,76 @@ impl EsTrack {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An MPEG-1 layer 3 frame, 44.1 kHz, 128 kbps, stereo: 417 bytes.
+    fn mp3_frame() -> Vec<u8> {
+        let mut f = vec![0u8; 417];
+        f[..4].copy_from_slice(&[0xff, 0xfb, 0x90, 0x00]);
+        f
+    }
+
+    /// An Info tag frame with the LAME encoder, `frames` frames, and the delay and padding fields.
+    fn info_frame(frames: u32, delay: u32, padding: u32) -> Vec<u8> {
+        let mut f = mp3_frame();
+        // The side information of an MPEG-1 stereo frame is 32 bytes.
+        let at = 4 + 32;
+        f[at..at + 4].copy_from_slice(b"Info");
+        f[at + 4..at + 8].copy_from_slice(&1u32.to_be_bytes());
+        f[at + 8..at + 12].copy_from_slice(&frames.to_be_bytes());
+        let ext = at + 12;
+        f[ext..ext + 9].copy_from_slice(b"LAME3.100");
+        let trim = (delay << 12) | padding;
+        f[ext + 21..ext + 24].copy_from_slice(&trim.to_be_bytes()[1..]);
+        f
+    }
+
+    #[test]
+    fn mpa_lame_delay_and_padding_span_frames() {
+        // Delay field 576 gives 528 + 1 + 576 = 1105 samples. Padding field 2000 gives
+        // 2000 - 529 = 1471 samples, which is more than one frame of 1152.
+        let mut data = info_frame(4, 576, 2000);
+        for _ in 0..4 {
+            data.extend_from_slice(&mp3_frame());
+        }
+        data.extend_from_slice(&mp3_frame()[..4]);
+
+        let mut es = MpaEs::new();
+        es.push(&data);
+
+        let mut frames = Vec::new();
+        while let Some(f) = es.next_frame(true) {
+            frames.push((f.dur, f.trim_start, f.trim_end));
+        }
+
+        assert_eq!(frames, [(47, 1105, 0), (1152, 0, 0), (1152 - 319, 0, 319), (0, 0, 1152)]);
+    }
+
+    #[test]
+    fn mpa_lame_delay_spanning_frames_is_the_lead_in() {
+        // MPEG-2 frames are 576 samples: a delay of 1105 spans two frames.
+        // 22.05 kHz, 80 kbps: 261 bytes.
+        let mut frame = vec![0u8; 261];
+        frame[..4].copy_from_slice(&[0xff, 0xf3, 0x90, 0x00]);
+        // MPEG-2 stereo side information is 17 bytes.
+        let at = 4 + 17;
+        let mut info = frame.clone();
+        info[at..at + 4].copy_from_slice(b"Info");
+        info[at + 4..at + 8].copy_from_slice(&1u32.to_be_bytes());
+        info[at + 8..at + 12].copy_from_slice(&3u32.to_be_bytes());
+        info[at + 12..at + 21].copy_from_slice(b"LAME3.100");
+        info[at + 33..at + 36].copy_from_slice(&(576u32 << 12).to_be_bytes()[1..]);
+
+        let mut data = info;
+        for _ in 0..3 {
+            data.extend_from_slice(&frame);
+        }
+        data.extend_from_slice(&frame[..4]);
+
+        let mut track = EsTrack::new(0, Box::new(MpaEs::new()));
+        track.push_pes(Some(0), &data);
+        assert!(track.probe(true));
+        assert_eq!(track.lead_in(), Some(1105));
+    }
 
     fn adts_frame(payload_len: usize, fill: u8) -> Vec<u8> {
         // MPEG-4 LC, 44.1 kHz (index 4), stereo, no CRC.

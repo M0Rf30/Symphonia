@@ -471,7 +471,7 @@ impl<'s> MpegPsReader<'s> {
             self.eof = false;
 
             for stream in self.streams.iter_mut() {
-                stream.es.seek(0);
+                stream.es.rewind();
             }
         }
 

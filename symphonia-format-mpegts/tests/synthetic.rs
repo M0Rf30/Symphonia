@@ -289,6 +289,47 @@ fn opus_trims_and_channels() {
 }
 
 #[test]
+fn mp3_lame_tag_gives_gapless_trims() {
+    // MPEG-1 layer 3, 44.1 kHz, 128 kbps, stereo: 417 byte frames of 1152 samples.
+    let frame = || {
+        let mut f = vec![0u8; 417];
+        f[..4].copy_from_slice(&[0xff, 0xfb, 0x90, 0x00]);
+        f
+    };
+
+    // An Info tag of 4 frames: delay field 576 (1105 samples with the decoder delay), padding
+    // field 2000 (1471 samples).
+    let mut info = frame();
+    info[36..40].copy_from_slice(b"Info");
+    info[40..44].copy_from_slice(&1u32.to_be_bytes());
+    info[44..48].copy_from_slice(&4u32.to_be_bytes());
+    info[48..57].copy_from_slice(b"LAME3.100");
+    info[69..72].copy_from_slice(&((576u32 << 12) | 2000).to_be_bytes()[1..]);
+
+    let mut frames = vec![info];
+    frames.extend((0..4).map(|_| frame()));
+
+    let mut mux = TsMux::new(188);
+    mux.psi(0x1000, &[StreamSpec { stream_type: 0x03, pid: 0x101, descriptors: vec![] }]);
+    mux_frames(&mut mux, 0x101, &frames, 5, 1152, 44_100, 1_000_000);
+
+    let mut reader = open(mux.out);
+    assert_eq!(reader.tracks()[0].delay, Some(1105));
+
+    let packets = read_all(&mut reader);
+    assert_eq!(packets.len(), 4);
+    assert_eq!(packets[0].trim_start.get(), 1105);
+    assert_eq!(packets[0].dur.get(), 47);
+    assert_eq!(packets[0].pts.get(), 0);
+    assert_eq!(packets[2].trim_end.get(), 319);
+    assert_eq!(packets[2].dur.get(), 1152 - 319);
+    // The padding spans the last frame completely.
+    assert_eq!(packets[3].trim_end.get(), 1152);
+    assert_eq!(packets[3].dur.get(), 0);
+    assert_eq!(reader.tracks()[0].duration.unwrap().get(), 4 * 1152 - 1105 - 1471);
+}
+
+#[test]
 fn recovers_from_garbage() {
     let frames = mpa_frames(60);
     let mut mux = TsMux::new(188);

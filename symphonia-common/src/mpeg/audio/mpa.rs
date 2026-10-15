@@ -9,8 +9,10 @@
 //! synchroniser for containers that do not preserve frame boundaries (e.g., MPEG-PS and MPEG-TS).
 
 use symphonia_core::audio::{Channels, Position};
+use symphonia_core::checksum::Crc16AnsiLe;
 use symphonia_core::codecs::audio::AudioCodecId;
 use symphonia_core::codecs::audio::well_known::{CODEC_ID_MP1, CODEC_ID_MP2, CODEC_ID_MP3};
+use symphonia_core::io::Monitor;
 
 use crate::mpeg::sync_buf::SyncBuffer;
 
@@ -29,6 +31,19 @@ pub const MPA_L3_RESERVOIR_PREROLL_FRAMES: u64 = 8;
 
 /// The maximum length of an MPEG audio frame, including the header.
 pub const MPA_MAX_FRAME_LEN: usize = 2881;
+
+/// The gapless information of a Xing/Info tag with a LAME extension.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct MpaGapless {
+    /// The number of audio frames of the stream, excluding the tag frame, if the tag has it.
+    pub num_frames: Option<u32>,
+    /// The number of samples to skip at the start of the stream, including the 529 samples of
+    /// decoder delay of the layer 3 hybrid filterbank.
+    pub delay: u32,
+    /// The number of samples of padding at the end of the stream, after the decoder delay is
+    /// accounted for.
+    pub padding: u32,
+}
 
 /// The information about an MPEG audio frame that can be determined from its header.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -109,6 +124,83 @@ impl MpaFrameInfo {
 
         // VBRI is always 32 bytes after the header.
         matches!(frame.get(MPA_HEADER_LEN + 32..MPA_HEADER_LEN + 36), Some(b"VBRI"))
+    }
+
+    /// If `frame`, a complete layer 3 frame with this header, is a Xing/Info tag, get the frame
+    /// count and the encoder delay and padding of its LAME extension.
+    ///
+    /// The tag layout is that of the LAME "Xing/Info tag" specification (`VbrTag.c` of LAME,
+    /// `lame_tag_spec`): after the `Xing`/`Info` ID come 32 bits of flags and the optional
+    /// frame count (bit 0), byte count (bit 1), 100 byte TOC (bit 2), and quality (bit 3)
+    /// fields, followed by the 36 byte LAME extension, of which 24 bytes through the 24 bit
+    /// delay (12 bits) and padding (12 bits) field are needed. The delay and padding are only
+    /// defined for the LAME, Lavf, and Lavc encoders. Like the layer 3 demuxer, the 529 samples
+    /// of decoder delay are added to the delay and removed from the padding, and a tag with a
+    /// CRC that does not match is rejected.
+    pub fn xing_gapless(&self, frame: &[u8]) -> Option<MpaGapless> {
+        if self.layer != 3 {
+            return None;
+        }
+
+        let crc_len = if self.has_crc { 2 } else { 0 };
+        let xing = MPA_HEADER_LEN + crc_len + self.l3_side_info_len();
+
+        if !matches!(frame.get(xing..xing + 4), Some(b"Xing" | b"Info")) {
+            return None;
+        }
+
+        let be32 = |at: usize| -> Option<u32> {
+            let b = frame.get(at..at + 4)?;
+            Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+        };
+
+        let flags = be32(xing + 4)?;
+        let mut pos = xing + 8;
+
+        let num_frames = if flags & 0x1 != 0 {
+            let n = be32(pos)?;
+            pos += 4;
+            Some(n)
+        }
+        else {
+            None
+        };
+
+        pos += [(0x2, 4), (0x4, 100), (0x8, 4)]
+            .iter()
+            .filter(|(bit, _)| flags & bit != 0)
+            .map(|(_, len)| len)
+            .sum::<usize>();
+
+        // The extension fields: encoder (9), revision (1), lowpass (1), peak (4), radio gain (2),
+        // audiophile gain (2), flags (1), ABR (1), then the delay and padding.
+        let ext = frame.get(pos..pos + 24)?;
+        let encoder = &ext[..4];
+
+        if !matches!(encoder, b"LAME" | b"Lavf" | b"Lavc") {
+            return Some(MpaGapless { num_frames, delay: 0, padding: 0 });
+        }
+
+        // The tag CRC is the last two bytes of the full 36 byte extension, and covers all bytes
+        // of the frame before it. It is always written by LAME.
+        if let Some(stored) = frame.get(pos + 34..pos + 36) {
+            let stored = u16::from_be_bytes([stored[0], stored[1]]);
+
+            let mut crc = Crc16AnsiLe::new(0);
+            crc.process_buf_bytes(&frame[..pos + 34]);
+
+            if stored != 0 && stored != crc.crc() {
+                return None;
+            }
+        }
+
+        let trim = u32::from_be_bytes([0, ext[21], ext[22], ext[23]]);
+
+        Some(MpaGapless {
+            num_frames,
+            delay: 528 + 1 + (trim >> 12),
+            padding: (trim & 0xfff).saturating_sub(528 + 1),
+        })
     }
 }
 

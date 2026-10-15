@@ -49,12 +49,23 @@ pub struct Timeline {
     /// If non-zero, the duration of a frame that all frames of the stream have. A timestamp that
     /// is derived from a PTS is rounded to the nearest multiple of it.
     grid: u64,
+    /// The timestamps of the frames of the grid are congruent to this modulo the grid. Non-zero if
+    /// the first frame of the stream is trimmed, so that the first frame starts before 0.
+    grid_phase: i64,
 }
 
 impl Timeline {
     /// Create a timeline for a timebase of `1 / rate`.
     pub fn new(rate: u32) -> Self {
-        Timeline { rate, base: None, next: 0, last_clock: 0, force_anchor: true, grid: 0 }
+        Timeline {
+            rate,
+            base: None,
+            next: 0,
+            last_clock: 0,
+            force_anchor: true,
+            grid: 0,
+            grid_phase: 0,
+        }
     }
 
     /// Set the duration of the frames of the stream, if all frames have the same duration. The
@@ -63,6 +74,18 @@ impl Timeline {
     /// is anchored on a PTS, which has a precision of 1/90000 s, or worse).
     pub fn set_grid(&mut self, grid: u64) {
         self.grid = grid;
+        self.grid_phase = 0;
+    }
+
+    /// Set the grid as `set_grid`, for a stream where the samples at the start of the first frame
+    /// are trimmed: the first frame starts at `-lead_in`, and the frames follow at the multiples
+    /// of `grid` from it.
+    pub fn set_grid_with_lead_in(&mut self, grid: u64, lead_in: u64) {
+        self.grid = grid;
+        self.grid_phase = match i64::try_from(grid) {
+            Ok(g) if g > 0 => (-((lead_in % grid) as i64)).rem_euclid(g),
+            _ => 0,
+        };
     }
 
     /// Convert a time in clock ticks since the PTS of timestamp 0 to a timestamp, aligned to the
@@ -75,7 +98,8 @@ impl Timeline {
         }
 
         let grid = self.grid as i64;
-        (ticks + grid / 2).div_euclid(grid) * grid
+        let phase = self.grid_phase;
+        (ticks - phase + grid / 2).div_euclid(grid) * grid + phase
     }
 
     /// The PTS of timestamp 0, if known.

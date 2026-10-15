@@ -46,6 +46,13 @@
 //! previous plus its duration, which is exact in samples. The PTS of the PES packets is only used
 //! to anchor the timeline at the start, after a seek, and where it signals a discontinuity.
 //!
+//! # Gapless playback
+//!
+//! The container has no gapless information. The trimmed samples are those the elementary stream
+//! carries: the encoder delay and padding of the LAME/Xing tag frame of an MPEG layer 3 stream (the
+//! tag frame is not a packet, but sets the trims of the packets). The first sample that is not trimmed has the timestamp 0 and the
+//! delay is reported by the track. Streams without such information, such as AAC and MP2, are not trimmed.
+//!
 //! # Seeking
 //!
 //! A program stream has no index. If the stream is seekable, the position of the PES packet
