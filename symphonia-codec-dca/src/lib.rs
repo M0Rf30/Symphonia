@@ -27,15 +27,18 @@
 //! substream (EXSS).
 //!
 //! If the extension substream carries a lossless (XLL, DTS-HD Master Audio) component, the output
-//! is the bit-exact lossless reconstruction. The low bit rate (LBR) component is not supported.
+//! is the bit-exact lossless reconstruction. The low bit rate (LBR, DTS Express) component is
+//! decoded when the packet has neither a core nor an XLL component.
 
 mod bits;
 mod decoder;
 mod dsp;
 mod exss;
 mod huff;
+mod lbr;
 mod tables;
 mod tables_dct;
+mod tables_lbr;
 mod xll;
 
 use symphonia_core::audio::{
@@ -56,6 +59,7 @@ use crate::decoder::{
     CoreDecoder, SYNC_CORE_14B_BE, SYNC_CORE_14B_LE, SYNC_CORE_BE, SYNC_CORE_LE, SYNC_SUBSTREAM,
     spkr,
 };
+use crate::lbr::LbrDecoder;
 use crate::xll::{XllDecoder, XllError};
 
 /// The minimum size of a packet.
@@ -172,6 +176,7 @@ pub struct DcaDecoder {
     opts: AudioDecoderOptions,
     core: CoreDecoder,
     xll: XllDecoder,
+    lbr: LbrDecoder,
     /// The `PACKET_*` flags of the last packet.
     packet: u32,
     /// Scratch buffer for packets that are not in 16-bit big-endian form.
@@ -220,6 +225,7 @@ impl DcaDecoder {
             opts: *opts,
             core: CoreDecoder::new(),
             xll: XllDecoder::new(),
+            lbr: LbrDecoder::new(),
             packet: 0,
             conv: Vec::new(),
             buf: AudioBuffer::new(AudioSpec::new(rate, channels), 0),
@@ -337,10 +343,27 @@ impl DcaDecoder {
             }
         }
 
+        // The LBR component is decoded when there is nothing else.
         if packet & (PACKET_CORE | PACKET_XLL) == 0 {
             return match asset {
                 Some(a) if a.has_lbr() => {
-                    unsupported_error("dca: LBR extension substreams are not supported")
+                    self.lbr.parse(rest, &a)?;
+                    let f = self.lbr.filter_frame();
+                    self.packet = 0;
+                    self.prepare_buffer(f.sample_rate, f.ch_mask, f.nsamples);
+                    self.buf.clear();
+                    self.buf.render_uninit(Some(f.nsamples));
+                    for (idx, &speaker) in self.plane_spkr.iter().enumerate() {
+                        let plane = self.buf.plane_mut(idx).expect("plane index in range");
+                        plane[..f.nsamples].copy_from_slice(&self.lbr.out[speaker][..f.nsamples]);
+                    }
+                    if self.opts.downmix != Downmix::None {
+                        self.downmix(f.sample_rate, f.ch_mask, f.nsamples);
+                    }
+                    if self.opts.gapless && (pkt.trim_start.get() != 0 || pkt.trim_end.get() != 0) {
+                        self.buf.trim(pkt.trim_start.get() as usize, pkt.trim_end.get() as usize);
+                    }
+                    Ok(())
                 }
                 _ => decode_error("dca: no valid substream found"),
             };
@@ -563,6 +586,7 @@ impl AudioDecoder for DcaDecoder {
     fn reset(&mut self) {
         self.core.flush();
         self.xll.flush();
+        self.lbr.flush();
         self.packet &= PACKET_MASK;
     }
 

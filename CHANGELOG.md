@@ -17,7 +17,7 @@ Changes since upstream `v0.6.1`.
 ### Added
 
 - Decoders: AC-3 and E-AC-3 (`symphonia-codec-ac3`), DTS including DTS-HD Master Audio
-  (`symphonia-codec-dca`), Dolby TrueHD and MLP (`symphonia-codec-truehd`), Speex
+  and DTS Express (LBR) (`symphonia-codec-dca`), Dolby TrueHD and MLP (`symphonia-codec-truehd`), Speex
   (`symphonia-codec-speex`), Nellymoser Asao (`symphonia-codec-nellymoser`), mp3PRO
   (`symphonia-bundle-mp3`, feature `mp3pro`), DSD and DST (`symphonia-codec-dsd`), and a native
   Opus decoder with a CELT-only encoder (`symphonia-codec-opus`).

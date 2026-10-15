@@ -14,8 +14,8 @@ The lossless (XLL, DTS-HD Master Audio) extension is decoded bit-exactly, includ
 smoothing, multiple channel sets with embedded downmix, 96 kHz and 192 kHz (two frequency band)
 streams, and lossy fallback to the core during recovery. The lossless reconstruction needs the
 fixed-point core decoder, which is therefore also implemented (and used for any DTS-HD stream that
-carries an XLL component). The low bit rate (LBR, DTS Express) component is not decoded; such
-streams are decoded from their core if they have one.
+carries an XLL component). The low bit rate (LBR, DTS Express) component of Blu-ray secondary audio
+(an extension substream without a core) is decoded too.
 
 With the `downmix` decoder option, core streams are mixed down to stereo with the primary channel downmix coefficients embedded in the stream (Lo/Ro or Lt/Rt), as the reference decoder does; without embedded coefficients, and for mono, the ITU-R BS.775 equations are used. Streams with an XLL component are always output with their native channels.
 

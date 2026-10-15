@@ -135,7 +135,7 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | APE (Monkey's Audio)         | Excellent | Yes     | `ape-format` | No      | [`symphonia-bundle-ape`]     |
 | AC-3, E-AC-3                 | Great     | No      | `ac3`        | No      | [`symphonia-codec-ac3`]      |
 | DSD                          | Great     | Yes     | `dsd`        | No      | [`symphonia-codec-dsd`]      |
-| DTS (core, XCH, XXCH, X96, XBR, XLL) | Great | No   | `dca`        | No      | [`symphonia-codec-dca`]      |
+| DTS (core, XCH, XXCH, X96, XBR, XLL, LBR) | Great | No   | `dca`        | No      | [`symphonia-codec-dca`]      |
 | FLAC                         | Excellent | Yes     | `flac`       | Yes     | [`symphonia-bundle-flac`]  |
 | MP1                          | Excellent | No      | `mp1`, `mpa` | No      | [`symphonia-bundle-mp3`]   |
 | MP2                          | Excellent | No      | `mp2`, `mpa` | No      | [`symphonia-bundle-mp3`]   |

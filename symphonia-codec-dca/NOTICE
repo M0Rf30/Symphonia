@@ -7,7 +7,7 @@ made from upstream FFmpeg, git commit 946fcce07b6d, files:
 
   libavcodec/dca.c, dca.h, dca_core.c, dca_core.h, dca_exss.c, dcadec.c, dcadsp.c, dcamath.h,
   dcaadpcm.c/.h, dcahuff.c/.h, dcadata.c, dca_syncwords.h, synth_filter.c, dca_xll.c, dca_xll.h,
-  dcadct.c
+  dcadct.c, dca_lbr.c, dca_lbr.h
 
 Copyright (C) 2016 foo86; (C) 2004 Gildas Bazin, (C) 2004 Benjamin Zores; (C) 2006 Benjamin
 Larsson; (C) 2007 Konstantin Shishkov; and other FFmpeg contributors, as stated in the headers
@@ -22,6 +22,9 @@ Derived material:
   coefficient tables, the XLL reflection coefficient and frequency band assembly tables.
 * `src/tables_dct.rs` is generated programmatically from the fixed-point IMDCT twiddle tables
   computed by `dcadct.c`.
+* `src/lbr.rs` is a port of `dca_lbr.c` (DTS Express chunk parsing, scale factor grids, tonal
+  components, partial stereo, LPC, hybrid filter bank, IMDCT and LFE IIR); `src/tables_lbr.rs`
+  is generated from the LBR tables of `dcadata.c` and `dcahuff.c`.
 * `src/xll.rs` is a port of `dca_xll.c` (lossless extension parsing, entropy decoding, inverse
   prediction, decorrelation, frequency band assembly, downmix undo, residual combination with the
   fixed-point core, and peak bit rate smoothing).

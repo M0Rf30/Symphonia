@@ -73,3 +73,43 @@ fn verify_xch_matches_reference() {
 fn verify_xll_matches_reference() {
     check(include_bytes!("data/xll_71.dts"), include_bytes!("data/xll_71.f32"), 8);
 }
+
+const EXSS_SYNC: [u8; 4] = [0x64, 0x58, 0x20, 0x25];
+
+/// `lbr_stereo.dts`: the first 8 packets of the DTS Express (LBR) secondary audio stream of a
+/// Blu-ray clip (stereo, 48 kHz, extension substream only).
+#[test]
+fn verify_lbr_matches_reference() {
+    let stream = include_bytes!("data/lbr_stereo.dts");
+    let reference = include_bytes!("data/lbr_stereo.f32");
+
+    let mut params = AudioCodecParameters::new();
+    params.for_codec(CODEC_ID_DCA);
+    let mut dec = DcaDecoder::try_new(&params, &AudioDecoderOptions::default()).unwrap();
+
+    let mut out: Vec<f32> = Vec::new();
+    for data in stream.chunks(2048) {
+        assert_eq!(data[..4], EXSS_SYNC);
+        let packet = PacketRef::new(0, Timestamp::new(0), Duration::new(0), data);
+        match dec.decode_ref(&packet).unwrap() {
+            GenericAudioBufferRef::F32(buf) => {
+                assert_eq!(buf.spec().channels().count(), 2);
+                for i in 0..buf.frames() {
+                    for c in 0..2 {
+                        out.push(buf.plane(c).unwrap()[i]);
+                    }
+                }
+            }
+            _ => panic!("expected f32 samples"),
+        }
+    }
+
+    let refr: Vec<f32> =
+        reference.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+    assert_eq!(out.len(), refr.len(), "sample count");
+
+    let sig: f64 = refr.iter().map(|&x| f64::from(x).powi(2)).sum();
+    let err: f64 = refr.iter().zip(&out).map(|(&r, &t)| f64::from(r - t).powi(2)).sum();
+    let snr = 10.0 * (sig / err.max(1e-30)).log10();
+    assert!(snr > 90.0, "snr {snr} dB");
+}
