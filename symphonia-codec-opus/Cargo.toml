@@ -45,7 +45,7 @@ name = "encoder_roundtrip"
 required-features = ["ogg"]
 
 [[test]]
-name = "golden_hashes"
+name = "reference_decode"
 required-features = ["ogg"]
 
 # Timing/regression-hash harness for the decoder and encoder hot paths

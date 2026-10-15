@@ -1,0 +1,187 @@
+name: Release
+
+# Pushing a `vX.Y.Z` (or `vX.Y.Z-rc.N`) tag publishes a GitHub release whose notes are the
+# matching `## [X.Y.Z]` section of CHANGELOG.md, with `symphonia-play` binaries attached.
+#
+# Publishing the crates to crates.io is opt-in: set the repository variable `CARGO_PUBLISH` to
+# `true` and add the `CARGO_REGISTRY_TOKEN` secret. The crate names are those of the upstream
+# project, so only enable it for an account that owns them.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)release, e.g. v0.6.2"
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  verify:
+    name: Verify tag and changelog
+
+    runs-on: ubuntu-latest
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+
+      - id: version
+        name: Check the tag against the workspace version
+        run: |
+          version=${TAG#v}
+          crate_version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "symphonia") | .version')
+          if [[ "$version" != "$crate_version" ]]; then
+            echo "::error::tag $TAG does not match the workspace version $crate_version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Extract release notes
+        run: .github/scripts/changelog-section.sh "${{ steps.version.outputs.version }}" > RELEASE_NOTES.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: RELEASE_NOTES.md
+
+  # Do not release what CI would reject.
+  test:
+    name: Test before release
+    needs: verify
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Setup Toolchain
+        run: rustup install stable && rustup default stable
+
+      - uses: Swatinem/rust-cache@v2.9.2
+
+      - name: Install Linux dependencies
+        run: sudo apt-get update && sudo apt-get install -y libpulse-dev
+
+      - name: Test all features
+        run: cargo test --release --all --all-features
+
+  binaries:
+    name: Build symphonia-play (${{ matrix.target }})
+    needs: verify
+
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, exe: symphonia-play }
+          - { os: macos-latest, target: aarch64-apple-darwin, exe: symphonia-play }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, exe: symphonia-play.exe }
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Setup Toolchain
+        run: rustup install stable && rustup default stable
+
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libpulse-dev
+
+      - name: Build
+        run: cargo build --release --locked -p symphonia-play
+
+      - name: Package
+        shell: bash
+        run: |
+          name="symphonia-play-${TAG}-${{ matrix.target }}"
+          mkdir "$name"
+          cp "target/release/${{ matrix.exe }}" LICENSE README.md CHANGELOG.md "$name/"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            7z a "$name.zip" "$name"
+            echo "ASSET=$name.zip" >> "$GITHUB_ENV"
+          else
+            tar czf "$name.tar.gz" "$name"
+            echo "ASSET=$name.tar.gz" >> "$GITHUB_ENV"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: symphonia-play-${{ matrix.target }}
+          path: ${{ env.ASSET }}
+
+  release:
+    name: GitHub release
+    needs: [verify, test, binaries]
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          prerelease=()
+          if [[ "$TAG" == *-* ]]; then
+            prerelease=(--prerelease)
+          fi
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file artifacts/release-notes/RELEASE_NOTES.md
+            gh release upload "$TAG" artifacts/symphonia-play-*/* --clobber
+          else
+            gh release create "$TAG" artifacts/symphonia-play-*/* \
+              --verify-tag --title "$TAG" \
+              --notes-file artifacts/release-notes/RELEASE_NOTES.md "${prerelease[@]}"
+          fi
+
+  publish:
+    name: Publish to crates.io
+    needs: [verify, test]
+    if: vars.CARGO_PUBLISH == 'true'
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Setup Toolchain
+        run: rustup install stable && rustup default stable
+
+      # Publishes every member that is not `publish = false`, in dependency order.
+      - name: Publish
+        run: cargo publish --workspace --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

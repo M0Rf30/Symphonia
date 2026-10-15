@@ -5,25 +5,29 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Golden hashes of full decodes and of encoder packets, pinned before the hot-path performance
-//! work so that any later optimisation can be proven bit-identical.
+//! Reference comparisons of the decoder and encoder that do not depend on the floating-point
+//! bit patterns of the platform (the CELT MDCT and the SILK filters use the libm of the target):
 //!
-//! The encoder test uses synthetic signals and always runs. The decoder test needs the sample
-//! set: `RMPD_SAMPLES=/path/to/samples cargo test -p symphonia-codec-opus --features ogg
-//! --release --test golden_hashes` (it is skipped when the variable is unset). The same hashes
-//! are printed by `cargo run -p symphonia-codec-opus --features ogg --release --example perf`.
+//! * The decoder output of the sample set is compared with libopus (through `ffmpeg -c:a
+//!   libopus`, skipped when it is unavailable) by SNR and maximum difference. Set `RMPD_SAMPLES` to
+//!   the sample directory: `RMPD_SAMPLES=/path/to/samples cargo test -p symphonia-codec-opus
+//!   --features ogg --release --test reference_decode`. Packet loss concealment has no reference
+//!   here; its output is checked for plausibility.
+//! * The encoder always runs on synthetic signals: the packets are deterministic, and decode with
+//!   this crate's decoder to the input signal within an SNR.
 
 #![allow(clippy::unwrap_used)] // test/example code: a panic is the failure signal
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::Path;
+use std::process::{Command, Stdio};
 
 use symphonia_codec_opus::decoder::{OpusDecoder, SampleRate};
-use symphonia_codec_opus::encoder::{BitrateMode, EncoderConfig, OpusEncoder};
+use symphonia_codec_opus::encoder::{BitrateMode, EncoderConfig, OpusEncoder, PRE_SKIP};
 use symphonia_core::codecs::CodecParameters;
 use symphonia_core::formats::{FormatOptions, FormatReader};
 use symphonia_core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia_format_ogg::OggReader;
-use symphonia_testutil::{Fnv, Lcg32};
+use symphonia_testutil::Lcg32;
 
 fn synth(frames: usize, ch: usize, seed: u32) -> Vec<f32> {
     let mut rng = Lcg32(seed);
@@ -46,49 +50,80 @@ fn synth(frames: usize, ch: usize, seed: u32) -> Vec<f32> {
     out
 }
 
-fn encode_hash(cfg: EncoderConfig, pcm: &[f32]) -> u64 {
+fn encode_packets(cfg: EncoderConfig, pcm: &[f32]) -> Vec<Vec<u8>> {
     let mut enc = OpusEncoder::new(cfg).unwrap();
     let mut packets = enc.push(pcm);
     packets.extend(enc.finish());
-    let mut h = Fnv::new();
-    for p in &packets {
-        h.write(&(p.len() as u32).to_le_bytes());
-        h.write(p);
-    }
-    h.0
+    packets
 }
 
-/// `(channels, bitrate, mode, complexity, golden hash)`.
-const ENCODER_GOLDEN: [(u8, u32, BitrateMode, u8, u64); 10] = [
-    (1, 12_000, BitrateMode::Vbr, 9, 0xf2b95aa2cae15198),
-    (1, 32_000, BitrateMode::Cbr, 10, 0x88fa8e93ba510905),
-    (1, 48_000, BitrateMode::ConstrainedVbr, 5, 0x35bd7037b48f5d52),
-    (1, 64_000, BitrateMode::Vbr, 9, 0xdca68e5d7a76ad43),
-    (1, 96_000, BitrateMode::Vbr, 0, 0xe13aeb37964fa537),
-    (2, 24_000, BitrateMode::Vbr, 9, 0x573c6f3e057e1381),
-    (2, 64_000, BitrateMode::Cbr, 10, 0x272382bca12518f1),
-    (2, 96_000, BitrateMode::ConstrainedVbr, 5, 0x2775c2b46df1f057),
-    (2, 128_000, BitrateMode::Vbr, 9, 0x817ea1bcb35ce45d),
-    (2, 192_000, BitrateMode::Vbr, 0, 0x90ab60b064ac44ad),
+/// `(channels, bitrate, mode, complexity, minimum round-trip SNR in dB)`.
+const ENCODER_CASES: [(u8, u32, BitrateMode, u8, f64); 10] = [
+    (1, 12_000, BitrateMode::Vbr, 9, 4.5),
+    (1, 32_000, BitrateMode::Cbr, 10, 11.0),
+    (1, 48_000, BitrateMode::ConstrainedVbr, 5, 12.5),
+    (1, 64_000, BitrateMode::Vbr, 9, 14.0),
+    (1, 96_000, BitrateMode::Vbr, 0, 17.5),
+    (2, 24_000, BitrateMode::Vbr, 9, 8.0),
+    (2, 64_000, BitrateMode::Cbr, 10, 11.0),
+    (2, 96_000, BitrateMode::ConstrainedVbr, 5, 12.0),
+    (2, 128_000, BitrateMode::Vbr, 9, 14.0),
+    (2, 192_000, BitrateMode::Vbr, 0, 16.5),
 ];
 
 #[test]
-fn encoder_packets_match_golden_hashes() {
-    for (ch, bitrate, mode, complexity, golden) in ENCODER_GOLDEN {
+fn encoder_packets_decode_to_the_input() {
+    for (n, (ch, bitrate, mode, complexity, min_snr)) in ENCODER_CASES.into_iter().enumerate() {
         let pcm = synth(48000 * 6, ch as usize, 7 + ch as u32);
         let mut cfg = EncoderConfig::new(ch, bitrate);
         cfg.mode = mode;
         cfg.complexity = complexity;
-        assert_eq!(
-            encode_hash(cfg, &pcm),
-            golden,
-            "encoder output changed: {ch}ch {bitrate} bps {mode:?} complexity {complexity}"
-        );
+        let packets = encode_packets(cfg, &pcm);
+        let label = format!("{ch}ch {bitrate} bps {mode:?} complexity {complexity}");
+
+        // The encoder is deterministic.
+        assert_eq!(packets, encode_packets(cfg, &pcm), "encoder output differs between runs");
+
+        let decoded = decode_packets(ch, &packets);
+        let snr = snr_db(&pcm, &decoded, ch as usize, PRE_SKIP as usize, 4 * 960);
+        if std::env::var_os("GOLDEN_PRINT").is_some() {
+            println!("case {n}: {label}: SNR {snr:.2} dB");
+        }
+        assert!(snr >= min_snr, "{label}: round-trip SNR {snr:.2} dB < {min_snr} dB");
     }
 }
 
-/// Reads `(channels, audio packets)` of a mono/stereo, mapping family 0 Ogg Opus file.
-fn read_packets(path: &std::path::Path) -> Option<(u8, Vec<Vec<u8>>)> {
+/// SNR in dB of `decoded` against `reference` (both interleaved, `channels` per frame), where
+/// `decoded[i + delay]` corresponds to `reference[i]`; the first and last `skip` frames are
+/// excluded.
+fn snr_db(reference: &[f32], decoded: &[f32], channels: usize, delay: usize, skip: usize) -> f64 {
+    let frames = reference.len() / channels;
+    let (mut sig, mut err) = (0.0f64, 0.0f64);
+    for i in skip..frames.saturating_sub(skip) {
+        for c in 0..channels {
+            let r = f64::from(reference[i * channels + c]);
+            let d = f64::from(decoded[(i + delay) * channels + c]);
+            sig += r * r;
+            err += (r - d) * (r - d);
+        }
+    }
+    10.0 * (sig / err.max(1e-30)).log10()
+}
+
+/// Decodes encoder packets of 20 ms with the crate's decoder.
+fn decode_packets(ch: u8, packets: &[Vec<u8>]) -> Vec<f32> {
+    let mut dec = OpusDecoder::try_new(SampleRate::Hz48000, ch).unwrap();
+    let mut buf = vec![0.0f32; 5760 * ch as usize];
+    let mut out = Vec::new();
+    for p in packets {
+        let n = dec.decode(Some(p), &mut buf, 5760).unwrap();
+        out.extend_from_slice(&buf[..n * ch as usize]);
+    }
+    out
+}
+
+/// Reads `(channels, pre-skip, audio packets)` of a mono/stereo, mapping family 0 Ogg Opus file.
+fn read_packets(path: &std::path::Path) -> Option<(u8, usize, Vec<Vec<u8>>)> {
     let data = std::fs::read(path).ok()?;
     let mss =
         MediaSourceStream::new(Box::new(Cursor::new(data)), MediaSourceStreamOptions::default());
@@ -108,64 +143,123 @@ fn read_packets(path: &std::path::Path) -> Option<(u8, Vec<Vec<u8>>)> {
     while let Ok(Some(p)) = reader.next_packet() {
         out.push(p.data.to_vec());
     }
-    Some((extra[9], out))
+    Some((extra[9], usize::from(u16::from_le_bytes([extra[10], extra[11]])), out))
 }
 
-fn decode_hash(ch: u8, packets: &[Vec<u8>], loss: bool) -> u64 {
+/// Decodes every packet to interleaved `f32`. With `loss`, every 13th packet (from the 6th) is
+/// lost, exercising PLC. A packet that fails to decode contributes no samples.
+fn decode_all(ch: u8, packets: &[Vec<u8>], loss: bool) -> Vec<f32> {
     let mut dec = OpusDecoder::try_new(SampleRate::Hz48000, ch).unwrap();
     let mut buf = vec![0.0f32; 5760 * ch as usize];
-    let mut h = Fnv::new();
+    let mut out = Vec::new();
     for (idx, p) in packets.iter().enumerate() {
-        // With `loss`, every 13th packet (from the 6th) is lost, exercising PLC.
         let pk = if loss && idx % 13 == 5 { None } else { Some(p.as_slice()) };
-        match dec.decode(pk, &mut buf, if pk.is_none() { 960 } else { 5760 }) {
-            Ok(n) => {
-                for v in &buf[..n * ch as usize] {
-                    h.word(v.to_bits());
-                }
-            }
-            Err(_) => h.write(b"err"),
+        let capacity = if pk.is_none() { dec.last_packet_duration() } else { 5760 };
+        if let Ok(n) = dec.decode(pk, &mut buf, capacity) {
+            out.extend_from_slice(&buf[..n * ch as usize]);
         }
     }
-    h.0
+    out
 }
 
-/// `(file, decode hash, decode-with-loss hash)`; the latter is `None` where not pinned.
-static DECODER_GOLDEN: [(&str, u64, Option<u64>); 10] = [
-    ("opus_cbr_96.opus", 0xacc86b5318996c09, None),
-    ("opus_ffm_celt_fb.opus", 0x64966c2807266272, Some(0xcbd50a701ef3a2d1)),
-    ("opus_ffm_fd120.opus", 0x95b12e412a40741f, None),
-    ("opus_ffm_fd2.5.opus", 0x5b160a8edcb5bd27, None),
-    ("opus_ffm_hybrid_st.opus", 0x961f3b202479473e, Some(0xd558f4472b7f6c50)),
-    ("opus_ffm_silk_wb_st.opus", 0x5f1f9687d725a51f, Some(0xfe41bc7022bffee0)),
-    ("opus_low_24.opus", 0x32a5010d21f3ba5a, None),
-    ("opus_mono.opus", 0x74ac3c7bdde7eba1, Some(0x762e32be55ccb004)),
-    ("opus_music_256.opus", 0xee66590788ec4e6b, Some(0x3b54d3203d79cfd7)),
-    ("opus_speech_mono_8.opus", 0xdbbd62ee791d4f9a, None),
+/// Decodes `path` to interleaved `f32` at 48 kHz with libopus through ffmpeg, which drops the
+/// pre-skip. Returns `None` if ffmpeg or libopus is unavailable.
+fn libopus_pcm(path: &Path) -> Option<Vec<f32>> {
+    let out = Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-nostats",
+            "-hide_banner",
+            "-c:a",
+            "libopus",
+            "-request_sample_fmt",
+            "flt",
+            "-i",
+        ])
+        .arg(path)
+        .args(["-map", "0:a:0", "-c:a", "pcm_f32le", "-f", "f32le", "-"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    out.status.success().then(|| {
+        out.stdout.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    })
+}
+
+fn rms(x: &[f32]) -> f64 {
+    (x.iter().map(|&v| f64::from(v).powi(2)).sum::<f64>() / x.len().max(1) as f64).sqrt()
+}
+
+/// Minimum SNR (dB) of the decoder output against libopus.
+const MIN_SNR_DB: f64 = 100.0;
+/// Maximum sample difference against libopus.
+const MAX_DIFF: f32 = 1e-4;
+
+/// The files of the sample set: mono and stereo, mapping family 0.
+const DECODER_FILES: [&str; 10] = [
+    "opus_cbr_96.opus",
+    "opus_ffm_celt_fb.opus",
+    "opus_ffm_fd120.opus",
+    "opus_ffm_fd2.5.opus",
+    "opus_ffm_hybrid_st.opus",
+    "opus_ffm_silk_wb_st.opus",
+    "opus_low_24.opus",
+    "opus_mono.opus",
+    "opus_music_256.opus",
+    "opus_speech_mono_8.opus",
 ];
 
 #[test]
-fn decoder_output_matches_golden_hashes() {
-    let Some(root) = std::env::var_os("RMPD_SAMPLES")
+fn decoder_output_matches_libopus() {
+    let Some(dir) = symphonia_testutil::sample_dir().map(|d| d.join("opus"))
     else {
         eprintln!("RMPD_SAMPLES not set; skipping");
         return;
     };
-    let dir = PathBuf::from(root).join("opus");
-    for (name, golden, golden_loss) in DECODER_GOLDEN {
+    let print = std::env::var_os("GOLDEN_PRINT").is_some();
+    for name in DECODER_FILES {
         let path = dir.join(name);
-        let Some((ch, packets)) = read_packets(&path)
+        let Some((ch, pre_skip, packets)) = read_packets(&path)
         else {
             eprintln!("{name}: not available; skipping");
             continue;
         };
-        assert_eq!(decode_hash(ch, &packets, false), golden, "{name}: decoder output changed");
-        if let Some(golden_loss) = golden_loss {
-            assert_eq!(
-                decode_hash(ch, &packets, true),
-                golden_loss,
-                "{name}: decoder output with packet loss changed"
-            );
+        let ch = usize::from(ch);
+        let ours = decode_all(ch as u8, &packets, false);
+        assert!(ours.len() > pre_skip * ch, "{name}: no output");
+        let ours = &ours[pre_skip * ch..];
+
+        // Packet loss concealment: the stream keeps its length and its level.
+        let lossy = decode_all(ch as u8, &packets, true);
+        assert!(lossy.iter().all(|v| v.is_finite()), "{name}: PLC output is not finite");
+        let (r, rl) = (rms(ours), rms(&lossy[pre_skip * ch..]));
+        assert!(rl > 0.25 * r && rl < 4.0 * r, "{name}: PLC level {rl} vs {r}");
+
+        let Some(reference) = libopus_pcm(&path)
+        else {
+            eprintln!("libopus not available through ffmpeg; skipping {name}");
+            continue;
+        };
+        // ffmpeg also trims the end of the stream to its granule position, by less than a packet.
+        let n = ours.len().min(reference.len());
+        assert!(
+            n + 5760 * ch >= ours.len(),
+            "{name}: libopus output is {} samples",
+            reference.len()
+        );
+        let (mut signal, mut noise, mut diff) = (0.0f64, 0.0f64, 0.0f32);
+        for (&s, &x) in ours[..n].iter().zip(&reference[..n]) {
+            signal += f64::from(x).powi(2);
+            noise += f64::from(s - x).powi(2);
+            diff = diff.max((s - x).abs());
         }
+        let snr = 10.0 * (signal / noise.max(1e-30)).log10();
+        if print {
+            println!("{name}: SNR {snr:.2} dB max {diff:.6}");
+        }
+        assert!(snr >= MIN_SNR_DB, "{name}: SNR {snr:.2} dB < {MIN_SNR_DB} dB");
+        assert!(diff <= MAX_DIFF, "{name}: max difference {diff} > {MAX_DIFF}");
     }
 }
