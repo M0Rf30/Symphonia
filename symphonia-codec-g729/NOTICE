@@ -1,0 +1,16 @@
+This crate (`symphonia-codec-g729`) is a pure-Rust ITU-T G.729 / G.729 Annex D decoder. It is
+licensed under the Mozilla Public License, v. 2.0, like the rest of Project Symphonia.
+
+The algorithm is specified by ITU-T Recommendation G.729 (and Annex D). This implementation is a
+port of FFmpeg's G.729 decoder: `libavcodec/g729dec.c`, `g729postfilter.c`, `g729data.h`,
+`g729.h` and the shared CELP code it uses (`lsp.c`, `celp_filters.c`, `celp_math.c`,
+`acelp_filters.c`, `acelp_vectors.c`, `acelp_pitch_delay.c`). The codebook, MA predictor, cosine,
+interpolation filter and phase filter tables in `src/tables.rs` were extracted programmatically
+from those files. FFmpeg is distributed under the GNU Lesser General Public License, version 2.1 or
+later.
+
+Copyright (c) 2007 Vladimir Voroshilov
+Copyright (c) 2008 Vladimir Voroshilov
+Copyright (c) 2007 Reynaldo H. Verdejo Pinochet (QCELP decoder, shared `acelp_vectors.c`)
+
+The LGPL-2.1+ terms apply to those derived portions.
