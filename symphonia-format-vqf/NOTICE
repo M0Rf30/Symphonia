@@ -1,0 +1,9 @@
+This crate (`symphonia-format-vqf`) is a from-scratch, pure-Rust demuxer for NTT TwinVQ (`.vqf`)
+files. It is licensed under the Mozilla Public License, v. 2.0, like the rest of Project Symphonia.
+
+NTT never published a specification of the container. The chunk layout (the `TWIN` marker, the
+`COMM`, `DSIZ`, `DATA` and metadata chunks), the mapping of chunk names to tags, the frame sizes
+per sample rate and bit rate, the packet format handed to the decoder (bit skip count, previous
+byte, frame bytes), and the seek calculation follow FFmpeg's `libavformat/vqf.c`
+(Copyright (c) 2009 Vitor Sessak), which is distributed under the GNU Lesser General Public
+License, version 2.1 or later. The LGPL-2.1+ terms apply to those derived portions.
