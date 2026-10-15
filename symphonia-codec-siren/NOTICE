@@ -1,0 +1,22 @@
+This crate (`symphonia-codec-siren`) is a pure-Rust Siren / G.722.1 decoder. It is licensed under
+the Mozilla Public License, v. 2.0, like the rest of Project Symphonia.
+
+The bitstream parsing, the vector quantizer centroids and Huffman trees (`src/tables.rs`,
+extracted programmatically), the noise substitution, the frame error concealment, the Windows Live
+Messenger ("MSN Siren") variant (its header, checksum and noise filling), and the transform and
+overlap-add structure follow FFmpeg's `libavcodec/siren.c`, which is distributed under the GNU
+Lesser General Public License, version 2.1 or later:
+
+Copyright (c) 2012 Youness Alaoui <kakaroto@kakaroto.homelinux.net>
+Copyright (c) 2018 Paul B Mahol
+Copyright (c) 2019 Lynne <dev@lynne.ee>
+
+The bit allocation ("categorize"), including its adjustment for bit rates above one bit per
+sample, and the parameters of the 14 kHz mode (G.722.1 Annex C: 28 regions, 640 sample frames, 5
+rate control bits) follow the ITU-T G.722.1 reference decoder from Polycom, as rendered by Steve
+Underwood's `libg722_1` (https://github.com/freeswitch/libg7221, LGPL-2.1+), which was also used as
+the oracle for the Siren 14 and 24/32/48 kbps test vectors:
+
+(C) 2004 Polycom, Inc. All rights reserved.
+
+The LGPL-2.1+ terms apply to those derived portions.
