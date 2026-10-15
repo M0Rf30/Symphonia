@@ -1,0 +1,11 @@
+This crate (`symphonia-format-qcp`) is a pure-Rust QCP demuxer. It is licensed under the Mozilla
+Public License, v. 2.0, like the rest of Project Symphonia.
+
+The file layout follows RFC 3625 ("The QCP File Format and Media Types for Speech Data"), and the
+packetization (the variable-rate rate-map table, the fixed packet size, the handling of truncated
+data chunks) and the codec GUIDs follow FFmpeg's `libavformat/qcp.c`, which is distributed under the
+GNU Lesser General Public License, version 2.1 or later.
+
+Copyright (c) 2009 Kenan Gillet
+
+The LGPL-2.1+ terms apply to those derived portions.
