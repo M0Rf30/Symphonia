@@ -8,6 +8,7 @@
 use std::io::{ErrorKind, Seek, SeekFrom};
 
 use symphonia_common::mpeg::es::EsParser;
+use symphonia_common::mpeg::s337m::S337mEs;
 use symphonia_common::mpeg::surround::{Ac3Es, DcaEs, TrueHdEs};
 use symphonia_core::codecs::CodecParameters;
 use symphonia_core::common::FourCc;
@@ -45,6 +46,9 @@ struct Kind {
     lead: usize,
     /// True if the duration can be estimated from the average size of the frames.
     cbr: bool,
+    /// True if the frames follow each other without a gap, so that the data is only a stream of
+    /// this kind if each frame starts where the previous ended.
+    contiguous: bool,
     /// Returns true if decoding can start at the frame.
     is_sync_point: fn(&[u8]) -> bool,
 }
@@ -58,6 +62,7 @@ const AC3: Kind = Kind {
     parser: || Box::new(Ac3Es::new()),
     lead: 0,
     cbr: true,
+    contiguous: true,
     is_sync_point: |_| true,
 };
 
@@ -70,6 +75,7 @@ const DTS: Kind = Kind {
     parser: || Box::new(DcaEs::new()),
     lead: 0,
     cbr: true,
+    contiguous: true,
     is_sync_point: |_| true,
 };
 
@@ -83,11 +89,27 @@ const TRUEHD: Kind = Kind {
     // The access unit header precedes the major sync word.
     lead: 4,
     cbr: false,
+    contiguous: true,
     // Only access units with a major sync can start decoding.
     is_sync_point: |au| {
         au.len() >= 8
             && u32::from_be_bytes([au[4], au[5], au[6], au[7]]) & 0xffff_fffe == 0xf872_6fba
     },
+};
+
+const S337M: Kind = Kind {
+    info: FormatInfo {
+        format: FormatId::new(FourCc::new(*b"S337")),
+        short_name: "s337m",
+        long_name: "SMPTE ST 337 Dolby E data burst stream",
+    },
+    parser: || Box::new(S337mEs::new()),
+    lead: 0,
+    // The bursts are spaced by the video frame, not by the size of the Dolby E frame.
+    cbr: false,
+    // The bursts have a preamble, and are separated by a guard band.
+    contiguous: false,
+    is_sync_point: |_| true,
 };
 
 /// Reads from `src` until `buf` is full or the end of the stream. Returns the length read, and
@@ -125,18 +147,21 @@ fn score_stream(kind: &Kind, mut src: ScopedStream<&mut MediaSourceStream<'_>>) 
     let mut next = 0u64;
 
     while let Some(frame) = parser.next_frame(eof) {
-        if frame.start != next {
-            break;
+        if kind.contiguous {
+            if frame.start != next {
+                break;
+            }
+
+            next += frame.data.len() as u64;
         }
 
-        next += frame.data.len() as u64;
         n_frames += 1;
     }
 
     Ok(if n_frames >= CONFIDENT_FRAMES {
         Score::Supported(255)
     }
-    else if eof && n_frames > 0 && next == len as u64 {
+    else if eof && n_frames > 0 && (!kind.contiguous || next == len as u64) {
         // The whole of a short stream is frames.
         Score::Supported(if n_frames > 1 { 200 } else { 100 })
     }
@@ -525,4 +550,15 @@ es_reader!(
     &["thd", "truehd", "mlp"],
     &["audio/vnd.dolby.mlp"],
     &[&[0xf8, 0x72, 0x6f, 0xba], &[0xf8, 0x72, 0x6f, 0xbb]]
+);
+
+es_reader!(
+    /// SMPTE ST 337 Dolby E elementary stream reader: the PCM of a pair of channels, with the Dolby
+    /// E frames carried in data bursts, as in `.s337m` files. The 16-bit, 20-bit, and 24-bit forms
+    /// are supported.
+    S337mReader,
+    S337M,
+    &["s337m"],
+    &["audio/vnd.dolby.dolby-e"],
+    &[&[0x72, 0xf8, 0x1f, 0x4e], &[0x20, 0x87, 0x6f, 0xf0], &[0x72, 0xf8, 0x96, 0x1f, 0x4e, 0xa5]]
 );

@@ -1,0 +1,25 @@
+[package]
+name = "symphonia-format-spdif"
+description = "Pure Rust IEC 61937 (S/PDIF) data burst demuxer (a part of project Symphonia)."
+authors = ["M0Rf30 <morf3089@gmail.com>"]
+readme = "README.md"
+categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
+keywords = ["audio", "media", "demuxer", "spdif", "iec61937"]
+# Common package metadata located in workspace Cargo.toml.
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+log = { workspace = true }
+symphonia-common = { workspace = true }
+symphonia-core = { workspace = true }
+
+[dev-dependencies]
+symphonia-testutil = { workspace = true }
+
+[lints]
+workspace = true

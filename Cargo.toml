@@ -11,6 +11,10 @@ members = [
     "symphonia-codec-adpcm",
     "symphonia-codec-alac",
     "symphonia-codec-speex",
+    "symphonia-codec-dolby-e",
+    "symphonia-codec-sbc",
+    "symphonia-codec-aptx",
+    "symphonia-codec-lc3",
     "symphonia-codec-nellymoser",
     "symphonia-codec-imc",
     "symphonia-codec-amrwb",
@@ -42,6 +46,8 @@ members = [
     "symphonia-format-asf",
     "symphonia-format-dsd",
     "symphonia-format-es",
+    "symphonia-format-bt",
+    "symphonia-format-spdif",
     "symphonia-format-flv",
     "symphonia-format-isomp4",
     "symphonia-format-mkv",
@@ -95,6 +101,10 @@ symphonia-codec-nellymoser = { version = "0.6.1", path = "symphonia-codec-nellym
 symphonia-codec-imc = { version = "0.6.1", path = "symphonia-codec-imc", default-features = false }
 symphonia-codec-truespeech = { version = "0.6.1", path = "symphonia-codec-truespeech", default-features = false }
 symphonia-codec-speex = { version = "0.6.1", path = "symphonia-codec-speex", default-features = false }
+symphonia-codec-dolby-e = { version = "0.6.1", path = "symphonia-codec-dolby-e", default-features = false }
+symphonia-codec-sbc = { version = "0.6.1", path = "symphonia-codec-sbc", default-features = false }
+symphonia-codec-aptx = { version = "0.6.1", path = "symphonia-codec-aptx", default-features = false }
+symphonia-codec-lc3 = { version = "0.6.1", path = "symphonia-codec-lc3", default-features = false }
 symphonia-codec-alac = { version = "0.6.1", path = "symphonia-codec-alac", default-features = false }
 symphonia-codec-dsd = { version = "0.6.1", path = "symphonia-codec-dsd", default-features = false }
 symphonia-codec-opus = { version = "0.6.1", path = "symphonia-codec-opus", default-features = false }
@@ -108,6 +118,8 @@ symphonia-format-caf = { version = "0.6.1", path = "symphonia-format-caf", defau
 symphonia-format-asf = { version = "0.6.1", path = "symphonia-format-asf", default-features = false }
 symphonia-format-dsd = { version = "0.6.1", path = "symphonia-format-dsd", default-features = false }
 symphonia-format-es = { version = "0.6.1", path = "symphonia-format-es", default-features = false }
+symphonia-format-bt = { version = "0.6.1", path = "symphonia-format-bt", default-features = false }
+symphonia-format-spdif = { version = "0.6.1", path = "symphonia-format-spdif", default-features = false }
 symphonia-format-flv = { version = "0.6.1", path = "symphonia-format-flv", default-features = false }
 symphonia-format-isomp4 = { version = "0.6.1", path = "symphonia-format-isomp4", default-features = false }
 symphonia-format-mkv = { version = "0.6.1", path = "symphonia-format-mkv", default-features = false }

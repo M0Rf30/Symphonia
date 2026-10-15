@@ -1,0 +1,25 @@
+[package]
+name = "symphonia-codec-dolby-e"
+description = "Pure Rust Dolby E decoder (a part of project Symphonia)."
+authors = ["Philip Deljanov <philip.deljanov@gmail.com>"]
+readme = "README.md"
+categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
+keywords = ["audio", "codec", "decoder", "dolby-e"]
+# Common package metadata located in workspace Cargo.toml.
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+log = { workspace = true }
+symphonia-core = { workspace = true }
+symphonia-common = { workspace = true }
+
+[dev-dependencies]
+symphonia-testutil = { workspace = true }
+
+[lints]
+workspace = true

@@ -345,3 +345,39 @@ path = "fuzz_targets/demux_asf.rs"
 test = false
 doc = false
 
+
+[[bin]]
+name = "decode_sbc"
+path = "fuzz_targets/decode_sbc.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_aptx"
+path = "fuzz_targets/decode_aptx.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_lc3"
+path = "fuzz_targets/decode_lc3.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_dolby_e"
+path = "fuzz_targets/decode_dolby_e.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_bt"
+path = "fuzz_targets/demux_bt.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_spdif"
+path = "fuzz_targets/demux_spdif.rs"
+test = false
+doc = false

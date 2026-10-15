@@ -1,0 +1,10 @@
+#software: Lavf63.1.102
+#tb 0: 1/90000
+#media_type 0: audio
+#codec_id 0: mp2
+#sample_rate 0: 22050
+#channel_layout_name 0: mono
+0,          0,          0,     4702,     1044, 0x238cc347
+0,       4702,       4702,     4702,     1046, 0x5916a995
+0,       9404,       9404,     4702,     1046, 0x9cfb942f
+0,      14106,      14106,     4702,     1046, 0x3842b7d6

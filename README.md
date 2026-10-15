@@ -16,7 +16,7 @@
 
 <p>
     <strong>
-        Symphonia is a pure Rust audio decoding and media demuxing library supporting AAC, AC-3, E-AC-3, ADPCM, AIFF, ALAC, APE, CAF, DSD, DTS, FLAC, FLV, MKV, MP1, MP2, MP3, mp3PRO, MP4, MPEG-PS, MPEG-TS, Musepack, Nellymoser, IMC/IAC, OGG, Opus, PCM, Speex, TrueHD, MLP, TrueSpeech, Vorbis, WAV, WavPack, and WebM.
+        Symphonia is a pure Rust audio decoding and media demuxing library supporting AAC, AC-3, E-AC-3, ADPCM, AIFF, ALAC, APE, CAF, DSD, DTS, FLAC, FLV, MKV, MP1, MP2, MP3, mp3PRO, MP4, MPEG-PS, MPEG-TS, Musepack, Nellymoser, IMC/IAC, OGG, Opus, PCM, SBC, aptX, LC3, Dolby E, Speex, TrueHD, MLP, TrueSpeech, Vorbis, WAV, WavPack, and WebM.
     </strong>
 </p>
 
@@ -84,7 +84,9 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | APE      | Excellent | Yes      | `ape-format` | No      | [`symphonia-bundle-ape`]      |
 | CAF      | Excellent | Yes      | `caf`        | No      | [`symphonia-format-caf`]    |
 | DSD (DSF, DFF) | Great | Yes    | `dsd`        | No      | [`symphonia-format-dsd`]      |
-| Elementary streams (AC-3, E-AC-3, DTS, TrueHD/MLP) | Great | Yes\*\* | `es`   | No      | [`symphonia-format-es`]       |
+| Elementary streams (AC-3, E-AC-3, DTS, TrueHD/MLP, Dolby E in SMPTE ST 337) | Great | Yes\*\* | `es`   | No      | [`symphonia-format-es`]       |
+| IEC 61937 / S/PDIF data bursts (AC-3, E-AC-3, DTS, MPEG audio, AAC) | Great | No | `spdif` | No | [`symphonia-format-spdif`] |
+| Bluetooth audio (SBC, aptX, aptX HD raw streams, LC3 `.lc3` files) | Great | Yes\*\*\*\* | `bt`   | No      | [`symphonia-format-bt`]       |
 | FLV (audio only) | Great | Yes\*\*\* | `flv`      | No      | [`symphonia-format-flv`]    |
 | ISO/MP4  | Excellent | Yes      | `isomp4`     | No      | [`symphonia-format-isomp4`] |
 | MKV/WebM | Excellent | Yes      | `mkv`        | Yes     | [`symphonia-format-mkv`]    |
@@ -99,6 +101,8 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 \*\* Raw elementary streams have no container timing: their duration is estimated (AC-3, DTS) or unknown (TrueHD/MLP), unless `prebuild_seek_index` is set and the source is seekable, in which case the stream is scanned and the duration is exact.
 
 \*\*\* FLV carries no end padding: only the leading decoder delay (e.g. Opus pre-skip) is trimmed.
+
+\*\*\*\* SBC streams are probed and seekable by frame. aptX and aptX HD streams have no signature, so they are never probed and must be opened with `AptxReader`/`AptxHdReader`; they can only seek to the start. LC3 files are probed and seekable by frame (the first frame after a seek starts from a blank decoder state).
 [`symphonia-format-qcp`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-qcp
 [`symphonia-format-amr`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-amr
 
@@ -114,6 +118,8 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 [`symphonia-format-riff`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-riff
 [`symphonia-format-dsd`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-dsd
 [`symphonia-format-es`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-es
+[`symphonia-format-spdif`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-spdif
+[`symphonia-format-bt`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-bt
 
 > [!TIP]
 > All formats can be enabled with the `all-formats` feature flag.
@@ -150,6 +156,10 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | Opus                         | Excellent | Yes     | `opus`       | Yes     | [`symphonia-codec-opus`]   |
 | PCM                          | Excellent | Yes     | `pcm`        | Yes     | [`symphonia-codec-pcm`]    |
 | Speex                        | Excellent | Yes     | `speex`      | No      | [`symphonia-codec-speex`]    |
+| SBC, mSBC                    | Excellent | No      | `sbc`        | No      | [`symphonia-codec-sbc`]      |
+| aptX, aptX HD                | Excellent | No      | `aptx`       | No      | [`symphonia-codec-aptx`]     |
+| LC3, LC3plus (incl. high resolution) | Great | No   | `lc3`        | No      | [`symphonia-codec-lc3`]      |
+| Dolby E                      | Great     | No      | `dolby-e`    | No      | [`symphonia-codec-dolby-e`]  |
 | TrueHD, MLP                  | Excellent | No      | `truehd`     | No      | [`symphonia-codec-truehd`]   |
 | TrueSpeech                   | Excellent | No      | `truespeech` | No      | [`symphonia-codec-truespeech`]|
 | Vorbis                       | Excellent | Yes     | `vorbis`     | Yes     | [`symphonia-codec-vorbis`] |
@@ -189,6 +199,10 @@ mp3PRO streams decode as plain MP3 by default. The `mp3pro` feature adds `Mp3Pro
 [`symphonia-codec-wma`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-wma
 [`symphonia-format-asf`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-asf
 [`symphonia-codec-speex`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-speex
+[`symphonia-codec-sbc`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-sbc
+[`symphonia-codec-aptx`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-aptx
+[`symphonia-codec-lc3`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-lc3
+[`symphonia-codec-dolby-e`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-dolby-e
 [`symphonia-codec-truehd`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-truehd
 [`symphonia-codec-truespeech`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-truespeech
 [`symphonia-codec-wavpack`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-wavpack

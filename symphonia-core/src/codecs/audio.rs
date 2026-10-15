@@ -484,6 +484,8 @@ pub mod well_known {
     pub const CODEC_ID_AC3: AudioCodecId = AudioCodecId(0x1008);
     /// Enhanced AC-3 (EAC-3, ATSC A/52B)
     pub const CODEC_ID_EAC3: AudioCodecId = AudioCodecId(0x1009);
+    /// Dolby E (SMPTE ST 337 data type 28)
+    pub const CODEC_ID_DOLBY_E: AudioCodecId = AudioCodecId(0x1050);
     /// Dolby AC-4 (ETSI TS 103 190)
     pub const CODEC_ID_AC4: AudioCodecId = AudioCodecId(0x100a);
     /// DTS Coherent Acoustics (DCA/DTS)
@@ -518,6 +520,8 @@ pub mod well_known {
     pub const CODEC_ID_LDAC: AudioCodecId = AudioCodecId(0x1018);
     /// Bink Audio
     pub const CODEC_ID_BINK_AUDIO: AudioCodecId = AudioCodecId(0x1019);
+    /// LC3 / LC3plus (ETSI TS 103 634)
+    pub const CODEC_ID_LC3: AudioCodecId = AudioCodecId(0x101a);
     /// Smacker Audio
     pub const CODEC_ID_SMACKER_AUDIO: AudioCodecId = AudioCodecId(0x1020);
     /// Nellymoser Asao

@@ -1,0 +1,13 @@
+This crate (`symphonia-format-spdif`) is a pure-Rust IEC 61937 data burst demuxer. It is licensed
+under the Mozilla Public License, v. 2.0, like the rest of Project Symphonia (see `LICENSE`).
+
+Algorithms derived from FFmpeg
+------------------------------
+
+The burst framing follows FFmpeg's `libavformat/spdifdec.c` (Copyright (c) 2009 Bartlomiej Wolowiec,
+Copyright (c) 2010 Anssi Hannula) and `libavformat/spdif.h` (Copyright (c) 2009 Bartlomiej
+Wolowiec): the sync word search, the data type values, the burst repetition periods, the payload
+length in bits (bytes for E-AC-3) rounded up to 16 bits, the 16-bit byte swap, and the ADTS
+raw data block count. These files are licensed under the GNU Lesser General Public License,
+version 2.1 or later. Only the algorithms and constants were reimplemented; no source code was
+copied.

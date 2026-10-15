@@ -1,0 +1,24 @@
+[package]
+name = "symphonia-codec-lc3"
+description = "Pure Rust LC3 / LC3plus decoder (a part of project Symphonia)."
+authors = ["Philip Deljanov <philip.deljanov@gmail.com>"]
+readme = "README.md"
+categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
+keywords = ["audio", "codec", "decoder", "lc3"]
+# Common package metadata located in workspace Cargo.toml.
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+log = { workspace = true }
+symphonia-core = { workspace = true }
+
+[dev-dependencies]
+symphonia-testutil = { workspace = true }
+
+[lints]
+workspace = true

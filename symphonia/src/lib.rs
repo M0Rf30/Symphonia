@@ -31,7 +31,8 @@
 //! | AMR (`.amr`, `.awb`) | `amr` | No   | No      |
 //! | ASF/WMA (`.wma`, `.asf`) | `asf` | Yes   | No      |
 //! | CAF      | `caf`        | No       | No      |
-//! | Elementary streams (AC-3, E-AC-3, DTS, TrueHD/MLP) | `es` | No | No |
+//! | Elementary streams (AC-3, E-AC-3, DTS, TrueHD/MLP, Dolby E) | `es` | No | No |
+//! | Bluetooth audio (`.sbc`, `.aptx`, `.aptxhd`, `.lc3`) | `bt` | No | No |
 //! | FLV (audio) | `flv`     | No       | No      |
 //! | ISO/MP4  | `isomp4`     | No       | No      |
 //! | MPEG-PS (audio) | `mpegps` | No    | No      |
@@ -78,6 +79,10 @@
 //! | Opus     | `opus`       | Yes     | Yes     |
 //! | PCM      | `pcm`        | Yes     | Yes     |
 //! | Speex    | `speex`      | Yes     | No      |
+//! | SBC, mSBC | `sbc`       | Yes     | No      |
+//! | aptX, aptX HD | `aptx`  | Yes     | No      |
+//! | LC3, LC3plus | `lc3`    | No      | No      |
+//! | Dolby E  | `dolby-e`    | No      | No      |
 //! | TrueHD, MLP | `truehd`  | No      | No      |
 //! | Vorbis   | `vorbis`     | Yes     | Yes     |
 //! | GSM 06.10, Microsoft GSM | `gsm` | No | No |
@@ -210,6 +215,14 @@ pub mod default {
         pub use symphonia_codec_pcm::PcmDecoder;
         #[cfg(feature = "speex")]
         pub use symphonia_codec_speex::SpeexDecoder;
+        #[cfg(feature = "sbc")]
+        pub use symphonia_codec_sbc::SbcDecoder;
+        #[cfg(feature = "aptx")]
+        pub use symphonia_codec_aptx::AptxDecoder;
+        #[cfg(feature = "lc3")]
+        pub use symphonia_codec_lc3::Lc3Decoder;
+        #[cfg(feature = "dolby-e")]
+        pub use symphonia_codec_dolby_e::DolbyEDecoder;
         #[cfg(feature = "truehd")]
         pub use symphonia_codec_truehd::TrueHdDecoder;
         #[cfg(feature = "vorbis")]
@@ -259,7 +272,11 @@ pub mod default {
         #[cfg(feature = "asf")]
         pub use symphonia_format_asf::AsfReader;
         #[cfg(feature = "es")]
-        pub use symphonia_format_es::{Ac3Reader, DtsReader, TrueHdReader};
+        pub use symphonia_format_es::{Ac3Reader, DtsReader, S337mReader, TrueHdReader};
+        #[cfg(feature = "spdif")]
+        pub use symphonia_format_spdif::SpdifReader;
+        #[cfg(feature = "bt")]
+        pub use symphonia_format_bt::{AptxHdReader, AptxReader, Lc3Reader, SbcReader};
         #[cfg(feature = "flv")]
         pub use symphonia_format_flv::FlvReader;
         #[cfg(feature = "isomp4")]
@@ -412,6 +429,18 @@ pub mod default {
         #[cfg(feature = "speex")]
         registry.register_audio_decoder::<codecs::SpeexDecoder>();
 
+        #[cfg(feature = "sbc")]
+        registry.register_audio_decoder::<codecs::SbcDecoder>();
+
+        #[cfg(feature = "aptx")]
+        registry.register_audio_decoder::<codecs::AptxDecoder>();
+
+        #[cfg(feature = "lc3")]
+        registry.register_audio_decoder::<codecs::Lc3Decoder>();
+
+        #[cfg(feature = "dolby-e")]
+        registry.register_audio_decoder::<codecs::DolbyEDecoder>();
+
         #[cfg(feature = "truehd")]
         registry.register_audio_decoder::<codecs::TrueHdDecoder>();
 
@@ -462,6 +491,21 @@ pub mod default {
 
         #[cfg(feature = "es")]
         probe.register_format::<formats::TrueHdReader<'_>>();
+
+        #[cfg(feature = "es")]
+        probe.register_format::<formats::S337mReader<'_>>();
+
+        #[cfg(feature = "spdif")]
+        probe.register_format::<formats::SpdifReader<'_>>();
+
+        // SBC frames start with a 1-byte sync word, so it is only tried after the other formats.
+        #[cfg(feature = "bt")]
+        probe.register_format_at_tier::<formats::SbcReader<'_>>(
+            symphonia_core::common::Tier::Fallback,
+        );
+
+        #[cfg(feature = "bt")]
+        probe.register_format::<formats::Lc3Reader<'_>>();
 
         #[cfg(feature = "flv")]
         probe.register_format::<formats::FlvReader<'_>>();

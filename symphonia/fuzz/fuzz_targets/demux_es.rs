@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use symphonia::default::formats::{Ac3Reader, DtsReader, TrueHdReader};
+use symphonia::default::formats::{Ac3Reader, DtsReader, S337mReader, TrueHdReader};
 use symphonia_fuzz::fuzz_demuxer;
 
 fuzz_target!(|data: Vec<u8>| {
@@ -10,15 +10,18 @@ fuzz_target!(|data: Vec<u8>| {
         return;
     };
     let stream = stream.to_vec();
-    match select % 3 {
+    match select % 4 {
         0 => fuzz_demuxer!(stream, |mss, fmt: &FormatOptions, _: &MetadataOptions| {
             Ac3Reader::try_new(mss, fmt.clone())
         }),
         1 => fuzz_demuxer!(stream, |mss, fmt: &FormatOptions, _: &MetadataOptions| {
             DtsReader::try_new(mss, fmt.clone())
         }),
-        _ => fuzz_demuxer!(stream, |mss, fmt: &FormatOptions, _: &MetadataOptions| {
+        2 => fuzz_demuxer!(stream, |mss, fmt: &FormatOptions, _: &MetadataOptions| {
             TrueHdReader::try_new(mss, fmt.clone())
+        }),
+        _ => fuzz_demuxer!(stream, |mss, fmt: &FormatOptions, _: &MetadataOptions| {
+            S337mReader::try_new(mss, fmt.clone())
         }),
     }
 });

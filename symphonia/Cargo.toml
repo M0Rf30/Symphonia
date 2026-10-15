@@ -38,6 +38,8 @@ gsm = ["dep:symphonia-codec-gsm"]
 amr = ["dep:symphonia-format-amr"]
 caf = ["dep:symphonia-format-caf"]
 es = ["dep:symphonia-format-es"]
+spdif = ["dep:symphonia-format-spdif"]
+bt = ["dep:symphonia-format-bt"]
 flv = ["dep:symphonia-format-flv"]
 isomp4 = ["dep:symphonia-format-isomp4"]
 mkv = ["dep:symphonia-format-mkv"]
@@ -66,6 +68,10 @@ ogg = ["dep:symphonia-format-ogg"]
 opus = ["dep:symphonia-codec-opus"]
 pcm = ["dep:symphonia-codec-pcm"]
 speex = ["dep:symphonia-codec-speex"]
+sbc = ["dep:symphonia-codec-sbc"]
+aptx = ["dep:symphonia-codec-aptx"]
+lc3 = ["dep:symphonia-codec-lc3"]
+dolby-e = ["dep:symphonia-codec-dolby-e"]
 truehd = ["dep:symphonia-codec-truehd"]
 truespeech = ["dep:symphonia-codec-truespeech"]
 wma = ["dep:symphonia-codec-wma"]
@@ -112,6 +118,10 @@ all-codecs = [
     "opus",
     "pcm",
     "speex",
+    "sbc",
+    "aptx",
+    "lc3",
+    "dolby-e",
     "truehd",
     "truespeech",
     "wma",
@@ -125,6 +135,8 @@ all-formats = [
     "ape-format",
     "dsd",
     "es",
+    "spdif",
+    "bt",
     "flv",
     "isomp4",
     "mkv",
@@ -275,6 +287,22 @@ optional = true
 workspace = true
 optional = true
 
+[dependencies.symphonia-codec-sbc]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-aptx]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-lc3]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-dolby-e]
+workspace = true
+optional = true
+
 [dependencies.symphonia-codec-truehd]
 workspace = true
 optional = true
@@ -324,6 +352,14 @@ workspace = true
 optional = true
 
 [dependencies.symphonia-format-es]
+workspace = true
+optional = true
+
+[dependencies.symphonia-format-spdif]
+workspace = true
+optional = true
+
+[dependencies.symphonia-format-bt]
 workspace = true
 optional = true
 

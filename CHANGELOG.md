@@ -21,6 +21,12 @@ Changes since upstream `v0.6.1`.
   (`symphonia-codec-speex`), Nellymoser Asao (`symphonia-codec-nellymoser`), mp3PRO
   (`symphonia-bundle-mp3`, feature `mp3pro`), DSD and DST (`symphonia-codec-dsd`), and a native
   Opus decoder with a CELT-only encoder (`symphonia-codec-opus`).
+- Decoders: SBC and mSBC (`symphonia-codec-sbc`, feature `sbc`), aptX and aptX HD
+  (`symphonia-codec-aptx`, feature `aptx`), LC3 and LC3plus including high resolution
+  (`symphonia-codec-lc3`, feature `lc3`) and Dolby E (`symphonia-codec-dolby-e`, feature
+  `dolby-e`), with the raw SBC/aptX/aptX HD streams and `.lc3` files (`symphonia-format-bt`,
+  feature `bt`), IEC 61937 data bursts (`symphonia-format-spdif`, feature `spdif`) and SMPTE ST 337
+  Dolby E streams (`symphonia-format-es`).
 - Decoder: GSM 06.10 full-rate and Microsoft GSM 6.10 (`symphonia-codec-gsm`, feature `gsm`),
 - Decoder: GSM 06.10 full-rate and Microsoft GSM 6.10 (`symphonia-codec-gsm`, feature `gsm`),
   mapped from WAVE `0x0031`/`0x0032`/`0x1500`, AIFF-C `GSM `, CAF `agsm`/`ms\0\x31`, QuickTime

@@ -1,0 +1,10 @@
+This crate (`symphonia-codec-lc3`) is a pure-Rust LC3 and LC3plus decoder. It is licensed under
+the Mozilla Public License, v. 2.0, like the rest of Project Symphonia (see `LICENSE`).
+
+The decoder implements ETSI TS 103 634 (LC3, V1.4.1 and later, which includes LC3plus and the
+high resolution modes), and is a function-by-function port of the decoder of liblc3
+(https://github.com/google/liblc3, `src/*.c`, `src/*.h`, `include/*.h`), Copyright (c) 2022
+Google LLC, distributed under the Apache License, version 2.0
+(https://www.apache.org/licenses/LICENSE-2.0). The tables (`src/tables.rs`) are extracted
+programmatically from `src/tables.c` of liblc3. The output of the decoder is tested against the
+`dlc3` tool of liblc3.

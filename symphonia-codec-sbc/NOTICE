@@ -1,0 +1,12 @@
+This crate (`symphonia-codec-sbc`) is a pure-Rust SBC (Bluetooth A2DP) and mSBC decoder. It is
+licensed under the Mozilla Public License, v. 2.0, like the rest of Project Symphonia (see
+`LICENSE`).
+
+The frame layout, CRC-8, bit allocation and dequantization follow the Advanced Audio Distribution
+Profile specification (A2DP v1.3, section 12.9), as implemented by FFmpeg's `libavcodec/sbcdec.c`,
+`libavcodec/sbc.c` and `libavcodec/sbc_parser.c`. The synthesis filter and the prototype and
+synthesis matrix constants (`src/tables.rs`, extracted programmatically) are those of FFmpeg's
+`libavcodec/sbcdec.c` and `libavcodec/sbcdec_data.h`. FFmpeg's SBC code is distributed under the
+GNU Lesser General Public License, version 2.1 or later, and is derived from the BlueZ SBC codec
+(Copyright (C) 2004-2010 Marcel Holtmann, 2004-2005 Henryk Ploetz, 2005-2006 Brad Midgley,
+Lennart Poettering, Siarhei Siamashka, Nokia Corporation), also LGPL-2.1+.

@@ -22,6 +22,7 @@
 //! | [`Ac3Reader`]   | AC-3 and E-AC-3            | `.ac3`, `.eac3`, `.ec3`  |
 //! | [`DtsReader`]   | DTS (core, and DTS-HD)     | `.dts`, `.dtshd`, `.dtsma` |
 //! | [`TrueHdReader`]| Dolby TrueHD and MLP       | `.thd`, `.truehd`, `.mlp` |
+//! | [`S337mReader`] | Dolby E in SMPTE ST 337 bursts | `.s337m`             |
 //!
 //! The streams are split into frames exactly as FFmpeg's parsers do (see
 //! `symphonia_common::mpeg::surround`). The readers are found by scanning for the sync words of
@@ -36,7 +37,14 @@
 //! the exact duration of all three, and a complete seek index. The readers seek
 //! by scanning forward from the nearest frame they have seen, so seeking into a part of a seekable
 //! stream that was not yet read scans the stream up to it.
+//!
+//! The SMPTE ST 337 reader splits the bursts of the data type of Dolby E (in the 16-bit, 20-bit,
+//! and 24-bit forms of the PCM), as FFmpeg's `s337m` demuxer does: a packet is the payload of a
+//! burst in big-endian words, without the preamble. The duration is that of the frames, and is
+//! only known if the source is scanned. Dolby E that is carried in the PCM of a WAV or MXF file
+//! (which are PCM, and cannot be told from it) is not detected: extract the PCM to a file with
+//! the extension `.s337m`, or feed the bursts to this reader.
 
 mod reader;
 
-pub use reader::{Ac3Reader, DtsReader, TrueHdReader};
+pub use reader::{Ac3Reader, DtsReader, S337mReader, TrueHdReader};

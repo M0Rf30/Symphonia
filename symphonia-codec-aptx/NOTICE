@@ -1,0 +1,9 @@
+This crate (`symphonia-codec-aptx`) is a pure-Rust aptX and aptX HD decoder. It is licensed under
+the Mozilla Public License, v. 2.0, like the rest of Project Symphonia (see `LICENSE`).
+
+aptX has no public specification. The decoder is ported from FFmpeg's `libavcodec/aptxdec.c`,
+`libavcodec/aptx.c` and `libavcodec/aptx.h` (Copyright (C) 2017 Aurelien Jacobs, 2018 Mauro
+Gaspari, Supraja Meedinti), which were written from the libopenaptx work of Pali Rohar, and are
+distributed under the GNU Lesser General Public License, version 2.1 or later. The quantization
+tables and the QMF coefficients (`src/tables.rs`) are extracted programmatically from `aptx.c` and
+`aptx.h`.

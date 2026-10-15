@@ -1,0 +1,8 @@
+This crate (`symphonia-codec-dolby-e`) is a pure-Rust Dolby E decoder. It is licensed under the
+Mozilla Public License, v. 2.0, like the rest of Project Symphonia (see `LICENSE`).
+
+Dolby E has no public specification. The decoder is ported from FFmpeg's `libavcodec/dolby_e.c`,
+`libavcodec/dolby_e_parse.c` and `libavcodec/dolby_e.h`, and the data burst framing in
+`symphonia-common` from `libavformat/s337m.c` (Copyright (c) 2017 foo86), which are distributed
+under the GNU Lesser General Public License, version 2.1 or later. The tables (`src/tables.rs`)
+are extracted programmatically from `dolby_e.c`.

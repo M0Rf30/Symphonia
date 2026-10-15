@@ -31,6 +31,10 @@ These targets bypass the demuxer and feed data directly to the codec implementat
 * **`decode_nellymoser`**: Nellymoser
 * **`decode_wma`**: Windows Media Audio 1 and 2 (the first byte selects the version, channels,
   stream flags and sample rate)
+* **`decode_sbc`**, **`decode_aptx`**: SBC/mSBC, and aptX/aptX HD (the first byte selects)
+* **`decode_lc3`**: LC3 and LC3plus (the first two bytes select the sample rate, frame duration,
+  high resolution mode and channels)
+* **`decode_dolby_e`**: Dolby E
 
 The last five targets read the input as a sequence of packets, each prefixed by its
 16-bit little-endian length (`fuzz_audio_decoder_packets`), so state carried between packets is
@@ -60,7 +64,9 @@ These targets instantiate a specific `FormatReader` directly, bypassing probing.
 * **`demux_adts`**: AAC ADTS
 * **`demux_adif`**: AAC ADIF
 * **`demux_loas`**: AAC LOAS/LATM
-* **`demux_es`**: AC-3/E-AC-3, DTS and TrueHD/MLP elementary streams (first byte selects the reader)
+* **`demux_es`**: AC-3/E-AC-3, DTS, TrueHD/MLP and SMPTE ST 337 Dolby E elementary streams (first byte selects the reader)
+* **`demux_bt`**: SBC, aptX, aptX HD and LC3 (first byte selects the reader)
+* **`demux_spdif`**: IEC 61937 data bursts
 
 Each target is a `[[bin]]` entry in `Cargo.toml` plus a file in `fuzz_targets/`. `run_all.sh` enumerates `fuzz_targets/*.rs`, so new targets only need those two.
 

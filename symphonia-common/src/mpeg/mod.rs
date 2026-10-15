@@ -13,9 +13,11 @@
 #![allow(clippy::manual_range_contains)]
 
 pub mod audio;
+pub mod dolby_e;
 pub mod es;
 pub mod formats;
 pub mod pes;
+pub mod s337m;
 pub mod seek;
 pub mod surround;
 pub(crate) mod sync_buf;

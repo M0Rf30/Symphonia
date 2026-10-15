@@ -1,0 +1,27 @@
+[package]
+name = "symphonia-format-bt"
+description = "Pure Rust SBC, aptX, aptX HD and LC3 (Bluetooth audio) stream demuxers (a part of project Symphonia)."
+authors = ["M0Rf30 <morf3089@gmail.com>"]
+readme = "README.md"
+categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
+keywords = ["audio", "media", "demuxer", "sbc", "aptx", "lc3"]
+# Common package metadata located in workspace Cargo.toml.
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+log = { workspace = true }
+symphonia-codec-aptx = { workspace = true }
+symphonia-codec-lc3 = { workspace = true }
+symphonia-codec-sbc = { workspace = true }
+symphonia-core = { workspace = true }
+
+[dev-dependencies]
+symphonia-testutil = { workspace = true }
+
+[lints]
+workspace = true
