@@ -474,6 +474,8 @@ pub mod well_known {
     pub const CODEC_ID_OPUS: AudioCodecId = AudioCodecId(0x1001);
     /// Speex
     pub const CODEC_ID_SPEEX: AudioCodecId = AudioCodecId(0x1002);
+    /// CELT (the pre-standard codec that was merged into Opus, as muxed by `celtenc`)
+    pub const CODEC_ID_CELT: AudioCodecId = AudioCodecId(0x1040);
     /// Musepack
     pub const CODEC_ID_MUSEPACK: AudioCodecId = AudioCodecId(0x1003);
     /// MPEG Layer 1 (MP1)
@@ -500,12 +502,10 @@ pub mod well_known {
     pub const CODEC_ID_ATRAC3: AudioCodecId = AudioCodecId(0x100d);
     /// Adaptive Transform Acoustic Coding 3+ (ATRAC3+)
     pub const CODEC_ID_ATRAC3PLUS: AudioCodecId = AudioCodecId(0x100e);
-    /// CELT (the pre-standard codec that was merged into Opus, as muxed by `celtenc`)
-    pub const CODEC_ID_CELT: AudioCodecId = AudioCodecId(0x1040);
     /// Adaptive Transform Acoustic Coding 9 (ATRAC9)
     pub const CODEC_ID_ATRAC9: AudioCodecId = AudioCodecId(0x100f);
-    /// Windows Media Audio
-    pub const CODEC_ID_WMA: AudioCodecId = AudioCodecId(0x1010);
+    /// Windows Media Audio 1 (WMA v1, WAVE format tag 0x0160)
+    pub const CODEC_ID_WMAV1: AudioCodecId = AudioCodecId(0x1010);
     /// RealAudio 1.0 14.4K (IS-54 VSELP)
     pub const CODEC_ID_RA10: AudioCodecId = AudioCodecId(0x1011);
     /// RealAudio 2.0 28.8K (G.728 LD-CELP)
@@ -530,10 +530,55 @@ pub mod well_known {
     pub const CODEC_ID_SMACKER_AUDIO: AudioCodecId = AudioCodecId(0x1020);
     /// Nellymoser Asao
     pub const CODEC_ID_NELLYMOSER: AudioCodecId = AudioCodecId(0x1021);
+    /// QDesign Music Codec 2 (QDM2)
+    pub const CODEC_ID_QDM2: AudioCodecId = AudioCodecId(0x1022);
+    /// QDesign Music Codec 1 (QDMC)
+    pub const CODEC_ID_QDMC: AudioCodecId = AudioCodecId(0x1023);
+    /// Windows Media Audio 2 (WMA v2, WAVE format tag 0x0161)
+    pub const CODEC_ID_WMAV2: AudioCodecId = AudioCodecId(0x1030);
+    /// Windows Media Audio 9 Professional (WMA Pro, WAVE format tag 0x0162)
+    pub const CODEC_ID_WMAPRO: AudioCodecId = AudioCodecId(0x1031);
+    /// Windows Media Audio 9 Lossless (WAVE format tag 0x0163)
+    pub const CODEC_ID_WMALOSSLESS: AudioCodecId = AudioCodecId(0x1032);
+    /// Windows Media Audio 9 Voice (WAVE format tag 0x000a)
+    pub const CODEC_ID_WMAVOICE: AudioCodecId = AudioCodecId(0x1033);
+
+    // Speech codecs
+    //--------------
+    /// AMR narrowband (3GPP TS 26.090)
+    pub const CODEC_ID_AMR_NB: AudioCodecId = AudioCodecId(0x1100);
+    /// AMR wideband (3GPP TS 26.190, ITU-T G.722.2)
+    pub const CODEC_ID_AMR_WB: AudioCodecId = AudioCodecId(0x1101);
+    /// ITU-T G.729 (CS-ACELP)
+    pub const CODEC_ID_G729: AudioCodecId = AudioCodecId(0x1102);
+    /// ITU-T G.723.1
+    pub const CODEC_ID_G723_1: AudioCodecId = AudioCodecId(0x1103);
+    /// Internet Low Bitrate Codec (iLBC, RFC 3951)
+    pub const CODEC_ID_ILBC: AudioCodecId = AudioCodecId(0x1104);
+    /// QCELP / PureVoice (TIA IS-733)
+    pub const CODEC_ID_QCELP: AudioCodecId = AudioCodecId(0x1105);
+    /// Enhanced Variable Rate Codec (EVRC, TIA IS-127)
+    pub const CODEC_ID_EVRC: AudioCodecId = AudioCodecId(0x1106);
+    /// Siren (ITU-T G.722.1 / G.722.1 Annex C)
+    pub const CODEC_ID_SIREN: AudioCodecId = AudioCodecId(0x1107);
+    /// MSN Siren
+    pub const CODEC_ID_MSN_SIREN: AudioCodecId = AudioCodecId(0x1108);
+    /// DSP Group TrueSpeech
+    pub const CODEC_ID_TRUESPEECH: AudioCodecId = AudioCodecId(0x1109);
+    /// Macintosh Audio Compression and Expansion 3:1 (MACE3)
+    pub const CODEC_ID_MACE3: AudioCodecId = AudioCodecId(0x110a);
+    /// Macintosh Audio Compression and Expansion 6:1 (MACE6)
+    pub const CODEC_ID_MACE6: AudioCodecId = AudioCodecId(0x110b);
     /// Intel Music Coder (IMC)
     pub const CODEC_ID_IMC: AudioCodecId = AudioCodecId(0x110c);
+    /// VQF TwinVQ
+    pub const CODEC_ID_TWINVQ: AudioCodecId = AudioCodecId(0x110d);
     /// Indeo Audio Coder (IAC), the stereo-capable variant of IMC
     pub const CODEC_ID_IAC: AudioCodecId = AudioCodecId(0x110e);
+    /// GSM 06.10 full-rate (ETSI EN 300 961, 33-byte frames)
+    pub const CODEC_ID_GSM: AudioCodecId = AudioCodecId(0x1140);
+    /// Microsoft GSM 6.10 (WAVE format tag 0x0031, 65-byte blocks of two frames)
+    pub const CODEC_ID_GSM_MS: AudioCodecId = AudioCodecId(0x1141);
 
     // Compressed lossless audio codecs
     //---------------------------------
@@ -552,6 +597,8 @@ pub mod well_known {
     pub const CODEC_ID_RALF: AudioCodecId = AudioCodecId(0x2005);
     /// Dolby TrueHD Lossless codec
     pub const CODEC_ID_TRUEHD: AudioCodecId = AudioCodecId(0x2006);
+    /// MPEG-4 Audio Lossless Coding (ALS)
+    pub const CODEC_ID_ALS: AudioCodecId = AudioCodecId(0x2007);
     /// Tom's lossless Audio Kompressor (TAK)
     pub const CODEC_ID_TAK: AudioCodecId = AudioCodecId(0x2010);
     /// Shorten (SHN)
@@ -586,7 +633,3 @@ pub mod well_known {
         pub const CODEC_PROFILE_AAC_USAC: CodecProfile = CodecProfile(41);
     }
 }
-    /// GSM 06.10 full-rate (ETSI EN 300 961, 33-byte frames)
-    pub const CODEC_ID_GSM: AudioCodecId = AudioCodecId(0x1140);
-    /// Microsoft GSM 6.10 (WAVE format tag 0x0031, 65-byte blocks of two frames)
-    pub const CODEC_ID_GSM_MS: AudioCodecId = AudioCodecId(0x1141);

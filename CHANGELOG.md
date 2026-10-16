@@ -21,6 +21,8 @@ Changes since upstream `v0.6.1`.
   (`symphonia-codec-speex`), Nellymoser Asao (`symphonia-codec-nellymoser`), mp3PRO
   (`symphonia-bundle-mp3`, feature `mp3pro`), DSD and DST (`symphonia-codec-dsd`), and a native
   Opus decoder with a CELT-only encoder (`symphonia-codec-opus`).
+- Decoder: QDesign Music Codec 1 and 2 (`symphonia-codec-qdesign`, feature `qdesign`), for
+  QuickTime/MP4 tracks (`QDMC`/`QDM2`, including FFmpeg-remuxed `glbl` extra data).
 - Decoder: GSM 06.10 full-rate and Microsoft GSM 6.10 (`symphonia-codec-gsm`, feature `gsm`),
   mapped from WAVE `0x0031`/`0x0032`/`0x1500`, AIFF-C `GSM `, CAF `agsm`/`ms\0\x31`, QuickTime
   `agsm`/`ms\0\x31` and Matroska `A_MS/ACM`.
