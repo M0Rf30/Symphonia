@@ -11,7 +11,7 @@ use symphonia_core::codecs::audio::{
     AudioCodecId, AudioCodecParameters, AudioDecoder, AudioDecoderOptions, FinalizeResult,
 };
 use symphonia_core::codecs::registry::{RegisterableAudioDecoder, SupportedAudioCodec};
-use symphonia_core::errors::{Result, decode_error, unsupported_error};
+use symphonia_core::errors::{Result, decode_error, reset_error, unsupported_error};
 use symphonia_core::io::FiniteStream;
 use symphonia_core::packet::PacketRef;
 use symphonia_core::support_audio_codec;
@@ -100,12 +100,20 @@ impl MpaDecoder {
             self.buf = AudioBuffer::new(header.spec(), 1152);
         }
         else {
-            // Ensure the packet contains an audio frame with the same signal specification as the
-            // buffer.
-            //
-            // TODO: Is it worth it to support changing signal specifications?
-            if self.buf.spec() != &header.spec() {
-                return decode_error("mpa: invalid audio buffer signal spec for packet");
+            // If the packet contains an audio frame with a different signal specification than the
+            // buffer (e.g., concatenated streams), the decoder cannot continue the previous
+            // stream: the Layer 3 bit reservoir and the overlap-add and synthesis history belong
+            // to it. Discard that state and the buffer, and report that the audio specification
+            // of the decoded audio is about to change. The decoder is ready to decode this
+            // packet, or the next one, with the new specification.
+            let spec = header.spec();
+
+            if self.buf.spec() != &spec {
+                self.state = State::new(self.params.codec);
+                self.buf = Default::default();
+                self.params.with_sample_rate(spec.rate()).with_channels(spec.channels().clone());
+
+                return reset_error();
             }
         }
 
