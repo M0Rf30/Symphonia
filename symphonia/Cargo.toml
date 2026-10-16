@@ -34,10 +34,10 @@ alac = ["dep:symphonia-codec-alac"]
 ape-format = ["dep:symphonia-bundle-ape"]
 dca = ["dep:symphonia-codec-dca"]
 dsd = ["dep:symphonia-codec-dsd", "dep:symphonia-format-dsd"]
-flac = ["dep:symphonia-bundle-flac"]
 gsm = ["dep:symphonia-codec-gsm"]
-amr = ["dep:symphonia-format-amr"]
+flac = ["dep:symphonia-bundle-flac"]
 caf = ["dep:symphonia-format-caf"]
+amr = ["dep:symphonia-format-amr"]
 es = ["dep:symphonia-format-es"]
 spdif = ["dep:symphonia-format-spdif"]
 bt = ["dep:symphonia-format-bt"]
@@ -53,43 +53,43 @@ tta = ["dep:symphonia-bundle-tta"]
 tak = ["dep:symphonia-bundle-tak"]
 mp1 = ["dep:symphonia-bundle-mp3", "symphonia-bundle-mp3/mp1"]
 mp2 = ["dep:symphonia-bundle-mp3", "symphonia-bundle-mp3/mp2"]
+mp3 = ["dep:symphonia-bundle-mp3", "symphonia-bundle-mp3/mp3"]
+mp3pro = ["mp3", "symphonia-bundle-mp3/mp3pro"]
 mace = ["dep:symphonia-codec-mace"]
-qcp = ["dep:symphonia-format-qcp"]
-amrwb = ["dep:symphonia-codec-amrwb"]
-amrnb = ["dep:symphonia-codec-amrnb"]
+nellymoser = ["dep:symphonia-codec-nellymoser"]
+qcelp = ["dep:symphonia-codec-qcelp"]
 evrc = ["dep:symphonia-codec-evrc"]
-als = ["dep:symphonia-codec-als"]
+qcp = ["dep:symphonia-format-qcp"]
 atrac = ["dep:symphonia-codec-atrac"]
 atrac3plus = ["dep:symphonia-codec-atrac3plus"]
 atrac9 = ["dep:symphonia-codec-atrac9"]
 cook = ["dep:symphonia-codec-cook"]
+imc = ["dep:symphonia-codec-imc"]
 ra = ["dep:symphonia-codec-ra"]
 ralf = ["dep:symphonia-codec-ralf"]
 sipr = ["dep:symphonia-codec-sipr"]
-qcelp = ["dep:symphonia-codec-qcelp"]
-siren = ["dep:symphonia-codec-siren"]
-mp3 = ["dep:symphonia-bundle-mp3", "symphonia-bundle-mp3/mp3"]
-vqf = ["dep:symphonia-format-vqf"]
-twinvq = ["dep:symphonia-codec-twinvq"]
-g7231 = ["dep:symphonia-codec-g7231"]
-g729 = ["dep:symphonia-codec-g729"]
-ilbc = ["dep:symphonia-codec-ilbc"]
-mp3pro = ["mp3", "symphonia-bundle-mp3/mp3pro"]
-nellymoser = ["dep:symphonia-codec-nellymoser"]
-imc = ["dep:symphonia-codec-imc"]
+amrnb = ["dep:symphonia-codec-amrnb"]
+amrwb = ["dep:symphonia-codec-amrwb"]
 ogg = ["dep:symphonia-format-ogg"]
 opus = ["dep:symphonia-codec-opus"]
 pcm = ["dep:symphonia-codec-pcm"]
 speex = ["dep:symphonia-codec-speex"]
+siren = ["dep:symphonia-codec-siren"]
 sbc = ["dep:symphonia-codec-sbc"]
 aptx = ["dep:symphonia-codec-aptx"]
 lc3 = ["dep:symphonia-codec-lc3"]
 dolby-e = ["dep:symphonia-codec-dolby-e"]
+als = ["dep:symphonia-codec-als"]
 truehd = ["dep:symphonia-codec-truehd"]
 truespeech = ["dep:symphonia-codec-truespeech"]
+twinvq = ["dep:symphonia-codec-twinvq"]
+vqf = ["dep:symphonia-format-vqf"]
 wma = ["dep:symphonia-codec-wma"]
 asf = ["dep:symphonia-format-asf"]
 avi = ["dep:symphonia-format-avi"]
+ilbc = ["dep:symphonia-codec-ilbc"]
+g729 = ["dep:symphonia-codec-g729"]
+g7231 = ["dep:symphonia-codec-g7231"]
 aiff = ["dep:symphonia-format-riff", "symphonia-format-riff/aiff"]
 au = ["dep:symphonia-format-sound", "symphonia-format-sound/au"]
 iff = ["dep:symphonia-format-sound", "symphonia-format-sound/iff"]
@@ -103,57 +103,56 @@ id3v1 = ["symphonia-metadata/id3v1"]
 id3v2 = ["symphonia-metadata/id3v2"]
 
 # MPEG audio codecs.
-    "mace",
 mpa = ["mp1", "mp2", "mp3"]
-    "evrc",
-    "als",
-    "atrac",
-    "atrac3plus",
-    "atrac9",
-    "cook",
-    "ra",
-    "ralf",
-    "sipr",
-    "amrwb",
-    "amrnb",
-    "qcelp",
-    "siren",
 
-    "twinvq",
-    "g7231",
-    "g729",
-    "ilbc",
 # Enable all supported codecs.
 all-codecs = [
     "aac",
     "ac3",
     "adpcm",
-    "amr",
     "alac",
+    "als",
     "dca",
     "dsd",
     "flac",
+    "gsm",
     "mp1",
     "mp2",
     "mp3",
+    "mp3pro",
+    "mace",
     "musepack",
-    "vqf",
-    "qcp",
     "nellymoser",
+    "qcelp",
+    "evrc",
+    "atrac",
+    "atrac3plus",
+    "atrac9",
+    "cook",
     "imc",
+    "ra",
+    "ralf",
+    "sipr",
+    "amrnb",
+    "amrwb",
     "opus",
     "pcm",
     "shorten",
     "speex",
+    "siren",
     "sbc",
     "aptx",
     "lc3",
     "dolby-e",
     "truehd",
     "truespeech",
+    "twinvq",
     "tta",
     "tak",
     "wma",
+    "ilbc",
+    "g729",
+    "g7231",
     "vorbis",
     "wavpack",
 ]
@@ -163,6 +162,7 @@ all-formats = [
     "adx",
     "caf",
     "ape-format",
+    "amr",
     "dsd",
     "es",
     "spdif",
@@ -174,14 +174,15 @@ all-formats = [
     "mpegts",
     "musepack",
     "ogg",
+    "qcp",
     "real",
     "shorten",
     "tta",
     "tak",
+    "vqf",
     "asf",
     "avi",
     "aiff",
-    "gsm",
     "au",
     "iff",
     "raw-pcm",
@@ -236,9 +237,6 @@ optional = true
 workspace = true
 optional = true
 
-[dependencies.symphonia-codec-mace]
-workspace = true
-optional = true
 [dependencies.symphonia-bundle-flac]
 workspace = true
 optional = true
@@ -246,6 +244,7 @@ optional = true
 [dependencies.symphonia-bundle-musepack]
 workspace = true
 optional = true
+
 [dependencies.symphonia-bundle-shorten]
 workspace = true
 optional = true
@@ -260,68 +259,6 @@ optional = true
 
 [dependencies.symphonia-bundle-mp3]
 workspace = true
-[dependencies.symphonia-codec-evrc]
-workspace = true
-optional = true
-
-[dependencies.symphonia-codec-als]
-workspace = true
-optional = true
-
-[dependencies.symphonia-codec-atrac]
-workspace = true
-optional = true
-
-[dependencies.symphonia-codec-atrac3plus]
-workspace = true
-optional = true
-
-[dependencies.symphonia-codec-atrac9]
-workspace = true
-optional = true
-
-[dependencies.symphonia-codec-cook]
-workspace = true
-optional = true
-
-[dependencies.symphonia-codec-ra]
-workspace = true
-optional = true
-
-[dependencies.symphonia-codec-ralf]
-workspace = true
-optional = true
-
-[dependencies.symphonia-codec-sipr]
-workspace = true
-optional = true
-[dependencies.symphonia-codec-qcelp]
-[dependencies.symphonia-codec-amrwb]
-workspace = true
-optional = true
-[dependencies.symphonia-codec-amrnb]
-[dependencies.symphonia-codec-g7231]
-workspace = true
-optional = true
-[dependencies.symphonia-codec-g729]
-[dependencies.symphonia-codec-siren]
-workspace = true
-optional = true
-workspace = true
-optional = true
-[dependencies.symphonia-codec-ilbc]
-workspace = true
-optional = true
-[dependencies.symphonia-format-vqf]
-workspace = true
-optional = true
-[dependencies.symphonia-codec-twinvq]
-workspace = true
-optional = true
-workspace = true
-optional = true
-workspace = true
-optional = true
 optional = true
 
 [dependencies.symphonia-codec-aac]
@@ -337,6 +274,10 @@ workspace = true
 optional = true
 
 [dependencies.symphonia-codec-dca]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-mace]
 workspace = true
 optional = true
 
@@ -356,21 +297,83 @@ optional = true
 workspace = true
 optional = true
 
-[dependencies.symphonia-format-amr]
+[dependencies.symphonia-codec-qcelp]
 workspace = true
 optional = true
+
+[dependencies.symphonia-codec-evrc]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-atrac]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-atrac3plus]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-atrac9]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-cook]
+workspace = true
+optional = true
+
 [dependencies.symphonia-codec-imc]
 workspace = true
 optional = true
 
-[dependencies.symphonia-codec-truespeech]
-[dependencies.symphonia-format-qcp]
+[dependencies.symphonia-codec-ra]
 workspace = true
 optional = true
+
+[dependencies.symphonia-codec-ralf]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-sipr]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-amrnb]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-amrwb]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-truespeech]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-twinvq]
+workspace = true
+optional = true
+
+[dependencies.symphonia-format-vqf]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-ilbc]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-g729]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-g7231]
 workspace = true
 optional = true
 
 [dependencies.symphonia-codec-speex]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-siren]
 workspace = true
 optional = true
 
@@ -398,7 +401,15 @@ optional = true
 workspace = true
 optional = true
 
+[dependencies.symphonia-codec-als]
+workspace = true
+optional = true
+
 [dependencies.symphonia-codec-dsd]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-gsm]
 workspace = true
 optional = true
 
@@ -442,6 +453,10 @@ optional = true
 workspace = true
 optional = true
 
+[dependencies.symphonia-format-amr]
+workspace = true
+optional = true
+
 [dependencies.symphonia-format-es]
 workspace = true
 optional = true
@@ -462,6 +477,10 @@ optional = true
 workspace = true
 optional = true
 
+[dependencies.symphonia-format-qcp]
+workspace = true
+optional = true
+
 [dependencies.symphonia-format-real]
 workspace = true
 optional = true
@@ -479,7 +498,3 @@ symphonia-testutil = { workspace = true }
 
 [lints]
 workspace = true
-[dependencies.symphonia-codec-gsm]
-workspace = true
-optional = true
-

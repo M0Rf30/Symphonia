@@ -27,16 +27,17 @@
 //! | Format   | Feature Flag | Gapless* | Default |
 //! |----------|--------------|----------|---------|
 //! | AIFF     | `aiff`       | Yes      | No      |
+//! | ASF/WMA (`.wma`, `.asf`) | `asf` | Yes   | No      |
 //! | AVI (`.avi`, audio streams) | `avi` | No | No |
 //! | CRI ADX (`.adx`) | `adx` | Yes     | No      |
 //! | Sun/NeXT AU (`.au`, `.snd`) | `au` | Yes | No |
 //! | Creative Voice (`.voc`) | `voc` | Yes | No |
 //! | IFF 8SVX/16SV (`.iff`, `.8svx`) | `iff` | Yes | No |
 //! | Raw PCM (explicit parameters, not probed) | `raw-pcm` | Yes | No |
-//! | QCP (`.qcp`) | `qcp`    | No      | No      |
 //! | AMR (`.amr`, `.awb`) | `amr` | No   | No      |
-//! | ASF/WMA (`.wma`, `.asf`) | `asf` | Yes   | No      |
+//! | QCP (`.qcp`) | `qcp`    | No      | No      |
 //! | CAF      | `caf`        | No       | No      |
+//! | NTT TwinVQ (`.vqf`) | `vqf` | No     | No      |
 //! | Elementary streams (AC-3, E-AC-3, DTS, TrueHD/MLP, Dolby E) | `es` | No | No |
 //! | Bluetooth audio (`.sbc`, `.aptx`, `.aptxhd`, `.lc3`) | `bt` | No | No |
 //! | FLV (audio) | `flv`     | No       | No      |
@@ -68,45 +69,45 @@
 //! | ALAC     | `alac`       | Yes     | No      |
 //! | DTS (core, XCH/XXCH/X96/XBR, XLL) | `dca` | No | No |
 //! | FLAC     | `flac`       | Yes     | Yes     |
+//! | GSM 06.10, Microsoft GSM | `gsm` | No | No |
 //! | MP1      | `mp1`, `mpa` | No      | No      |
-//! | MACE 3:1, 6:1 | `mace`    | No      | No      |
-//! | EVRC     | `evrc`         | No      | No      |
-//! | MPEG-4 ALS | `als` | No      | No      |
-//! | ATRAC1, ATRAC3 | `atrac` | No      | No      |
-//! | ATRAC3+ | `atrac3plus` | No      | No      |
-//! | ATRAC9 | `atrac9` | No      | No      |
-//! | RealAudio Cook | `cook` | No      | No      |
-//! | RealAudio 1.0/2.0 | `ra` | No      | No      |
-//! | RealAudio Lossless | `ralf` | No      | No      |
-//! | RealAudio SIPR | `sipr` | No      | No      |
-//! | AMR-WB   | `amrwb`      | No      | No      |
-//! | TwinVQ (VQF) | `twinvq`   | No      | No      |
-//! | G.723.1  | `g7231`      | No      | No      |
-//! | G.729    | `g729`       | No      | No      |
-//! | iLBC     | `ilbc`       | No      | No      |
-//! | Siren, G.722.1, MSN Siren | `siren` | No | No |
-//! | AMR-NB   | `amrnb`      | No      | No      |
-//! | QCELP (13K) | `qcelp`     | No      | No      |
 //! | MP2      | `mp2`, `mpa` | No      | No      |
 //! | MP3      | `mp3`, `mpa` | Yes     | No      |
 //! | Musepack | `musepack`   | Yes     | No      |
 //! | Shorten  | `shorten`    | Yes     | No      |
 //! | TTA (True Audio) | `tta` | Yes     | No      |
 //! | TAK      | `tak`        | Yes     | No      |
+//! | MACE 3:1, 6:1 | `mace`    | No      | No      |
 //! | Nellymoser | `nellymoser` | No    | No      |
+//! | QCELP (13K) | `qcelp`     | No      | No      |
+//! | EVRC     | `evrc`         | No      | No      |
+//! | ATRAC1, ATRAC3 | `atrac`  | No      | No      |
+//! | ATRAC3+ | `atrac3plus` | No      | No      |
+//! | ATRAC9 | `atrac9` | No      | No      |
+//! | RealAudio Cook | `cook`   | No      | No      |
 //! | IMC, IAC | `imc`        | No      | No      |
+//! | RealAudio 1.0/2.0 | `ra` | No    | No      |
+//! | RealAudio Lossless | `ralf` | No  | No      |
+//! | RealAudio SIPR | `sipr` | No      | No      |
+//! | AMR-NB   | `amrnb`      | No      | No      |
+//! | AMR-WB   | `amrwb`      | No      | No      |
 //! | TrueSpeech | `truespeech` | No    | No      |
+//! | TwinVQ (VQF) | `twinvq`   | No      | No      |
 //! | Windows Media Audio 1/2 | `wma` | Yes | No    |
+//! | iLBC     | `ilbc`       | No      | No      |
+//! | G.729    | `g729`       | No      | No      |
+//! | G.723.1  | `g7231`      | No      | No      |
 //! | Opus     | `opus`       | Yes     | Yes     |
 //! | PCM      | `pcm`        | Yes     | Yes     |
 //! | Speex    | `speex`      | Yes     | No      |
+//! | Siren, G.722.1, MSN Siren | `siren` | No | No |
 //! | SBC, mSBC | `sbc`       | Yes     | No      |
 //! | aptX, aptX HD | `aptx`  | Yes     | No      |
 //! | LC3, LC3plus | `lc3`    | No      | No      |
 //! | Dolby E  | `dolby-e`    | No      | No      |
+//! | MPEG-4 ALS | `als`      | No      | No      |
 //! | TrueHD, MLP | `truehd`  | No      | No      |
 //! | Vorbis   | `vorbis`     | Yes     | Yes     |
-//! | GSM 06.10, Microsoft GSM | `gsm` | No | No |
 //!
 //! **Tip:** All codecs can be enabled with the `all-codecs` feature flag. Similarly, all MPEG
 //! audio codecs can be enabled with the `mpa` feature flag.
@@ -189,41 +190,6 @@ pub mod default {
         #[cfg(any(feature = "mp1", feature = "mp2", feature = "mp3"))]
         pub use symphonia_bundle_mp3::MpaDecoder;
         #[cfg(feature = "musepack")]
-        #[cfg(feature = "mace")]
-        pub use symphonia_codec_mace::MaceDecoder;
-        #[cfg(feature = "evrc")]
-        pub use symphonia_codec_evrc::EvrcDecoder;
-        #[cfg(feature = "als")]
-        pub use symphonia_codec_als::AlsDecoder;
-        #[cfg(feature = "atrac")]
-        pub use symphonia_codec_atrac::AtracDecoder;
-        #[cfg(feature = "atrac3plus")]
-        pub use symphonia_codec_atrac3plus::Atrac3PlusDecoder;
-        #[cfg(feature = "atrac9")]
-        pub use symphonia_codec_atrac9::Atrac9Decoder;
-        #[cfg(feature = "cook")]
-        pub use symphonia_codec_cook::CookDecoder;
-        #[cfg(feature = "ra")]
-        pub use symphonia_codec_ra::{Ra144Decoder, Ra288Decoder};
-        #[cfg(feature = "ralf")]
-        pub use symphonia_codec_ralf::RalfDecoder;
-        #[cfg(feature = "sipr")]
-        pub use symphonia_codec_sipr::SiprDecoder;
-        #[cfg(feature = "amrwb")]
-        pub use symphonia_codec_amrwb::AmrWbDecoder;
-        #[cfg(feature = "twinvq")]
-        pub use symphonia_codec_twinvq::TwinVqDecoder;
-        #[cfg(feature = "amrnb")]
-        #[cfg(feature = "g7231")]
-        pub use symphonia_codec_g7231::G7231Decoder;
-        #[cfg(feature = "g729")]
-        pub use symphonia_codec_g729::G729Decoder;
-        pub use symphonia_codec_ilbc::IlbcDecoder;
-        pub use symphonia_codec_amrnb::AmrNbDecoder;
-        #[cfg(feature = "siren")]
-        pub use symphonia_codec_siren::SirenDecoder;
-        #[cfg(feature = "qcelp")]
-        pub use symphonia_codec_qcelp::QcelpDecoder;
         pub use symphonia_bundle_musepack::MpcDecoder;
         #[cfg(feature = "shorten")]
         pub use symphonia_bundle_shorten::ShortenDecoder;
@@ -243,21 +209,56 @@ pub mod default {
         pub use symphonia_codec_dca::DcaDecoder;
         #[cfg(feature = "dsd")]
         pub use symphonia_codec_dsd::DsdDecoder;
+        #[cfg(feature = "gsm")]
+        pub use symphonia_codec_gsm::GsmDecoder;
+        #[cfg(feature = "mace")]
+        pub use symphonia_codec_mace::MaceDecoder;
         #[cfg(feature = "nellymoser")]
         pub use symphonia_codec_nellymoser::NellymoserDecoder;
+        #[cfg(feature = "qcelp")]
+        pub use symphonia_codec_qcelp::QcelpDecoder;
+        #[cfg(feature = "evrc")]
+        pub use symphonia_codec_evrc::EvrcDecoder;
+        #[cfg(feature = "atrac")]
+        pub use symphonia_codec_atrac::AtracDecoder;
+        #[cfg(feature = "atrac3plus")]
+        pub use symphonia_codec_atrac3plus::Atrac3PlusDecoder;
+        #[cfg(feature = "atrac9")]
+        pub use symphonia_codec_atrac9::Atrac9Decoder;
+        #[cfg(feature = "cook")]
+        pub use symphonia_codec_cook::CookDecoder;
         #[cfg(feature = "imc")]
         pub use symphonia_codec_imc::ImcDecoder;
+        #[cfg(feature = "ra")]
+        pub use symphonia_codec_ra::{Ra144Decoder, Ra288Decoder};
+        #[cfg(feature = "ralf")]
+        pub use symphonia_codec_ralf::RalfDecoder;
+        #[cfg(feature = "sipr")]
+        pub use symphonia_codec_sipr::SiprDecoder;
+        #[cfg(feature = "amrnb")]
+        pub use symphonia_codec_amrnb::AmrNbDecoder;
+        #[cfg(feature = "amrwb")]
+        pub use symphonia_codec_amrwb::AmrWbDecoder;
         #[cfg(feature = "truespeech")]
         pub use symphonia_codec_truespeech::TrueSpeechDecoder;
+        #[cfg(feature = "twinvq")]
+        pub use symphonia_codec_twinvq::TwinVqDecoder;
         #[cfg(feature = "wma")]
         pub use symphonia_codec_wma::WmaDecoder;
         #[cfg(feature = "ilbc")]
+        pub use symphonia_codec_ilbc::IlbcDecoder;
+        #[cfg(feature = "g729")]
+        pub use symphonia_codec_g729::G729Decoder;
+        #[cfg(feature = "g7231")]
+        pub use symphonia_codec_g7231::G7231Decoder;
         #[cfg(feature = "opus")]
         pub use symphonia_codec_opus::OpusAudioDecoder;
         #[cfg(feature = "pcm")]
         pub use symphonia_codec_pcm::PcmDecoder;
         #[cfg(feature = "speex")]
         pub use symphonia_codec_speex::SpeexDecoder;
+        #[cfg(feature = "siren")]
+        pub use symphonia_codec_siren::SirenDecoder;
         #[cfg(feature = "sbc")]
         pub use symphonia_codec_sbc::SbcDecoder;
         #[cfg(feature = "aptx")]
@@ -266,6 +267,8 @@ pub mod default {
         pub use symphonia_codec_lc3::Lc3Decoder;
         #[cfg(feature = "dolby-e")]
         pub use symphonia_codec_dolby_e::DolbyEDecoder;
+        #[cfg(feature = "als")]
+        pub use symphonia_codec_als::AlsDecoder;
         #[cfg(feature = "truehd")]
         pub use symphonia_codec_truehd::TrueHdDecoder;
         #[cfg(feature = "vorbis")]
@@ -274,10 +277,6 @@ pub mod default {
         pub use symphonia_codec_wavpack::WavPackDecoder;
     }
 
-        #[cfg(feature = "vqf")]
-        pub use symphonia_format_vqf::VqfReader;
-        #[cfg(feature = "amr")]
-        pub use symphonia_format_amr::AmrReader;
     pub mod formats {
         //! The `formats` module re-exports all enabled Symphonia format readers.
 
@@ -296,10 +295,6 @@ pub mod default {
         #[cfg(feature = "tak")]
         pub use symphonia_bundle_tak::TakReader;
         #[cfg(feature = "aac")]
-        #[cfg(feature = "qcp")]
-        pub use symphonia_format_qcp::QcpReader;
-        #[cfg(feature = "gsm")]
-        pub use symphonia_codec_gsm::GsmDecoder;
         pub use symphonia_codec_aac::AdifReader;
         #[cfg(feature = "aac")]
         pub use symphonia_codec_aac::AdtsReader;
@@ -318,6 +313,10 @@ pub mod default {
         pub use symphonia_format_caf::CafReader;
         #[cfg(feature = "dsd")]
         pub use symphonia_format_dsd::{CODEC_TYPE_DSD, DffReader, DsfReader};
+        #[cfg(feature = "amr")]
+        pub use symphonia_format_amr::AmrReader;
+        #[cfg(feature = "vqf")]
+        pub use symphonia_format_vqf::VqfReader;
         #[cfg(feature = "asf")]
         pub use symphonia_format_asf::AsfReader;
         #[cfg(feature = "avi")]
@@ -344,6 +343,8 @@ pub mod default {
         pub use symphonia_format_mpegts::MpegTsReader;
         #[cfg(feature = "ogg")]
         pub use symphonia_format_ogg::OggReader;
+        #[cfg(feature = "qcp")]
+        pub use symphonia_format_qcp::QcpReader;
         #[cfg(feature = "aiff")]
         pub use symphonia_format_riff::AiffReader;
         #[cfg(feature = "wav")]
@@ -410,53 +411,7 @@ pub mod default {
     /// function.
     pub fn get_probe() -> &'static Probe {
         &PROBE
-        #[cfg(feature = "mace")]
-        registry.register_audio_decoder::<codecs::MaceDecoder>();
     }
-        #[cfg(feature = "evrc")]
-        registry.register_audio_decoder::<codecs::EvrcDecoder>();
-
-        #[cfg(feature = "als")]
-        registry.register_audio_decoder::<codecs::AlsDecoder>();
-
-        #[cfg(feature = "atrac")]
-        registry.register_audio_decoder::<codecs::AtracDecoder>();
-
-        #[cfg(feature = "atrac3plus")]
-        registry.register_audio_decoder::<codecs::Atrac3PlusDecoder>();
-        #[cfg(feature = "atrac9")]
-        registry.register_audio_decoder::<codecs::Atrac9Decoder>();
-
-        #[cfg(feature = "cook")]
-        registry.register_audio_decoder::<codecs::CookDecoder>();
-
-        #[cfg(feature = "ra")]
-        registry.register_audio_decoder::<codecs::Ra144Decoder>();
-
-        #[cfg(feature = "ra")]
-        registry.register_audio_decoder::<codecs::Ra288Decoder>();
-
-        #[cfg(feature = "ralf")]
-        registry.register_audio_decoder::<codecs::RalfDecoder>();
-
-        #[cfg(feature = "sipr")]
-        registry.register_audio_decoder::<codecs::SiprDecoder>();
-        #[cfg(feature = "qcelp")]
-        #[cfg(feature = "amrwb")]
-        registry.register_audio_decoder::<codecs::AmrWbDecoder>();
-        #[cfg(feature = "amrnb")]
-        #[cfg(feature = "twinvq")]
-        registry.register_audio_decoder::<codecs::TwinVqDecoder>();
-        registry.register_audio_decoder::<codecs::AmrNbDecoder>();
-        #[cfg(feature = "g7231")]
-        registry.register_audio_decoder::<codecs::G7231Decoder>();
-        #[cfg(feature = "g729")]
-        registry.register_audio_decoder::<codecs::G729Decoder>();
-        #[cfg(feature = "ilbc")]
-        registry.register_audio_decoder::<codecs::IlbcDecoder>();
-        #[cfg(feature = "siren")]
-        registry.register_audio_decoder::<codecs::SirenDecoder>();
-        registry.register_audio_decoder::<codecs::QcelpDecoder>();
 
     /// Registers all the codecs selected by the `feature` flags in the includer's `Cargo.toml` on
     /// the provided `CodecRegistry`. If `features` is not set, the default set of Symphonia codecs
@@ -485,6 +440,9 @@ pub mod default {
         #[cfg(feature = "dsd")]
         registry.register_audio_decoder::<codecs::DsdDecoder>();
 
+        #[cfg(feature = "gsm")]
+        registry.register_audio_decoder::<codecs::GsmDecoder>();
+
         #[cfg(feature = "flac")]
         registry.register_audio_decoder::<codecs::FlacDecoder>();
 
@@ -492,37 +450,92 @@ pub mod default {
         registry.register_audio_decoder::<codecs::MpcDecoder>();
         #[cfg(feature = "shorten")]
         registry.register_audio_decoder::<codecs::ShortenDecoder>();
+
         #[cfg(feature = "tta")]
         registry.register_audio_decoder::<codecs::TtaDecoder>();
+
         #[cfg(feature = "tak")]
         registry.register_audio_decoder::<codecs::TakDecoder>();
 
         #[cfg(any(feature = "mp1", feature = "mp2", feature = "mp3"))]
         registry.register_audio_decoder::<codecs::MpaDecoder>();
 
+        // With the `mp3pro` feature, MP3 streams decode with the SBR-aware decoder instead of the
+        // plain ISO decoder (MP1 and MP2 stay with `MpaDecoder`). `Mp3ProDecoder` also decodes
+        // plain MP3, so it replaces the MP3 slot `MpaDecoder` registered above.
+        #[cfg(feature = "mp3pro")]
+        registry.register_audio_decoder::<codecs::Mp3ProDecoder>();
+
+        #[cfg(feature = "mace")]
+        registry.register_audio_decoder::<codecs::MaceDecoder>();
+
         #[cfg(feature = "nellymoser")]
         registry.register_audio_decoder::<codecs::NellymoserDecoder>();
-        #[cfg(feature = "vqf")]
-        probe.register_format::<formats::VqfReader<'_>>();
-        #[cfg(feature = "qcp")]
-        probe.register_format::<formats::QcpReader<'_>>();
-        #[cfg(feature = "amr")]
-        probe.register_format::<formats::AmrReader<'_>>();
+
+        #[cfg(feature = "qcelp")]
+        registry.register_audio_decoder::<codecs::QcelpDecoder>();
+
+        #[cfg(feature = "evrc")]
+        registry.register_audio_decoder::<codecs::EvrcDecoder>();
+
+        #[cfg(feature = "atrac")]
+        registry.register_audio_decoder::<codecs::AtracDecoder>();
+
+        #[cfg(feature = "atrac3plus")]
+        registry.register_audio_decoder::<codecs::Atrac3PlusDecoder>();
+        #[cfg(feature = "atrac9")]
+        registry.register_audio_decoder::<codecs::Atrac9Decoder>();
+
+        #[cfg(feature = "cook")]
+        registry.register_audio_decoder::<codecs::CookDecoder>();
 
         #[cfg(feature = "imc")]
         registry.register_audio_decoder::<codecs::ImcDecoder>();
 
+        #[cfg(feature = "ra")]
+        registry.register_audio_decoder::<codecs::Ra144Decoder>();
+
+        #[cfg(feature = "ra")]
+        registry.register_audio_decoder::<codecs::Ra288Decoder>();
+
+        #[cfg(feature = "ralf")]
+        registry.register_audio_decoder::<codecs::RalfDecoder>();
+
+        #[cfg(feature = "sipr")]
+        registry.register_audio_decoder::<codecs::SiprDecoder>();
+
+        #[cfg(feature = "amrnb")]
+        registry.register_audio_decoder::<codecs::AmrNbDecoder>();
+
+        #[cfg(feature = "amrwb")]
+        registry.register_audio_decoder::<codecs::AmrWbDecoder>();
+
         #[cfg(feature = "truespeech")]
         registry.register_audio_decoder::<codecs::TrueSpeechDecoder>();
 
+        #[cfg(feature = "twinvq")]
+        registry.register_audio_decoder::<codecs::TwinVqDecoder>();
+
         #[cfg(feature = "wma")]
         registry.register_audio_decoder::<codecs::WmaDecoder>();
+
+        #[cfg(feature = "ilbc")]
+        registry.register_audio_decoder::<codecs::IlbcDecoder>();
+
+        #[cfg(feature = "g729")]
+        registry.register_audio_decoder::<codecs::G729Decoder>();
+
+        #[cfg(feature = "g7231")]
+        registry.register_audio_decoder::<codecs::G7231Decoder>();
 
         #[cfg(feature = "pcm")]
         registry.register_audio_decoder::<codecs::PcmDecoder>();
 
         #[cfg(feature = "speex")]
         registry.register_audio_decoder::<codecs::SpeexDecoder>();
+
+        #[cfg(feature = "siren")]
+        registry.register_audio_decoder::<codecs::SirenDecoder>();
 
         #[cfg(feature = "sbc")]
         registry.register_audio_decoder::<codecs::SbcDecoder>();
@@ -535,6 +548,9 @@ pub mod default {
 
         #[cfg(feature = "dolby-e")]
         registry.register_audio_decoder::<codecs::DolbyEDecoder>();
+
+        #[cfg(feature = "als")]
+        registry.register_audio_decoder::<codecs::AlsDecoder>();
 
         #[cfg(feature = "truehd")]
         registry.register_audio_decoder::<codecs::TrueHdDecoder>();
@@ -578,6 +594,15 @@ pub mod default {
         #[cfg(feature = "flac")]
         probe.register_format::<formats::FlacReader<'_>>();
 
+        #[cfg(feature = "amr")]
+        probe.register_format::<formats::AmrReader<'_>>();
+
+        #[cfg(feature = "qcp")]
+        probe.register_format::<formats::QcpReader<'_>>();
+
+        #[cfg(feature = "vqf")]
+        probe.register_format::<formats::VqfReader<'_>>();
+
         #[cfg(feature = "es")]
         probe.register_format::<formats::Ac3Reader<'_>>();
 
@@ -607,10 +632,13 @@ pub mod default {
 
         #[cfg(feature = "adx")]
         probe.register_format::<formats::AdxReader<'_>>();
+
         #[cfg(feature = "real")]
         probe.register_format::<formats::RealReader<'_>>();
+
         #[cfg(feature = "asf")]
         probe.register_format::<formats::AsfReader<'_>>();
+
         #[cfg(feature = "avi")]
         probe.register_format::<formats::AviReader<'_>>();
 
@@ -624,13 +652,13 @@ pub mod default {
         probe.register_format::<formats::IsoMp4Reader<'_>>();
 
         #[cfg(feature = "musepack")]
-        #[cfg(feature = "gsm")]
-        registry.register_audio_decoder::<codecs::GsmDecoder>();
         probe.register_format::<formats::MpcReader<'_>>();
         #[cfg(feature = "shorten")]
         probe.register_format::<formats::ShortenReader<'_>>();
+
         #[cfg(feature = "tta")]
         probe.register_format::<formats::TtaReader<'_>>();
+
         #[cfg(feature = "tak")]
         probe.register_format::<formats::TakReader<'_>>();
 
@@ -642,10 +670,13 @@ pub mod default {
 
         #[cfg(feature = "wav")]
         probe.register_format::<formats::WavReader<'_>>();
+
         #[cfg(feature = "au")]
         probe.register_format::<formats::AuReader<'_>>();
+
         #[cfg(feature = "voc")]
         probe.register_format::<formats::VocReader<'_>>();
+
         #[cfg(feature = "iff")]
         probe.register_format::<formats::IffReader<'_>>();
 

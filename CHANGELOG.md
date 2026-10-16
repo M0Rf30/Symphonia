@@ -21,18 +21,20 @@ Changes since upstream `v0.6.1`.
   (`symphonia-codec-speex`), Nellymoser Asao (`symphonia-codec-nellymoser`), mp3PRO
   (`symphonia-bundle-mp3`, feature `mp3pro`), DSD and DST (`symphonia-codec-dsd`), and a native
   Opus decoder with a CELT-only encoder (`symphonia-codec-opus`).
-- Demuxers: Sun/NeXT AU- RealAudio: RealMedia/RealAudio demuxer (`symphonia-format-real`, feature `real`, for `.rm`, `.rmvb`
+- Decoder: GSM 06.10 full-rate and Microsoft GSM 6.10 (`symphonia-codec-gsm`, feature `gsm`),
+  mapped from WAVE `0x0031`/`0x0032`/`0x1500`, AIFF-C `GSM `, CAF `agsm`/`ms\0\x31`, QuickTime
+  `agsm`/`ms\0\x31` and Matroska `A_MS/ACM`.
+- RealAudio: RealMedia/RealAudio demuxer (`symphonia-format-real`, feature `real`, for `.rm`, `.rmvb`
   and `.ra`, with the `genr`, `Int4` and `sipr` deinterleavers), and decoders for
   Cook (`symphonia-codec-cook`, `cook`), RealAudio 1.0/2.0 (`symphonia-codec-ra`, `ra`),
   RealAudio Lossless (`symphonia-codec-ralf`, `ralf`) and SIPR in all four modes
   (`symphonia-codec-sipr`, `sipr`), checked against FFmpeg.
 - Decoders: ATRAC1 and ATRAC3 (`symphonia-codec-atrac`, feature `atrac`), ATRAC3+
-  (`symphonia-codec-atrac3plus`, feature `atrac3plus`, from WAVE/OMA frames) and MPEG-4 ALS
   (`symphonia-codec-atrac3plus`, feature `atrac3plus`, from WAVE/OMA frames), ATRAC9
   (`symphonia-codec-atrac9`, feature `atrac9`, from `.at9` RIFF/WAVE) and MPEG-4 ALS
   (`symphonia-codec-als`, feature `als`, including the floating-point and multi-channel modes),
   checked against FFmpeg.
-, Creative VOC, IFF 8SVX/16SV/MAUD and headerless PCM
+- Demuxers: Sun/NeXT AU, Creative VOC, IFF 8SVX/16SV/MAUD and headerless PCM
   (`symphonia-format-sound`, features `au`, `voc`, `iff`, `raw-pcm`) and CRI ADX
   (`symphonia-format-game`, feature `adx`).
 - Demuxer: AVI audio streams (PCM, float, A-law, mu-law, MS and IMA ADPCM, MPEG audio layers
@@ -46,10 +48,6 @@ Changes since upstream `v0.6.1`.
   `dolby-e`), with the raw SBC/aptX/aptX HD streams and `.lc3` files (`symphonia-format-bt`,
   feature `bt`), IEC 61937 data bursts (`symphonia-format-spdif`, feature `spdif`) and SMPTE ST 337
   Dolby E streams (`symphonia-format-es`).
-- Decoder: GSM 06.10 full-rate and Microsoft GSM 6.10 (`symphonia-codec-gsm`, feature `gsm`),
-- Decoder: GSM 06.10 full-rate and Microsoft GSM 6.10 (`symphonia-codec-gsm`, feature `gsm`),
-  mapped from WAVE `0x0031`/`0x0032`/`0x1500`, AIFF-C `GSM `, CAF `agsm`/`ms\0\x31`, QuickTime
-  `agsm`/`ms\0\x31` and Matroska `A_MS/ACM`.
 - Decoder: Windows Media Audio 1 and 2 (`symphonia-codec-wma`, feature `wma`), and an ASF/WMA
   demuxer (`symphonia-format-asf`, feature `asf`) with seeking and tags; WAVE `0x0160` to `0x0163`
   are mapped to the WMA codec IDs.
@@ -76,6 +74,12 @@ Changes since upstream `v0.6.1`.
 - The probe scans zero padding quickly and skips metadata that fails to read; ID3v2 tags are read
   from appended positions in every container.
 - Gapless handling and seeking improved in MP4, MKV, Ogg, CAF, RIFF and MPEG-in-WAVE.
+- MPEG audio (MP1/MP2/MP3): a mid-stream change of the signal specification (sample rate or
+  channel count, as in concatenated files) reports `ResetRequired` and restarts the new stream
+  from a clean state instead of failing.
+- mp3PRO: gapless playback (the LAME delay/padding and the 962-sample SBR delay are removed), and
+  with the `mp3pro` feature the SBR decoder is registered in the default codec registry in place
+  of `MpaDecoder` for MP3.
 
 ### Fixed
 
