@@ -171,7 +171,8 @@ fn seeking_reproduces_the_sequential_decode() {
 fn truncated_streams_match_ffmpeg() {
     for name in ["c2_s16_44_p2_md5", "c6_s16_44_p2_f512", "c1_s24_44_p2_f1024"] {
         let original = fixture(name);
-        for cut in [original.len() / 5, original.len() / 2, original.len() * 4 / 5, original.len() - 3]
+        for cut in
+            [original.len() / 5, original.len() / 2, original.len() * 4 / 5, original.len() - 3]
         {
             let data = original[..cut].to_vec();
             let ours = match open(data.clone()) {

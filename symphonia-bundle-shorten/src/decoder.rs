@@ -46,7 +46,8 @@ fn render<S: Sample>(
     buf.clear();
     buf.render_uninit(Some(core.blocksize()));
     for chan in 0..buf.spec().channels().count() {
-        let Some(plane) = buf.plane_mut(chan) else {
+        let Some(plane) = buf.plane_mut(chan)
+        else {
             return decode_error("shorten: missing output plane");
         };
         for (out, &sample) in plane.iter_mut().zip(core.samples(chan)) {
@@ -162,7 +163,8 @@ impl AudioDecoder for ShortenDecoder {
         if let Err(e) = self.decode_inner(packet) {
             self.clear();
             Err(e)
-        } else {
+        }
+        else {
             Ok(self.generic())
         }
     }

@@ -172,7 +172,8 @@ fn ffmpeg_pcm(data: &[u8], bytes_per_sample: usize) -> Option<Vec<u8>> {
 
 fn compare_ffmpeg(label: &str, data: Vec<u8>) {
     let ours = decode(data.clone());
-    let Some(theirs) = ffmpeg_pcm(&data, ours.bytes_per_sample) else {
+    let Some(theirs) = ffmpeg_pcm(&data, ours.bytes_per_sample)
+    else {
         eprintln!("ffmpeg not found; skipping {label}");
         return;
     };
@@ -192,7 +193,8 @@ fn compare_ffmpeg_cut(label: &str, data: Vec<u8>) {
             Decoded { bytes_per_sample: 2, channels: 0, frames: 0, pcm: Vec::new(), errors: 0 }
         }
     };
-    let Some(theirs) = ffmpeg_pcm(&data, ours.bytes_per_sample) else {
+    let Some(theirs) = ffmpeg_pcm(&data, ours.bytes_per_sample)
+    else {
         eprintln!("ffmpeg not found; skipping {label}");
         return;
     };
@@ -288,7 +290,8 @@ fn corrupt_streams_match_ffmpeg() {
             }
 
             let ours = decode(data.clone());
-            let Some(theirs) = ffmpeg_pcm(&data, ours.bytes_per_sample.max(1)) else {
+            let Some(theirs) = ffmpeg_pcm(&data, ours.bytes_per_sample.max(1))
+            else {
                 return;
             };
             // Anything a decoder rejects is dropped, so the comparison is on the common prefix:

@@ -164,7 +164,8 @@ impl<'s> ShortenReader<'s> {
                 buf.drain(..at);
                 buf_pos += at as u64;
             }
-        } else {
+        }
+        else {
             src.seek_buffered_rev(4);
         }
 
@@ -180,7 +181,8 @@ impl<'s> ShortenReader<'s> {
             let parsed = read_params(&mut br).and_then(|h| Ok((h, read_source_format(&mut br)?)));
             match parsed {
                 Ok((header, format)) => {
-                    let Some(format) = format.or_else(|| prefix_format.clone()) else {
+                    let Some(format) = format.or_else(|| prefix_format.clone())
+                    else {
                         return decode_error("shorten: the stream does not give its sample rate");
                     };
                     break (header, format, br.bit_pos());
@@ -295,7 +297,8 @@ impl<'s> ShortenReader<'s> {
             let mut br = BitReader::new(&self.buf[self.head..], self.bit);
             let result = if br.bits_left() < 5 {
                 Err(crate::bits::eof())
-            } else {
+            }
+            else {
                 self.scan.decode_group(&mut br, false)
             };
             match result {
@@ -344,7 +347,8 @@ impl<'s> ShortenReader<'s> {
         recon.read_state(&self.anchors[at].state)?;
 
         let found = loop {
-            let Some((end_bit, frames)) = self.scan_group()? else {
+            let Some((end_bit, frames)) = self.scan_group()?
+            else {
                 break None;
             };
             let frames = frames as u64;
@@ -389,7 +393,8 @@ fn find_stream_end(src: &mut MediaSourceStream<'_>, start: u64) -> Result<Option
     const TRAILER_LEN: u64 = 12;
     const SEEK_HEADER_LEN: u64 = 12;
 
-    let Some(len) = src.byte_len().filter(|_| src.is_seekable()) else {
+    let Some(len) = src.byte_len().filter(|_| src.is_seekable())
+    else {
         return Ok(None);
     };
     if len < start + TRAILER_LEN + SEEK_HEADER_LEN {
@@ -410,7 +415,8 @@ fn find_stream_end(src: &mut MediaSourceStream<'_>, start: u64) -> Result<Option
             Some(at) if read_at(at, &mut magic).is_ok() && &magic == b"SEEK" => Some(at),
             _ => None,
         }
-    } else {
+    }
+    else {
         None
     };
 

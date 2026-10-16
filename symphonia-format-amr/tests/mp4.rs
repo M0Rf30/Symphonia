@@ -86,7 +86,10 @@ fn amr_and_3gp_packets_are_identical() {
         // Timestamps are in samples in both containers.
         let rate = if wb { 16000 } else { 8000 };
         assert_eq!(a.tracks()[0].time_base, g.tracks()[0].time_base);
-        assert_eq!(g.tracks()[0].time_base.unwrap().calc_time(Timestamp::new(rate)).unwrap().as_secs_f64(), 1.0);
+        assert_eq!(
+            g.tracks()[0].time_base.unwrap().calc_time(Timestamp::new(rate)).unwrap().as_secs_f64(),
+            1.0
+        );
     }
 }
 

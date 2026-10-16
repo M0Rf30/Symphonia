@@ -29,12 +29,16 @@ These targets bypass the demuxer and feed data directly to the codec implementat
 * **`decode_truehd`**: Dolby TrueHD and MLP
 * **`decode_speex`**: Speex (with and without an Ogg header)
 * **`decode_nellymoser`**: Nellymoser
+* **`decode_tta`**: True Audio (the first 22 bytes are the file header)
+* **`decode_tak`**: TAK (mono, 44.1 kHz, 16 bit)
 * **`decode_wma`**: Windows Media Audio 1 and 2 (the first byte selects the version, channels,
   stream flags and sample rate)
 * **`decode_sbc`**, **`decode_aptx`**: SBC/mSBC, and aptX/aptX HD (the first byte selects)
 * **`decode_lc3`**: LC3 and LC3plus (the first two bytes select the sample rate, frame duration,
   high resolution mode and channels)
 * **`decode_dolby_e`**: Dolby E
+* **`decode_cook`**, **`decode_ra`**, **`decode_ralf`**, **`decode_sipr`**: RealAudio Cook, 1.0/2.0
+  (14.4K, 28.8K), Lossless (RALF) and SIPR
 
 The last five targets read the input as a sequence of packets, each prefixed by its
 16-bit little-endian length (`fuzz_audio_decoder_packets`), so state carried between packets is
@@ -54,19 +58,26 @@ These targets instantiate a specific `FormatReader` directly, bypassing probing.
 * **`demux_mpegts`**: MPEG-TS
 * **`demux_mpegps`**: MPEG-PS
 * **`demux_flv`**: FLV
+* **`demux_real`**: RealMedia (`.rm`, `.rmvb`) and RealAudio (`.ra`)
 * **`demux_asf`**: ASF (`.wma`, `.asf`)
 * **`demux_dsf`**: DSF
 * **`demux_dff`**: DFF
 * **`demux_mp3`**: MPEG Audio (MP1/MP2/MP3) elementary stream
 * **`demux_ape`**: Monkey's Audio (APE)
 * **`demux_musepack`**: Musepack
+* **`demux_tta`**: True Audio
+* **`demux_tak`**: TAK
 * **`demux_wavpack`**: WavPack
 * **`demux_adts`**: AAC ADTS
 * **`demux_adif`**: AAC ADIF
 * **`demux_loas`**: AAC LOAS/LATM
 * **`demux_es`**: AC-3/E-AC-3, DTS, TrueHD/MLP and SMPTE ST 337 Dolby E elementary streams (first byte selects the reader)
 * **`demux_bt`**: SBC, aptX, aptX HD and LC3 (first byte selects the reader)
-* **`demux_spdif`**: IEC 61937 data bursts
+* **`demux_adx`**: CRI ADX (decoded with the ADPCM decoder)
+* **`demux_au`**: Sun/NeXT AU
+* **`demux_voc`**: Creative Voice File
+* **`demux_iff`**: IFF 8SVX/16SV/MAUD
+* **`demux_raw`**: headerless PCM (the first 5 bytes select the sample format, channels, rate)
 
 Each target is a `[[bin]]` entry in `Cargo.toml` plus a file in `fuzz_targets/`. `run_all.sh` enumerates `fuzz_targets/*.rs`, so new targets only need those two.
 

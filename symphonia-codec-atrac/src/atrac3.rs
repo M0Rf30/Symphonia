@@ -470,7 +470,8 @@ fn read_quant_spectral_coeffs(
         else {
             for pair in mantissas.chunks_exact_mut(2).take(num_codes) {
                 // `num_bits` is always 4 in this case.
-                let code = if num_bits != 0 { bits(br.read_bits_leq32(num_bits))? as usize } else { 0 };
+                let code =
+                    if num_bits != 0 { bits(br.read_bits_leq32(num_bits))? as usize } else { 0 };
                 pair[0] = i32::from(MANTISSA_CLC_TAB[code >> 2]);
                 pair[1] = i32::from(MANTISSA_CLC_TAB[code & 3]);
             }
@@ -626,10 +627,10 @@ fn channel_weighting(su1: &mut [f32], su2: &mut [f32], p3: &[u8; 6]) {
 
         for band in (256..4 * 256).step_by(256) {
             for nsample in band..band + 8 {
-                su1[nsample] = (f64::from(su1[nsample])
-                    * interpolate(w0[0], w0[1], nsample - band)) as f32;
-                su2[nsample] = (f64::from(su2[nsample])
-                    * interpolate(w1[0], w1[1], nsample - band)) as f32;
+                su1[nsample] =
+                    (f64::from(su1[nsample]) * interpolate(w0[0], w0[1], nsample - band)) as f32;
+                su2[nsample] =
+                    (f64::from(su2[nsample]) * interpolate(w1[0], w1[1], nsample - band)) as f32;
             }
 
             for nsample in band + 8..band + 256 {

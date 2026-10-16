@@ -120,7 +120,8 @@ impl Bgmc {
             let target = (value.wrapping_sub(low).wrapping_add(1) << FREQ_BITS).wrapping_sub(1)
                 / range.max(1);
 
-            let Some(&lut_val) = self.lut.get(lut_base + (target >> (FREQ_BITS - LUT_BITS)) as usize)
+            let Some(&lut_val) =
+                self.lut.get(lut_base + (target >> (FREQ_BITS - LUT_BITS)) as usize)
             else {
                 return false;
             };
@@ -141,8 +142,9 @@ impl Bgmc {
                 return false;
             };
 
-            high = low
-                .wrapping_add((range.wrapping_mul(u32::from(c0)).wrapping_sub(1 << FREQ_BITS)) >> FREQ_BITS);
+            high = low.wrapping_add(
+                (range.wrapping_mul(u32::from(c0)).wrapping_sub(1 << FREQ_BITS)) >> FREQ_BITS,
+            );
             low = low.wrapping_add(range.wrapping_mul(u32::from(c1)) >> FREQ_BITS);
 
             loop {

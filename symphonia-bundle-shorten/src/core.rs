@@ -126,7 +126,8 @@ impl Core {
 
     /// Restores the state serialized by [`Core::write_state`] from the start of `data`.
     pub fn read_state(&mut self, data: &[u8]) -> Result<()> {
-        let Some(data) = data.get(..self.state_len()) else {
+        let Some(data) = data.get(..self.state_len())
+        else {
             return decode_error("shorten: truncated decoder state");
         };
         let word = |chunk: &[u8]| i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
@@ -245,7 +246,8 @@ impl Core {
         let offset = &self.offset[chan];
         let coffset = if nmean == 0 {
             offset[0]
-        } else {
+        }
+        else {
             // Version 0 streams have `nmean == -1`: no means, so the offset is zero.
             let mut sum = if version < 2 { 0 } else { nmean / 2 };
             for &v in &offset[..nmean.max(0) as usize] {
@@ -263,7 +265,8 @@ impl Core {
 
         if cmd == FN_ZERO {
             decoded[nwrap..nwrap + blocksize].fill(0);
-        } else {
+        }
+        else {
             // The predictor: the transmitted coefficients or a fixed polynomial.
             let (order, coeffs, qshift): (usize, &[i32], u32) = if cmd == FN_QLPC {
                 let order = br.golomb_u(LPCQSIZE)? as usize;
@@ -274,7 +277,8 @@ impl Core {
                     *c = br.golomb_s(LPCQUANT)?;
                 }
                 (order, &self.coeffs[..order], LPCQUANT)
-            } else {
+            }
+            else {
                 (cmd as usize, &FIXED_COEFFS[cmd as usize][..cmd as usize], 0)
             };
 
@@ -287,9 +291,11 @@ impl Core {
 
             let init_sum = if order == 0 {
                 coffset
-            } else if cmd == FN_QLPC {
+            }
+            else if cmd == FN_QLPC {
                 self.header.lpcqoffset()
-            } else {
+            }
+            else {
                 0
             };
 
@@ -322,9 +328,11 @@ impl Core {
             offset.copy_within(1..nmean as usize, 0);
             offset[nmean as usize - 1] = if version < 2 {
                 mean as i32
-            } else if self.bitshift == 32 {
+            }
+            else if self.bitshift == 32 {
                 0
-            } else {
+            }
+            else {
                 mean.wrapping_mul(1i64 << self.bitshift) as i32
             };
         }

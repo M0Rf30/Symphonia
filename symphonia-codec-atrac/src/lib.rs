@@ -91,8 +91,7 @@ pub struct AtracDecoder {
 
 impl AtracDecoder {
     pub fn try_new(params: &AudioCodecParameters, opts: &AudioDecoderOptions) -> Result<Self> {
-        let Some(supported) =
-            Self::supported_codecs().iter().find(|c| c.id == params.codec)
+        let Some(supported) = Self::supported_codecs().iter().find(|c| c.id == params.codec)
         else {
             return unsupported_error("atrac: invalid codec");
         };
@@ -235,7 +234,11 @@ impl RegisterableAudioDecoder for AtracDecoder {
 
     fn supported_codecs() -> &'static [SupportedAudioCodec] {
         &[
-            support_audio_codec!(CODEC_ID_ATRAC1, "atrac1", "ATRAC1 (Adaptive TRansform Acoustic Coding)"),
+            support_audio_codec!(
+                CODEC_ID_ATRAC1,
+                "atrac1",
+                "ATRAC1 (Adaptive TRansform Acoustic Coding)"
+            ),
             support_audio_codec!(
                 CODEC_ID_ATRAC3,
                 "atrac3",

@@ -183,7 +183,8 @@ pub(crate) fn read_uint(br: &mut BitReader<'_>, version: u8, k: u32) -> Result<u
             return decode_error("shorten: invalid parameter width");
         }
         k
-    } else {
+    }
+    else {
         k
     };
     br.golomb_u(k)
@@ -302,7 +303,8 @@ impl<'a> Bytes<'a> {
         if self.left() >= N {
             out.copy_from_slice(&self.data[self.pos..self.pos + N]);
             self.pos += N;
-        } else {
+        }
+        else {
             self.pos = self.data.len();
         }
         out

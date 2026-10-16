@@ -332,7 +332,8 @@ impl<'s> AviReader<'s> {
             skip_to(&mut mss, next)?;
         }
 
-        let Some(movi) = movi else {
+        let Some(movi) = movi
+        else {
             return decode_error("avi: no movi list");
         };
 
@@ -372,11 +373,13 @@ impl<'s> AviReader<'s> {
                 return Ok(false);
             }
 
-            let Ok(marker) = self.reader.read_quad_bytes() else {
+            let Ok(marker) = self.reader.read_quad_bytes()
+            else {
                 return Ok(false);
             };
             let len = u64::from(self.reader.read_u32()?);
-            let Ok(form) = self.reader.read_quad_bytes() else {
+            let Ok(form) = self.reader.read_quad_bytes()
+            else {
                 return Ok(false);
             };
 
@@ -528,7 +531,8 @@ fn skip_to(mss: &mut MediaSourceStream<'_>, pos: u64) -> Result<()> {
     if pos > cur {
         if mss.is_seekable() {
             mss.seek(SeekFrom::Start(pos))?;
-        } else {
+        }
+        else {
             mss.ignore_bytes(pos - cur)?;
         }
     }
@@ -589,7 +593,8 @@ fn read_strl(
             // Suggested buffer size, quality.
             mss.ignore_bytes(8)?;
             sample_size = mss.read_u32()?;
-        } else if id == *b"strf" && len <= MAX_HEADER_LEN && len >= 16 {
+        }
+        else if id == *b"strf" && len <= MAX_HEADER_LEN && len >= 16 {
             let mut buf = vec![0; len as usize];
             mss.read_buf_exact(&mut buf)?;
             format = parse_wave_format(&buf);
@@ -602,17 +607,20 @@ fn read_strl(
         return Ok(None);
     }
 
-    let Some(fmt) = format else {
+    let Some(fmt) = format
+    else {
         warn!("avi: audio stream {index} has no format");
         return Ok(None);
     };
 
-    let Some((params, layout)) = make_params(&fmt) else {
+    let Some((params, layout)) = make_params(&fmt)
+    else {
         warn!("avi: ignoring audio stream {index} with format tag {:#06x}", fmt.tag);
         return Ok(None);
     };
 
-    let Some(time_base) = TimeBase::try_from_recip(fmt.rate) else {
+    let Some(time_base) = TimeBase::try_from_recip(fmt.rate)
+    else {
         return Ok(None);
     };
 
@@ -695,7 +703,8 @@ impl FormatReader for AviReader<'_> {
             SeekTo::Time { track_id, .. } => track_id.unwrap_or(self.tracks[0].id),
         };
 
-        let Some(si) = self.tracks.iter().position(|t| t.id == track_id) else {
+        let Some(si) = self.tracks.iter().position(|t| t.id == track_id)
+        else {
             return seek_error(SeekErrorKind::Unseekable);
         };
 
@@ -713,7 +722,8 @@ impl FormatReader for AviReader<'_> {
         }
 
         loop {
-            let Some(packet) = self.next_inner()? else {
+            let Some(packet) = self.next_inner()?
+            else {
                 return seek_error(SeekErrorKind::OutOfRange);
             };
 

@@ -10,6 +10,8 @@
 // The decode follows the reference bit-exactly, and its index-based loops keep the order of the
 // arithmetic obvious.
 #![allow(clippy::needless_range_loop)]
+// The tables are read-only and copied from the reference.
+#![allow(clippy::large_const_arrays)]
 // The following lints are allowed in all Symphonia crates. Please see clippy.toml for their
 // justification.
 #![allow(clippy::comparison_chain)]

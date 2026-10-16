@@ -109,12 +109,14 @@ fn check(name: &str, codec: symphonia_core::codecs::audio::AudioCodecId, samples
     assert_eq!(out.len(), samples);
 
     // Against the committed reference (16-bit output of FFmpeg).
-    let reference = std::fs::read(fixture(&name.replace(".wav", ".ref.s16").replace(".mkv", ".ref.s16")))
-        .unwrap();
+    let reference =
+        std::fs::read(fixture(&name.replace(".wav", ".ref.s16").replace(".mkv", ".ref.s16")))
+            .unwrap();
     let want: Vec<i16> =
         reference.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
     assert_eq!(want.len(), out.len());
-    let max = out.iter().zip(&want).map(|(&g, &w)| (i32::from(to_s16(g)) - i32::from(w)).abs()).max();
+    let max =
+        out.iter().zip(&want).map(|(&g, &w)| (i32::from(to_s16(g)) - i32::from(w)).abs()).max();
     // Single precision transforms with a different butterfly order: allow 1 LSB.
     assert!(max.unwrap() <= 1, "{name}: max deviation {} LSB", max.unwrap());
 

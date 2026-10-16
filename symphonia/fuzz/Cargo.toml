@@ -163,6 +163,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "demux_real"
+path = "fuzz_targets/demux_real.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "demux_dsf"
 path = "fuzz_targets/demux_dsf.rs"
 test = false
@@ -235,122 +241,16 @@ test = false
 doc = false
 
 [[bin]]
+name = "decode_als"
+path = "fuzz_targets/decode_als.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "decode_speex"
 path = "fuzz_targets/decode_speex.rs"
 test = false
 doc = false
-[[bin]]
-name = "decode_mace"
-path = "fuzz_targets/decode_mace.rs"
-test = false
-doc = false
-[[bin]]
-[[bin]]
-name = "decode_siren"
-path = "fuzz_targets/decode_siren.rs"
-test = false
-doc = false
-name = "demux_vqf"
-[[bin]]
-name = "decode_amrnb"
-path = "fuzz_targets/decode_amrnb.rs"
-test = false
-doc = false
-path = "fuzz_targets/demux_vqf.rs"
-test = false
-doc = false
-[[bin]]
-name = "decode_twinvq"
-path = "fuzz_targets/decode_twinvq.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "decode_nellymoser"
-[[bin]]
-name = "demux_amr"
-path = "fuzz_targets/demux_amr.rs"
-test = false
-doc = false
-[[bin]]
-name = "decode_g729"
-path = "fuzz_targets/decode_g729.rs"
-test = false
-doc = false
-[[bin]]
-name = "decode_ilbc"
-[[bin]]
-name = "demux_qcp"
-path = "fuzz_targets/demux_qcp.rs"
-test = false
-doc = false
-[[bin]]
-name = "decode_evrc"
-path = "fuzz_targets/decode_evrc.rs"
-test = false
-doc = false
-[[bin]]
-name = "decode_qcelp"
-path = "fuzz_targets/decode_qcelp.rs"
-test = false
-doc = false
-[[bin]]
-name = "decode_g7231"
-path = "fuzz_targets/decode_g7231.rs"
-test = false
-doc = false
-[[bin]]
-name = "decode_amrwb"
-path = "fuzz_targets/decode_amrwb.rs"
-test = false
-doc = false
-path = "fuzz_targets/decode_ilbc.rs"
-test = false
-doc = false
-path = "fuzz_targets/decode_nellymoser.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "decode_qdesign"
-path = "fuzz_targets/decode_qdesign.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "decode_imc"
-path = "fuzz_targets/decode_imc.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "decode_truespeech"
-path = "fuzz_targets/decode_truespeech.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "demux_es"
-path = "fuzz_targets/demux_es.rs"
-test = false
-doc = false
-[[bin]]
-name = "decode_gsm"
-path = "fuzz_targets/decode_gsm.rs"
-test = false
-doc = false
-[[bin]]
-name = "decode_wma"
-path = "fuzz_targets/decode_wma.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "demux_asf"
-path = "fuzz_targets/demux_asf.rs"
-test = false
-doc = false
-
 
 [[bin]]
 name = "decode_sbc"
@@ -383,7 +283,235 @@ test = false
 doc = false
 
 [[bin]]
+name = "decode_twinvq"
+path = "fuzz_targets/decode_twinvq.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_vqf"
+path = "fuzz_targets/demux_vqf.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_mace"
+path = "fuzz_targets/decode_mace.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_nellymoser"
+path = "fuzz_targets/decode_nellymoser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_atrac"
+path = "fuzz_targets/decode_atrac.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_atrac9"
+path = "fuzz_targets/decode_atrac9.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_siren"
+path = "fuzz_targets/decode_siren.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_cook"
+path = "fuzz_targets/decode_cook.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_imc"
+path = "fuzz_targets/decode_imc.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_qdesign"
+path = "fuzz_targets/decode_qdesign.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_ra"
+path = "fuzz_targets/decode_ra.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_ralf"
+path = "fuzz_targets/decode_ralf.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_sipr"
+path = "fuzz_targets/decode_sipr.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_amrnb"
+path = "fuzz_targets/decode_amrnb.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_truespeech"
+path = "fuzz_targets/decode_truespeech.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_gsm"
+path = "fuzz_targets/decode_gsm.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_ilbc"
+path = "fuzz_targets/decode_ilbc.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_g729"
+path = "fuzz_targets/decode_g729.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_es"
+path = "fuzz_targets/demux_es.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "demux_spdif"
 path = "fuzz_targets/demux_spdif.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_amr"
+path = "fuzz_targets/demux_amr.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_shorten"
+path = "fuzz_targets/decode_shorten.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_shorten"
+path = "fuzz_targets/demux_shorten.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_tta"
+path = "fuzz_targets/decode_tta.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_tta"
+path = "fuzz_targets/demux_tta.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_tak"
+path = "fuzz_targets/decode_tak.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_tak"
+path = "fuzz_targets/demux_tak.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_adx"
+path = "fuzz_targets/demux_adx.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_au"
+path = "fuzz_targets/demux_au.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_voc"
+path = "fuzz_targets/demux_voc.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_iff"
+path = "fuzz_targets/demux_iff.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_raw"
+path = "fuzz_targets/demux_raw.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_wma"
+path = "fuzz_targets/decode_wma.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_asf"
+path = "fuzz_targets/demux_asf.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_amrwb"
+path = "fuzz_targets/decode_amrwb.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_g7231"
+path = "fuzz_targets/decode_g7231.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_qcelp"
+path = "fuzz_targets/decode_qcelp.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_evrc"
+path = "fuzz_targets/decode_evrc.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "demux_qcp"
+path = "fuzz_targets/demux_qcp.rs"
 test = false
 doc = false

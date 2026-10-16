@@ -15,9 +15,7 @@ use symphonia_core::dsp::mdct::Imdct;
 use symphonia_core::errors::{Result, decode_error};
 use symphonia_core::io::{BitReaderLtr, ReadBitsLtr};
 
-use crate::common::{
-    QMF_DELAY, bits, iqmf_finish, iqmf_prepare, make_qmf_window, make_sf_table,
-};
+use crate::common::{QMF_DELAY, bits, iqmf_finish, iqmf_prepare, make_qmf_window, make_sf_table};
 use crate::tables::{
     BFU_AMOUNT_TAB1, BFU_AMOUNT_TAB2, BFU_AMOUNT_TAB3, BFU_BANDS_T, BFU_START_LONG,
     BFU_START_SHORT, SPECS_PER_BFU,
@@ -134,10 +132,7 @@ impl Atrac1Core {
             return decode_error("atrac1: unsupported number of channels");
         }
 
-        Ok(Atrac1Core {
-            units: (0..channels).map(|_| SoundUnit::new()).collect(),
-            dsp: Dsp::new(),
-        })
+        Ok(Atrac1Core { units: (0..channels).map(|_| SoundUnit::new()).collect(), dsp: Dsp::new() })
     }
 
     pub fn reset(&mut self) {
@@ -308,7 +303,6 @@ impl Dsp {
         let prev = 1 - cur;
 
         for (band, &band_samples) in SAMPLES_PER_BAND.iter().enumerate().take(QMF_BANDS) {
-
             // Number of MDCT blocks in the band: 1 for long mode, 4 for short mode (low/mid
             // bands) and 8 for short mode (high band).
             let num_blocks = 1usize << su.log2_block_count[band];
@@ -367,7 +361,13 @@ impl Dsp {
             &su.fst_qmf_delay,
             &mut self.iqmf_temp,
         );
-        iqmf_finish(&self.qmf_window, 128, &self.iqmf_temp, &mut self.qmf_tmp, &mut su.fst_qmf_delay);
+        iqmf_finish(
+            &self.qmf_window,
+            128,
+            &self.iqmf_temp,
+            &mut self.qmf_tmp,
+            &mut su.fst_qmf_delay,
+        );
 
         // Delay the signal of the high band by 39 samples.
         su.last_qmf_delay.copy_within(256..256 + HIGH_BAND_DELAY, 0);

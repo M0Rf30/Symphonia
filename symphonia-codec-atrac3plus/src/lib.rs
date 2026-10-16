@@ -41,8 +41,8 @@ mod tables;
 mod unit;
 
 use symphonia_core::audio::{
-    AsGenericAudioBufferRef, AudioBuffer, AudioMut, AudioSpec, Channels,
-    GenericAudioBufferRef, layouts,
+    AsGenericAudioBufferRef, AudioBuffer, AudioMut, AudioSpec, Channels, GenericAudioBufferRef,
+    layouts,
 };
 use symphonia_core::codecs::CodecInfo;
 use symphonia_core::codecs::audio::well_known::CODEC_ID_ATRAC3PLUS;
@@ -78,11 +78,9 @@ fn layout_for(count: usize) -> Option<Layout> {
         1 => Layout { channels: layouts::CHANNEL_LAYOUT_MONO, units: &[M], map: &[0] },
         2 => Layout { channels: layouts::CHANNEL_LAYOUT_STEREO, units: &[S], map: &[0, 1] },
         3 => Layout { channels: layouts::CHANNEL_LAYOUT_3P0, units: &[S, M], map: &[0, 1, 2] },
-        4 => Layout {
-            channels: layouts::CHANNEL_LAYOUT_4P0,
-            units: &[S, M, M],
-            map: &[0, 1, 2, 3],
-        },
+        4 => {
+            Layout { channels: layouts::CHANNEL_LAYOUT_4P0, units: &[S, M, M], map: &[0, 1, 2, 3] }
+        }
         6 => Layout {
             channels: layouts::CHANNEL_LAYOUT_5P1,
             units: &[S, M, S, M],

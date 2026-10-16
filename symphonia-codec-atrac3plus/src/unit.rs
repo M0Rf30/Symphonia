@@ -215,7 +215,11 @@ fn vlc(gb: &mut BitReader<'_>, tab: &Vlc) -> Result<i32> {
 }
 
 /// Decode the number of coded quantization units.
-fn num_coded_units(gb: &mut BitReader<'_>, chan: &mut ChanParams, num_quant_units: usize) -> Result<()> {
+fn num_coded_units(
+    gb: &mut BitReader<'_>,
+    chan: &mut ChanParams,
+    num_quant_units: usize,
+) -> Result<()> {
     chan.fill_mode = gb.get(2);
     if chan.fill_mode == 0 {
         chan.num_coded_vals = num_quant_units;
@@ -233,7 +237,11 @@ fn num_coded_units(gb: &mut BitReader<'_>, chan: &mut ChanParams, num_quant_unit
 }
 
 /// Add weighting coefficients to the decoded word-length information.
-fn add_wordlen_weights(chan: &mut ChanParams, num_quant_units: usize, wtab_idx: usize) -> Result<()> {
+fn add_wordlen_weights(
+    chan: &mut ChanParams,
+    num_quant_units: usize,
+    wtab_idx: usize,
+) -> Result<()> {
     let weights = &WL_WEIGHTS[chan.ch_num * 3 + wtab_idx - 1];
     for (wl, &w) in chan.qu_wordlen[..num_quant_units].iter_mut().zip(weights) {
         *wl += i32::from(w);
@@ -245,7 +253,11 @@ fn add_wordlen_weights(chan: &mut ChanParams, num_quant_units: usize, wtab_idx: 
 }
 
 /// Subtract weighting coefficients from decoded scale factors.
-fn subtract_sf_weights(chan: &mut ChanParams, used_quant_units: usize, wtab_idx: usize) -> Result<()> {
+fn subtract_sf_weights(
+    chan: &mut ChanParams,
+    used_quant_units: usize,
+    wtab_idx: usize,
+) -> Result<()> {
     let weights = &SF_WEIGHTS[wtab_idx - 1];
     for (sf, &w) in chan.qu_sf_idx[..used_quant_units].iter_mut().zip(weights) {
         *sf -= i32::from(w);
@@ -715,7 +727,8 @@ fn decode_qu_spectra(
     out: &mut [i16],
 ) -> Result<()> {
     let (group_size, num_coeffs, bits, is_signed) = tab;
-    let (group_size, num_coeffs, bits) = (usize::from(group_size), usize::from(num_coeffs), u32::from(bits));
+    let (group_size, num_coeffs, bits) =
+        (usize::from(group_size), usize::from(num_coeffs), u32::from(bits));
     let mut pos = 0;
 
     while pos < out.len() {
@@ -1061,7 +1074,8 @@ fn gainc_loc_mode1(gb: &mut BitReader<'_>, cb: &Codebooks, dst: &mut GainInfo) -
 
         for i in 1..dst.num_points {
             // Switch the VLC according to the curve direction (ascending/descending).
-            let tab = if dst.lev_code[i] <= dst.lev_code[i - 1] { &cb.gain[7] } else { &cb.gain[9] };
+            let tab =
+                if dst.lev_code[i] <= dst.lev_code[i - 1] { &cb.gain[7] } else { &cb.gain[9] };
             dst.loc_code[i] = dst.loc_code[i - 1] + vlc(gb, tab)?;
         }
     }
@@ -1183,8 +1197,9 @@ fn decode_gainc_loc_codes(
                         let more_than_ref = i >= prev.num_points;
                         // Select the VLC according to the curve direction and the presence of a
                         // prediction.
-                        let tab = &cb.gain
-                            [usize::from(dst.lev_code[i] > dst.lev_code[i - 1]) * 2 + usize::from(more_than_ref) + 6];
+                        let tab = &cb.gain[usize::from(dst.lev_code[i] > dst.lev_code[i - 1]) * 2
+                            + usize::from(more_than_ref)
+                            + 6];
                         let delta = vlc(gb, tab)?;
                         if more_than_ref {
                             dst.loc_code[i] = dst.loc_code[i - 1] + delta;

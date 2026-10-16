@@ -25,9 +25,7 @@ use symphonia_core::packet::PacketRef;
 use symphonia_core::support_audio_codec;
 
 use crate::bits::BitReader;
-use crate::info::{
-    CODEC_MONO_STEREO, CODEC_MULTICHANNEL, FrameHeader, StreamInfo, check_crc,
-};
+use crate::info::{CODEC_MONO_STEREO, CODEC_MULTICHANNEL, FrameHeader, StreamInfo, check_crc};
 use crate::tables::{MC_DMODES, PREDICTOR_SIZES, XCODES};
 
 /// The most samples a frame can hold.
@@ -78,7 +76,9 @@ fn get_bits_esc4(br: &mut BitReader<'_>) -> u32 {
 /// Sums the products of 16-bit values in 32-bit wrapping arithmetic.
 #[inline]
 fn dot(a: &[i16], b: &[i16]) -> i32 {
-    a.iter().zip(b).fold(0i32, |s, (&x, &y)| s.wrapping_add(i32::from(x).wrapping_mul(i32::from(y))))
+    a.iter()
+        .zip(b)
+        .fold(0i32, |s, (&x, &y)| s.wrapping_add(i32::from(x).wrapping_mul(i32::from(y))))
 }
 
 /// Clips to the range of a signed 13-bit integer (`av_clip_intp2(v, 13)`).
@@ -392,7 +392,8 @@ fn decode_subframe(
             let ta = sc.tfilter[a];
             let tb = sc.tfilter[b];
             let x = ta.wrapping_add(((p.wrapping_mul(tb).wrapping_add(256)) as i32 >> 9) as u32);
-            sc.tfilter[b] = tb.wrapping_add(((p.wrapping_mul(ta).wrapping_add(256)) as i32 >> 9) as u32);
+            sc.tfilter[b] =
+                tb.wrapping_add(((p.wrapping_mul(ta).wrapping_add(256)) as i32 >> 9) as u32);
             sc.tfilter[a] = x;
             a += 1;
             b = b.wrapping_sub(1);
@@ -619,8 +620,7 @@ fn decorrelate(
                 for i in 0..tmp {
                     let v =
                         512i32.wrapping_add(dot(&sc.residues[i..i + order], &sc.filter[..order]));
-                    p1[p1_pos] =
-                        clip13(v >> 10).wrapping_mul(1 << dshift).wrapping_sub(p1[p1_pos]);
+                    p1[p1_pos] = clip13(v >> 10).wrapping_mul(1 << dshift).wrapping_sub(p1[p1_pos]);
                     p1_pos += 1;
                 }
 
@@ -850,7 +850,6 @@ impl TakDecoder {
             }
 
             for &m in &mcd[..count] {
-
                 if m.present && m.index == 1 {
                     decode_channel(sc, &mut br, &mut chans[m.chan2], &mut states[m.chan2])?;
                 }

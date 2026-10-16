@@ -76,7 +76,8 @@ impl<'a> BitReader<'a> {
     fn read_unary(&mut self) -> Result<u32, Error> {
         let mut zeros = 0u32;
         loop {
-            let Some(&byte) = self.data.get(self.pos >> 3) else {
+            let Some(&byte) = self.data.get(self.pos >> 3)
+            else {
                 return Err(eof());
             };
             let skip = (self.pos & 7) as u32;
@@ -85,7 +86,8 @@ impl<'a> BitReader<'a> {
             if bits == 0 {
                 zeros = zeros.wrapping_add(8 - skip);
                 self.pos += (8 - skip) as usize;
-            } else {
+            }
+            else {
                 let lz = bits.leading_zeros();
                 zeros = zeros.wrapping_add(lz);
                 self.pos += lz as usize + 1;

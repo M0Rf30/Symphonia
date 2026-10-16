@@ -31,8 +31,8 @@ use symphonia_core::support_format;
 use symphonia_core::units::{Duration, TimeBase, Timestamp};
 
 use crate::info::{
-    FRAME_FLAG_IS_LAST, FrameHeader, MAX_FRAME_HEADER_BYTES, METADATA_END,
-    METADATA_LAST_FRAME, METADATA_MD5, METADATA_STREAMINFO, StreamInfo, crc24,
+    FRAME_FLAG_IS_LAST, FrameHeader, MAX_FRAME_HEADER_BYTES, METADATA_END, METADATA_LAST_FRAME,
+    METADATA_MD5, METADATA_STREAMINFO, StreamInfo, crc24,
 };
 
 /// The marker of the file header.
@@ -422,7 +422,8 @@ impl<'s> TakReader<'s> {
 
     /// The first sample of the frame of a header.
     fn frame_start(&self, header: &FrameHeader) -> u64 {
-        let frame_samples = header.info.as_ref().map_or(self.info.frame_samples, |i| i.frame_samples);
+        let frame_samples =
+            header.info.as_ref().map_or(self.info.frame_samples, |i| i.frame_samples);
         u64::from(header.frame_num) * u64::from(frame_samples)
     }
 }
@@ -579,11 +580,7 @@ impl FormatReader for TakReader<'_> {
         self.buf_pos = lo.pos;
         self.eof = false;
 
-        Ok(SeekedTo {
-            track_id: 0,
-            required_ts: ts,
-            actual_ts: Timestamp::new(actual_ts as i64),
-        })
+        Ok(SeekedTo { track_id: 0, required_ts: ts, actual_ts: Timestamp::new(actual_ts as i64) })
     }
 
     fn into_inner<'a>(self: Box<Self>) -> MediaSourceStream<'a>

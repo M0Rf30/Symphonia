@@ -125,7 +125,12 @@ pub(crate) fn channels_from_count(count: u16) -> Channels {
         3 => P::FRONT_LEFT | P::FRONT_RIGHT | P::LFE1,
         4 => P::FRONT_LEFT | P::FRONT_RIGHT | P::REAR_LEFT | P::REAR_RIGHT,
         6 => {
-            P::FRONT_LEFT | P::FRONT_RIGHT | P::FRONT_CENTER | P::LFE1 | P::REAR_LEFT | P::REAR_RIGHT
+            P::FRONT_LEFT
+                | P::FRONT_RIGHT
+                | P::FRONT_CENTER
+                | P::LFE1
+                | P::REAR_LEFT
+                | P::REAR_RIGHT
         }
         7 => {
             P::FRONT_LEFT

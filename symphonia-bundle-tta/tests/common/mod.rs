@@ -122,8 +122,7 @@ pub fn decode_reader(reader: &mut TtaReader<'_>, verify: bool) -> Decoded {
     let bytes_per_sample = (params.bits_per_sample.expect("bits per sample") as usize).div_ceil(8);
     let mut dec = decoder(reader, verify);
 
-    let mut out =
-        Decoded { bytes_per_sample, channels: 0, frames: 0, pcm: Vec::new(), errors: 0 };
+    let mut out = Decoded { bytes_per_sample, channels: 0, frames: 0, pcm: Vec::new(), errors: 0 };
 
     while let Ok(Some(packet)) = reader.next_packet() {
         match dec.decode(&packet) {

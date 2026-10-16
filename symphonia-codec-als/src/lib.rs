@@ -76,9 +76,7 @@ use bits::Bits;
 use config::{Config, ceil_log2};
 use mlz::Mlz;
 use softfloat::{FLOAT_1, SoftFloat, reconstruct};
-use tables::{
-    LTP_GAIN_VALUES, MCC_WEIGHTINGS, PARCOR_RICE_TABLE, PARCOR_SCALED_VALUES, TAIL_CODE,
-};
+use tables::{LTP_GAIN_VALUES, MCC_WEIGHTINGS, PARCOR_RICE_TABLE, PARCOR_SCALED_VALUES, TAIL_CODE};
 
 /// The most samples of the buffer of decoded samples (all channels, one frame plus history).
 const MAX_RAW_SAMPLES: usize = 1 << 27;
@@ -176,7 +174,8 @@ impl Crc {
     }
 
     fn update(&mut self, byte: u8) {
-        self.value = self.table[((self.value ^ u32::from(byte)) & 0xff) as usize] ^ (self.value >> 8);
+        self.value =
+            self.table[((self.value ^ u32::from(byte)) & 0xff) as usize] ^ (self.value >> 8);
     }
 }
 
@@ -357,7 +356,10 @@ impl AlsDecoder {
     fn store_carryover(&mut self, c: usize) {
         let max_order = self.cfg.max_order;
         let start = self.chan_base(c) - max_order;
-        self.raw.copy_within(start + self.cfg.frame_length..start + self.cfg.frame_length + max_order, start);
+        self.raw.copy_within(
+            start + self.cfg.frame_length..start + self.cfg.frame_length + max_order,
+            start,
+        );
     }
 
     /// Read the block switching field if necessary and set the actual block sizes. Also assures
@@ -573,8 +575,8 @@ impl AlsDecoder {
                 gain[3] = bits.rice(2).wrapping_mul(8);
                 gain[4] = bits.rice(1).wrapping_mul(8);
 
-                self.ltp_lag[ci] = (bits.get(self.ltp_lag_length) as usize + (opt_order + 1).max(4))
-                    as i32;
+                self.ltp_lag[ci] =
+                    (bits.get(self.ltp_lag_length) as usize + (opt_order + 1).max(4)) as i32;
             }
         }
 
@@ -649,8 +651,8 @@ impl AlsDecoder {
                     let mut res = self.raw[pos];
 
                     if res as u32 == cur_tail_code {
-                        let max_msb = (2 + u32::from(sx[sb] > 2) + u32::from(sx[sb] > 10))
-                            << (5 - delta[sb]);
+                        let max_msb =
+                            (2 + u32::from(sx[sb] > 2) + u32::from(sx[sb] > 10)) << (5 - delta[sb]);
 
                         res = bits.rice(cur_s);
 
@@ -850,7 +852,8 @@ impl AlsDecoder {
 
     /// Decode the blocks of a channel independently.
     fn decode_blocks_ind(&mut self, bits: &mut Bits<'_>, ra_frame: bool, c: usize) -> Result<()> {
-        let mut bd = Block { len: 0, ra: ra_frame, ci: 0, js: false, pos: self.chan_base(c), other: None };
+        let mut bd =
+            Block { len: 0, ra: ra_frame, ci: 0, js: false, pos: self.chan_base(c), other: None };
 
         for b in 0..self.num_blocks {
             bd.len = self.div_blocks[b] as usize;
@@ -892,12 +895,14 @@ impl AlsDecoder {
             // Reconstruct the joint-stereo blocks.
             if bd0.js {
                 for s in 0..len {
-                    self.raw[bd0.pos + s] = self.raw[bd1.pos + s].wrapping_sub(self.raw[bd0.pos + s]);
+                    self.raw[bd0.pos + s] =
+                        self.raw[bd1.pos + s].wrapping_sub(self.raw[bd0.pos + s]);
                 }
             }
             else if bd1.js {
                 for s in 0..len {
-                    self.raw[bd1.pos + s] = self.raw[bd1.pos + s].wrapping_add(self.raw[bd0.pos + s]);
+                    self.raw[bd1.pos + s] =
+                        self.raw[bd1.pos + s].wrapping_add(self.raw[bd0.pos + s]);
                 }
             }
 
@@ -1371,9 +1376,10 @@ impl AlsDecoder {
     fn fill_output(&mut self) {
         let channels = self.cfg.channels;
         let n = self.acc.first().map_or(0, Vec::len);
-        let spec = AudioSpec::new(self.cfg.sample_rate, self.params.channels.clone().unwrap_or(
-            Channels::Discrete(channels as u16),
-        ));
+        let spec = AudioSpec::new(
+            self.cfg.sample_rate,
+            self.params.channels.clone().unwrap_or(Channels::Discrete(channels as u16)),
+        );
 
         match &mut self.buf {
             Output::S16(buf) => {

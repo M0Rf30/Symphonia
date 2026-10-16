@@ -28,7 +28,8 @@ const LOC_SIZE: usize = 1 << LOC_SCALE;
 /// Maps a subband number to its power compensation group.
 const SUBBAND_TO_POWGRP: [u8; SUBBANDS] = [0, 1, 1, 2, 2, 2, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4];
 /// Maps a subband number to its first quantization unit.
-const SUBBAND_TO_QU: [u8; SUBBANDS + 1] = [0, 8, 12, 16, 18, 20, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32];
+const SUBBAND_TO_QU: [u8; SUBBANDS + 1] =
+    [0, 8, 12, 16, 18, 20, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32];
 /// Number of taps in the inverse PQF filter, in units of 16 samples (half of the 384 taps).
 const PQF_FIR_LEN: usize = 12;
 
@@ -158,7 +159,9 @@ impl Synth {
                 let wordlen = chan.qu_wordlen[qu];
                 if wordlen > 0 {
                     let q = SF_TAB[chan.qu_sf_idx[qu] as usize] * MANT_TAB[wordlen as usize];
-                    for (d, &s) in self.spectrum[ch][start..end].iter_mut().zip(&chan.spectrum[start..end]) {
+                    for (d, &s) in
+                        self.spectrum[ch][start..end].iter_mut().zip(&chan.spectrum[start..end])
+                    {
                         *d = f32::from(s) * q;
                     }
                 }
@@ -246,8 +249,8 @@ impl Synth {
         for ch in 0..num_channels {
             for sb in 0..num_subbands {
                 let chan = &unit.channels[ch];
-                let wind_id =
-                    (usize::from(chan.wnd_shape[cur ^ 1][sb]) << 1) + usize::from(chan.wnd_shape[cur][sb]);
+                let wind_id = (usize::from(chan.wnd_shape[cur ^ 1][sb]) << 1)
+                    + usize::from(chan.wnd_shape[cur][sb]);
 
                 // Inverse transform and windowing.
                 let range = sb * SUBBAND_SAMPLES..(sb + 1) * SUBBAND_SAMPLES;
@@ -341,7 +344,8 @@ impl Synth {
         let input = &self.imdct_out;
         let out = &mut self.time_buf[range];
 
-        let gc_scale = if gc_next.num_points != 0 { t.gain_tab1[gc_next.lev_code[0] as usize] } else { 1.0 };
+        let gc_scale =
+            if gc_next.num_points != 0 { t.gain_tab1[gc_next.lev_code[0] as usize] } else { 1.0 };
 
         if gc_now.num_points == 0 {
             for (pos, o) in out.iter_mut().enumerate() {
@@ -395,7 +399,8 @@ impl Synth {
         let mut tones_next = unit.channels[ch].tones_info[cur][sb];
 
         // Reconstruct full envelopes for both overlapping regions from truncated bitstream data.
-        if tones_next.pend_env.has_start_point && tones_next.pend_env.start_pos < tones_next.pend_env.stop_pos
+        if tones_next.pend_env.has_start_point
+            && tones_next.pend_env.start_pos < tones_next.pend_env.stop_pos
         {
             tones_next.curr_env.has_start_point = true;
             tones_next.curr_env.start_pos = tones_next.pend_env.start_pos + 32;
@@ -409,7 +414,9 @@ impl Synth {
             tones_next.curr_env.start_pos = 0;
         }
 
-        if tones_now.pend_env.has_stop_point && tones_now.pend_env.stop_pos >= tones_next.curr_env.start_pos {
+        if tones_now.pend_env.has_stop_point
+            && tones_now.pend_env.stop_pos >= tones_next.curr_env.start_pos
+        {
             tones_next.curr_env.has_stop_point = true;
             tones_next.curr_env.stop_pos = tones_now.pend_env.stop_pos;
         }
@@ -438,7 +445,11 @@ impl Synth {
         }
 
         // Hann windowing for non-faded wave signals.
-        if tones_now.num_wavs != 0 && tones_next.num_wavs != 0 && reg1_env_nonzero && reg2_env_nonzero {
+        if tones_now.num_wavs != 0
+            && tones_next.num_wavs != 0
+            && reg1_env_nonzero
+            && reg2_env_nonzero
+        {
             for (v, &w) in wavreg1.iter_mut().zip(&t.hann[128..]) {
                 *v *= w;
             }
@@ -530,14 +541,16 @@ fn waves_synth(
     reg_offset: i32,
     out: &mut [f32; 128],
 ) {
-    let waves = synth.waves.get(data.start_index..data.start_index + data.num_wavs).unwrap_or_default();
+    let waves =
+        synth.waves.get(data.start_index..data.start_index + data.num_wavs).unwrap_or_default();
 
     for wave in waves {
         // Amplitude dequantization (amplitude mode 1).
         let amp = f64::from(t.amp_sf[wave.amp_sf as usize]);
 
         let inc = wave.freq_index;
-        let mut pos = ((((wave.phase_index & 0x1f) << 6) - (reg_offset ^ 128) * inc) & 2047) as usize;
+        let mut pos =
+            ((((wave.phase_index & 0x1f) << 6) - (reg_offset ^ 128) * inc) & 2047) as usize;
 
         // Waveform generation.
         for o in out.iter_mut() {

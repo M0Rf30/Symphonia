@@ -10,9 +10,9 @@
 mod common;
 
 use common::*;
+use symphonia_codec_ralf::RalfDecoder;
 use symphonia_core::codecs::audio::well_known::CODEC_ID_RALF;
 use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
-use symphonia_codec_ralf::RalfDecoder;
 
 /// 9 independent units (10 packets, 1 split frame) of a RealAudio 10 Lossless file: stereo,
 /// 44.1 kHz. They cover all four stereo modes, all block lengths, and 8 of the filter precisions

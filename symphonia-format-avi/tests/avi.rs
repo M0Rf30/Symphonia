@@ -42,7 +42,8 @@ fn open(name: &str) -> Box<dyn FormatReader + 'static> {
 }
 
 fn decoder(reader: &dyn FormatReader, track: usize) -> Box<dyn AudioDecoder> {
-    let Some(CodecParameters::Audio(params)) = reader.tracks()[track].codec_params.as_ref() else {
+    let Some(CodecParameters::Audio(params)) = reader.tracks()[track].codec_params.as_ref()
+    else {
         panic!("not audio");
     };
     let opts = AudioDecoderOptions::default();
@@ -108,7 +109,8 @@ fn parameters() {
         let reader = open(name);
         assert_eq!(reader.tracks().len(), 1, "{name}");
 
-        let Some(CodecParameters::Audio(params)) = reader.tracks()[0].codec_params.as_ref() else {
+        let Some(CodecParameters::Audio(params)) = reader.tracks()[0].codec_params.as_ref()
+        else {
             panic!("{name}: not audio");
         };
 
@@ -121,7 +123,8 @@ fn parameters() {
 #[test]
 fn matches_ffmpeg() {
     for &(name, _, _, _, tolerance) in FILES {
-        let Some(expected) = ffmpeg_s16(&path(name)) else {
+        let Some(expected) = ffmpeg_s16(&path(name))
+        else {
             return;
         };
 
@@ -294,6 +297,6 @@ fn opendml_continuation_and_seek() {
         .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(300), track_id: 1 })
         .unwrap();
     let actual = seeked.actual_ts.get() as usize;
-    assert!(actual <= 300 && actual >= 200);
+    assert!((200..=300).contains(&actual));
     assert_eq!(decode_s16(reader.as_mut()), samples[actual..]);
 }

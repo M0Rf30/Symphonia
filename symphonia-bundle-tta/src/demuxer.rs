@@ -194,12 +194,7 @@ impl ProbeableFormat<'_> for TtaReader<'_> {
     }
 
     fn probe_data() -> &'static [ProbeFormatData] {
-        &[support_format!(
-            TTA_FORMAT_INFO,
-            &["tta"],
-            &["audio/x-tta", "audio/tta"],
-            &[b"TTA1"]
-        )]
+        &[support_format!(TTA_FORMAT_INFO, &["tta"], &["audio/x-tta", "audio/tta"], &[b"TTA1"])]
     }
 }
 
@@ -250,7 +245,8 @@ impl FormatReader for TtaReader<'_> {
             )));
         }
 
-        let dur = if index + 1 == self.sizes.len() { self.last_frame_length } else { self.frame_length };
+        let dur =
+            if index + 1 == self.sizes.len() { self.last_frame_length } else { self.frame_length };
 
         Ok(Some(
             PacketBuilder::new()
@@ -288,7 +284,8 @@ impl FormatReader for TtaReader<'_> {
         // defined to be.
         let index = (required_ts.get() as u64 / self.frame_length) as usize;
 
-        let pos = self.first_frame_pos + self.sizes[..index].iter().map(|&s| u64::from(s)).sum::<u64>();
+        let pos =
+            self.first_frame_pos + self.sizes[..index].iter().map(|&s| u64::from(s)).sum::<u64>();
         self.reader.seek(SeekFrom::Start(pos))?;
 
         self.next_frame = index;

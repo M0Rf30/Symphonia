@@ -47,12 +47,7 @@ pub(crate) fn make_qmf_window() -> [f32; 48] {
 /// samples.
 ///
 /// The inputs may alias the output of [`iqmf_finish`], which is why the filter is split in two.
-pub(crate) fn iqmf_prepare(
-    lo: &[f32],
-    hi: &[f32],
-    delay: &[f32; QMF_DELAY],
-    temp: &mut [f32],
-) {
+pub(crate) fn iqmf_prepare(lo: &[f32], hi: &[f32], delay: &[f32; QMF_DELAY], temp: &mut [f32]) {
     temp[..QMF_DELAY].copy_from_slice(delay);
 
     for (k, (&l, &h)) in lo.iter().zip(hi).enumerate() {

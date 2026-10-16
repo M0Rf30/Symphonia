@@ -194,10 +194,10 @@ pub mod default {
         pub use symphonia_bundle_musepack::MpcDecoder;
         #[cfg(feature = "shorten")]
         pub use symphonia_bundle_shorten::ShortenDecoder;
-        #[cfg(feature = "tta")]
-        pub use symphonia_bundle_tta::TtaDecoder;
         #[cfg(feature = "tak")]
         pub use symphonia_bundle_tak::TakDecoder;
+        #[cfg(feature = "tta")]
+        pub use symphonia_bundle_tta::TtaDecoder;
         #[cfg(feature = "aac")]
         pub use symphonia_codec_aac::AacDecoder;
         #[cfg(feature = "ac3")]
@@ -206,22 +206,14 @@ pub mod default {
         pub use symphonia_codec_adpcm::AdpcmDecoder;
         #[cfg(feature = "alac")]
         pub use symphonia_codec_alac::AlacDecoder;
-        #[cfg(feature = "dca")]
-        pub use symphonia_codec_dca::DcaDecoder;
-        #[cfg(feature = "dsd")]
-        pub use symphonia_codec_dsd::DsdDecoder;
-        #[cfg(feature = "gsm")]
-        pub use symphonia_codec_gsm::GsmDecoder;
-        #[cfg(feature = "mace")]
-        pub use symphonia_codec_mace::MaceDecoder;
-        #[cfg(feature = "nellymoser")]
-        pub use symphonia_codec_nellymoser::NellymoserDecoder;
-        #[cfg(feature = "qcelp")]
-        pub use symphonia_codec_qcelp::QcelpDecoder;
-        #[cfg(feature = "qdesign")]
-        pub use symphonia_codec_qdesign::QdesignDecoder;
-        #[cfg(feature = "evrc")]
-        pub use symphonia_codec_evrc::EvrcDecoder;
+        #[cfg(feature = "als")]
+        pub use symphonia_codec_als::AlsDecoder;
+        #[cfg(feature = "amrnb")]
+        pub use symphonia_codec_amrnb::AmrNbDecoder;
+        #[cfg(feature = "amrwb")]
+        pub use symphonia_codec_amrwb::AmrWbDecoder;
+        #[cfg(feature = "aptx")]
+        pub use symphonia_codec_aptx::AptxDecoder;
         #[cfg(feature = "atrac")]
         pub use symphonia_codec_atrac::AtracDecoder;
         #[cfg(feature = "atrac3plus")]
@@ -230,56 +222,64 @@ pub mod default {
         pub use symphonia_codec_atrac9::Atrac9Decoder;
         #[cfg(feature = "cook")]
         pub use symphonia_codec_cook::CookDecoder;
-        #[cfg(feature = "imc")]
-        pub use symphonia_codec_imc::ImcDecoder;
-        #[cfg(feature = "ra")]
-        pub use symphonia_codec_ra::{Ra144Decoder, Ra288Decoder};
-        #[cfg(feature = "ralf")]
-        pub use symphonia_codec_ralf::RalfDecoder;
-        #[cfg(feature = "sipr")]
-        pub use symphonia_codec_sipr::SiprDecoder;
-        #[cfg(feature = "amrnb")]
-        pub use symphonia_codec_amrnb::AmrNbDecoder;
-        #[cfg(feature = "amrwb")]
-        pub use symphonia_codec_amrwb::AmrWbDecoder;
-        #[cfg(feature = "truespeech")]
-        pub use symphonia_codec_truespeech::TrueSpeechDecoder;
-        #[cfg(feature = "twinvq")]
-        pub use symphonia_codec_twinvq::TwinVqDecoder;
-        #[cfg(feature = "wma")]
-        pub use symphonia_codec_wma::WmaDecoder;
-        #[cfg(feature = "ilbc")]
-        pub use symphonia_codec_ilbc::IlbcDecoder;
+        #[cfg(feature = "dca")]
+        pub use symphonia_codec_dca::DcaDecoder;
+        #[cfg(feature = "dolby-e")]
+        pub use symphonia_codec_dolby_e::DolbyEDecoder;
+        #[cfg(feature = "dsd")]
+        pub use symphonia_codec_dsd::DsdDecoder;
+        #[cfg(feature = "evrc")]
+        pub use symphonia_codec_evrc::EvrcDecoder;
         #[cfg(feature = "g729")]
         pub use symphonia_codec_g729::G729Decoder;
         #[cfg(feature = "g7231")]
         pub use symphonia_codec_g7231::G7231Decoder;
-        #[cfg(feature = "opus")]
-        pub use symphonia_codec_opus::OpusAudioDecoder;
-        #[cfg(feature = "pcm")]
-        pub use symphonia_codec_pcm::PcmDecoder;
-        #[cfg(feature = "speex")]
-        pub use symphonia_codec_speex::SpeexDecoder;
-        #[cfg(feature = "siren")]
-        pub use symphonia_codec_siren::SirenDecoder;
-        #[cfg(feature = "sbc")]
-        pub use symphonia_codec_sbc::SbcDecoder;
-        #[cfg(feature = "aptx")]
-        pub use symphonia_codec_aptx::AptxDecoder;
+        #[cfg(feature = "gsm")]
+        pub use symphonia_codec_gsm::GsmDecoder;
+        #[cfg(feature = "ilbc")]
+        pub use symphonia_codec_ilbc::IlbcDecoder;
+        #[cfg(feature = "imc")]
+        pub use symphonia_codec_imc::ImcDecoder;
         #[cfg(feature = "lc3")]
         pub use symphonia_codec_lc3::Lc3Decoder;
         #[cfg(feature = "ldac")]
         pub use symphonia_codec_ldac::LdacDecoder;
-        #[cfg(feature = "dolby-e")]
-        pub use symphonia_codec_dolby_e::DolbyEDecoder;
-        #[cfg(feature = "als")]
-        pub use symphonia_codec_als::AlsDecoder;
+        #[cfg(feature = "mace")]
+        pub use symphonia_codec_mace::MaceDecoder;
+        #[cfg(feature = "nellymoser")]
+        pub use symphonia_codec_nellymoser::NellymoserDecoder;
+        #[cfg(feature = "opus")]
+        pub use symphonia_codec_opus::OpusAudioDecoder;
+        #[cfg(feature = "pcm")]
+        pub use symphonia_codec_pcm::PcmDecoder;
+        #[cfg(feature = "qcelp")]
+        pub use symphonia_codec_qcelp::QcelpDecoder;
+        #[cfg(feature = "qdesign")]
+        pub use symphonia_codec_qdesign::QdesignDecoder;
+        #[cfg(feature = "ra")]
+        pub use symphonia_codec_ra::{Ra144Decoder, Ra288Decoder};
+        #[cfg(feature = "ralf")]
+        pub use symphonia_codec_ralf::RalfDecoder;
+        #[cfg(feature = "sbc")]
+        pub use symphonia_codec_sbc::SbcDecoder;
+        #[cfg(feature = "sipr")]
+        pub use symphonia_codec_sipr::SiprDecoder;
+        #[cfg(feature = "siren")]
+        pub use symphonia_codec_siren::SirenDecoder;
+        #[cfg(feature = "speex")]
+        pub use symphonia_codec_speex::SpeexDecoder;
         #[cfg(feature = "truehd")]
         pub use symphonia_codec_truehd::TrueHdDecoder;
+        #[cfg(feature = "truespeech")]
+        pub use symphonia_codec_truespeech::TrueSpeechDecoder;
+        #[cfg(feature = "twinvq")]
+        pub use symphonia_codec_twinvq::TwinVqDecoder;
         #[cfg(feature = "vorbis")]
         pub use symphonia_codec_vorbis::VorbisDecoder;
         #[cfg(feature = "wavpack")]
         pub use symphonia_codec_wavpack::WavPackDecoder;
+        #[cfg(feature = "wma")]
+        pub use symphonia_codec_wma::WmaDecoder;
     }
 
     pub mod formats {
@@ -295,10 +295,10 @@ pub mod default {
         pub use symphonia_bundle_musepack::MpcReader;
         #[cfg(feature = "shorten")]
         pub use symphonia_bundle_shorten::ShortenReader;
-        #[cfg(feature = "tta")]
-        pub use symphonia_bundle_tta::TtaReader;
         #[cfg(feature = "tak")]
         pub use symphonia_bundle_tak::TakReader;
+        #[cfg(feature = "tta")]
+        pub use symphonia_bundle_tta::TtaReader;
         #[cfg(feature = "aac")]
         pub use symphonia_codec_aac::AdifReader;
         #[cfg(feature = "aac")]
@@ -314,30 +314,24 @@ pub mod default {
         /// `FormatOptions` (see `symphonia_codec_wavpack::with_sibling_correction`).
         #[cfg(feature = "wavpack")]
         pub use symphonia_codec_wavpack::with_sibling_correction as wavpack_with_sibling_correction;
-        #[cfg(feature = "caf")]
-        pub use symphonia_format_caf::CafReader;
-        #[cfg(feature = "dsd")]
-        pub use symphonia_format_dsd::{CODEC_TYPE_DSD, DffReader, DsfReader};
         #[cfg(feature = "amr")]
         pub use symphonia_format_amr::AmrReader;
-        #[cfg(feature = "vqf")]
-        pub use symphonia_format_vqf::VqfReader;
         #[cfg(feature = "asf")]
         pub use symphonia_format_asf::AsfReader;
         #[cfg(feature = "avi")]
         pub use symphonia_format_avi::AviReader;
-        #[cfg(feature = "es")]
-        pub use symphonia_format_es::{Ac3Reader, DtsReader, S337mReader, TrueHdReader};
-        #[cfg(feature = "spdif")]
-        pub use symphonia_format_spdif::SpdifReader;
         #[cfg(feature = "bt")]
         pub use symphonia_format_bt::{AptxHdReader, AptxReader, Lc3Reader, SbcReader};
+        #[cfg(feature = "caf")]
+        pub use symphonia_format_caf::CafReader;
+        #[cfg(feature = "dsd")]
+        pub use symphonia_format_dsd::{CODEC_TYPE_DSD, DffReader, DsfReader};
+        #[cfg(feature = "es")]
+        pub use symphonia_format_es::{Ac3Reader, DtsReader, S337mReader, TrueHdReader};
         #[cfg(feature = "flv")]
         pub use symphonia_format_flv::FlvReader;
         #[cfg(feature = "adx")]
         pub use symphonia_format_game::AdxReader;
-        #[cfg(feature = "real")]
-        pub use symphonia_format_real::RealReader;
         #[cfg(feature = "isomp4")]
         pub use symphonia_format_isomp4::IsoMp4Reader;
         #[cfg(feature = "mkv")]
@@ -350,6 +344,8 @@ pub mod default {
         pub use symphonia_format_ogg::OggReader;
         #[cfg(feature = "qcp")]
         pub use symphonia_format_qcp::QcpReader;
+        #[cfg(feature = "real")]
+        pub use symphonia_format_real::RealReader;
         #[cfg(feature = "aiff")]
         pub use symphonia_format_riff::AiffReader;
         #[cfg(feature = "wav")]
@@ -358,10 +354,14 @@ pub mod default {
         pub use symphonia_format_sound::AuReader;
         #[cfg(feature = "iff")]
         pub use symphonia_format_sound::IffReader;
-        #[cfg(feature = "raw-pcm")]
-        pub use symphonia_format_sound::{RawPcmParams, RawPcmReader, RawPcmSampleFormat};
         #[cfg(feature = "voc")]
         pub use symphonia_format_sound::VocReader;
+        #[cfg(feature = "raw-pcm")]
+        pub use symphonia_format_sound::{RawPcmParams, RawPcmReader, RawPcmSampleFormat};
+        #[cfg(feature = "spdif")]
+        pub use symphonia_format_spdif::SpdifReader;
+        #[cfg(feature = "vqf")]
+        pub use symphonia_format_vqf::VqfReader;
     }
 
     pub mod meta {

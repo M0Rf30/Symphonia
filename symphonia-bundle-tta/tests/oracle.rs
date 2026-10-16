@@ -105,7 +105,8 @@ fn truncated_streams_match_ffmpeg() {
         let original = fixture(name);
         let first_frame = first_frame_pos(&original);
 
-        for cut in [first_frame + 1, first_frame + 100, original.len() * 3 / 4, original.len() - 5] {
+        for cut in [first_frame + 1, first_frame + 100, original.len() * 3 / 4, original.len() - 5]
+        {
             let data = original[..cut].to_vec();
             compare_lenient(&format!("{name} cut at {cut}"), data);
         }
