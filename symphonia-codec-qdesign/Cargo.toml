@@ -1,0 +1,24 @@
+[package]
+name = "symphonia-codec-qdesign"
+description = "Pure Rust QDesign Music Codec (QDM2, QDMC) decoder (a part of project Symphonia)."
+authors = ["Symphonia contributors"]
+readme = "README.md"
+categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
+keywords = ["audio", "codec", "decoder", "qdesign", "qdm2"]
+# Common package metadata located in workspace Cargo.toml.
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+symphonia-core = { workspace = true }
+
+[dev-dependencies]
+symphonia-format-isomp4 = { workspace = true }
+symphonia-testutil = { workspace = true }
+
+[lints]
+workspace = true

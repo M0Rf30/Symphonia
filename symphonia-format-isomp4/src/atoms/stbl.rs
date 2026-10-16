@@ -119,6 +119,35 @@ impl StblAtom {
             self.stsz.sample_sizes = SampleSize::Constant(block_align);
         }
     }
+
+    /// QuickTime describes QDesign (QDMC/QDM2) audio with one sample per frame (a nominal size of
+    /// 1), but the data is coded in blocks of `samples_per_frame` frames of `bytes_per_frame`
+    /// bytes each. Group the samples such that one sample is one block, like FFmpeg's
+    /// `mov_build_index` does for these codecs.
+    fn regroup_qdesign_blocks(&mut self) {
+        let Some((block_align, frames)) = self.stsd.qdesign_block()
+        else {
+            return;
+        };
+
+        let SampleSize::Constant(size) = self.stsz.sample_sizes
+        else {
+            return;
+        };
+
+        // Samples that are already blocks, or a chunk that is not a whole number of blocks.
+        if size == block_align || self.stsz.sample_count % frames != 0 {
+            return;
+        }
+
+        // Validate before the first change.
+        let mut stts = self.stts.clone();
+        if stts.regroup(frames) && self.stsc.regroup(frames) {
+            self.stts = stts;
+            self.stsz.sample_count /= frames;
+            self.stsz.sample_sizes = SampleSize::Constant(block_align);
+        }
+    }
 }
 
 impl Atom for StblAtom {
@@ -187,6 +216,7 @@ impl Atom for StblAtom {
         let mut stbl = StblAtom { stsd, stts, stsc, stsz, stco, co64 };
         stbl.regroup_adpcm_blocks();
         stbl.regroup_mace_blocks();
+        stbl.regroup_qdesign_blocks();
         stbl.regroup_pcm_frames();
         Ok(stbl)
     }

@@ -188,6 +188,20 @@ impl StsdAtom {
         }
     }
 
+    /// Gets the block size in bytes and the number of frames of the blocks of QuickTime QDesign
+    /// (QDMC/QDM2) data, if this is such a track.
+    pub(crate) fn qdesign_block(&self) -> Option<(u32, u32)> {
+        match &self.sample_entry {
+            SampleEntry::Audio(entry)
+                if matches!(entry.codec_id, CODEC_ID_QDMC | CODEC_ID_QDM2) =>
+            {
+                Some((entry.bytes_per_frame?, entry.samples_per_frame?))
+                    .filter(|(bytes, frames)| *bytes > 0 && *frames > 0)
+            }
+            _ => None,
+        }
+    }
+
     /// Gets the block size in bytes and the number of frames of the blocks of QuickTime ADPCM
     /// (Microsoft, IMA WAV) data, if this is such a track.
     /// Gets the block size in bytes and the number of frames of the blocks of QuickTime ADPCM
@@ -240,6 +254,12 @@ pub struct AudioSampleEntry {
     pub bits_per_coded_sample: Option<u32>,
     pub frames_per_packet: Option<u64>,
     pub frames_per_block: Option<u64>,
+    /// The number of frames per block of block-based QuickTime codecs, from the version 1
+    /// sample entry (FFmpeg's `samples_per_frame`).
+    pub samples_per_frame: Option<u32>,
+    /// The number of bytes per frame of block-based QuickTime codecs, from the version 1 sample
+    /// entry (FFmpeg's `bytes_per_frame`).
+    pub bytes_per_frame: Option<u32>,
     /// If the samples of the track are single PCM frames.
     pub is_pcm_frames: bool,
     /// The size in bytes of a block of block-based codecs.
@@ -361,10 +381,22 @@ impl Atom for AudioSampleEntry {
 
                 // The number of bytes per PCM audio frame (ISO/MP4 sample). For non-PCM codecs,
                 // this value is not useful.
-                let _bytes_per_frame = it.read_u32()?;
+                let v1_bytes_per_frame = it.read_u32()?;
 
                 // The next value, as defined, is seemingly non-sensical.
                 let _ = it.read_u32()?;
+
+                // The QDesign codecs are block-based: each packet of a chunk holds
+                // `v1_samples_per_packet` frames in `v1_bytes_per_frame` bytes (FFmpeg's
+                // `samples_per_frame` / `bytes_per_frame`). The chunk regrouping is done in
+                // `StblAtom`.
+                if matches!(
+                    header.atom_type,
+                    AtomType::AudioSampleEntryQdm2 | AtomType::AudioSampleEntryQdmc
+                ) {
+                    entry.samples_per_frame = Some(v1_samples_per_packet);
+                    entry.bytes_per_frame = Some(v1_bytes_per_frame);
+                }
 
                 if is_pcm_codec {
                     entry.codec_id = pcm_codec_id(header.atom_type);
@@ -603,6 +635,14 @@ impl Atom for AudioSampleEntry {
                 {
                     // The QDesign decoders parse the `wave` atom (the `frma` and `QDCA` atoms)
                     // themselves, so the payload is the extra data.
+                    let atom = it.read_atom::<PayloadAtom>()?;
+                    entry.extra_data = Some(atom.data);
+                }
+                AtomType::GlobalHeader
+                    if matches!(entry.codec_id, CODEC_ID_QDM2 | CODEC_ID_QDMC) =>
+                {
+                    // FFmpeg's muxer writes the `QDCA` atom directly in a `glbl` atom instead of
+                    // wrapping it in a `wave`/`frma` atom; the QDesign decoders accept either.
                     let atom = it.read_atom::<PayloadAtom>()?;
                     entry.extra_data = Some(atom.data);
                 }

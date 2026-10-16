@@ -209,6 +209,9 @@ pub enum AtomType {
     GaplessPlaybackTag,
     GenreTag,
     GroupingTag,
+    /// `glbl`: a generic container for codec extra data, as written by FFmpeg for QuickTime
+    /// audio/video codecs without a more specific extension atom.
+    GlobalHeader,
     Handler,
     HdVideoTag,
     HevcConfiguration,
@@ -371,6 +374,7 @@ impl From<[u8; 4]> for AtomType {
             b"fLaC" => AtomType::AudioSampleEntryFlac,
             b"free" => AtomType::Free,
             b"ftyp" => AtomType::FileType,
+            b"glbl" => AtomType::GlobalHeader,
             b"hdlr" => AtomType::Handler,
             b"hev1" => AtomType::VisualSampleEntryHev1,
             b"hvc1" => AtomType::VisualSampleEntryHvc1,
