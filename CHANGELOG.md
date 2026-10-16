@@ -46,6 +46,7 @@ Changes since upstream `v0.6.1`.
   bit-exact with FFmpeg.
 - Decoders: SBC and mSBC (`symphonia-codec-sbc`, feature `sbc`), aptX and aptX HD
   (`symphonia-codec-aptx`, feature `aptx`), LC3 and LC3plus including high resolution
+  (`symphonia-codec-lc3`, feature `lc3`) and Dolby E (`symphonia-codec-dolby-e`, feature
   (`symphonia-codec-lc3`, feature `lc3`), LDAC (`symphonia-codec-ldac`, feature `ldac`) and
   Dolby E (`symphonia-codec-dolby-e`, feature
   `dolby-e`), with the raw SBC/aptX/aptX HD streams and `.lc3` files (`symphonia-format-bt`,

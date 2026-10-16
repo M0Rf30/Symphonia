@@ -16,7 +16,7 @@
 
 <p>
     <strong>
-        Symphonia is a pure Rust audio decoding and media demuxing library supporting AAC, AC-3, E-AC-3, ADPCM, AIFF, ALAC, APE, CAF, DSD, DTS, FLAC, FLV, MKV, MP1, MP2, MP3, mp3PRO, MP4, MPEG-PS, MPEG-TS, Musepack, Nellymoser, IMC/IAC, OGG, Opus, PCM, SBC, aptX, LDAC, LC3, Dolby E, Speex, TrueHD, MLP, TrueSpeech, Vorbis, WAV, WavPack, and WebM.
+        Symphonia is a pure Rust audio decoding and media demuxing library supporting AAC, AC-3, E-AC-3, ADPCM, AIFF, ALAC, APE, CAF, DSD, DTS, FLAC, FLV, MACE, MKV, MP1, MP2, MP3, mp3PRO, MP4, MPEG-PS, MPEG-TS, Musepack, Nellymoser, IMC/IAC, OGG, Opus, PCM, SBC, aptX, LC3, Dolby E, AMR, QCP, Speex, TrueHD, MLP, TrueSpeech, GSM, Vorbis, WAV, WavPack, WMA/ASF, and WebM.
     </strong>
 </p>
 
@@ -77,13 +77,13 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 
 | Format   | Status    | Gapless* | Feature Flag | Default | Crate                       |
 |----------|-----------|----------|--------------|---------|-----------------------------|
+| AIFF     | Excellent | Yes      | `aiff`       | No      | [`symphonia-format-riff`]   |
 | AU/SND (Sun/NeXT) | Great | Yes | `au` | No | [`symphonia-format-sound`] |
 | VOC (Creative Voice) | Great | Yes | `voc` | No | [`symphonia-format-sound`] |
 | IFF 8SVX/16SV | Great | Yes | `iff` | No | [`symphonia-format-sound`] |
 | Raw PCM (explicit parameters, not probed) | Great | Yes | `raw-pcm` | No | [`symphonia-format-sound`] |
-| QCP (QCELP, EVRC, SMV; `.qcp`) | Great | No | `qcp` | No | [`symphonia-format-qcp`] |
 | AMR (`.amr`, `.awb`) | Great | No | `amr`        | No      | [`symphonia-format-amr`]      |
-| AIFF     | Excellent | Yes      | `aiff`       | No      | [`symphonia-format-riff`]   |
+| QCP (QCELP, EVRC, SMV; `.qcp`) | Great | No | `qcp` | No | [`symphonia-format-qcp`] |
 | ASF/WMA (`.wma`, `.asf`, audio only) | Great | No | `asf` | No | [`symphonia-format-asf`] |
 | AVI (`.avi`, audio streams only) | Great | No | `avi` | No | [`symphonia-format-avi`] |
 | APE      | Excellent | Yes      | `ape-format` | No      | [`symphonia-bundle-ape`]      |
@@ -108,16 +108,16 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 
 \* Gapless playback requires support from both the demuxer and decoder.
 
+\*\*\*\* SBC streams are probed and seekable by frame. aptX and aptX HD streams have no signature, so they are never probed and must be opened with `AptxReader`/`AptxHdReader`; they can only seek to the start. LC3 files are probed and seekable by frame (the first frame after a seek starts from a blank decoder state).
+
 \*\* Raw elementary streams have no container timing: their duration is estimated (AC-3, DTS) or unknown (TrueHD/MLP), unless `prebuild_seek_index` is set and the source is seekable, in which case the stream is scanned and the duration is exact.
 
 \*\*\* FLV carries no end padding: only the leading decoder delay (e.g. Opus pre-skip) is trimmed.
 
-\*\*\*\* SBC streams are probed and seekable by frame. aptX and aptX HD streams have no signature, so they are never probed and must be opened with `AptxReader`/`AptxHdReader`; they can only seek to the start. LC3 files are probed and seekable by frame (the first frame after a seek starts from a blank decoder state).
-[`symphonia-format-qcp`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-qcp
-[`symphonia-format-amr`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-amr
-
 \*\*\*\*\* MPEG-PS and MPEG-TS carry no gapless metadata of their own: the trims are those of the codec, where the stream has them (the Opus pre-skip and end trim of the TS access unit headers, the LAME/Xing encoder delay and padding of MP3 streams that keep the tag frame). AAC (ADTS/LATM) streams have no priming information, so none is trimmed.
 
+[`symphonia-format-amr`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-amr
+[`symphonia-format-qcp`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-qcp
 [`symphonia-format-caf`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-caf
 [`symphonia-format-real`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-real
 [`symphonia-format-flv`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-flv
@@ -144,16 +144,16 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | AAC-LC                       | Excellent | Yes     | `aac`        | No      | [`symphonia-codec-aac`]    |
 | ADPCM                        | Excellent | Yes     | `adpcm`      | Yes     | [`symphonia-codec-adpcm`]  |
 | ALAC                         | Excellent | Yes     | `alac`       | No      | [`symphonia-codec-alac`]   |
-| MACE 3:1, 6:1                | Excellent | No      | `mace`       | No      | [`symphonia-codec-mace`]     |
 | APE (Monkey's Audio)         | Excellent | Yes     | `ape-format` | No      | [`symphonia-bundle-ape`]     |
 | AC-3, E-AC-3                 | Great     | No      | `ac3`        | No      | [`symphonia-codec-ac3`]      |
 | DSD                          | Great     | Yes     | `dsd`        | No      | [`symphonia-codec-dsd`]      |
 | DTS (core, XCH, XXCH, X96, XBR, XLL, LBR) | Great | No   | `dca`        | No      | [`symphonia-codec-dca`]      |
 | FLAC                         | Excellent | Yes     | `flac`       | Yes     | [`symphonia-bundle-flac`]  |
+| MACE 3:1, 6:1                | Excellent | No      | `mace`       | No      | [`symphonia-codec-mace`]     |
 | MP1                          | Excellent | No      | `mp1`, `mpa` | No      | [`symphonia-bundle-mp3`]   |
 | MP2                          | Excellent | No      | `mp2`, `mpa` | No      | [`symphonia-bundle-mp3`]   |
 | MP3                          | Excellent | Yes     | `mp3`, `mpa` | No      | [`symphonia-bundle-mp3`]   |
-| mp3PRO                       | Great     | No      | `mp3pro`     | No      | [`symphonia-bundle-mp3`]   |
+| mp3PRO                       | Excellent | Yes     | `mp3pro`     | No      | [`symphonia-bundle-mp3`]   |
 | Musepack                     | Excellent | Yes     | `musepack`   | No      | [`symphonia-bundle-musepack`]|
 | Shorten                      | Excellent | Yes     | `shorten`    | No      | [`symphonia-bundle-shorten`] |
 | TAK                          | Excellent | Yes     | `tak`        | No      | [`symphonia-bundle-tak`]     |
@@ -168,15 +168,6 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | RealAudio 1.0, 2.0 (14.4K, 28.8K) | Excellent | No | `ra`         | No      | [`symphonia-codec-ra`]       |
 | RealAudio SIPR               | Excellent | No      | `sipr`       | No      | [`symphonia-codec-sipr`]     |
 | RealAudio Lossless (RALF)    | Excellent | No      | `ralf`       | No      | [`symphonia-codec-ralf`]     |
-| TwinVQ                       | Great     | No      | `twinvq`     | No      | [`symphonia-codec-twinvq`]   |
-| Siren 7, Siren 14 (G.722.1, Annex C), MSN Siren | Great | No | `siren` | No | [`symphonia-codec-siren`] |
-| EVRC                         | Great     | No      | `evrc`       | No      | [`symphonia-codec-evrc`]     |
-| QCELP (13K)                  | Great     | No      | `qcelp`      | No      | [`symphonia-codec-qcelp`]    |
-| iLBC (20 ms, 30 ms)          | Great     | No      | `ilbc`       | No      | [`symphonia-codec-ilbc`]     |
-| G.723.1                      | Great     | No      | `g7231`      | No      | [`symphonia-codec-g7231`]    |
-| AMR-WB                       | Great     | No      | `amrwb`      | No      | [`symphonia-codec-amrwb`]    |
-| AMR-NB                       | Great     | No      | `amrnb`      | No      | [`symphonia-codec-amrnb`]    |
-| G.729, G.729A, G.729D        | Great     | No      | `g729`       | No      | [`symphonia-codec-g729`]     |
 | IMC (Intel Music Coder), IAC | Excellent | No      | `imc`        | No      | [`symphonia-codec-imc`]      |
 | Opus                         | Excellent | Yes     | `opus`       | Yes     | [`symphonia-codec-opus`]   |
 | PCM                          | Excellent | Yes     | `pcm`        | Yes     | [`symphonia-codec-pcm`]    |
@@ -188,27 +179,27 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | Dolby E                      | Great     | No      | `dolby-e`    | No      | [`symphonia-codec-dolby-e`]  |
 | TrueHD, MLP                  | Excellent | No      | `truehd`     | No      | [`symphonia-codec-truehd`]   |
 | TrueSpeech                   | Excellent | No      | `truespeech` | No      | [`symphonia-codec-truespeech`]|
+| GSM 06.10, Microsoft GSM     | Excellent | No      | `gsm`        | No      | [`symphonia-codec-gsm`]      |
+| G.729, G.729A, G.729D        | Great     | No      | `g729`       | No      | [`symphonia-codec-g729`]     |
+| AMR-NB                       | Great     | No      | `amrnb`      | No      | [`symphonia-codec-amrnb`]    |
+| AMR-WB                       | Great     | No      | `amrwb`      | No      | [`symphonia-codec-amrwb`]    |
+| G.723.1                      | Great     | No      | `g7231`      | No      | [`symphonia-codec-g7231`]    |
+| iLBC (20 ms, 30 ms)          | Great     | No      | `ilbc`       | No      | [`symphonia-codec-ilbc`]     |
+| QCELP (13K)                  | Great     | No      | `qcelp`      | No      | [`symphonia-codec-qcelp`]    |
+| EVRC                         | Great     | No      | `evrc`       | No      | [`symphonia-codec-evrc`]     |
+| Siren 7, Siren 14 (G.722.1, Annex C), MSN Siren | Great | No | `siren` | No | [`symphonia-codec-siren`] |
+| TwinVQ                       | Great     | No      | `twinvq`     | No      | [`symphonia-codec-twinvq`]   |
 | Vorbis                       | Excellent | Yes     | `vorbis`     | Yes     | [`symphonia-codec-vorbis`] |
 | WavPack                      | Great     | Yes     | `wavpack`    | No      | [`symphonia-codec-wavpack`]  |
 | WMA 1, WMA 2                 | Great     | Yes     | `wma`        | No      | [`symphonia-codec-wma`]      |
 
 A `symphonia-bundle-*` package is a combination of a decoder and a native demuxer.
 
-[`symphonia-codec-mace`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-mace
-mp3PRO streams decode as plain MP3 by default. The `mp3pro` feature adds `Mp3ProDecoder`, which is not registered in the default codec registry: register it in place of `MpaDecoder` to decode the SBR high band and get output at twice the core sample rate.
+mp3PRO streams decode as plain MP3 by default. The `mp3pro` feature enables `Mp3ProDecoder`, which decodes the SBR high band and outputs audio at twice the core sample rate; when it is enabled, MP3 streams in the default codec registry are decoded by it in place of `MpaDecoder`.
 
 [`symphonia-codec-aac`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-aac
 [`symphonia-codec-adpcm`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-adpcm
 [`symphonia-codec-alac`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-alac
-[`symphonia-codec-twinvq`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-twinvq
-[`symphonia-codec-siren`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-siren
-[`symphonia-codec-evrc`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-evrc
-[`symphonia-codec-qcelp`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-qcelp
-[`symphonia-codec-ilbc`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-ilbc
-[`symphonia-codec-g7231`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-g7231
-[`symphonia-codec-amrwb`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-amrwb
-[`symphonia-codec-amrnb`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-amrnb
-[`symphonia-codec-g729`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-g729
 [`symphonia-bundle-flac`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-bundle-flac
 [`symphonia-bundle-mp3`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-bundle-mp3
 [`symphonia-codec-pcm`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-pcm
@@ -222,9 +213,9 @@ mp3PRO streams decode as plain MP3 by default. The `mp3pro` feature adds `Mp3Pro
 [`symphonia-codec-ac3`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-ac3
 [`symphonia-codec-dca`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-dca
 [`symphonia-codec-dsd`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-dsd
+[`symphonia-codec-mace`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-mace
 [`symphonia-codec-nellymoser`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-nellymoser
 [`symphonia-codec-cook`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-cook
-[`symphonia-codec-qdesign`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-qdesign
 [`symphonia-codec-atrac`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-atrac
 [`symphonia-codec-atrac3plus`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-atrac3plus
 [`symphonia-codec-atrac9`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-atrac9
@@ -232,12 +223,21 @@ mp3PRO streams decode as plain MP3 by default. The `mp3pro` feature adds `Mp3Pro
 [`symphonia-codec-ra`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-ra
 [`symphonia-codec-sipr`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-sipr
 [`symphonia-codec-ralf`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-ralf
-| GSM 06.10, Microsoft GSM     | Excellent | No      | `gsm`        | No      | [`symphonia-codec-gsm`]      |
 [`symphonia-codec-imc`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-imc
+[`symphonia-codec-qdesign`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-qdesign
 [`symphonia-codec-wma`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-wma
 [`symphonia-format-asf`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-asf
 [`symphonia-format-avi`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-avi
 [`symphonia-codec-speex`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-speex
+[`symphonia-codec-g729`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-g729
+[`symphonia-codec-amrnb`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-amrnb
+[`symphonia-codec-amrwb`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-amrwb
+[`symphonia-codec-g7231`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-g7231
+[`symphonia-codec-ilbc`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-ilbc
+[`symphonia-codec-qcelp`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-qcelp
+[`symphonia-codec-evrc`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-evrc
+[`symphonia-codec-siren`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-siren
+[`symphonia-codec-twinvq`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-twinvq
 [`symphonia-codec-sbc`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-sbc
 [`symphonia-codec-aptx`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-aptx
 [`symphonia-codec-lc3`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-lc3
@@ -245,6 +245,7 @@ mp3PRO streams decode as plain MP3 by default. The `mp3pro` feature adds `Mp3Pro
 [`symphonia-codec-dolby-e`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-dolby-e
 [`symphonia-codec-truehd`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-truehd
 [`symphonia-codec-truespeech`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-truespeech
+[`symphonia-codec-gsm`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-gsm
 [`symphonia-codec-wavpack`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-wavpack
 
 > [!TIP]
@@ -254,7 +255,6 @@ mp3PRO streams decode as plain MP3 by default. The `mp3pro` feature adds `Mp3Pro
 
 All metadata readers are provided by the `symphonia-metadata` crate.
 
-* G.729: Annex B (VAD/DTX/comfort noise) SID and untransmitted frames are rejected, and the output matches FFmpeg's decoder rather than being bit-exact to the ITU-T reference decoder.
 For metadata formats that are standalone and not part of the media container, a feature flag may be used to toggle support.
 
 | Format                | Status    | Feature Flag | Default |
@@ -273,14 +273,13 @@ For metadata formats that are standalone and not part of the media container, a 
 
 ### Known Unsupported Codecs and Containers
 
-[`symphonia-codec-gsm`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-gsm
 Codecs and containers without a row in the tables above are not implemented. Known gaps:
 
 * Video and subtitle codecs: no video or subtitle decoder exists in this repository.
 * WMA Pro, WMA Lossless and WMA Voice: codec IDs are reserved in `symphonia-core`, but no decoder crate implements them (WMA 1 and 2 are decoded).
-* ASF/WMA and AVI containers: no demuxer crate exists.
+* AVI container: no demuxer crate exists.
 * AAC: error resilience tools (Huffman codeword reordering, RVLC, virtual codebooks), LTP in AAC-LD, SBR with AAC-LD, and Parametric Stereo with anything other than a single mono `SCE` core element are rejected as unsupported (see `symphonia-codec-aac`).
-* mp3PRO SBR decoding is not in the default codec registry (opt-in via the `mp3pro` feature).
+* G.729: Annex B (VAD/DTX/comfort noise) SID and untransmitted frames are rejected, and the output matches FFmpeg's decoder rather than being bit-exact to the ITU-T reference decoder.
 
 Please open an issue to request a missing format.
 

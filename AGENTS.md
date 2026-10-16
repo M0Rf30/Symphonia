@@ -133,7 +133,7 @@ cargo test --all --exclude symphonia-play                       # CI default fea
 cargo test --all --all-features --exclude symphonia-play
 cargo test --release --all --all-features --exclude symphonia-play
 cargo test -p symphonia-codec-aac --test sbr_golden             # one integration test
-cargo test -p symphonia-codec-opus --features ogg --release --test golden_hashes
+cargo test -p symphonia-codec-opus --features ogg --release --test reference_decode
 RMPD_SAMPLES=~/rmpd-samples/samples cargo test -p symphonia --all-features --test decode_golden
 GOLDEN_PRINT=1 RMPD_SAMPLES=... cargo test -p symphonia-bundle-ape --test ape_golden -- --nocapture
 cd symphonia/fuzz && cargo fuzz run decode_any                  # or ./run_all.sh 10
