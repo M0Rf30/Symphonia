@@ -72,7 +72,9 @@ fn decode(name: &str) -> Decoded {
     assert!(params.codec == CODEC_ID_MACE3 || params.codec == CODEC_ID_MACE6);
 
     let mut decoder = symphonia::default::get_codecs()
-        .make_audio_decoder(&params, &AudioDecoderOptions::default())
+        // The raw decode is compared with FFmpeg's: the edit list of the stream-copied fixtures is
+        // not exact, and gapless trimming would cut audio that FFmpeg outputs.
+        .make_audio_decoder(&params, &AudioDecoderOptions::default().gapless(false))
         .unwrap();
 
     let mut channels = 0;
@@ -84,7 +86,14 @@ fn decode(name: &str) -> Decoded {
         }
 
         if std::env::var("MACE_DBG").is_ok_and(|v| name.contains(&v)) {
-            eprintln!("pkt pts={:?} dur={:?} trim={:?}/{:?} len={}", packet.pts, packet.dur, packet.trim_start, packet.trim_end, packet.data.len());
+            eprintln!(
+                "pkt pts={:?} dur={:?} trim={:?}/{:?} len={}",
+                packet.pts,
+                packet.dur,
+                packet.trim_start,
+                packet.trim_end,
+                packet.data.len()
+            );
         }
         let GenericAudioBufferRef::S16(buf) = decoder.decode(&packet).unwrap()
         else {
@@ -133,15 +142,15 @@ fn ffmpeg_reference(name: &str, channels: usize) -> Option<Vec<i16>> {
 }
 
 /// (file, MACE 3:1, channels, sample rate, frames, FNV-1a of the PCM)
-const FIXTURES: [(&str, bool, usize, u32, usize, u64); 8] = [
-    ("bach_mace3_mono.aif", true, 1, 22255, 0, 0),
-    ("bach_mace6_mono.aif", false, 1, 22255, 0, 0),
-    ("bach_mace6_mono.caf", false, 1, 22255, 0, 0),
-    ("surge_mace3_mono.mov", true, 1, 44100, 0, 0),
-    ("surge_mace6_mono.mov", false, 1, 44100, 0, 0),
-    ("stereo_mace3.mov", true, 2, 22050, 0, 0),
-    ("stereo_mace3.caf", true, 2, 22050, 0, 0),
-    ("stereo_mace6.mov", false, 2, 44100, 0, 0),
+static FIXTURES: [(&str, bool, usize, u32, usize, u64); 8] = [
+    ("bach_mace3_mono.aif", true, 1, 22255, 257022, 0x8d7326d9f9e10a7f),
+    ("bach_mace6_mono.aif", false, 1, 22255, 257028, 0x3b99385bf28eb50b),
+    ("bach_mace6_mono.caf", false, 1, 22255, 257028, 0x3b99385bf28eb50b),
+    ("surge_mace3_mono.mov", true, 1, 44100, 578298, 0xbd6be2597f4b7d13),
+    ("surge_mace6_mono.mov", false, 1, 44100, 578298, 0x3d6368026378bfa9),
+    ("stereo_mace3.mov", true, 2, 22050, 66150, 0xa6fad6a0607c65ed),
+    ("stereo_mace3.caf", true, 2, 22050, 66150, 0xa6fad6a0607c65ed),
+    ("stereo_mace6.mov", false, 2, 44100, 132300, 0xf8aa5ddd3e66bf25),
 ];
 
 #[test]
