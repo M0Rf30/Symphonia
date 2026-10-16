@@ -160,6 +160,7 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | TTA (True Audio)             | Excellent | Yes     | `tta`        | No      | [`symphonia-bundle-tta`]     |
 | Nellymoser                   | Excellent | No      | `nellymoser` | No      | [`symphonia-codec-nellymoser`]|
 | RealAudio Cook               | Excellent | No      | `cook`       | No      | [`symphonia-codec-cook`]     |
+| QDesign Music Codec (QDMC/QDM2, in MP4) | Excellent | No | `qdesign` | No | [`symphonia-codec-qdesign`]  |
 | ATRAC1, ATRAC3 (also RealAudio `atrc`) | Excellent | No | `atrac`  | No      | [`symphonia-codec-atrac`]    |
 | ATRAC3+                      | Excellent | No      | `atrac3plus` | No      | [`symphonia-codec-atrac3plus`]|
 | ATRAC9                       | Excellent | No      | `atrac9`     | No      | [`symphonia-codec-atrac9`]    |
@@ -223,6 +224,7 @@ mp3PRO streams decode as plain MP3 by default. The `mp3pro` feature adds `Mp3Pro
 [`symphonia-codec-dsd`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-dsd
 [`symphonia-codec-nellymoser`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-nellymoser
 [`symphonia-codec-cook`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-cook
+[`symphonia-codec-qdesign`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-qdesign
 [`symphonia-codec-atrac`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-atrac
 [`symphonia-codec-atrac3plus`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-atrac3plus
 [`symphonia-codec-atrac9`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-atrac9

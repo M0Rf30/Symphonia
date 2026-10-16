@@ -312,6 +312,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "decode_qdesign"
+path = "fuzz_targets/decode_qdesign.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "decode_imc"
 path = "fuzz_targets/decode_imc.rs"
 test = false
