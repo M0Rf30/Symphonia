@@ -31,6 +31,7 @@ members = [
     "symphonia-codec-als",
     "symphonia-codec-atrac",
     "symphonia-codec-atrac3plus",
+    "symphonia-codec-atrac9",
     "symphonia-codec-cook",
     "symphonia-codec-ra",
     "symphonia-codec-ralf",
@@ -89,6 +90,7 @@ symphonia-codec-evrc = { version = "0.6.1", path = "symphonia-codec-evrc", defau
 symphonia-codec-als = { version = "0.6.1", path = "symphonia-codec-als", default-features = false }
 symphonia-codec-atrac = { version = "0.6.1", path = "symphonia-codec-atrac", default-features = false }
 symphonia-codec-atrac3plus = { version = "0.6.1", path = "symphonia-codec-atrac3plus", default-features = false }
+symphonia-codec-atrac9 = { version = "0.6.1", path = "symphonia-codec-atrac9", default-features = false }
 symphonia-codec-cook = { version = "0.6.1", path = "symphonia-codec-cook", default-features = false }
 symphonia-codec-ra = { version = "0.6.1", path = "symphonia-codec-ra", default-features = false }
 symphonia-codec-ralf = { version = "0.6.1", path = "symphonia-codec-ralf", default-features = false }

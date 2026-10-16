@@ -28,6 +28,8 @@ Changes since upstream `v0.6.1`.
   (`symphonia-codec-sipr`, `sipr`), checked against FFmpeg.
 - Decoders: ATRAC1 and ATRAC3 (`symphonia-codec-atrac`, feature `atrac`), ATRAC3+
   (`symphonia-codec-atrac3plus`, feature `atrac3plus`, from WAVE/OMA frames) and MPEG-4 ALS
+  (`symphonia-codec-atrac3plus`, feature `atrac3plus`, from WAVE/OMA frames), ATRAC9
+  (`symphonia-codec-atrac9`, feature `atrac9`, from `.at9` RIFF/WAVE) and MPEG-4 ALS
   (`symphonia-codec-als`, feature `als`, including the floating-point and multi-channel modes),
   checked against FFmpeg.
 , Creative VOC, IFF 8SVX/16SV/MAUD and headerless PCM

@@ -74,6 +74,7 @@
 //! | MPEG-4 ALS | `als` | No      | No      |
 //! | ATRAC1, ATRAC3 | `atrac` | No      | No      |
 //! | ATRAC3+ | `atrac3plus` | No      | No      |
+//! | ATRAC9 | `atrac9` | No      | No      |
 //! | RealAudio Cook | `cook` | No      | No      |
 //! | RealAudio 1.0/2.0 | `ra` | No      | No      |
 //! | RealAudio Lossless | `ralf` | No      | No      |
@@ -198,6 +199,8 @@ pub mod default {
         pub use symphonia_codec_atrac::AtracDecoder;
         #[cfg(feature = "atrac3plus")]
         pub use symphonia_codec_atrac3plus::Atrac3PlusDecoder;
+        #[cfg(feature = "atrac9")]
+        pub use symphonia_codec_atrac9::Atrac9Decoder;
         #[cfg(feature = "cook")]
         pub use symphonia_codec_cook::CookDecoder;
         #[cfg(feature = "ra")]
@@ -421,6 +424,8 @@ pub mod default {
 
         #[cfg(feature = "atrac3plus")]
         registry.register_audio_decoder::<codecs::Atrac3PlusDecoder>();
+        #[cfg(feature = "atrac9")]
+        registry.register_audio_decoder::<codecs::Atrac9Decoder>();
 
         #[cfg(feature = "cook")]
         registry.register_audio_decoder::<codecs::CookDecoder>();
