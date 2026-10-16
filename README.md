@@ -16,7 +16,7 @@
 
 <p>
     <strong>
-        Symphonia is a pure Rust audio decoding and media demuxing library supporting AAC, AC-3, E-AC-3, ADPCM, AIFF, ALAC, APE, CAF, DSD, DTS, FLAC, FLV, MKV, MP1, MP2, MP3, mp3PRO, MP4, MPEG-PS, MPEG-TS, Musepack, Nellymoser, IMC/IAC, OGG, Opus, PCM, SBC, aptX, LC3, Dolby E, Speex, TrueHD, MLP, TrueSpeech, Vorbis, WAV, WavPack, and WebM.
+        Symphonia is a pure Rust audio decoding and media demuxing library supporting AAC, AC-3, E-AC-3, ADPCM, AIFF, ALAC, APE, CAF, DSD, DTS, FLAC, FLV, MKV, MP1, MP2, MP3, mp3PRO, MP4, MPEG-PS, MPEG-TS, Musepack, Nellymoser, IMC/IAC, OGG, Opus, PCM, SBC, aptX, LDAC, LC3, Dolby E, Speex, TrueHD, MLP, TrueSpeech, Vorbis, WAV, WavPack, and WebM.
     </strong>
 </p>
 
@@ -183,6 +183,7 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | SBC, mSBC                    | Excellent | No      | `sbc`        | No      | [`symphonia-codec-sbc`]      |
 | aptX, aptX HD                | Excellent | No      | `aptx`       | No      | [`symphonia-codec-aptx`]     |
 | LC3, LC3plus (incl. high resolution) | Great | No   | `lc3`        | No      | [`symphonia-codec-lc3`]      |
+| LDAC (A2DP)                  | Excellent | No      | `ldac`       | No      | [`symphonia-codec-ldac`]     |
 | Dolby E                      | Great     | No      | `dolby-e`    | No      | [`symphonia-codec-dolby-e`]  |
 | TrueHD, MLP                  | Excellent | No      | `truehd`     | No      | [`symphonia-codec-truehd`]   |
 | TrueSpeech                   | Excellent | No      | `truespeech` | No      | [`symphonia-codec-truespeech`]|
@@ -238,6 +239,7 @@ mp3PRO streams decode as plain MP3 by default. The `mp3pro` feature adds `Mp3Pro
 [`symphonia-codec-sbc`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-sbc
 [`symphonia-codec-aptx`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-aptx
 [`symphonia-codec-lc3`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-lc3
+[`symphonia-codec-ldac`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-ldac
 [`symphonia-codec-dolby-e`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-dolby-e
 [`symphonia-codec-truehd`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-truehd
 [`symphonia-codec-truespeech`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-truespeech

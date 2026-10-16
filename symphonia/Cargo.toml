@@ -78,6 +78,7 @@ siren = ["dep:symphonia-codec-siren"]
 sbc = ["dep:symphonia-codec-sbc"]
 aptx = ["dep:symphonia-codec-aptx"]
 lc3 = ["dep:symphonia-codec-lc3"]
+ldac = ["dep:symphonia-codec-ldac"]
 dolby-e = ["dep:symphonia-codec-dolby-e"]
 als = ["dep:symphonia-codec-als"]
 truehd = ["dep:symphonia-codec-truehd"]
@@ -143,6 +144,7 @@ all-codecs = [
     "sbc",
     "aptx",
     "lc3",
+    "ldac",
     "dolby-e",
     "truehd",
     "truespeech",
@@ -386,6 +388,10 @@ workspace = true
 optional = true
 
 [dependencies.symphonia-codec-lc3]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-ldac]
 workspace = true
 optional = true
 

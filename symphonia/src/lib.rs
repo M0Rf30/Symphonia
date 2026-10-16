@@ -104,6 +104,7 @@
 //! | SBC, mSBC | `sbc`       | Yes     | No      |
 //! | aptX, aptX HD | `aptx`  | Yes     | No      |
 //! | LC3, LC3plus | `lc3`    | No      | No      |
+//! | LDAC (A2DP) | `ldac`    | No      | No      |
 //! | Dolby E  | `dolby-e`    | No      | No      |
 //! | MPEG-4 ALS | `als`      | No      | No      |
 //! | TrueHD, MLP | `truehd`  | No      | No      |
@@ -265,6 +266,8 @@ pub mod default {
         pub use symphonia_codec_aptx::AptxDecoder;
         #[cfg(feature = "lc3")]
         pub use symphonia_codec_lc3::Lc3Decoder;
+        #[cfg(feature = "ldac")]
+        pub use symphonia_codec_ldac::LdacDecoder;
         #[cfg(feature = "dolby-e")]
         pub use symphonia_codec_dolby_e::DolbyEDecoder;
         #[cfg(feature = "als")]
@@ -545,6 +548,8 @@ pub mod default {
 
         #[cfg(feature = "lc3")]
         registry.register_audio_decoder::<codecs::Lc3Decoder>();
+        #[cfg(feature = "ldac")]
+        registry.register_audio_decoder::<codecs::LdacDecoder>();
 
         #[cfg(feature = "dolby-e")]
         registry.register_audio_decoder::<codecs::DolbyEDecoder>();
