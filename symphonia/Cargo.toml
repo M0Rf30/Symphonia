@@ -27,81 +27,82 @@ default = ["opt-simd", "all-meta", "adpcm", "flac", "mkv", "ogg", "opus", "pcm",
 aac = ["dep:symphonia-codec-aac"]
 # Compute the complex QMF banks of SBR with an FFT: faster, but not bit for bit identical.
 aac-sbr-fft-qmf = ["aac", "symphonia-codec-aac/sbr-fft-qmf"]
+ac3 = ["dep:symphonia-codec-ac3"]
 adpcm = ["dep:symphonia-codec-adpcm"]
 adx = ["adpcm", "dep:symphonia-format-game"]
-ac3 = ["dep:symphonia-codec-ac3"]
+aiff = ["dep:symphonia-format-riff", "symphonia-format-riff/aiff"]
 alac = ["dep:symphonia-codec-alac"]
-ape-format = ["dep:symphonia-bundle-ape"]
-dca = ["dep:symphonia-codec-dca"]
-dsd = ["dep:symphonia-codec-dsd", "dep:symphonia-format-dsd"]
-gsm = ["dep:symphonia-codec-gsm"]
-flac = ["dep:symphonia-bundle-flac"]
-caf = ["dep:symphonia-format-caf"]
+als = ["dep:symphonia-codec-als"]
 amr = ["dep:symphonia-format-amr"]
-es = ["dep:symphonia-format-es"]
-spdif = ["dep:symphonia-format-spdif"]
+amrnb = ["dep:symphonia-codec-amrnb"]
+amrwb = ["dep:symphonia-codec-amrwb"]
+ape = ["symphonia-metadata/ape"]
+ape-format = ["dep:symphonia-bundle-ape"]
+aptx = ["dep:symphonia-codec-aptx"]
+asf = ["dep:symphonia-format-asf"]
+atrac = ["dep:symphonia-codec-atrac"]
+atrac3plus = ["dep:symphonia-codec-atrac3plus"]
+atrac9 = ["dep:symphonia-codec-atrac9"]
+au = ["dep:symphonia-format-sound", "symphonia-format-sound/au"]
+avi = ["dep:symphonia-format-avi"]
 bt = ["dep:symphonia-format-bt"]
+caf = ["dep:symphonia-format-caf"]
+cook = ["dep:symphonia-codec-cook"]
+dca = ["dep:symphonia-codec-dca"]
+dolby-e = ["dep:symphonia-codec-dolby-e"]
+dsd = ["dep:symphonia-codec-dsd", "dep:symphonia-format-dsd"]
+es = ["dep:symphonia-format-es"]
+evrc = ["dep:symphonia-codec-evrc"]
+flac = ["dep:symphonia-bundle-flac"]
 flv = ["dep:symphonia-format-flv"]
-real = ["dep:symphonia-format-real"]
+g7231 = ["dep:symphonia-codec-g7231"]
+g729 = ["dep:symphonia-codec-g729"]
+gsm = ["dep:symphonia-codec-gsm"]
+id3v1 = ["symphonia-metadata/id3v1"]
+id3v2 = ["symphonia-metadata/id3v2"]
+iff = ["dep:symphonia-format-sound", "symphonia-format-sound/iff"]
+ilbc = ["dep:symphonia-codec-ilbc"]
+imc = ["dep:symphonia-codec-imc"]
 isomp4 = ["dep:symphonia-format-isomp4"]
+lc3 = ["dep:symphonia-codec-lc3"]
+ldac = ["dep:symphonia-codec-ldac"]
+mace = ["dep:symphonia-codec-mace"]
 mkv = ["dep:symphonia-format-mkv"]
-mpegps = ["dep:symphonia-format-mpegps"]
-mpegts = ["dep:symphonia-format-mpegts"]
-musepack = ["dep:symphonia-bundle-musepack"]
-shorten = ["dep:symphonia-bundle-shorten"]
-tta = ["dep:symphonia-bundle-tta"]
-tak = ["dep:symphonia-bundle-tak"]
 mp1 = ["dep:symphonia-bundle-mp3", "symphonia-bundle-mp3/mp1"]
 mp2 = ["dep:symphonia-bundle-mp3", "symphonia-bundle-mp3/mp2"]
 mp3 = ["dep:symphonia-bundle-mp3", "symphonia-bundle-mp3/mp3"]
 mp3pro = ["mp3", "symphonia-bundle-mp3/mp3pro"]
-mace = ["dep:symphonia-codec-mace"]
+mpegps = ["dep:symphonia-format-mpegps"]
+mpegts = ["dep:symphonia-format-mpegts"]
+musepack = ["dep:symphonia-bundle-musepack"]
 nellymoser = ["dep:symphonia-codec-nellymoser"]
-qcelp = ["dep:symphonia-codec-qcelp"]
-evrc = ["dep:symphonia-codec-evrc"]
-qcp = ["dep:symphonia-format-qcp"]
-atrac = ["dep:symphonia-codec-atrac"]
-atrac3plus = ["dep:symphonia-codec-atrac3plus"]
-atrac9 = ["dep:symphonia-codec-atrac9"]
-cook = ["dep:symphonia-codec-cook"]
-imc = ["dep:symphonia-codec-imc"]
-ra = ["dep:symphonia-codec-ra"]
-ralf = ["dep:symphonia-codec-ralf"]
-sipr = ["dep:symphonia-codec-sipr"]
-amrnb = ["dep:symphonia-codec-amrnb"]
-amrwb = ["dep:symphonia-codec-amrwb"]
 ogg = ["dep:symphonia-format-ogg"]
 opus = ["dep:symphonia-codec-opus"]
 pcm = ["dep:symphonia-codec-pcm"]
-speex = ["dep:symphonia-codec-speex"]
-siren = ["dep:symphonia-codec-siren"]
+qcelp = ["dep:symphonia-codec-qcelp"]
+qcp = ["dep:symphonia-format-qcp"]
+qdesign = ["dep:symphonia-codec-qdesign"]
+ra = ["dep:symphonia-codec-ra"]
+ralf = ["dep:symphonia-codec-ralf"]
+raw-pcm = ["dep:symphonia-format-sound", "symphonia-format-sound/raw-pcm"]
+real = ["dep:symphonia-format-real"]
 sbc = ["dep:symphonia-codec-sbc"]
-aptx = ["dep:symphonia-codec-aptx"]
-lc3 = ["dep:symphonia-codec-lc3"]
-ldac = ["dep:symphonia-codec-ldac"]
-dolby-e = ["dep:symphonia-codec-dolby-e"]
-als = ["dep:symphonia-codec-als"]
+shorten = ["dep:symphonia-bundle-shorten"]
+sipr = ["dep:symphonia-codec-sipr"]
+siren = ["dep:symphonia-codec-siren"]
+spdif = ["dep:symphonia-format-spdif"]
+speex = ["dep:symphonia-codec-speex"]
+tak = ["dep:symphonia-bundle-tak"]
 truehd = ["dep:symphonia-codec-truehd"]
 truespeech = ["dep:symphonia-codec-truespeech"]
+tta = ["dep:symphonia-bundle-tta"]
 twinvq = ["dep:symphonia-codec-twinvq"]
-vqf = ["dep:symphonia-format-vqf"]
-wma = ["dep:symphonia-codec-wma"]
-asf = ["dep:symphonia-format-asf"]
-avi = ["dep:symphonia-format-avi"]
-ilbc = ["dep:symphonia-codec-ilbc"]
-g729 = ["dep:symphonia-codec-g729"]
-g7231 = ["dep:symphonia-codec-g7231"]
-aiff = ["dep:symphonia-format-riff", "symphonia-format-riff/aiff"]
-au = ["dep:symphonia-format-sound", "symphonia-format-sound/au"]
-iff = ["dep:symphonia-format-sound", "symphonia-format-sound/iff"]
-raw-pcm = ["dep:symphonia-format-sound", "symphonia-format-sound/raw-pcm"]
 voc = ["dep:symphonia-format-sound", "symphonia-format-sound/voc"]
 vorbis = ["dep:symphonia-codec-vorbis"]
+vqf = ["dep:symphonia-format-vqf"]
 wav = ["dep:symphonia-format-riff", "symphonia-format-riff/wav"]
 wavpack = ["dep:symphonia-codec-wavpack"]
-ape = ["symphonia-metadata/ape"]
-id3v1 = ["symphonia-metadata/id3v1"]
-id3v2 = ["symphonia-metadata/id3v2"]
+wma = ["dep:symphonia-codec-wma"]
 
 # MPEG audio codecs.
 mpa = ["mp1", "mp2", "mp3"]
@@ -113,63 +114,68 @@ all-codecs = [
     "adpcm",
     "alac",
     "als",
-    "dca",
-    "dsd",
-    "flac",
-    "gsm",
-    "mp1",
-    "mp2",
-    "mp3",
-    "mp3pro",
-    "mace",
-    "musepack",
-    "nellymoser",
-    "qcelp",
-    "evrc",
+    "amrnb",
+    "amrwb",
+    "aptx",
     "atrac",
     "atrac3plus",
     "atrac9",
     "cook",
+    "dca",
+    "dolby-e",
+    "dsd",
+    "evrc",
+    "flac",
+    "g7231",
+    "g729",
+    "gsm",
+    "ilbc",
     "imc",
-    "ra",
-    "ralf",
-    "sipr",
-    "amrnb",
-    "amrwb",
-    "opus",
-    "pcm",
-    "shorten",
-    "speex",
-    "siren",
-    "sbc",
-    "aptx",
     "lc3",
     "ldac",
-    "dolby-e",
+    "mace",
+    "mp1",
+    "mp2",
+    "mp3",
+    "mp3pro",
+    "musepack",
+    "nellymoser",
+    "opus",
+    "pcm",
+    "qcelp",
+    "qdesign",
+    "ra",
+    "ralf",
+    "sbc",
+    "shorten",
+    "sipr",
+    "siren",
+    "speex",
+    "tak",
     "truehd",
     "truespeech",
-    "twinvq",
     "tta",
-    "tak",
-    "wma",
-    "ilbc",
-    "g729",
-    "g7231",
+    "twinvq",
     "vorbis",
     "wavpack",
+    "wma",
 ]
 
 # Enable all supported container formats.
 all-formats = [
     "adx",
-    "caf",
-    "ape-format",
+    "aiff",
     "amr",
+    "ape-format",
+    "asf",
+    "au",
+    "avi",
+    "bt",
+    "caf",
     "dsd",
     "es",
-    "spdif",
-    "bt",
     "flv",
+    "iff",
     "isomp4",
     "mkv",
     "mpegps",
@@ -177,18 +183,14 @@ all-formats = [
     "musepack",
     "ogg",
     "qcp",
+    "raw-pcm",
     "real",
     "shorten",
-    "tta",
+    "spdif",
     "tak",
-    "vqf",
-    "asf",
-    "avi",
-    "aiff",
-    "au",
-    "iff",
-    "raw-pcm",
+    "tta",
     "voc",
+    "vqf",
     "wav",
 ]
 
@@ -328,6 +330,10 @@ workspace = true
 optional = true
 
 [dependencies.symphonia-codec-ra]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-qdesign]
 workspace = true
 optional = true
 

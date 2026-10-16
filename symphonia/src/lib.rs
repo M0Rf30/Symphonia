@@ -218,6 +218,8 @@ pub mod default {
         pub use symphonia_codec_nellymoser::NellymoserDecoder;
         #[cfg(feature = "qcelp")]
         pub use symphonia_codec_qcelp::QcelpDecoder;
+        #[cfg(feature = "qdesign")]
+        pub use symphonia_codec_qdesign::QdesignDecoder;
         #[cfg(feature = "evrc")]
         pub use symphonia_codec_evrc::EvrcDecoder;
         #[cfg(feature = "atrac")]
@@ -477,6 +479,9 @@ pub mod default {
 
         #[cfg(feature = "qcelp")]
         registry.register_audio_decoder::<codecs::QcelpDecoder>();
+
+        #[cfg(feature = "qdesign")]
+        registry.register_audio_decoder::<codecs::QdesignDecoder>();
 
         #[cfg(feature = "evrc")]
         registry.register_audio_decoder::<codecs::EvrcDecoder>();
