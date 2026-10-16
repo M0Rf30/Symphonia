@@ -1,0 +1,22 @@
+This crate (`symphonia-codec-ldac`) is a pure-Rust LDAC (Sony Bluetooth A2DP) decoder. It is
+licensed under the Mozilla Public License, v. 2.0, like the rest of Project Symphonia (see
+`LICENSE`).
+
+The bitstream layout, the spectral quantization, the scale-factor and gradient coding, and the
+frame header follow the LDAC reference implementation published by Sony Corporation as the AOSP
+`external/libldac` encoder (https://android.googlesource.com/platform/external/libldac, Copyright
+(C) 2003-2017 Sony Corporation), which is distributed under the Apache License, Version 2.0. The
+following tables in `src/tables.rs` are the verbatim encoder constants (or their direct inverse):
+
+- the scale-factor weighting tables (`gaa_sfcwgt_ldac`),
+- the resampled gradient curves (`gaa_resamp_grad_ldac`),
+- the scale-factor Huffman codebooks (`sa_hc_sf0_*_ldac`, `sa_hc_sf1_*_ldac`), and
+- the 2- and 4-dimensional spectrum code tables (`ga_2dimenc_spec_ldac`, `ga_4dimenc_spec_ldac`,
+  emitted here as their decoder-side inverse).
+
+The remaining dequantization step sizes, the spectrum scale, the analysis/synthesis window and the
+inverse MDCT are derived from the same reference.
+
+The decoder was cross-checked against the independent open-source `libldacdec` decoder
+(https://github.com/hegdi/libldacdec, Copyright (c) 2021 Dirk Helbig, MIT License), which was used
+only to validate the decode pipeline, not as a source of code or tables.
