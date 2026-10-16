@@ -194,12 +194,14 @@ pub(crate) struct Transform {
 
 impl Transform {
     pub fn new() -> Self {
-        // The transform is scaled by 2 (as FFmpeg's).
+        // The transform is scaled by 2 (as FFmpeg's), and negated: with the positive scale the
+        // output is the exact negation of FFmpeg's (`ff_mdct_init(.., inverse = 1, 2.0)`), with the
+        // negative one it is identical (max error 5e-8 on the `16-11` sample).
         Transform {
             imdct: [
-                Imdct::new_scaled(128, 2.0),
-                Imdct::new_scaled(256, 2.0),
-                Imdct::new_scaled(1024, 2.0),
+                Imdct::new_scaled(128, -2.0),
+                Imdct::new_scaled(256, -2.0),
+                Imdct::new_scaled(1024, -2.0),
             ],
             full: Box::new([0.0; 2048]),
             block: Box::new([0.0; 2048]),
