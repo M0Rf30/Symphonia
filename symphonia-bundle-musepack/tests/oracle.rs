@@ -26,19 +26,18 @@ use symphonia_core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia_core::formats::{FormatOptions, FormatReader};
 use symphonia_core::io::MediaSourceStream;
 
-/// Locates the `mpcdec` oracle binary via `MPCDEC_BIN`, falling back to the well-known path used
-/// during this crate's development (see the final report / NOTICE for how it was built).
+/// Locates the `mpcdec` oracle binary via `MPCDEC_BIN`, falling back to a `PATH` lookup.
 fn find_mpcdec() -> Option<String> {
     if let Ok(p) = std::env::var("MPCDEC_BIN") {
         if Path::new(&p).is_file() {
             return Some(p);
         }
     }
-    const DEV_PATH: &str = "/tmp/mpc_oracle/build/codec/mpcdec/mpcdec";
-    if Path::new(DEV_PATH).is_file() {
-        return Some(DEV_PATH.to_string());
-    }
-    None
+    let exe = format!("mpcdec{}", std::env::consts::EXE_SUFFIX);
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(&exe))
+        .find(|p| p.is_file())
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 /// Decodes `path` with this crate, returning interleaved `i16` PCM (rounded, clamped) and the
@@ -128,8 +127,10 @@ fn matches_mpcdec_oracle_sv8() {
         return;
     };
 
-    let fixture = Path::new("tests/fixture_stereo_q5.mpc");
-    let tmp_wav = std::env::temp_dir().join("musepack_oracle_test_stereo_q5.wav");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixture_stereo_q5.mpc");
+    let fixture = fixture.as_path();
+    let tmp_wav = std::env::temp_dir()
+        .join(format!("musepack_oracle_test_stereo_q5_{}.wav", std::process::id()));
 
     let status = Command::new(&mpcdec).arg(fixture).arg(&tmp_wav).status().expect("run mpcdec");
     assert!(status.success(), "mpcdec failed");
@@ -155,8 +156,9 @@ fn matches_mpcdec_oracle_sv8() {
 
 /// Validates SV7 decode against the real-world sample used during development. The sample
 /// (`samples.ffmpeg.org/A-codecs/musepack/`, a commercial recording) is not redistributable and
-/// is therefore never committed; this test only runs if a copy has been placed at
-/// `MUSEPACK_SV7_SAMPLE` or the well-known dev path below, and is skipped otherwise.
+/// is therefore never committed; this test only runs if a copy is named by `MUSEPACK_SV7_SAMPLE`
+/// or the corpus (`RMPD_SAMPLES`) holds `musepack/mpc7_user_stp_acoustic.mpc`, and is skipped
+/// otherwise.
 #[test]
 fn matches_mpcdec_oracle_sv7_real_sample() {
     let Some(mpcdec) = find_mpcdec()
@@ -165,18 +167,18 @@ fn matches_mpcdec_oracle_sv7_real_sample() {
         return;
     };
 
-    let sample_path = std::env::var("MUSEPACK_SV7_SAMPLE")
-        .unwrap_or_else(|_| "/tmp/sv7_samples/duran.mpc".to_string());
-    let sample_path = Path::new(&sample_path);
-    if !sample_path.is_file() {
-        eprintln!(
-            "skipping: no real SV7 sample at {} (set MUSEPACK_SV7_SAMPLE)",
-            sample_path.display()
-        );
+    let sample_path = std::env::var_os("MUSEPACK_SV7_SAMPLE")
+        .map(std::path::PathBuf::from)
+        .or_else(|| symphonia_testutil::sample_path("musepack/mpc7_user_stp_acoustic.mpc"));
+    let Some(sample_path) = sample_path.filter(|p| p.is_file())
+    else {
+        eprintln!("skipping: no real SV7 sample (set MUSEPACK_SV7_SAMPLE or RMPD_SAMPLES)");
         return;
-    }
+    };
+    let sample_path = sample_path.as_path();
 
-    let tmp_wav = std::env::temp_dir().join("musepack_oracle_test_sv7.wav");
+    let tmp_wav =
+        std::env::temp_dir().join(format!("musepack_oracle_test_sv7_{}.wav", std::process::id()));
     let status = Command::new(&mpcdec).arg(sample_path).arg(&tmp_wav).status().expect("run mpcdec");
     assert!(status.success(), "mpcdec failed");
 
