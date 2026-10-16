@@ -1,0 +1,25 @@
+This crate (`symphonia-bundle-tta`) is a pure-Rust demuxer and decoder for True Audio (TTA1)
+streams. The bitstream parsing and the decoding algorithm are a port of the TTA support in FFmpeg
+(release n9.0.2, https://github.com/FFmpeg/FFmpeg):
+
+  libavcodec/tta.c       (frame decoding: adaptive Rice code, hybrid filter calls, fixed order
+                          prediction, channel decorrelation, end of last frame detection)
+  libavcodec/ttadsp.c    (the 8-tap sign-sign LMS hybrid filter)
+  libavcodec/ttadata.c   (the Rice parameter threshold table and the filter configuration)
+  libavformat/tta.c      (the file header, seek table, packet and seek layout)
+  libavformat/matroskadec.c (the header that is synthesized for `A_TTA1` Matroska tracks)
+
+FFmpeg's TTA code is
+
+  Copyright (c) 2006 Alex Beregszaszi
+
+and is distributed under the GNU Lesser General Public License, version 2.1 or (at your option)
+any later version. The parts of this crate derived from it remain subject to those terms in
+addition to the Mozilla Public License, v. 2.0 that covers the rest of Project Symphonia. A copy
+of the LGPL-2.1 is available at https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html.
+
+The True Audio format and its reference implementation (libtta) are by Aleksander Djuric
+(https://www.true-audio.com/). No code of libtta was used.
+
+FFmpeg itself was used, unmodified and unlinked, as the decode oracle (and its `tta` encoder as the
+stream generator) to verify that this decoder's output is bit-exact.

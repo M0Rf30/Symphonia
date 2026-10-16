@@ -1,0 +1,30 @@
+[package]
+name = "symphonia-format-real"
+description = "Pure Rust RealMedia (RM, RMVB, RA) audio demuxer (a part of project Symphonia)."
+authors = ["M0Rf30 <morf3089@gmail.com>"]
+readme = "README.md"
+categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
+keywords = ["audio", "media", "demuxer", "realmedia", "realaudio"]
+# Common package metadata located in workspace Cargo.toml.
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+log = { workspace = true }
+symphonia-common = { workspace = true }
+symphonia-core = { workspace = true }
+
+[dev-dependencies]
+symphonia-codec-atrac = { workspace = true }
+symphonia-codec-cook = { workspace = true }
+symphonia-codec-ra = { workspace = true }
+symphonia-codec-ralf = { workspace = true }
+symphonia-codec-sipr = { workspace = true }
+symphonia-testutil = { workspace = true }
+
+[lints]
+workspace = true

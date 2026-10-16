@@ -1,0 +1,25 @@
+This crate (`symphonia-bundle-tak`) is a pure-Rust demuxer and decoder for TAK (Tom's lossless
+Audio Kompressor) streams. The bitstream parsing and the decoding algorithm are a port of the TAK
+support in FFmpeg (https://github.com/FFmpeg/FFmpeg):
+
+  libavcodec/takdec.c    (frame decoding: subframes, predictors, residue coding, decorrelation)
+  libavcodec/takdsp.c    (the sample decorrelation and shift helpers)
+  libavcodec/tak.c       (stream info and frame header parsing, CRC-24, frame sizes)
+  libavcodec/tak_parser.c (frame boundary detection)
+  libavformat/takdec.c   (the file header: metadata blocks, last frame, MD5)
+
+FFmpeg's TAK code is
+
+  Copyright (c) 2012 Paul B Mahol
+  Copyright (c) 2015 Paul B Mahol
+
+and is distributed under the GNU Lesser General Public License, version 2.1 or (at your option)
+any later version. The parts of this crate derived from it remain subject to those terms in
+addition to the Mozilla Public License, v. 2.0 that covers the rest of Project Symphonia. A copy
+of the LGPL-2.1 is available at https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html.
+
+TAK is by Thomas Becker (https://www.thbeck.de/Tak/Tak.html). None of the TAK software
+development kit was used.
+
+FFmpeg itself was used, unmodified and unlinked, as the decode oracle to verify that this
+decoder's output is bit-exact. The test streams were encoded with Takc 2.3.3.

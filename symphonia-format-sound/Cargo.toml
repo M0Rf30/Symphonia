@@ -1,0 +1,34 @@
+[package]
+name = "symphonia-format-sound"
+description = "Pure Rust AU/SND, VOC, IFF/8SVX and raw PCM demuxers (a part of project Symphonia)."
+authors = ["M0Rf30 <morf3089@gmail.com>"]
+readme = "README.md"
+categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
+keywords = ["audio", "media", "demuxer", "au", "voc"]
+# Common package metadata located in workspace Cargo.toml.
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[features]
+default = ["au", "voc", "iff", "raw-pcm"]
+au = []
+voc = []
+iff = []
+raw-pcm = []
+
+[dependencies]
+log = { workspace = true }
+symphonia-common = { workspace = true }
+symphonia-core = { workspace = true }
+
+[dev-dependencies]
+symphonia-codec-adpcm = { workspace = true }
+symphonia-codec-pcm = { workspace = true }
+symphonia-testutil = { workspace = true }
+
+[lints]
+workspace = true

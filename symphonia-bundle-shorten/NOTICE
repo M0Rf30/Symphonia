@@ -1,0 +1,36 @@
+This crate (`symphonia-bundle-shorten`) is a pure-Rust Shorten (`.shn`) lossless audio demuxer and
+decoder. It is licensed under the Mozilla Public License, v. 2.0, like the rest of Project Symphonia
+(see `LICENSE`).
+
+Algorithms derived from FFmpeg
+------------------------------
+
+The decoder is a port of the algorithm of FFmpeg's `libavcodec/shorten.c` (the command grammar, the
+Rice/Golomb residual codes, the fixed polynomial and quantized LPC predictors, the running mean
+offset, the bit shift and the 32-bit wrapping arithmetic) and the stream header parsing follows
+`libavcodec/shorten.c` (`read_header`) and `libavformat/shortendec.c`, so that its output is bit
+exact with FFmpeg's. FFmpeg is licensed under the GNU Lesser General Public License, version 2.1 or
+later; its copyright notices follow:
+
+    Copyright (c) 2005 Jeff Muizelaar
+    Copyright (c) 2001 Fabrice Bellard
+    Copyright (c) 2005 Alex Beregszaszi
+    Copyright (c) 2015 Carl Eugen Hoyos
+
+No FFmpeg source code is copied; the Rust code is an independent reimplementation. Anybody
+redistributing this crate should therefore treat the algorithm-level derivation above as subject to
+the LGPL-2.1-or-later terms in addition to the MPL-2.0 terms of the crate itself.
+
+Format references
+-----------------
+
+* T. Robinson, "SHORTEN: Simple lossless and near-lossless waveform compression", Cambridge
+  University Engineering Department technical report CUED/F-INFENG/TR.156, 1994, describes the
+  coding scheme.
+* The file type numbering, the command codes, the field widths and the layout of the seek table
+  trailer (`SEEK`, `SHNAMPSK`) are facts of the file format taken from the header files and the
+  documentation of the Shorten 3.6.1 reference implementation by Tony Robinson (SoftSound).
+  Its source code was used only to read the format and to generate test streams (with the types
+  that FFmpeg does not decode); none of it is copied into this crate.
+* The extended types that FFmpeg rejects (signed 8-bit and unsigned 16-bit samples) follow the
+  reference implementation. Streams with u-law or A-law samples are not supported.

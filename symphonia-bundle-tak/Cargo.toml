@@ -1,0 +1,24 @@
+[package]
+name = "symphonia-bundle-tak"
+description = "Pure Rust TAK (Tom's lossless Audio Kompressor) demuxer and decoder (a part of project Symphonia)."
+authors = ["OMBS.IO Dev Team <dev@ombs.io>"]
+readme = "README.md"
+categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
+keywords = ["audio", "codec", "decoder", "tak", "lossless"]
+# Common package metadata located in workspace Cargo.toml.
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+symphonia-core = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+symphonia-testutil = { workspace = true }
+
+[lints]
+workspace = true

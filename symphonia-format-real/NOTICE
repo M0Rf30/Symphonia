@@ -1,0 +1,14 @@
+This crate (`symphonia-format-real`) is a from-scratch, pure-Rust RealMedia / RealAudio demuxer. It
+is licensed under the Mozilla Public License, v. 2.0, like the rest of Project Symphonia.
+
+RealMedia has no public specification. The header layouts (`.RMF` chunks, `.ra` v3/v4/v5 headers,
+`MLTI` multi-rate descriptors), the packet resynchronisation, the index chunks, the codec FourCC
+mapping, the audio de-interleavers (`genr`, `Int4`, `sipr`, `vbrs`/`vbrf`) and the SIPR nibble
+reordering table follow FFmpeg's `libavformat/rmdec.c`, `libavformat/rm.c`, `libavformat/rm.h` and
+`libavformat/rmsipr.c`, which are distributed under the GNU Lesser General Public License, version
+2.1 or later.
+
+Copyright (c) 2000, 2001 Fabrice Bellard
+Copyright (c) 2009 Aurelien Jacobs <aurel@gnuage.org>
+
+The LGPL-2.1+ terms apply to those derived portions.

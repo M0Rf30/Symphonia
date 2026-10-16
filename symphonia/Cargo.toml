@@ -28,6 +28,7 @@ aac = ["dep:symphonia-codec-aac"]
 # Compute the complex QMF banks of SBR with an FFT: faster, but not bit for bit identical.
 aac-sbr-fft-qmf = ["aac", "symphonia-codec-aac/sbr-fft-qmf"]
 adpcm = ["dep:symphonia-codec-adpcm"]
+adx = ["adpcm", "dep:symphonia-format-game"]
 ac3 = ["dep:symphonia-codec-ac3"]
 alac = ["dep:symphonia-codec-alac"]
 ape-format = ["dep:symphonia-bundle-ape"]
@@ -41,11 +42,15 @@ es = ["dep:symphonia-format-es"]
 spdif = ["dep:symphonia-format-spdif"]
 bt = ["dep:symphonia-format-bt"]
 flv = ["dep:symphonia-format-flv"]
+real = ["dep:symphonia-format-real"]
 isomp4 = ["dep:symphonia-format-isomp4"]
 mkv = ["dep:symphonia-format-mkv"]
 mpegps = ["dep:symphonia-format-mpegps"]
 mpegts = ["dep:symphonia-format-mpegts"]
 musepack = ["dep:symphonia-bundle-musepack"]
+shorten = ["dep:symphonia-bundle-shorten"]
+tta = ["dep:symphonia-bundle-tta"]
+tak = ["dep:symphonia-bundle-tak"]
 mp1 = ["dep:symphonia-bundle-mp3", "symphonia-bundle-mp3/mp1"]
 mp2 = ["dep:symphonia-bundle-mp3", "symphonia-bundle-mp3/mp2"]
 mace = ["dep:symphonia-codec-mace"]
@@ -76,7 +81,12 @@ truehd = ["dep:symphonia-codec-truehd"]
 truespeech = ["dep:symphonia-codec-truespeech"]
 wma = ["dep:symphonia-codec-wma"]
 asf = ["dep:symphonia-format-asf"]
+avi = ["dep:symphonia-format-avi"]
 aiff = ["dep:symphonia-format-riff", "symphonia-format-riff/aiff"]
+au = ["dep:symphonia-format-sound", "symphonia-format-sound/au"]
+iff = ["dep:symphonia-format-sound", "symphonia-format-sound/iff"]
+raw-pcm = ["dep:symphonia-format-sound", "symphonia-format-sound/raw-pcm"]
+voc = ["dep:symphonia-format-sound", "symphonia-format-sound/voc"]
 vorbis = ["dep:symphonia-codec-vorbis"]
 wav = ["dep:symphonia-format-riff", "symphonia-format-riff/wav"]
 wavpack = ["dep:symphonia-codec-wavpack"]
@@ -117,6 +127,7 @@ all-codecs = [
     "imc",
     "opus",
     "pcm",
+    "shorten",
     "speex",
     "sbc",
     "aptx",
@@ -124,6 +135,8 @@ all-codecs = [
     "dolby-e",
     "truehd",
     "truespeech",
+    "tta",
+    "tak",
     "wma",
     "vorbis",
     "wavpack",
@@ -131,6 +144,7 @@ all-codecs = [
 
 # Enable all supported container formats.
 all-formats = [
+    "adx",
     "caf",
     "ape-format",
     "dsd",
@@ -144,9 +158,18 @@ all-formats = [
     "mpegts",
     "musepack",
     "ogg",
+    "real",
+    "shorten",
+    "tta",
+    "tak",
     "asf",
+    "avi",
     "aiff",
     "gsm",
+    "au",
+    "iff",
+    "raw-pcm",
+    "voc",
     "wav",
 ]
 
@@ -207,6 +230,18 @@ optional = true
 [dependencies.symphonia-bundle-musepack]
 workspace = true
 optional = true
+[dependencies.symphonia-bundle-shorten]
+workspace = true
+optional = true
+
+[dependencies.symphonia-bundle-tta]
+workspace = true
+optional = true
+
+[dependencies.symphonia-bundle-tak]
+workspace = true
+optional = true
+
 [dependencies.symphonia-bundle-mp3]
 workspace = true
 [dependencies.symphonia-codec-evrc]
@@ -262,6 +297,10 @@ workspace = true
 optional = true
 
 [dependencies.symphonia-format-asf]
+workspace = true
+optional = true
+
+[dependencies.symphonia-format-avi]
 workspace = true
 optional = true
 
@@ -335,6 +374,10 @@ optional = true
 workspace = true
 optional = true
 
+[dependencies.symphonia-format-sound]
+workspace = true
+optional = true
+
 [dependencies.symphonia-format-isomp4]
 workspace = true
 optional = true
@@ -364,6 +407,14 @@ workspace = true
 optional = true
 
 [dependencies.symphonia-format-flv]
+workspace = true
+optional = true
+
+[dependencies.symphonia-format-game]
+workspace = true
+optional = true
+
+[dependencies.symphonia-format-real]
 workspace = true
 optional = true
 

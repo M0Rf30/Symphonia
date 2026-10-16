@@ -27,6 +27,12 @@
 //! | Format   | Feature Flag | Gapless* | Default |
 //! |----------|--------------|----------|---------|
 //! | AIFF     | `aiff`       | Yes      | No      |
+//! | AVI (`.avi`, audio streams) | `avi` | No | No |
+//! | CRI ADX (`.adx`) | `adx` | Yes     | No      |
+//! | Sun/NeXT AU (`.au`, `.snd`) | `au` | Yes | No |
+//! | Creative Voice (`.voc`) | `voc` | Yes | No |
+//! | IFF 8SVX/16SV (`.iff`, `.8svx`) | `iff` | Yes | No |
+//! | Raw PCM (explicit parameters, not probed) | `raw-pcm` | Yes | No |
 //! | QCP (`.qcp`) | `qcp`    | No      | No      |
 //! | AMR (`.amr`, `.awb`) | `amr` | No   | No      |
 //! | ASF/WMA (`.wma`, `.asf`) | `asf` | Yes   | No      |
@@ -35,9 +41,13 @@
 //! | Bluetooth audio (`.sbc`, `.aptx`, `.aptxhd`, `.lc3`) | `bt` | No | No |
 //! | FLV (audio) | `flv`     | No       | No      |
 //! | ISO/MP4  | `isomp4`     | No       | No      |
+//! | RealMedia (audio: `.rm`, `.rmvb`, `.ra`) | `real` | No | No |
 //! | MPEG-PS (audio) | `mpegps` | No    | No      |
 //! | MPEG-TS (audio) | `mpegts` | No    | No      |
 //! | Musepack | `musepack`   | Yes      | No      |
+//! | Shorten (`.shn`) | `shorten` | Yes | No   |
+//! | TTA (`.tta`) | `tta`    | Yes      | No      |
+//! | TAK (`.tak`) | `tak`    | Yes      | No      |
 //! | MKV/WebM | `mkv`        | Yes      | Yes     |
 //! | OGG      | `ogg`        | Yes      | Yes     |
 //! | Wave     | `wav`        | Yes      | Yes     |
@@ -72,6 +82,9 @@
 //! | MP2      | `mp2`, `mpa` | No      | No      |
 //! | MP3      | `mp3`, `mpa` | Yes     | No      |
 //! | Musepack | `musepack`   | Yes     | No      |
+//! | Shorten  | `shorten`    | Yes     | No      |
+//! | TTA (True Audio) | `tta` | Yes     | No      |
+//! | TAK      | `tak`        | Yes     | No      |
 //! | Nellymoser | `nellymoser` | No    | No      |
 //! | IMC, IAC | `imc`        | No      | No      |
 //! | TrueSpeech | `truespeech` | No    | No      |
@@ -188,6 +201,12 @@ pub mod default {
         #[cfg(feature = "qcelp")]
         pub use symphonia_codec_qcelp::QcelpDecoder;
         pub use symphonia_bundle_musepack::MpcDecoder;
+        #[cfg(feature = "shorten")]
+        pub use symphonia_bundle_shorten::ShortenDecoder;
+        #[cfg(feature = "tta")]
+        pub use symphonia_bundle_tta::TtaDecoder;
+        #[cfg(feature = "tak")]
+        pub use symphonia_bundle_tak::TakDecoder;
         #[cfg(feature = "aac")]
         pub use symphonia_codec_aac::AacDecoder;
         #[cfg(feature = "ac3")]
@@ -246,6 +265,12 @@ pub mod default {
         pub use symphonia_bundle_mp3::MpaReader;
         #[cfg(feature = "musepack")]
         pub use symphonia_bundle_musepack::MpcReader;
+        #[cfg(feature = "shorten")]
+        pub use symphonia_bundle_shorten::ShortenReader;
+        #[cfg(feature = "tta")]
+        pub use symphonia_bundle_tta::TtaReader;
+        #[cfg(feature = "tak")]
+        pub use symphonia_bundle_tak::TakReader;
         #[cfg(feature = "aac")]
         #[cfg(feature = "qcp")]
         pub use symphonia_format_qcp::QcpReader;
@@ -271,6 +296,8 @@ pub mod default {
         pub use symphonia_format_dsd::{CODEC_TYPE_DSD, DffReader, DsfReader};
         #[cfg(feature = "asf")]
         pub use symphonia_format_asf::AsfReader;
+        #[cfg(feature = "avi")]
+        pub use symphonia_format_avi::AviReader;
         #[cfg(feature = "es")]
         pub use symphonia_format_es::{Ac3Reader, DtsReader, S337mReader, TrueHdReader};
         #[cfg(feature = "spdif")]
@@ -279,6 +306,10 @@ pub mod default {
         pub use symphonia_format_bt::{AptxHdReader, AptxReader, Lc3Reader, SbcReader};
         #[cfg(feature = "flv")]
         pub use symphonia_format_flv::FlvReader;
+        #[cfg(feature = "adx")]
+        pub use symphonia_format_game::AdxReader;
+        #[cfg(feature = "real")]
+        pub use symphonia_format_real::RealReader;
         #[cfg(feature = "isomp4")]
         pub use symphonia_format_isomp4::IsoMp4Reader;
         #[cfg(feature = "mkv")]
@@ -293,6 +324,14 @@ pub mod default {
         pub use symphonia_format_riff::AiffReader;
         #[cfg(feature = "wav")]
         pub use symphonia_format_riff::WavReader;
+        #[cfg(feature = "au")]
+        pub use symphonia_format_sound::AuReader;
+        #[cfg(feature = "iff")]
+        pub use symphonia_format_sound::IffReader;
+        #[cfg(feature = "raw-pcm")]
+        pub use symphonia_format_sound::{RawPcmParams, RawPcmReader, RawPcmSampleFormat};
+        #[cfg(feature = "voc")]
+        pub use symphonia_format_sound::VocReader;
     }
 
     pub mod meta {
@@ -401,6 +440,12 @@ pub mod default {
 
         #[cfg(feature = "musepack")]
         registry.register_audio_decoder::<codecs::MpcDecoder>();
+        #[cfg(feature = "shorten")]
+        registry.register_audio_decoder::<codecs::ShortenDecoder>();
+        #[cfg(feature = "tta")]
+        registry.register_audio_decoder::<codecs::TtaDecoder>();
+        #[cfg(feature = "tak")]
+        registry.register_audio_decoder::<codecs::TakDecoder>();
 
         #[cfg(any(feature = "mp1", feature = "mp2", feature = "mp3"))]
         registry.register_audio_decoder::<codecs::MpaDecoder>();
@@ -510,8 +555,14 @@ pub mod default {
         #[cfg(feature = "flv")]
         probe.register_format::<formats::FlvReader<'_>>();
 
+        #[cfg(feature = "adx")]
+        probe.register_format::<formats::AdxReader<'_>>();
+        #[cfg(feature = "real")]
+        probe.register_format::<formats::RealReader<'_>>();
         #[cfg(feature = "asf")]
         probe.register_format::<formats::AsfReader<'_>>();
+        #[cfg(feature = "avi")]
+        probe.register_format::<formats::AviReader<'_>>();
 
         #[cfg(feature = "mpegps")]
         probe.register_format::<formats::MpegPsReader<'_>>();
@@ -526,6 +577,12 @@ pub mod default {
         #[cfg(feature = "gsm")]
         registry.register_audio_decoder::<codecs::GsmDecoder>();
         probe.register_format::<formats::MpcReader<'_>>();
+        #[cfg(feature = "shorten")]
+        probe.register_format::<formats::ShortenReader<'_>>();
+        #[cfg(feature = "tta")]
+        probe.register_format::<formats::TtaReader<'_>>();
+        #[cfg(feature = "tak")]
+        probe.register_format::<formats::TakReader<'_>>();
 
         #[cfg(any(feature = "mp1", feature = "mp2", feature = "mp3"))]
         probe.register_format::<formats::MpaReader<'_>>();
@@ -535,6 +592,12 @@ pub mod default {
 
         #[cfg(feature = "wav")]
         probe.register_format::<formats::WavReader<'_>>();
+        #[cfg(feature = "au")]
+        probe.register_format::<formats::AuReader<'_>>();
+        #[cfg(feature = "voc")]
+        probe.register_format::<formats::VocReader<'_>>();
+        #[cfg(feature = "iff")]
+        probe.register_format::<formats::IffReader<'_>>();
 
         #[cfg(feature = "ogg")]
         probe.register_format::<formats::OggReader<'_>>();

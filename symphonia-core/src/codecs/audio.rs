@@ -460,6 +460,10 @@ pub mod well_known {
     pub const CODEC_ID_ADPCM_IMA_XBOX: AudioCodecId = AudioCodecId(0x213);
     /// ADPCM IMA Westwood
     pub const CODEC_ID_ADPCM_IMA_WS: AudioCodecId = AudioCodecId(0x214);
+    /// CRI ADX ADPCM
+    pub const CODEC_ID_ADPCM_ADX: AudioCodecId = AudioCodecId(0x240);
+    /// Nintendo DSP ADPCM (GameCube/Wii DSPADPCM, THP audio)
+    pub const CODEC_ID_ADPCM_NINTENDO_DSP: AudioCodecId = AudioCodecId(0x241);
 
     // Compressed lossy audio codecs
     //------------------------------
@@ -548,6 +552,10 @@ pub mod well_known {
     pub const CODEC_ID_RALF: AudioCodecId = AudioCodecId(0x2005);
     /// Dolby TrueHD Lossless codec
     pub const CODEC_ID_TRUEHD: AudioCodecId = AudioCodecId(0x2006);
+    /// Tom's lossless Audio Kompressor (TAK)
+    pub const CODEC_ID_TAK: AudioCodecId = AudioCodecId(0x2010);
+    /// Shorten (SHN)
+    pub const CODEC_ID_SHORTEN: AudioCodecId = AudioCodecId(0x2011);
 
     /// Codec profiles for well-known audio codecs.
     pub mod profiles {

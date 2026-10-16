@@ -14,4 +14,5 @@
 
 pub mod apple;
 pub mod mpeg;
+pub mod pcm;
 pub mod xiph;

@@ -1,0 +1,17 @@
+# Symphonia AVI Format Reader
+
+[<img alt="Docs.rs" src="https://img.shields.io/badge/docs.rs-symphonia_format_avi-brightgreen?style=for-the-badge" height="22"/>](https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-avi)
+
+AVI (Audio Video Interleave) demuxer for Project Symphonia. Audio streams only (PCM, float, A-law,
+mu-law, MS and IMA ADPCM, MPEG audio layers 1/2/3), including OpenDML (`AVIX`) files.
+
+> [!NOTE]
+> This crate is part of Symphonia. Please use the [`symphonia`](https://crates.io/crates/symphonia) crate instead of this one directly.
+
+## License
+
+Symphonia is provided under the MPL v2.0 license. Please refer to the LICENSE file for more details.
+
+## Contributing
+
+Symphonia is a free and open-source project that welcomes contributions! To get started, please read our [Contribution Guidelines](https://github.com/M0Rf30/Symphonia/blob/rmpd-next/CONTRIBUTING.md).

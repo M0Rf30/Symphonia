@@ -21,6 +21,14 @@ Changes since upstream `v0.6.1`.
   (`symphonia-codec-speex`), Nellymoser Asao (`symphonia-codec-nellymoser`), mp3PRO
   (`symphonia-bundle-mp3`, feature `mp3pro`), DSD and DST (`symphonia-codec-dsd`), and a native
   Opus decoder with a CELT-only encoder (`symphonia-codec-opus`).
+- Demuxers: Sun/NeXT AU, Creative VOC, IFF 8SVX/16SV/MAUD and headerless PCM
+  (`symphonia-format-sound`, features `au`, `voc`, `iff`, `raw-pcm`) and CRI ADX
+  (`symphonia-format-game`, feature `adx`).
+- Demuxer: AVI audio streams (PCM, float, A-law, mu-law, MS and IMA ADPCM, MPEG audio layers
+  1/2/3, OpenDML continuations; `symphonia-format-avi`, feature `avi`).
+- Bundles: TTA (`symphonia-bundle-tta`, feature `tta`), TAK (`symphonia-bundle-tak`, feature `tak`)
+  and Shorten (`symphonia-bundle-shorten`, feature `shorten`): decoder and demuxer each,
+  bit-exact with FFmpeg.
 - Decoders: SBC and mSBC (`symphonia-codec-sbc`, feature `sbc`), aptX and aptX HD
   (`symphonia-codec-aptx`, feature `aptx`), LC3 and LC3plus including high resolution
   (`symphonia-codec-lc3`, feature `lc3`) and Dolby E (`symphonia-codec-dolby-e`, feature

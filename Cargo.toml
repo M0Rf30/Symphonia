@@ -7,6 +7,9 @@ members = [
     "symphonia-bundle-flac",
     "symphonia-bundle-mp3",
     "symphonia-bundle-musepack",
+    "symphonia-bundle-shorten",
+    "symphonia-bundle-tak",
+    "symphonia-bundle-tta",
     "symphonia-codec-aac",
     "symphonia-codec-adpcm",
     "symphonia-codec-alac",
@@ -44,17 +47,21 @@ members = [
     "symphonia-common",
     "symphonia-core",
     "symphonia-format-asf",
+    "symphonia-format-avi",
     "symphonia-format-dsd",
     "symphonia-format-es",
     "symphonia-format-bt",
     "symphonia-format-spdif",
     "symphonia-format-flv",
+    "symphonia-format-game",
     "symphonia-format-isomp4",
     "symphonia-format-mkv",
     "symphonia-format-mpegps",
     "symphonia-format-mpegts",
     "symphonia-format-ogg",
+    "symphonia-format-real",
     "symphonia-format-riff",
+    "symphonia-format-sound",
     "symphonia-metadata",
     "symphonia-tagging",
     "symphonia-testutil",
@@ -91,6 +98,9 @@ symphonia-bundle-ape = { version = "0.6.1", path = "symphonia-bundle-ape", defau
 symphonia-bundle-flac = { version = "0.6.1", path = "symphonia-bundle-flac", default-features = false }
 symphonia-bundle-mp3 = { version = "0.6.1", path = "symphonia-bundle-mp3", default-features = false }
 symphonia-bundle-musepack = { version = "0.6.1", path = "symphonia-bundle-musepack", default-features = false }
+symphonia-bundle-shorten = { version = "0.6.1", path = "symphonia-bundle-shorten", default-features = false }
+symphonia-bundle-tak = { version = "0.6.1", path = "symphonia-bundle-tak", default-features = false }
+symphonia-bundle-tta = { version = "0.6.1", path = "symphonia-bundle-tta", default-features = false }
 symphonia-codec-aac = { version = "0.6.1", path = "symphonia-codec-aac", default-features = false }
 symphonia-codec-adpcm = { version = "0.6.1", path = "symphonia-codec-adpcm", default-features = false }
 symphonia-format-qcp = { version = "0.6.1", path = "symphonia-format-qcp", default-features = false }
@@ -106,6 +116,7 @@ symphonia-codec-sbc = { version = "0.6.1", path = "symphonia-codec-sbc", default
 symphonia-codec-aptx = { version = "0.6.1", path = "symphonia-codec-aptx", default-features = false }
 symphonia-codec-lc3 = { version = "0.6.1", path = "symphonia-codec-lc3", default-features = false }
 symphonia-codec-alac = { version = "0.6.1", path = "symphonia-codec-alac", default-features = false }
+symphonia-codec-gsm = { version = "0.6.1", path = "symphonia-codec-gsm", default-features = false }
 symphonia-codec-dsd = { version = "0.6.1", path = "symphonia-codec-dsd", default-features = false }
 symphonia-codec-opus = { version = "0.6.1", path = "symphonia-codec-opus", default-features = false }
 symphonia-codec-pcm = { version = "0.6.1", path = "symphonia-codec-pcm", default-features = false }
@@ -116,17 +127,21 @@ symphonia-common = { version = "0.6.1", path = "symphonia-common", default-featu
 symphonia-core = { version = "0.6.1", path = "symphonia-core", default-features = false }
 symphonia-format-caf = { version = "0.6.1", path = "symphonia-format-caf", default-features = false }
 symphonia-format-asf = { version = "0.6.1", path = "symphonia-format-asf", default-features = false }
+symphonia-format-avi = { version = "0.6.1", path = "symphonia-format-avi", default-features = false }
 symphonia-format-dsd = { version = "0.6.1", path = "symphonia-format-dsd", default-features = false }
 symphonia-format-es = { version = "0.6.1", path = "symphonia-format-es", default-features = false }
 symphonia-format-bt = { version = "0.6.1", path = "symphonia-format-bt", default-features = false }
 symphonia-format-spdif = { version = "0.6.1", path = "symphonia-format-spdif", default-features = false }
 symphonia-format-flv = { version = "0.6.1", path = "symphonia-format-flv", default-features = false }
+symphonia-format-game = { version = "0.6.1", path = "symphonia-format-game", default-features = false }
 symphonia-format-isomp4 = { version = "0.6.1", path = "symphonia-format-isomp4", default-features = false }
 symphonia-format-mkv = { version = "0.6.1", path = "symphonia-format-mkv", default-features = false }
 symphonia-format-mpegps = { version = "0.6.1", path = "symphonia-format-mpegps", default-features = false }
 symphonia-format-mpegts = { version = "0.6.1", path = "symphonia-format-mpegts", default-features = false }
 symphonia-format-ogg = { version = "0.6.1", path = "symphonia-format-ogg", default-features = false }
+symphonia-format-real = { version = "0.6.1", path = "symphonia-format-real", default-features = false }
 symphonia-format-riff = { version = "0.6.1", path = "symphonia-format-riff", default-features = false }
+symphonia-format-sound = { version = "0.6.1", path = "symphonia-format-sound", default-features = false }
 symphonia-metadata = { version = "0.6.1", path = "symphonia-metadata", default-features = false }
 symphonia-testutil = { path = "symphonia-testutil" }
 clap = "4.6.0"
@@ -144,4 +159,3 @@ unwrap_used = "warn"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
-symphonia-codec-gsm = { version = "0.6.1", path = "symphonia-codec-gsm", default-features = false }

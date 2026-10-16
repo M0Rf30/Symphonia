@@ -77,20 +77,30 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 
 | Format   | Status    | Gapless* | Feature Flag | Default | Crate                       |
 |----------|-----------|----------|--------------|---------|-----------------------------|
+| AU/SND (Sun/NeXT) | Great | Yes | `au` | No | [`symphonia-format-sound`] |
+| VOC (Creative Voice) | Great | Yes | `voc` | No | [`symphonia-format-sound`] |
+| IFF 8SVX/16SV | Great | Yes | `iff` | No | [`symphonia-format-sound`] |
+| Raw PCM (explicit parameters, not probed) | Great | Yes | `raw-pcm` | No | [`symphonia-format-sound`] |
 | QCP (QCELP, EVRC, SMV; `.qcp`) | Great | No | `qcp` | No | [`symphonia-format-qcp`] |
 | AMR (`.amr`, `.awb`) | Great | No | `amr`        | No      | [`symphonia-format-amr`]      |
 | AIFF     | Excellent | Yes      | `aiff`       | No      | [`symphonia-format-riff`]   |
 | ASF/WMA (`.wma`, `.asf`, audio only) | Great | No | `asf` | No | [`symphonia-format-asf`] |
+| AVI (`.avi`, audio streams only) | Great | No | `avi` | No | [`symphonia-format-avi`] |
 | APE      | Excellent | Yes      | `ape-format` | No      | [`symphonia-bundle-ape`]      |
 | CAF      | Excellent | Yes      | `caf`        | No      | [`symphonia-format-caf`]    |
+| CRI ADX (`.adx`, unencrypted) | Great | Yes | `adx`   | No      | [`symphonia-format-game`]     |
 | DSD (DSF, DFF) | Great | Yes    | `dsd`        | No      | [`symphonia-format-dsd`]      |
 | Elementary streams (AC-3, E-AC-3, DTS, TrueHD/MLP, Dolby E in SMPTE ST 337) | Great | Yes\*\* | `es`   | No      | [`symphonia-format-es`]       |
 | IEC 61937 / S/PDIF data bursts (AC-3, E-AC-3, DTS, MPEG audio, AAC) | Great | No | `spdif` | No | [`symphonia-format-spdif`] |
 | Bluetooth audio (SBC, aptX, aptX HD raw streams, LC3 `.lc3` files) | Great | Yes\*\*\*\* | `bt`   | No      | [`symphonia-format-bt`]       |
 | FLV (audio only) | Great | Yes\*\*\* | `flv`      | No      | [`symphonia-format-flv`]    |
+| RealMedia (`.rm`, `.rmvb`) and RealAudio (`.ra`), audio only | Great | No | `real` | No | [`symphonia-format-real`] |
 | ISO/MP4  | Excellent | Yes      | `isomp4`     | No      | [`symphonia-format-isomp4`] |
 | MKV/WebM | Excellent | Yes      | `mkv`        | Yes     | [`symphonia-format-mkv`]    |
 | Musepack | Excellent | Yes      | `musepack`   | No      | [`symphonia-bundle-musepack`] |
+| Shorten (`.shn`) | Excellent | Yes | `shorten` | No | [`symphonia-bundle-shorten`] |
+| TAK (`.tak`) | Excellent | Yes | `tak` | No | [`symphonia-bundle-tak`] |
+| TTA (`.tta`) | Excellent | Yes | `tta` | No | [`symphonia-bundle-tta`] |
 | MPEG-PS (audio only) | Great | Yes\*\*\*\*\* | `mpegps`     | No      | [`symphonia-format-mpegps`] |
 | MPEG-TS (audio only) | Great | Yes\*\*\*\*\* | `mpegts`     | No      | [`symphonia-format-mpegts`] |
 | OGG      | Excellent | Yes      | `ogg`        | Yes     | [`symphonia-format-ogg`]    |
@@ -109,12 +119,15 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 \*\*\*\*\* MPEG-PS and MPEG-TS carry no gapless metadata of their own: the trims are those of the codec, where the stream has them (the Opus pre-skip and end trim of the TS access unit headers, the LAME/Xing encoder delay and padding of MP3 streams that keep the tag frame). AAC (ADTS/LATM) streams have no priming information, so none is trimmed.
 
 [`symphonia-format-caf`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-caf
+[`symphonia-format-real`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-real
 [`symphonia-format-flv`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-flv
+[`symphonia-format-game`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-game
 [`symphonia-format-isomp4`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-isomp4
 [`symphonia-format-mkv`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-mkv
 [`symphonia-format-mpegps`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-mpegps
 [`symphonia-format-mpegts`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-mpegts
 [`symphonia-format-ogg`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-ogg
+[`symphonia-format-sound`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-sound
 [`symphonia-format-riff`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-riff
 [`symphonia-format-dsd`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-dsd
 [`symphonia-format-es`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-es
@@ -142,6 +155,9 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | MP3                          | Excellent | Yes     | `mp3`, `mpa` | No      | [`symphonia-bundle-mp3`]   |
 | mp3PRO                       | Great     | No      | `mp3pro`     | No      | [`symphonia-bundle-mp3`]   |
 | Musepack                     | Excellent | Yes     | `musepack`   | No      | [`symphonia-bundle-musepack`]|
+| Shorten                      | Excellent | Yes     | `shorten`    | No      | [`symphonia-bundle-shorten`] |
+| TAK                          | Excellent | Yes     | `tak`        | No      | [`symphonia-bundle-tak`]     |
+| TTA (True Audio)             | Excellent | Yes     | `tta`        | No      | [`symphonia-bundle-tta`]     |
 | Nellymoser                   | Excellent | No      | `nellymoser` | No      | [`symphonia-codec-nellymoser`]|
 | TwinVQ                       | Great     | No      | `twinvq`     | No      | [`symphonia-codec-twinvq`]   |
 | Siren 7, Siren 14 (G.722.1, Annex C), MSN Siren | Great | No | `siren` | No | [`symphonia-codec-siren`] |
@@ -190,6 +206,9 @@ mp3PRO streams decode as plain MP3 by default. The `mp3pro` feature adds `Mp3Pro
 [`symphonia-codec-opus`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-opus
 [`symphonia-bundle-ape`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-bundle-ape
 [`symphonia-bundle-musepack`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-bundle-musepack
+[`symphonia-bundle-shorten`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-bundle-shorten
+[`symphonia-bundle-tak`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-bundle-tak
+[`symphonia-bundle-tta`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-bundle-tta
 [`symphonia-codec-ac3`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-ac3
 [`symphonia-codec-dca`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-dca
 [`symphonia-codec-dsd`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-dsd
@@ -198,6 +217,7 @@ mp3PRO streams decode as plain MP3 by default. The `mp3pro` feature adds `Mp3Pro
 [`symphonia-codec-imc`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-imc
 [`symphonia-codec-wma`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-wma
 [`symphonia-format-asf`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-asf
+[`symphonia-format-avi`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-avi
 [`symphonia-codec-speex`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-speex
 [`symphonia-codec-sbc`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-sbc
 [`symphonia-codec-aptx`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-aptx

@@ -1,0 +1,28 @@
+[package]
+name = "symphonia-format-avi"
+description = "Pure Rust AVI audio demuxer (a part of project Symphonia)."
+authors = ["M0Rf30 <morf3089@gmail.com>"]
+readme = "README.md"
+categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
+keywords = ["audio", "media", "demuxer", "avi"]
+# Common package metadata located in workspace Cargo.toml.
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+log = { workspace = true }
+symphonia-common = { workspace = true }
+symphonia-core = { workspace = true }
+
+[dev-dependencies]
+symphonia-codec-adpcm = { workspace = true }
+symphonia-codec-pcm = { workspace = true }
+symphonia-bundle-mp3 = { workspace = true, features = ["mp2", "mp3"] }
+symphonia-testutil = { workspace = true }
+
+[lints]
+workspace = true
