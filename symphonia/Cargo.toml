@@ -58,6 +58,13 @@ qcp = ["dep:symphonia-format-qcp"]
 amrwb = ["dep:symphonia-codec-amrwb"]
 amrnb = ["dep:symphonia-codec-amrnb"]
 evrc = ["dep:symphonia-codec-evrc"]
+als = ["dep:symphonia-codec-als"]
+atrac = ["dep:symphonia-codec-atrac"]
+atrac3plus = ["dep:symphonia-codec-atrac3plus"]
+cook = ["dep:symphonia-codec-cook"]
+ra = ["dep:symphonia-codec-ra"]
+ralf = ["dep:symphonia-codec-ralf"]
+sipr = ["dep:symphonia-codec-sipr"]
 qcelp = ["dep:symphonia-codec-qcelp"]
 siren = ["dep:symphonia-codec-siren"]
 mp3 = ["dep:symphonia-bundle-mp3", "symphonia-bundle-mp3/mp3"]
@@ -98,6 +105,13 @@ id3v2 = ["symphonia-metadata/id3v2"]
     "mace",
 mpa = ["mp1", "mp2", "mp3"]
     "evrc",
+    "als",
+    "atrac",
+    "atrac3plus",
+    "cook",
+    "ra",
+    "ralf",
+    "sipr",
     "amrwb",
     "amrnb",
     "qcelp",
@@ -245,6 +259,34 @@ optional = true
 [dependencies.symphonia-bundle-mp3]
 workspace = true
 [dependencies.symphonia-codec-evrc]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-als]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-atrac]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-atrac3plus]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-cook]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-ra]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-ralf]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-sipr]
 workspace = true
 optional = true
 [dependencies.symphonia-codec-qcelp]

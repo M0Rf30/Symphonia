@@ -71,6 +71,13 @@
 //! | MP1      | `mp1`, `mpa` | No      | No      |
 //! | MACE 3:1, 6:1 | `mace`    | No      | No      |
 //! | EVRC     | `evrc`         | No      | No      |
+//! | MPEG-4 ALS | `als` | No      | No      |
+//! | ATRAC1, ATRAC3 | `atrac` | No      | No      |
+//! | ATRAC3+ | `atrac3plus` | No      | No      |
+//! | RealAudio Cook | `cook` | No      | No      |
+//! | RealAudio 1.0/2.0 | `ra` | No      | No      |
+//! | RealAudio Lossless | `ralf` | No      | No      |
+//! | RealAudio SIPR | `sipr` | No      | No      |
 //! | AMR-WB   | `amrwb`      | No      | No      |
 //! | TwinVQ (VQF) | `twinvq`   | No      | No      |
 //! | G.723.1  | `g7231`      | No      | No      |
@@ -185,6 +192,20 @@ pub mod default {
         pub use symphonia_codec_mace::MaceDecoder;
         #[cfg(feature = "evrc")]
         pub use symphonia_codec_evrc::EvrcDecoder;
+        #[cfg(feature = "als")]
+        pub use symphonia_codec_als::AlsDecoder;
+        #[cfg(feature = "atrac")]
+        pub use symphonia_codec_atrac::AtracDecoder;
+        #[cfg(feature = "atrac3plus")]
+        pub use symphonia_codec_atrac3plus::Atrac3PlusDecoder;
+        #[cfg(feature = "cook")]
+        pub use symphonia_codec_cook::CookDecoder;
+        #[cfg(feature = "ra")]
+        pub use symphonia_codec_ra::{Ra144Decoder, Ra288Decoder};
+        #[cfg(feature = "ralf")]
+        pub use symphonia_codec_ralf::RalfDecoder;
+        #[cfg(feature = "sipr")]
+        pub use symphonia_codec_sipr::SiprDecoder;
         #[cfg(feature = "amrwb")]
         pub use symphonia_codec_amrwb::AmrWbDecoder;
         #[cfg(feature = "twinvq")]
@@ -391,6 +412,30 @@ pub mod default {
     }
         #[cfg(feature = "evrc")]
         registry.register_audio_decoder::<codecs::EvrcDecoder>();
+
+        #[cfg(feature = "als")]
+        registry.register_audio_decoder::<codecs::AlsDecoder>();
+
+        #[cfg(feature = "atrac")]
+        registry.register_audio_decoder::<codecs::AtracDecoder>();
+
+        #[cfg(feature = "atrac3plus")]
+        registry.register_audio_decoder::<codecs::Atrac3PlusDecoder>();
+
+        #[cfg(feature = "cook")]
+        registry.register_audio_decoder::<codecs::CookDecoder>();
+
+        #[cfg(feature = "ra")]
+        registry.register_audio_decoder::<codecs::Ra144Decoder>();
+
+        #[cfg(feature = "ra")]
+        registry.register_audio_decoder::<codecs::Ra288Decoder>();
+
+        #[cfg(feature = "ralf")]
+        registry.register_audio_decoder::<codecs::RalfDecoder>();
+
+        #[cfg(feature = "sipr")]
+        registry.register_audio_decoder::<codecs::SiprDecoder>();
         #[cfg(feature = "qcelp")]
         #[cfg(feature = "amrwb")]
         registry.register_audio_decoder::<codecs::AmrWbDecoder>();

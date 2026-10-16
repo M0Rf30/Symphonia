@@ -1,0 +1,12 @@
+This crate (`symphonia-codec-ralf`) is a from-scratch, pure-Rust RealAudio Lossless (RALF) decoder.
+It is licensed under the Mozilla Public License, v. 2.0, like the rest of Project Symphonia.
+
+RALF has no public specification. The block and packet layout, the entropy coding (including the
+canonical assignment of codes to the code length tables), the prediction filter and the stereo
+reconstruction follow FFmpeg's `libavcodec/ralf.c`, and the code length tables in `src/tables.rs`
+(extracted programmatically) are those of `libavcodec/ralfdata.h`. FFmpeg is distributed under the
+GNU Lesser General Public License, version 2.1 or later.
+
+Copyright (c) 2012 Konstantin Shishkov
+
+The LGPL-2.1+ terms apply to those derived portions.

@@ -28,6 +28,13 @@ members = [
     "symphonia-codec-ilbc",
     "symphonia-codec-amrnb",
     "symphonia-codec-evrc",
+    "symphonia-codec-als",
+    "symphonia-codec-atrac",
+    "symphonia-codec-atrac3plus",
+    "symphonia-codec-cook",
+    "symphonia-codec-ra",
+    "symphonia-codec-ralf",
+    "symphonia-codec-sipr",
     "symphonia-codec-qcelp",
     "symphonia-codec-mace",
     "symphonia-codec-siren",
@@ -79,6 +86,13 @@ rust-version = "1.85"
 version = "0.6.1"
 symphonia-codec-mace = { version = "0.6.1", path = "symphonia-codec-mace", default-features = false }
 symphonia-codec-evrc = { version = "0.6.1", path = "symphonia-codec-evrc", default-features = false }
+symphonia-codec-als = { version = "0.6.1", path = "symphonia-codec-als", default-features = false }
+symphonia-codec-atrac = { version = "0.6.1", path = "symphonia-codec-atrac", default-features = false }
+symphonia-codec-atrac3plus = { version = "0.6.1", path = "symphonia-codec-atrac3plus", default-features = false }
+symphonia-codec-cook = { version = "0.6.1", path = "symphonia-codec-cook", default-features = false }
+symphonia-codec-ra = { version = "0.6.1", path = "symphonia-codec-ra", default-features = false }
+symphonia-codec-ralf = { version = "0.6.1", path = "symphonia-codec-ralf", default-features = false }
+symphonia-codec-sipr = { version = "0.6.1", path = "symphonia-codec-sipr", default-features = false }
 symphonia-codec-amrwb = { version = "0.6.1", path = "symphonia-codec-amrwb", default-features = false }
 symphonia-format-vqf = { version = "0.6.1", path = "symphonia-format-vqf", default-features = false }
 symphonia-codec-siren = { version = "0.6.1", path = "symphonia-codec-siren", default-features = false }

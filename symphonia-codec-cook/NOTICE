@@ -1,0 +1,14 @@
+This crate (`symphonia-codec-cook`) is a pure-Rust RealAudio Cook decoder. It is licensed under the
+Mozilla Public License, v. 2.0, like the rest of Project Symphonia.
+
+Cook has no public specification. The bitstream parsing, bit allocation (`categorize`), vector
+dequantisation, joint-stereo decoupling, MLT windowing and gain-control logic follow FFmpeg's
+`libavcodec/cook.c`, and the Huffman and scale tables (`src/tables.rs`, extracted programmatically)
+come from `libavcodec/cookdata.h`. The additive lagged-Fibonacci noise generator follows
+`libavutil/lfg.c`. These files are distributed under the GNU Lesser General Public License,
+version 2.1 or later.
+
+Copyright (c) 2003 Sascha Sommer
+Copyright (c) 2005 Benjamin Larsson
+
+The LGPL-2.1+ terms apply to those derived portions.

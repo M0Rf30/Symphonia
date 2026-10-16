@@ -159,6 +159,13 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | TAK                          | Excellent | Yes     | `tak`        | No      | [`symphonia-bundle-tak`]     |
 | TTA (True Audio)             | Excellent | Yes     | `tta`        | No      | [`symphonia-bundle-tta`]     |
 | Nellymoser                   | Excellent | No      | `nellymoser` | No      | [`symphonia-codec-nellymoser`]|
+| RealAudio Cook               | Excellent | No      | `cook`       | No      | [`symphonia-codec-cook`]     |
+| ATRAC1, ATRAC3 (also RealAudio `atrc`) | Excellent | No | `atrac`  | No      | [`symphonia-codec-atrac`]    |
+| ATRAC3+                      | Excellent | No      | `atrac3plus` | No      | [`symphonia-codec-atrac3plus`]|
+| MPEG-4 ALS (in MP4)          | Excellent | Yes     | `als`        | No      | [`symphonia-codec-als`]      |
+| RealAudio 1.0, 2.0 (14.4K, 28.8K) | Excellent | No | `ra`         | No      | [`symphonia-codec-ra`]       |
+| RealAudio SIPR               | Excellent | No      | `sipr`       | No      | [`symphonia-codec-sipr`]     |
+| RealAudio Lossless (RALF)    | Excellent | No      | `ralf`       | No      | [`symphonia-codec-ralf`]     |
 | TwinVQ                       | Great     | No      | `twinvq`     | No      | [`symphonia-codec-twinvq`]   |
 | Siren 7, Siren 14 (G.722.1, Annex C), MSN Siren | Great | No | `siren` | No | [`symphonia-codec-siren`] |
 | EVRC                         | Great     | No      | `evrc`       | No      | [`symphonia-codec-evrc`]     |
@@ -213,6 +220,13 @@ mp3PRO streams decode as plain MP3 by default. The `mp3pro` feature adds `Mp3Pro
 [`symphonia-codec-dca`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-dca
 [`symphonia-codec-dsd`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-dsd
 [`symphonia-codec-nellymoser`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-nellymoser
+[`symphonia-codec-cook`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-cook
+[`symphonia-codec-atrac`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-atrac
+[`symphonia-codec-atrac3plus`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-atrac3plus
+[`symphonia-codec-als`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-als
+[`symphonia-codec-ra`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-ra
+[`symphonia-codec-sipr`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-sipr
+[`symphonia-codec-ralf`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-ralf
 | GSM 06.10, Microsoft GSM     | Excellent | No      | `gsm`        | No      | [`symphonia-codec-gsm`]      |
 [`symphonia-codec-imc`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-imc
 [`symphonia-codec-wma`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-wma
@@ -257,8 +271,8 @@ For metadata formats that are standalone and not part of the media container, a 
 Codecs and containers without a row in the tables above are not implemented. Known gaps:
 
 * Video and subtitle codecs: no video or subtitle decoder exists in this repository.
-* ATRAC, WMA and RealAudio Cook: codec IDs are reserved in `symphonia-core` (`CODEC_ID_ATRAC*`, `CODEC_ID_WMA`, `CODEC_ID_COOK`), but no decoder crate implements them.
-* ASF/WMA, RealMedia and AVI containers: no demuxer crate exists.
+* ATRAC9, WMA Pro, WMA Lossless and WMA Voice: codec IDs are reserved in `symphonia-core`, but no decoder crate implements them (WMA 1 and 2 are decoded).
+* ASF/WMA and AVI containers: no demuxer crate exists.
 * AAC: error resilience tools (Huffman codeword reordering, RVLC, virtual codebooks), LTP in AAC-LD, SBR with AAC-LD, and Parametric Stereo with anything other than a single mono `SCE` core element are rejected as unsupported (see `symphonia-codec-aac`).
 * mp3PRO SBR decoding is not in the default codec registry (opt-in via the `mp3pro` feature).
 

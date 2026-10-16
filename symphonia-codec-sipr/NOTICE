@@ -1,0 +1,16 @@
+This crate (`symphonia-codec-sipr`) is a pure-Rust RealAudio SIPR (Sipro Lab ACELP.net) decoder. It
+is licensed under the Mozilla Public License, v. 2.0, like the rest of Project Symphonia.
+
+SIPR has no public specification. The bitstream layout, LSF/gain/pitch decoding, the fixed
+codebook, the post-filters and the 16 kbit/s mode follow FFmpeg's `libavcodec/sipr.c` and
+`sipr16k.c`; the supporting CELP/ACELP routines (LSP to LPC conversion, interpolation, vector
+sums, filters) follow `libavcodec/lsp.c`, `acelp_vectors.c`, `acelp_filters.c`,
+`acelp_pitch_delay.c` and `celp_filters.c`. The codebook and window tables (`src/tables.rs`,
+extracted programmatically) come from `libavcodec/siprdata.h`, `sipr16kdata.h` and
+`acelp_vectors.c`. These files are distributed under the GNU Lesser General Public License,
+version 2.1 or later.
+
+Copyright (c) 2008 Vladimir Voroshilov
+Copyright (c) 2009 Vitor Sessak
+
+The LGPL-2.1+ terms apply to those derived portions.

@@ -21,7 +21,16 @@ Changes since upstream `v0.6.1`.
   (`symphonia-codec-speex`), Nellymoser Asao (`symphonia-codec-nellymoser`), mp3PRO
   (`symphonia-bundle-mp3`, feature `mp3pro`), DSD and DST (`symphonia-codec-dsd`), and a native
   Opus decoder with a CELT-only encoder (`symphonia-codec-opus`).
-- Demuxers: Sun/NeXT AU, Creative VOC, IFF 8SVX/16SV/MAUD and headerless PCM
+- Demuxers: Sun/NeXT AU- RealAudio: RealMedia/RealAudio demuxer (`symphonia-format-real`, feature `real`, for `.rm`, `.rmvb`
+  and `.ra`, with the `genr`, `Int4` and `sipr` deinterleavers), and decoders for
+  Cook (`symphonia-codec-cook`, `cook`), RealAudio 1.0/2.0 (`symphonia-codec-ra`, `ra`),
+  RealAudio Lossless (`symphonia-codec-ralf`, `ralf`) and SIPR in all four modes
+  (`symphonia-codec-sipr`, `sipr`), checked against FFmpeg.
+- Decoders: ATRAC1 and ATRAC3 (`symphonia-codec-atrac`, feature `atrac`), ATRAC3+
+  (`symphonia-codec-atrac3plus`, feature `atrac3plus`, from WAVE/OMA frames) and MPEG-4 ALS
+  (`symphonia-codec-als`, feature `als`, including the floating-point and multi-channel modes),
+  checked against FFmpeg.
+, Creative VOC, IFF 8SVX/16SV/MAUD and headerless PCM
   (`symphonia-format-sound`, features `au`, `voc`, `iff`, `raw-pcm`) and CRI ADX
   (`symphonia-format-game`, feature `adx`).
 - Demuxer: AVI audio streams (PCM, float, A-law, mu-law, MS and IMA ADPCM, MPEG audio layers

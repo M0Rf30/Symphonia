@@ -1,0 +1,20 @@
+[package]
+name = "symphonia-codec-ra"
+description = "Pure Rust RealAudio 1.0 (14.4K) and 2.0 (28.8K) decoders (a part of project Symphonia)."
+authors = ["Philip Deljanov <philip.deljanov@gmail.com>"]
+readme = "README.md"
+categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
+keywords = ["audio", "codec", "decoder", "realaudio"]
+# Common package metadata located in workspace Cargo.toml.
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+symphonia-core = { workspace = true }
+
+[lints]
+workspace = true

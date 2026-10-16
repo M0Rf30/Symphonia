@@ -1,0 +1,17 @@
+This crate (`symphonia-codec-atrac3plus`) is a from-scratch, pure-Rust ATRAC3+ decoder. It is
+licensed under the Mozilla Public License, v. 2.0, like the rest of Project Symphonia.
+
+ATRAC3+ has no public specification. The bitstream parser, the canonical Huffman codebook
+descriptors and all other tables (`src/tables.rs`, extracted programmatically), the gain
+compensation, power compensation ("noise dithering"), sine-wave (GHA) synthesis, IMDCT windowing and
+inverse polyphase quadrature filter bank follow FFmpeg's `libavcodec/atrac3plusdec.c`,
+`libavcodec/atrac3plus.c`, `libavcodec/atrac3plusdsp.c`, `libavcodec/atrac3plus_data.h` and
+`libavcodec/atrac.c`, which are distributed under the GNU Lesser General Public License,
+version 2.1 or later. The technical description at
+http://wiki.multimedia.cx/index.php?title=ATRAC3plus was used by the FFmpeg authors.
+
+Copyright (c) 2010-2013 Maxim Poliakovski
+Copyright (c) 2006-2013 Maxim Poliakovski (atrac.c)
+Copyright (c) 2006-2008 Benjamin Larsson (atrac.c)
+
+The LGPL-2.1+ terms apply to those derived portions.

@@ -1,0 +1,11 @@
+This crate (`symphonia-codec-als`) is a pure-Rust MPEG-4 Audio Lossless Coding (ALS) decoder. It is
+licensed under the Mozilla Public License, v. 2.0, like the rest of Project Symphonia (see
+`LICENSE`).
+
+The decoder is ported from the ALS decoder of FFmpeg (https://ffmpeg.org): the bitstream and
+prediction decoder (`libavcodec/alsdec.c`, Thilo Borgmann, Umair Khan, Hendrik Leppkes and
+others), the block Gilbert-Moore decoder and its code tables (`libavcodec/bgmc.c`, Thilo
+Borgmann), the MLZ decompressor (`libavcodec/mlz.c`, Ivan Uskov) and the software floating-point
+arithmetic (`libavutil/softfloat_ieee754.h`, Michael Niedermayer). The tables in `bgmc_tables.rs`
+and `tables.rs` are taken from those files. These FFmpeg files are licensed under the GNU Lesser
+General Public License, version 2.1 or (at your option) any later version.

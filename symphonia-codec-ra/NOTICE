@@ -1,0 +1,18 @@
+This crate (`symphonia-codec-ra`) is a pure-Rust RealAudio 1.0 (14.4K) and RealAudio 2.0 (28.8K)
+decoder. It is licensed under the Mozilla Public License, v. 2.0, like the rest of Project Symphonia.
+
+Neither codec has a public specification. The algorithms and tables follow FFmpeg's
+`libavcodec/ra144dec.c`, `libavcodec/ra144.c`, `libavcodec/ra144.h` (RealAudio 1.0), and
+`libavcodec/ra288.c`, `libavcodec/ra288.h`, `libavcodec/g728_template.c`,
+`libavcodec/lpc_functions.h`, `libavcodec/celp_filters.c` (RealAudio 2.0, a G.728 LD-CELP variant,
+see ITU-T G.728 blocks 36, 46-49). The tables in `src/tables144.rs` and `src/tables288.rs` were
+extracted programmatically from those files. FFmpeg's code is distributed under the GNU Lesser
+General Public License, version 2.1 or later. FFmpeg's RealAudio 1.0 decoder is in turn based on the
+public domain decoder at http://www.honeypot.net/audio.
+
+Copyright (c) 2003 The FFmpeg project
+Copyright (c) 2003 Nick Kurshev
+Copyright (c) 2006 Justin Ruggles
+Copyright (c) 2008 Vitor Sessak
+
+The LGPL-2.1+ terms apply to those derived portions.
