@@ -124,6 +124,9 @@ pub(crate) struct ParseStatus {
     /// Every channel is in the "SBR active" state and its [`SbrFrame`] must be applied. If false,
     /// the frame takes the core-only path (bands >= kx zeroed).
     pub apply: bool,
+    /// The block was parsed without any error: the CRC (if present) matched and the element ended
+    /// in the last byte of the block. Leftover bytes of a plain MP3 stream rarely are.
+    pub clean: bool,
     /// SBR was switched off permanently (e.g., unsupported protocol). The core-only path is
     /// used for this and every following frame.
     pub disabled: bool,

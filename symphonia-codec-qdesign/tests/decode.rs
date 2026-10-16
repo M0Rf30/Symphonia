@@ -19,9 +19,9 @@
 //! frames out of millions, in the files tested): the comparison aligns on the shorter of the two
 //! and requires the length difference to be small.
 //!
-//! QDMC is not covered here: its container mapping is exercised by `qdmc_extra_data_is_accepted`
-//! below, but its synthesis is not bit- or SNR-correct against FFmpeg yet (see issue #16); adding
-//! a correctness test for it is left for when that is fixed.
+//! QDMC is covered by `qdmc_matches_ffmpeg` (`rumcoke.mov`, `slick.mov` and `tidemo1-24bit-rle.mov`
+//! of the sample corpus), and the Matroska mapping by `matroska_matches_ffmpeg`, which remuxes a
+//! sample with `ffmpeg`.
 
 use std::process::{Command, Stdio};
 
@@ -32,12 +32,18 @@ use symphonia_core::codecs::audio::well_known::CODEC_ID_QDMC;
 use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
 use symphonia_core::formats::{FormatOptions, FormatReader, TrackType};
 use symphonia_format_isomp4::IsoMp4Reader;
+use symphonia_format_mkv::MkvReader;
 use symphonia_testutil::{open_sample, sample_path};
 
 /// Decodes the default audio track of `qdesign/{name}` with Symphonia, as interleaved `i16`.
 fn decode(name: &str) -> Option<Vec<i16>> {
     let mss = open_sample(format!("qdesign/{name}"))?;
-    let mut reader = IsoMp4Reader::try_new(mss, FormatOptions::default()).unwrap();
+    let reader = IsoMp4Reader::try_new(mss, FormatOptions::default()).unwrap();
+    Some(decode_reader(name, reader))
+}
+
+/// Decodes the default audio track of `reader` with Symphonia, as interleaved `i16`.
+fn decode_reader(name: &str, mut reader: impl FormatReader) -> Vec<i16> {
     let track = reader.default_track(TrackType::Audio).unwrap();
     let id = track.id;
     let Some(CodecParameters::Audio(params)) = track.codec_params.clone()
@@ -65,7 +71,7 @@ fn decode(name: &str) -> Option<Vec<i16>> {
         b.copy_to_vec_interleaved::<i16>(&mut v);
         out.extend_from_slice(&v);
     }
-    Some(out)
+    out
 }
 
 /// Decodes the default audio track of `qdesign/{name}` with FFmpeg, as interleaved `i16`, if
@@ -150,6 +156,38 @@ fn qdm2_matches_ffmpeg() {
     }
 }
 
+#[test]
+fn qdmc_matches_ffmpeg() {
+    let mut any_ran = false;
+
+    for name in ["rumcoke.mov", "slick.mov", "tidemo1-24bit-rle.mov"] {
+        let Some(got) = decode(name)
+        else {
+            eprintln!("RMPD_SAMPLES not set or {name} missing, skipping");
+            continue;
+        };
+        let Some(want) = ffmpeg_decode(name)
+        else {
+            eprintln!("ffmpeg not available, skipping {name}");
+            continue;
+        };
+
+        let (max, snr, len_diff) = compare(&got, &want);
+        eprintln!(
+            "{name}: {} samples, max diff {max} LSB, SNR {snr:.1} dB, length diff {len_diff}",
+            got.len().min(want.len())
+        );
+        assert!(max <= MAX_LSB, "{name}: max diff {max} LSB");
+        assert!(snr >= MIN_SNR, "{name}: SNR {snr} dB");
+        assert!(len_diff <= MAX_LEN_DIFF, "{name}: length diff {len_diff} frames");
+        any_ran = true;
+    }
+
+    if !any_ran {
+        eprintln!("no QDMC samples and/or ffmpeg available, test did not verify anything");
+    }
+}
+
 /// The `QDCA` atom FFmpeg writes directly inside a `glbl` atom when remuxing a QDMC track,
 /// without the `wave`/`frma` wrapper QuickTime itself uses (see `symphonia-format-isomp4`'s
 /// `AtomType::GlobalHeader` handling). Mono, 22050 Hz, arbitrary bit rate/group size, FFT size 64
@@ -172,4 +210,50 @@ fn qdmc_extra_data_is_accepted() {
     let mut params = AudioCodecParameters::new();
     params.for_codec(CODEC_ID_QDMC).with_extra_data(QDMC_BARE_QDCA_EXTRA_DATA.to_vec().into());
     QdesignDecoder::try_new(&params, &AudioDecoderOptions::default()).unwrap();
+}
+
+/// A sample remuxed into Matroska (`A_QUICKTIME/QDM2` or `A_QUICKTIME/QDMC`) decodes like the
+/// original.
+#[test]
+fn matroska_matches_ffmpeg() {
+    let mut any_ran = false;
+
+    for name in ["switzler084d_dl.mov", "rumcoke.mov"] {
+        let (Some(path), Some(want)) =
+            (sample_path(format!("qdesign/{name}")), ffmpeg_decode(name))
+        else {
+            eprintln!("RMPD_SAMPLES not set, ffmpeg not available or {name} missing, skipping");
+            continue;
+        };
+
+        let mkv = std::env::temp_dir().join(format!("qdesign_{}_{name}.mkv", std::process::id()));
+        let remuxed = Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-i"])
+            .arg(&path)
+            .args(["-map", "0:a:0", "-c", "copy"])
+            .arg(&mkv)
+            .stderr(Stdio::null())
+            .status();
+        if !remuxed.is_ok_and(|s| s.success()) {
+            eprintln!("ffmpeg cannot remux {name} into Matroska, skipping");
+            continue;
+        }
+
+        let file = std::fs::File::open(&mkv).unwrap();
+        let mss = symphonia_core::io::MediaSourceStream::new(Box::new(file), Default::default());
+        let reader = MkvReader::try_new(mss, FormatOptions::default()).unwrap();
+        let got = decode_reader(name, reader);
+        std::fs::remove_file(&mkv).unwrap();
+
+        let (max, snr, len_diff) = compare(&got, &want);
+        eprintln!("{name} (mkv): max diff {max} LSB, SNR {snr:.1} dB, length diff {len_diff}");
+        assert!(max <= MAX_LSB, "{name}: max diff {max} LSB");
+        assert!(snr >= MIN_SNR, "{name}: SNR {snr} dB");
+        assert!(len_diff <= MAX_LEN_DIFF, "{name}: length diff {len_diff} frames");
+        any_ran = true;
+    }
+
+    if !any_ran {
+        eprintln!("did not verify anything");
+    }
 }

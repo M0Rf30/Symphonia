@@ -281,8 +281,6 @@ pub struct Layer3 {
     pub overlap: [[[f32; 18]; 32]; 2],
     pub synthesis: [synthesis::SynthesisState; 2],
     pub reservoir: BitReservoir,
-    /// The intensity stereo rule for MPEG2/2.5 bitstreams.
-    pub intensity_mode: IntensityMode,
 }
 
 impl Layer3 {
@@ -318,22 +316,13 @@ impl Layer3 {
         Ok(())
     }
 
-    pub fn new(intensity_mode: IntensityMode) -> Self {
+    pub fn new() -> Self {
         Self {
             samples: [[[0f32; 576]; 2]; 2],
             overlap: [[[0f32; 18]; 32]; 2],
             synthesis: Default::default(),
             reservoir: BitReservoir::new(),
-            intensity_mode,
         }
-    }
-
-    /// The ancillary data of the last decoded frame: the bit reservoir bytes following the
-    /// frame's main data (scale factors and Huffman coded samples). It runs to the end of the
-    /// buffered main data and therefore may include main data of following frames.
-    #[cfg(feature = "mp3pro")]
-    pub fn ancillary_data(&self) -> &[u8] {
-        self.reservoir.bytes_ref()
     }
 
     /// Reads the main_data portion of a MPEG audio frame from a `BitStream` into `FrameData`.
@@ -445,6 +434,23 @@ impl Layer for Layer3 {
         header: &FrameHeader,
         out: &mut AudioBuffer<f32>,
     ) -> Result<()> {
+        self.decode_frame(reader, header, out, |_| IntensityMode::Iso)
+    }
+}
+
+impl Layer3 {
+    /// Decodes a frame. `intensity_mode` is called once the main data of the frame has been read,
+    /// before the stereo processing, with the ancillary data of the frame: the bit reservoir bytes
+    /// following the frame's main data (scale factors and Huffman coded samples). The ancillary
+    /// data runs to the end of the buffered main data and therefore may include main data of
+    /// following frames. The returned intensity stereo rule is used to decode the frame.
+    pub(crate) fn decode_frame(
+        &mut self,
+        reader: &mut BufReader<'_>,
+        header: &FrameHeader,
+        out: &mut AudioBuffer<f32>,
+        intensity_mode: impl FnOnce(&[u8]) -> IntensityMode,
+    ) -> Result<()> {
         // Initialize an empty FrameData to store the side_info and main_data portions of the
         // frame.
         let mut frame_data: FrameData = Default::default();
@@ -488,6 +494,8 @@ impl Layer for Layer3 {
             }
         }
 
+        let intensity_mode = intensity_mode(self.reservoir.bytes_ref());
+
         for gr in 0..header.n_granules() {
             let granule = &mut frame_data.granules[gr];
 
@@ -500,7 +508,7 @@ impl Layer for Layer3 {
                 requantize::requantize(header, &granule.channels[1], &mut self.samples[gr][1]);
 
                 // Apply joint stereo processing if it is used.
-                stereo::stereo(header, granule, self.intensity_mode, &mut self.samples[gr])?;
+                stereo::stereo(header, granule, intensity_mode, &mut self.samples[gr])?;
             }
 
             // Each granule will yield 576 samples. After reserving frames, all steps must be
@@ -552,7 +560,7 @@ impl Layer for Layer3 {
 
 #[cfg(test)]
 mod tests {
-    use super::{BitReservoir, IntensityMode, Layer3};
+    use super::{BitReservoir, Layer3};
     use crate::common::{ChannelMode, Emphasis, FrameHeader, MpegLayer, MpegVersion};
 
     use std::sync::{Mutex, Once};
@@ -647,7 +655,7 @@ mod tests {
 
     #[test]
     fn verify_crc_accepts_valid_and_rejects_corrupt_frame() {
-        let mut layer = Layer3::new(IntensityMode::Iso);
+        let mut layer = Layer3::new();
         let header = header();
 
         let mut data = frame();
@@ -690,10 +698,10 @@ mod tests {
 
         // A new decoder state starts over.
         let warnings = logged_warnings(|| {
-            let mut layer = Layer3::new(IntensityMode::Iso);
+            let mut layer = Layer3::new();
             assert_eq!(layer.reservoir.fill(&main_data, 0).unwrap(), 0);
 
-            let mut layer = Layer3::new(IntensityMode::Iso);
+            let mut layer = Layer3::new();
             assert_eq!(layer.reservoir.fill(&main_data, 30).unwrap(), 30);
         });
 

@@ -18,6 +18,7 @@ symphonia-core = { workspace = true }
 
 [dev-dependencies]
 symphonia-format-isomp4 = { workspace = true }
+symphonia-format-mkv = { workspace = true }
 symphonia-testutil = { workspace = true }
 
 [lints]

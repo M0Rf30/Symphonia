@@ -16,7 +16,7 @@ use symphonia_core::codecs::audio::{
 };
 use symphonia_core::codecs::registry::{RegisterableAudioDecoder, SupportedAudioCodec};
 use symphonia_core::errors::{Result, decode_error, reset_error, unsupported_error};
-use symphonia_core::io::FiniteStream;
+use symphonia_core::io::{BufReader, FiniteStream};
 use symphonia_core::packet::PacketRef;
 use symphonia_core::support_audio_codec;
 
@@ -24,7 +24,7 @@ use crate::common::{FrameHeader, Layer, MpegLayer};
 use crate::header;
 use crate::layer3::{IntensityMode, Layer3};
 
-use super::{SbrDsp, SbrParser};
+use super::{ParseStatus, SbrDsp, SbrParser};
 
 /// The number of core samples per MPEG-2/2.5 Layer III frame, and per SBR frame.
 const CORE_FRAME_LEN: usize = 576;
@@ -40,26 +40,28 @@ const SBR_FRAME_LEN: usize = 2 * CORE_FRAME_LEN;
 /// The SBR decoder state of a stream.
 struct Sbr {
     parser: SbrParser,
-    dsp: SbrDsp,
-    /// SBR was switched off permanently. The core-only path is used from then on.
-    disabled: bool,
+    /// The filter banks, created once the output of the stream is known to be the SBR output.
+    dsp: Option<SbrDsp>,
 }
 
 /// mp3PRO decoder: MPEG Layer III with Spectral Band Replication.
 ///
-/// The core is decoded as MPEG Layer III with the mp3PRO intensity stereo rule (see
-/// `IntensityMode::Mp3Pro`). If the core is an MPEG-2/2.5 stream with a sample rate below
-/// 32 kHz, the SBR data carried in the ancillary data of every frame reconstructs the high band,
-/// and the decoder outputs audio at twice the core sample rate. The SBR filter banks delay the
-/// output by 962 samples (at the output rate). If gapless playback is enabled, the delay is
-/// compensated: the packet trims, which count core samples, are doubled and moved 962 samples
-/// later, so the audio that remains is the audio between the stream delay and padding, aligned
-/// with the core. (The last 962 samples of the stream cannot be decoded, so padding shorter than
-/// 481 core samples shortens the output.) Otherwise, the decoder outputs the core audio unchanged.
+/// A stream is an mp3PRO stream if it is an MPEG-2/2.5 Layer III stream with a sample rate below
+/// 32 kHz, and the ancillary data of its frames carries SBR data (a valid SBR header). The SBR
+/// data reconstructs the high band, and the decoder outputs audio at twice the core sample rate.
+/// The core is decoded with the mp3PRO intensity stereo rule (see `IntensityMode::Mp3Pro`). The
+/// SBR filter banks delay the output by 962 samples (at the output rate). If gapless playback is
+/// enabled, the delay is compensated: the packet trims, which count core samples, are doubled and
+/// moved 962 samples later, so the audio that remains is the audio between the stream delay and
+/// padding, aligned with the core. (The last 962 samples of the stream cannot be decoded, so
+/// padding shorter than 481 core samples shortens the output.) Otherwise, the decoder outputs the
+/// core audio unchanged.
 ///
-/// For a plain MP3 stream, the output differs from the ISO decoder [`crate::MpaDecoder`] only in
-/// the treatment of MPEG-2/2.5 intensity stereo, and, for streams below 32 kHz, the doubled
-/// sample rate. This decoder is not registered by default.
+/// Every other stream is a plain MP3 stream: the decoder outputs the same samples as the ISO
+/// decoder [`crate::MpaDecoder`], at the core sample rate. Whether a stream is an mp3PRO stream is
+/// decided by its first frame. If the first frame has no SBR data but a later frame has, the
+/// decoder requests a reset ([`symphonia_core::errors::Error::ResetRequired`]) as the output
+/// sample rate changes.
 pub struct Mp3ProDecoder {
     opts: AudioDecoderOptions,
     params: AudioCodecParameters,
@@ -72,6 +74,9 @@ pub struct Mp3ProDecoder {
     /// specification alone does not identify the stream: an MPEG-2 core at 22.05 kHz with SBR and
     /// an MPEG-1 core at 44.1 kHz without it both output 44.1 kHz.
     core_spec: Option<AudioSpec>,
+    /// Whether the output of the stream is the SBR output at twice the core sample rate. `None`
+    /// until the first frame of the stream that may carry SBR data is decoded.
+    sbr_output: Option<bool>,
     /// The range of the first samples of the next SBR packet that the delayed audio of the
     /// previous packet leaves in the output, if gapless playback is enabled.
     carry: Range<usize>,
@@ -86,11 +91,12 @@ impl Mp3ProDecoder {
         Ok(Mp3ProDecoder {
             opts: *opts,
             params: params.clone(),
-            layer: Box::new(Layer3::new(IntensityMode::Mp3Pro)),
+            layer: Box::new(Layer3::new()),
             sbr: None,
             core: Default::default(),
             buf: Default::default(),
             core_spec: None,
+            sbr_output: None,
             carry: 0..0,
         })
     }
@@ -141,18 +147,8 @@ impl Mp3ProDecoder {
         }
 
         let core_spec = header.spec();
-        let sbr = Self::has_sbr(&header);
 
-        let out_spec = if sbr {
-            AudioSpec::new(2 * core_spec.rate(), core_spec.channels().clone())
-        }
-        else {
-            core_spec.clone()
-        };
-
-        // The audio buffer can only be created after the first frame is decoded.
-        if self.buf.is_unused() {
-            self.buf = AudioBuffer::new(out_spec, 1152);
+        if self.core_spec.is_none() {
             self.core_spec = Some(core_spec.clone());
         }
         else if self.core_spec.as_ref() != Some(&core_spec) {
@@ -161,9 +157,8 @@ impl Mp3ProDecoder {
             // stream and report that the audio specification is about to change. The decoder is
             // ready to decode this packet, or the next one, with the new specification.
             self.reset();
-            self.core = Default::default();
-            self.buf = Default::default();
-            self.core_spec = None;
+            self.discard_stream();
+            self.sbr_output = None;
             self.params
                 .with_sample_rate(core_spec.rate())
                 .with_channels(core_spec.channels().clone());
@@ -171,64 +166,29 @@ impl Mp3ProDecoder {
             return reset_error();
         }
 
-        self.buf.clear();
-
         self.layer.verify_crc(packet.data, &header)?;
 
-        if !sbr {
-            self.layer.decode(&mut reader, &header, &mut self.buf)?;
+        let sbr_output = if Self::has_sbr(&header) {
+            self.decode_sbr_capable(&mut reader, &header, core_spec)?
         }
         else {
-            if self.core.is_unused() {
-                self.core = AudioBuffer::new(core_spec, CORE_FRAME_LEN);
+            self.sbr_output = Some(false);
+
+            if self.buf.is_unused() {
+                self.buf = AudioBuffer::new(core_spec, 1152);
             }
 
-            self.core.clear();
-            self.layer.decode(&mut reader, &header, &mut self.core)?;
-
-            let n_channels = header.n_channels();
-            let out_rate = 2 * header.sample_rate;
-
-            let sbr = self.sbr.get_or_insert_with(|| {
-                let parser = SbrParser::new(header.sample_rate, n_channels);
-                let dsp = SbrDsp::new(n_channels, out_rate, parser.header(), parser.tables());
-                Box::new(Sbr { parser, dsp, disabled: false })
-            });
-
-            let mut apply = false;
-
-            if !sbr.disabled {
-                let status = sbr.parser.parse(self.layer.ancillary_data());
-
-                if status.header_reset {
-                    let data_extra = sbr.parser.frame(0).data_extra;
-                    sbr.dsp.reset(sbr.parser.header(), sbr.parser.tables(), data_extra);
-                }
-
-                sbr.disabled = status.disabled;
-                apply = status.apply && !status.disabled;
-            }
-
-            self.buf.render_uninit(Some(2 * CORE_FRAME_LEN));
-
-            for ch in 0..n_channels {
-                let (Some(core), Some(out)) = (self.core.plane(ch), self.buf.plane_mut(ch))
-                else {
-                    return decode_error("mp3pro: missing audio plane");
-                };
-
-                let frame = if apply { Some(sbr.parser.frame(ch)) } else { None };
-
-                sbr.dsp.process(ch, core, frame, sbr.parser.header(), out);
-            }
-        }
+            self.buf.clear();
+            self.layer.decode(&mut reader, &header, &mut self.buf)?;
+            false
+        };
 
         if self.opts.gapless {
             // The trim counts are in core samples.
             let trim_start = packet.trim_start.get() as usize;
             let trim_end = packet.trim_end.get() as usize;
 
-            if sbr {
+            if sbr_output {
                 self.trim_sbr(trim_start, trim_end);
             }
             else {
@@ -237,6 +197,121 @@ impl Mp3ProDecoder {
         }
 
         Ok(())
+    }
+
+    /// Discards the audio buffers and the signal specification of the stream being decoded.
+    fn discard_stream(&mut self) {
+        self.core = Default::default();
+        self.buf = Default::default();
+        self.core_spec = None;
+    }
+
+    /// Decodes a frame of a core that may carry SBR data, into `self.buf`. Returns true if the
+    /// output is the SBR output at twice the core rate, and false if it is the core audio.
+    ///
+    /// Whether the stream has SBR data is not known before the ancillary data of its frames is
+    /// parsed, which requires decoding the frame (the ancillary data follows the main data, which
+    /// is in the bit reservoir). The first frame of the stream with valid SBR data, which carries
+    /// an SBR header, makes the stream an mp3PRO stream. Until then, the frames are decoded like
+    /// plain MPEG-2/2.5 Layer III, like [`crate::MpaDecoder`] does: the intensity stereo rule of
+    /// a frame is chosen after the ancillary data is parsed and before the stereo processing. If
+    /// the first frame of the stream has SBR data, the stream is an mp3PRO stream from the start.
+    /// Otherwise, the stream is a plain stream, and if SBR data is found later (a stream that
+    /// starts without an SBR header), the change of the output specification is reported with a
+    /// reset, and the frame is decoded again with the new specification.
+    fn decode_sbr_capable(
+        &mut self,
+        reader: &mut BufReader<'_>,
+        header: &FrameHeader,
+        core_spec: AudioSpec,
+    ) -> Result<bool> {
+        if self.core.is_unused() {
+            self.core = AudioBuffer::new(core_spec.clone(), 1152);
+        }
+
+        self.core.clear();
+
+        let n_channels = header.n_channels();
+        let known = self.sbr_output;
+
+        let sbr = self.sbr.get_or_insert_with(|| {
+            Box::new(Sbr { parser: SbrParser::new(header.sample_rate, n_channels), dsp: None })
+        });
+
+        // Parse the ancillary data of the frame as soon as it is available.
+        let mut status = ParseStatus::default();
+
+        self.layer.decode_frame(reader, header, &mut self.core, |ancillary| {
+            status = sbr.parser.parse(ancillary);
+
+            // The frame is decoded as an mp3PRO frame if the stream is one, or if this frame
+            // makes it one.
+            if known.unwrap_or(status.apply && status.clean) {
+                IntensityMode::Mp3Pro
+            }
+            else {
+                IntensityMode::Iso
+            }
+        })?;
+
+        let apply = status.apply && !status.disabled;
+
+        // Only a block that parses without errors starts the SBR output of a stream.
+        let detected = apply && status.clean;
+        let sbr_output = *self.sbr_output.get_or_insert(detected);
+
+        if !sbr_output {
+            if detected {
+                // SBR data in a stream that was decoded as a plain stream so far.
+                self.reset();
+                self.discard_stream();
+                self.sbr_output = Some(true);
+                return reset_error();
+            }
+
+            // The parser switches SBR off for good if the data is not valid SBR data. That is
+            // what a plain stream looks like, but it must not stop the detection of SBR data in
+            // the frames to come.
+            if status.disabled {
+                self.sbr = None;
+            }
+
+            // The core audio is the output.
+            std::mem::swap(&mut self.core, &mut self.buf);
+            return Ok(false);
+        }
+
+        if self.buf.is_unused() {
+            let out_spec = AudioSpec::new(2 * core_spec.rate(), core_spec.channels().clone());
+            self.buf = AudioBuffer::new(out_spec, 1152);
+        }
+
+        self.buf.clear();
+        self.buf.render_uninit(Some(SBR_FRAME_LEN));
+
+        let out_rate = 2 * header.sample_rate;
+
+        let dsp = sbr.dsp.get_or_insert_with(|| {
+            SbrDsp::new(n_channels, out_rate, sbr.parser.header(), sbr.parser.tables())
+        });
+
+        if status.header_reset {
+            let data_extra = sbr.parser.frame(0).data_extra;
+            dsp.reset(sbr.parser.header(), sbr.parser.tables(), data_extra);
+        }
+
+        for ch in 0..n_channels {
+            let (Some(core), Some(out)) = (self.core.plane(ch), self.buf.plane_mut(ch))
+            else {
+                return decode_error("mp3pro: missing audio plane");
+            };
+
+            let frame = if apply { Some(sbr.parser.frame(ch)) } else { None };
+
+            dsp.process(ch, core, frame, sbr.parser.header(), out);
+        }
+
+        Ok(true)
     }
 }
 
@@ -250,7 +325,7 @@ impl AudioDecoder for Mp3ProDecoder {
     }
 
     fn reset(&mut self) {
-        *self.layer = Layer3::new(IntensityMode::Mp3Pro);
+        *self.layer = Layer3::new();
         self.sbr = None;
         self.carry = 0..0;
     }

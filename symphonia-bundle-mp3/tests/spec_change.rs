@@ -26,8 +26,6 @@ const STEREO_44K: &[u8] = include_bytes!("fixtures/mp3_cbr128_st_44k_notag.mp3")
 /// 22.05 kHz mono MPEG-2 Layer III.
 const MONO_22K: &[u8] = include_bytes!("fixtures/mp3_mpeg2_mono_22k.mp3");
 /// 44.1 kHz mono MPEG-1 Layer III.
-#[cfg(feature = "mp3pro")]
-const MONO_44K: &[u8] = include_bytes!("fixtures/mp3_mpeg1_mono_44k.mp3");
 
 /// The samples of one run of frames with the same signal specification.
 #[derive(Debug, PartialEq)]
@@ -154,48 +152,18 @@ fn verify_channel_count_change_requires_reset() {
     assert_eq!(layout, [(22050, 1), (44100, 2), (22050, 1)]);
 }
 
-/// The core of an mp3PRO stream with SBR (MPEG-2 at 22.05 kHz) and the core of a plain MP3 stream
-/// (MPEG-1 at 44.1 kHz) output the same specification, 44.1 kHz mono, but the second stream cannot
-/// continue the decoder state of the first.
-#[cfg(feature = "mp3pro")]
-#[test]
-fn verify_mp3pro_core_change_with_same_output_spec_requires_reset() {
-    let (alone, resets, _) = decode_runs(mp3pro, MONO_44K, true);
-    assert_eq!(resets, 0);
-    let (sbr, resets, _) = decode_runs(mp3pro, MONO_22K, true);
-    assert_eq!(resets, 0);
-    assert_eq!(alone.len() + sbr.len(), 2);
-    assert_eq!(
-        (alone[0].rate, alone[0].channels, sbr[0].rate, sbr[0].channels),
-        (44100, 1, 44100, 1)
-    );
-
-    let (runs, resets, params) = decode_runs(mp3pro, &concat(&[MONO_22K, MONO_44K]), true);
-    assert_eq!(resets, 1);
-    assert_eq!(runs.len(), 2);
-    assert_eq!(params, (Some(44100), Some(1)));
-
-    assert!(sbr[0].samples.starts_with(&runs[0].samples));
-    assert!(runs[0].samples.len() + 2 * 1152 >= sbr[0].samples.len());
-
-    // The plain stream is decoded as if it were on its own.
-    assert!(alone[0].samples.ends_with(&runs[1].samples));
-    assert!(runs[1].samples.len() + 2 * 1152 >= alone[0].samples.len());
-}
-
-/// The output rate of an mp3PRO stream is twice the core rate, and the decoder reports the
-/// change of the core specification like [`MpaDecoder`].
+/// The change of the core specification is reported like [`MpaDecoder`], and the output of a
+/// plain stream below 32 kHz has the core rate.
 #[cfg(feature = "mp3pro")]
 #[test]
 fn verify_mp3pro_spec_change_requires_reset() {
-    let (runs, resets, params) = decode_runs(mp3pro, &concat(&[STEREO_44K, MONO_22K]), true);
+    let stream = concat(&[STEREO_44K, MONO_22K]);
+    let (runs, resets, params) = decode_runs(mp3pro, &stream, true);
     assert_eq!(resets, 1);
     let layout: Vec<_> = runs.iter().map(|run| (run.rate, run.channels)).collect();
-    assert_eq!(layout, [(44100, 2), (44100, 1)]);
+    assert_eq!(layout, [(44100, 2), (22050, 1)]);
     assert_eq!(params, (Some(22050), Some(1)));
 
-    // Decoded as if it were on its own.
-    let (alone, ..) = decode_runs(mp3pro, MONO_22K, true);
-    assert!(alone[0].samples.ends_with(&runs[1].samples));
-    assert!(runs[1].samples.len() + 4 * 576 >= alone[0].samples.len());
+    // The same as the ISO decoder.
+    assert_eq!((runs, resets, params), decode_runs(mpa, &stream, true));
 }

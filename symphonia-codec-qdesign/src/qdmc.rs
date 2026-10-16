@@ -339,12 +339,14 @@ impl Qdmc {
                 let v = self.get_vlc(bits, 3, true)?;
 
                 let mut freq = i + v;
-                i = freq + 1;
                 while freq >= group_size as i32 - 1 {
                     freq += 2 - group_size as i32;
                     pos2 += group_size;
                     off += 1 << group_bits;
                 }
+
+                // The `for` loop of FFmpeg continues from the adjusted frequency.
+                i = freq + 1;
 
                 if pos2 >= self.frame_size {
                     break;

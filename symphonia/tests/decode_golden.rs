@@ -332,14 +332,6 @@ fn lossy_output_matches_ffmpeg() {
         if print {
             println!("    (\"{rel}\", {got_frames}, ..),");
         }
-        // With the `mp3pro` feature, MPEG-2/2.5 Layer III streams below 32 kHz decode at twice
-        // their sample rate (SBR output, delayed by up to 962 samples and trimmed by gapless
-        // playback), which ffmpeg's plain MP3 decoder does not produce. The mp3PRO output is
-        // checked by the `symphonia-bundle-mp3` tests.
-        if cfg!(feature = "mp3pro") && got_frames.abs_diff(2 * frames) <= 2304 {
-            continue;
-        }
-
         if got_frames != frames {
             failures.push(format!("{rel}: {got_frames} frames != {frames}"));
         }

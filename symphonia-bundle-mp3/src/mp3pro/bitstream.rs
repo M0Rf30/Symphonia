@@ -1216,6 +1216,7 @@ impl SbrParser {
             }
         }
         status.apply = true;
+        status.clean = self.chans[..self.n_channels].iter().all(|c| c.hw[hw::ERROR] == 0);
         status
     }
 
@@ -1273,7 +1274,13 @@ impl SbrParser {
         let block = &anc[..anc.len().min(length)];
 
         let mut r = BitReader::new(block);
-        r.skip(2);
+
+        // The block starts with the bits `11` in every mp3PRO stream observed (the first byte of
+        // the block is 0xc0 or 0xe0 with the header flag). Leftover bytes of a plain MP3 stream
+        // rarely have them, and the CRC and the element checks below are weak on their own.
+        if r.get(2) != 0b11 {
+            return ERR_PROTOCOL;
+        }
         let header_flag = r.get(1) != 0;
         r.skip(9);
 

@@ -325,6 +325,18 @@ fn flac_extra_data_from_codec_private(codec_private: &[u8]) -> Result<Box<[u8]>>
     }
 }
 
+/// Gets the codec of an `A_QUICKTIME` track. Its CodecPrivate is the QuickTime sound description,
+/// which starts with its size and the FourCC of the codec (the FourCC is also accepted at the
+/// start, as FFmpeg does).
+fn quicktime_audio_codec(codec_private: &[u8]) -> Option<AudioCodecId> {
+    // Only the QDesign codecs are supported.
+    [4, 0].into_iter().find_map(|pos| match codec_private.get(pos..pos + 4)? {
+        b"QDM2" => Some(CODEC_ID_QDM2),
+        b"QDMC" => Some(CODEC_ID_QDMC),
+        _ => None,
+    })
+}
+
 fn get_codec_id(track: &TrackElement) -> Option<CodecId> {
     let bit_depth = track.audio.as_ref().and_then(|a| a.bit_depth);
 
@@ -373,9 +385,11 @@ fn get_codec_id(track: &TrackElement) -> Option<CodecId> {
             _ => return None,
         },
         "A_MS/ACM" => CodecId::Audio(AcmFormat::parse(track.codec_private.as_deref()?)?.codec()?),
-        // A_QUICKTIME
-        // A_QUICKTIME/QDMC
-        // A_QUICKTIME/QDM2
+        // The QuickTime audio codecs. The QDesign decoders find their parameters (the `QDCA`
+        // atom) in the CodecPrivate, wherever it is in it, so it is passed on unchanged.
+        "A_QUICKTIME/QDMC" => CodecId::Audio(CODEC_ID_QDMC),
+        "A_QUICKTIME/QDM2" => CodecId::Audio(CODEC_ID_QDM2),
+        "A_QUICKTIME" => CodecId::Audio(quicktime_audio_codec(track.codec_private.as_deref()?)?),
 
         // Video Codecs
         "V_MJPEG" => CodecId::Video(CODEC_ID_MJPEG),
