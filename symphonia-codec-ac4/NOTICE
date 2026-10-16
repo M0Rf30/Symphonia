@@ -1,0 +1,19 @@
+This product includes software developed by the FFmpeg Project
+(http://ffmpeg.org/) and its contributors.
+
+The AC-4 decoder in this crate is a translation of the following FFmpeg
+sources, which are Copyright (c) 2019 Paul B Mahol and licensed under the
+GNU Lesser General Public License, version 2.1 or later (LGPL-2.1-or-later):
+
+  * libavcodec/ac4dec.c
+  * libavcodec/ac4dec_data.h
+
+The inverse MDCT follows FFmpeg's av_tx (libavutil/tx.c and
+libavutil/tx_template.c, Copyright (c) 2017 Lynne <dev@lynne.ee> and others,
+LGPL-2.1-or-later).
+
+The Kaiser-Bessel derived window follows FFmpeg's libavcodec/kbdwin.c
+(Copyright (c) 2006 Smartjog S.A.S / Baptiste Coudurier, LGPL-2.1-or-later).
+
+A copy of the GNU Lesser General Public License, version 2.1, is available at:
+https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html
