@@ -12,8 +12,7 @@ use symphonia_core::audio::{Channels, Position};
 use symphonia_core::codecs::audio::well_known::{
     CODEC_ID_AC3, CODEC_ID_ADPCM_IMA_QT, CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_MS,
     CODEC_ID_AMR_NB, CODEC_ID_AMR_WB, CODEC_ID_DCA, CODEC_ID_EAC3, CODEC_ID_GSM, CODEC_ID_GSM_MS,
-    CODEC_ID_ILBC, CODEC_ID_MACE3, CODEC_ID_MACE6, CODEC_ID_QDM2, CODEC_ID_QDMC,
-    CODEC_ID_TRUEHD,
+    CODEC_ID_ILBC, CODEC_ID_MACE3, CODEC_ID_MACE6, CODEC_ID_QDM2, CODEC_ID_QDMC, CODEC_ID_TRUEHD,
 };
 use symphonia_core::codecs::audio::well_known::{
     CODEC_ID_MP3, CODEC_ID_PCM_ALAW, CODEC_ID_PCM_MULAW,
@@ -145,12 +144,7 @@ impl Atom for StsdAtom {
                     AtomType::Other(fourcc)
                         if matches!(
                             &fourcc,
-                            b"ac-4"
-                                | b"mha1"
-                                | b"mha2"
-                                | b"mhm1"
-                                | b"mhm2"
-                                | b"sawp"
+                            b"ac-4" | b"mha1" | b"mha2" | b"mhm1" | b"mhm2" | b"sawp"
                         ) =>
                     {
                         warn!(

@@ -1288,31 +1288,18 @@ impl ProbeableFormat<'_> for IsoMp4Reader<'_> {
     }
 
     fn probe_data() -> &'static [ProbeFormatData] {
-        &[support_format!(
-            ISOMP4_FORMAT_INFO,
-            &["mp4", "m4a", "m4p", "m4b", "m4r", "m4v", "mov"],
-            &["video/mp4", "audio/m4a"],
-            &[b"ftyp"] // Top-level atoms
-        ),
-        // Classic QuickTime movies have no ftyp atom, and start with another top-level atom.
-        support_format!(
-            ISOMP4_FORMAT_INFO,
-            &["mov"],
-            &["video/quicktime"],
-            &[b"moov"]
-        ),
-        support_format!(
-            ISOMP4_FORMAT_INFO,
-            &["mov"],
-            &["video/quicktime"],
-            &[b"wide"]
-        ),
-        support_format!(
-            ISOMP4_FORMAT_INFO,
-            &["mov"],
-            &["video/quicktime"],
-            &[b"mdat"]
-        )]
+        &[
+            support_format!(
+                ISOMP4_FORMAT_INFO,
+                &["mp4", "m4a", "m4p", "m4b", "m4r", "m4v", "mov"],
+                &["video/mp4", "audio/m4a"],
+                &[b"ftyp"] // Top-level atoms
+            ),
+            // Classic QuickTime movies have no ftyp atom, and start with another top-level atom.
+            support_format!(ISOMP4_FORMAT_INFO, &["mov"], &["video/quicktime"], &[b"moov"]),
+            support_format!(ISOMP4_FORMAT_INFO, &["mov"], &["video/quicktime"], &[b"wide"]),
+            support_format!(ISOMP4_FORMAT_INFO, &["mov"], &["video/quicktime"], &[b"mdat"]),
+        ]
     }
 }
 

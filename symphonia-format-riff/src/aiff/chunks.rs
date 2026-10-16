@@ -597,8 +597,9 @@ fn read_sample_rate<B: ReadBytes>(reader: &mut B) -> Result<NonZero<u32>> {
         return decode_error("aiff: sample rate is not a real number");
     }
 
+    // Round to the nearest integer like FFmpeg: the rate of 22 kHz MACE files is 22254.5454 Hz.
     // Do not allow a 0 Hz sample rates.
-    let sample_rate = match NonZero::new(sample_rate_f64 as u32) {
+    let sample_rate = match NonZero::new(sample_rate_f64.round() as u32) {
         Some(sample_rate) => sample_rate,
         _ => return decode_error("aiff: sample rate cannot be 0"),
     };

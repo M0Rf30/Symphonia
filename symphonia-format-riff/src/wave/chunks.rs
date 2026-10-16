@@ -11,7 +11,6 @@ use std::io::{Seek, SeekFrom};
 use symphonia_core::audio::AmbisonicBFormat;
 use symphonia_core::audio::{ChannelLabel, Channels, Position};
 use symphonia_core::codecs::audio::AudioCodecId;
-use symphonia_core::codecs::audio::well_known::CODEC_ID_ATRAC3;
 use symphonia_core::codecs::audio::well_known::CODEC_ID_G729;
 use symphonia_core::codecs::audio::well_known::CODEC_ID_MSN_SIREN;
 use symphonia_core::codecs::audio::well_known::{
@@ -21,6 +20,9 @@ use symphonia_core::codecs::audio::well_known::{
     CODEC_ID_GSM_MS, CODEC_ID_MP2, CODEC_ID_MP3, CODEC_ID_PCM_ALAW, CODEC_ID_PCM_F32LE,
     CODEC_ID_PCM_F64LE, CODEC_ID_PCM_MULAW, CODEC_ID_PCM_S16LE, CODEC_ID_PCM_S24LE,
     CODEC_ID_PCM_S32LE, CODEC_ID_PCM_U8, CODEC_ID_TRUESPEECH,
+};
+use symphonia_core::codecs::audio::well_known::{
+    CODEC_ID_ATRAC3, CODEC_ID_ATRAC3PLUS, CODEC_ID_ATRAC9,
 };
 use symphonia_core::codecs::audio::well_known::{CODEC_ID_IAC, CODEC_ID_IMC};
 use symphonia_core::codecs::audio::well_known::{
@@ -376,6 +378,44 @@ impl WaveFormatChunk {
                 channels,
                 codec: CODEC_ID_ATRAC3,
                 extra_data: Some(extra_data),
+            }));
+        }
+
+        // ATRAC3+ and ATRAC9 have their own GUIDs. The 22 bytes are followed by codec data: nothing
+        // that the ATRAC3+ decoder needs, and the 12 byte configuration of ATRAC9 (FFmpeg
+        // `ff_codec_wav_guids`, `ff_get_wav_header`).
+        #[rustfmt::skip]
+        const ATRAC3PLUS_GUID: [u8; 16] = [
+            0xbf, 0xaa, 0x23, 0xe9, 0x58, 0xcb, 0x71, 0x44,
+            0xa1, 0x19, 0xff, 0xfa, 0x01, 0xe4, 0xce, 0x62,
+        ];
+        #[rustfmt::skip]
+        const ATRAC9_GUID: [u8; 16] = [
+            0xd2, 0x42, 0xe1, 0x47, 0xba, 0x36, 0x8d, 0x4d,
+            0x88, 0xfc, 0x61, 0x65, 0x4f, 0x8c, 0x83, 0x6c,
+        ];
+
+        if sub_format_guid == ATRAC3PLUS_GUID || sub_format_guid == ATRAC9_GUID {
+            let extra_data = reader.read_boxed_slice_exact(usize::from(extra_size) - 22)?;
+            let channels = match fix_wave_channel_mask(channel_mask, num_channels)
+                .ok()
+                .and_then(Position::from_wave_channel_mask)
+            {
+                Some(positions) => Channels::Positioned(positions),
+                None => map_wave_channel_count(num_channels)?,
+            };
+            let (codec, extra_data) = if sub_format_guid == ATRAC9_GUID {
+                (CODEC_ID_ATRAC9, Some(extra_data))
+            }
+            else {
+                (CODEC_ID_ATRAC3PLUS, None)
+            };
+            return Ok(FormatData::Adpcm(FormatAdpcm {
+                block_align,
+                bits_per_sample: 0,
+                channels,
+                codec,
+                extra_data,
             }));
         }
 

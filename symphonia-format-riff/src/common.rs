@@ -12,7 +12,6 @@ use std::marker::PhantomData;
 use std::num::NonZero;
 
 use symphonia_core::audio::Channels;
-use symphonia_core::codecs::audio::well_known::CODEC_ID_ATRAC3;
 use symphonia_core::codecs::audio::well_known::CODEC_ID_G729;
 use symphonia_core::codecs::audio::well_known::CODEC_ID_MSN_SIREN;
 use symphonia_core::codecs::audio::well_known::{
@@ -22,6 +21,9 @@ use symphonia_core::codecs::audio::well_known::{
     CODEC_ID_ADPCM_YAMAHA, CODEC_ID_GSM, CODEC_ID_GSM_MS, CODEC_ID_MACE3, CODEC_ID_MACE6,
     CODEC_ID_PCM_F32BE, CODEC_ID_PCM_F32LE, CODEC_ID_PCM_F64BE, CODEC_ID_PCM_F64LE,
     CODEC_ID_TRUESPEECH,
+};
+use symphonia_core::codecs::audio::well_known::{
+    CODEC_ID_ATRAC3, CODEC_ID_ATRAC3PLUS, CODEC_ID_ATRAC9,
 };
 use symphonia_core::codecs::audio::well_known::{CODEC_ID_IAC, CODEC_ID_IMC};
 use symphonia_core::codecs::audio::well_known::{
@@ -495,9 +497,46 @@ impl FormatAdpcm {
                 }
                 PacketInfo::with_blocks(self.block_align, 1024)
             }
+            CODEC_ID_ATRAC3PLUS => {
+                // Every block is one frame of 2048 samples per channel.
+                if self.block_align == 0 {
+                    return decode_error("riff (atrac3plus): invalid block align");
+                }
+                PacketInfo::with_blocks(self.block_align, 2048)
+            }
+            CODEC_ID_ATRAC9 => {
+                // Every block is a superframe of one, two or four frames of 64, 128 or 256 samples
+                // per channel. The decoder validates the block size against the extra data.
+                let Some(samples) = self.extra_data.as_deref().and_then(atrac9_block_samples)
+                else {
+                    return decode_error("riff (atrac9): invalid extra data");
+                };
+                if self.block_align == 0 {
+                    return decode_error("riff (atrac9): invalid block align");
+                }
+                PacketInfo::with_blocks(self.block_align, samples)
+            }
             _ => unimplemented!("incomplete new adpcm codec"),
         }
     }
+}
+
+/// Gets the number of samples per channel of an ATRAC9 block (superframe) from the 12-byte codec
+/// extra data: a little-endian version, the 0xfe magic byte, then the bit fields `sample rate
+/// index (4)`, `channel config (3)`, `reserved (1)`, `frame bytes - 1 (11)` and `log2 frames (2)`.
+fn atrac9_block_samples(extra: &[u8]) -> Option<u64> {
+    /// The log2 of the number of samples of a frame, for each sample rate index.
+    const FRAME_LOG2: [u8; 16] = [6, 6, 7, 7, 7, 8, 8, 8, 6, 6, 7, 7, 7, 8, 8, 8];
+
+    let &[_, _, _, _, 0xfe, b0, _, b2, ..] = extra
+    else {
+        return None;
+    };
+
+    let sri = usize::from(b0 >> 4);
+    let log2_frames = (b2 >> 3) & 0x3;
+
+    Some((1u64 << FRAME_LOG2[sri]) << log2_frames)
 }
 
 pub struct FormatIeeeFloat {
