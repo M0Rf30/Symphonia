@@ -178,3 +178,43 @@ fn usac_fd_lpd_transitions_match_fdk() {
     let snr = 10.0 * (signal / noise.max(1e-9)).log10();
     assert!(snr >= 38.0, "signal to noise ratio {snr:.1} dB, expected at least 38");
 }
+
+/// Signal to noise ratio of the decoded samples against a 16-bit reference, in dB.
+fn snr_db(reference: &[u8], samples: &[f32]) -> f64 {
+    assert_eq!(reference.len(), samples.len() * 2);
+
+    let mut signal = 0.0f64;
+    let mut noise = 0.0f64;
+    for (r, &s) in reference.chunks_exact(2).zip(samples) {
+        let r = f64::from(i16::from_le_bytes([r[0], r[1]]));
+        let e = f64::from((s * 32768.0).clamp(-32768.0, 32767.0).round()) - r;
+        signal += r * r;
+        noise += e * e;
+    }
+
+    10.0 * (signal / noise.max(1e-9)).log10()
+}
+
+/// A channel pair whose channels have window sequences of their own, including a long start
+/// window of the second channel followed by a stop window in a common window frame. Compared with
+/// libfdk-aac.
+#[test]
+fn usac_cpe_independent_windows_match_fdk() {
+    let samples = decode(include_bytes!("fixtures/usac_cpe_windows.bin"), 2, FRAME);
+    let snr = snr_db(include_bytes!("fixtures/usac_cpe_windows.s16"), &samples);
+
+    assert!(snr >= 60.0, "signal to noise ratio {snr:.1} dB, expected at least 60");
+}
+
+/// MPEG Surround 2-1-2 with phase coding, high rate mode and smoothing behind eSBR: access units
+/// 8 to 23 of a 32 kbit/s 48 kHz stream (the first ones settle the decorrelator and the filter
+/// states) compared with libfdk-aac.
+#[test]
+fn usac_mps212_matches_fdk() {
+    const SKIP: usize = 8;
+
+    let samples = decode(include_bytes!("fixtures/usac_mps212.bin"), 2, 2 * FRAME);
+    let snr = snr_db(include_bytes!("fixtures/usac_mps212.s16"), &samples[SKIP * 2 * FRAME * 2..]);
+
+    assert!(snr >= 40.0, "signal to noise ratio {snr:.1} dB, expected at least 40");
+}

@@ -43,6 +43,7 @@ use super::build_elem_targets;
 use esbr::EsbrDecoder;
 use fd::{FdChannelState, FdFilterbank};
 use lpd::LpdDecoder;
+use mps212::Mps212Decoder;
 use stereo::StereoState;
 
 /// The scale of the internal samples, `1 / I16_SCALE`, applied when the core samples are written
@@ -66,6 +67,9 @@ fn usac_sampling_index(core_rate: u32) -> usize {
 /// A single channel element (also used for an LFE element).
 struct SceState {
     target: usize,
+    /// The MPEG Surround 2-1-2 upmix of a channel pair element with one core channel, and the
+    /// output channel of its second channel.
+    mps: Option<(Mps212Decoder, usize)>,
     ch: FdChannelState,
     pcm: Vec<f32>,
     sbr: Option<EsbrDecoder>,
@@ -137,12 +141,13 @@ impl UsacDecoder {
             None => return decode_error("aac: usac stream without a usac config"),
         };
 
-        // The linear-prediction-domain and MPS212 tools are not implemented yet; reject
-        // configurations that require them up front.
+        // MPEG Surround is implemented for one core channel with SBR before the upmix only.
         for element in &config.elements {
             if let UsacElementConfig::Cpe { stereo_config_index, .. } = element {
-                if *stereo_config_index > 0 {
-                    return unsupported_error("aac: usac mps212 is not yet implemented");
+                if *stereo_config_index > 1 {
+                    return unsupported_error(
+                        "aac: usac mps212 with residual coding or sbr after the upmix",
+                    );
                 }
             }
         }
@@ -168,6 +173,33 @@ impl UsacDecoder {
                     let sbr = Self::make_sbr(&config, sbr, 1, core_frame_len)?;
                     Element::Sce(SceState {
                         target: targets[0],
+                        mps: None,
+                        ch: FdChannelState::new(core_frame_len, sampling_index, NOISE_SEED_FIRST),
+                        pcm: vec![0.0; core_frame_len],
+                        sbr,
+                        lpd: LpdDecoder::new(core_frame_len, core_rate),
+                        last_lpd: None,
+                    })
+                }
+                UsacElementConfig::Cpe { sbr, stereo_config_index, mps212, .. }
+                    if *stereo_config_index == 1 =>
+                {
+                    // One core channel and the MPEG Surround upmix of the SBR output.
+                    let (is_pair, targets) = target_iter.next().expect("element targets align");
+                    debug_assert!(is_pair);
+                    let Some(mps_cfg) = mps212
+                    else {
+                        return decode_error("aac: usac mps212 configuration is missing");
+                    };
+                    let sbr = Self::make_sbr(&config, sbr, 1, core_frame_len)?;
+
+                    if sbr.is_none() {
+                        return unsupported_error("aac: usac mps212 without sbr");
+                    }
+
+                    Element::Sce(SceState {
+                        target: targets[0],
+                        mps: Some((Mps212Decoder::new(*mps_cfg, core_frame_len / 32)?, targets[1])),
                         ch: FdChannelState::new(core_frame_len, sampling_index, NOISE_SEED_FIRST),
                         pcm: vec![0.0; core_frame_len],
                         sbr,
@@ -195,6 +227,7 @@ impl UsacDecoder {
                     debug_assert!(!is_pair);
                     Element::Sce(SceState {
                         target: targets[0],
+                        mps: None,
                         ch: FdChannelState::new(core_frame_len, sampling_index, NOISE_SEED_FIRST),
                         pcm: vec![0.0; core_frame_len],
                         sbr: None,
@@ -312,7 +345,9 @@ impl UsacDecoder {
                     }
 
                     if *stereo_config_index > 0 {
-                        return unsupported_error("aac: usac mps212 is not yet implemented");
+                        self.decode_sce(elem_idx, core.noise_filling, &mut bs, data, indep_flag)?;
+                        elem_idx += 1;
+                        continue;
                     }
 
                     self.decode_cpe(elem_idx, core.noise_filling, &mut bs, data, indep_flag)?;
@@ -415,6 +450,10 @@ impl UsacDecoder {
                 sbr.parse(bs, data, indep_flag)?;
             }
 
+            if let Some((mps, _)) = &mut state.mps {
+                mps.parse(bs, indep_flag)?;
+            }
+
             return Self::output_sce(&mut self.buf, state);
         }
 
@@ -427,6 +466,10 @@ impl UsacDecoder {
 
         if let Some(sbr) = &mut state.sbr {
             sbr.parse(bs, data, indep_flag)?;
+        }
+
+        if let Some((mps, _)) = &mut state.mps {
+            mps.parse(bs, indep_flag)?;
         }
 
         // TNS is applied to a single channel after the stereo tools (a no-op here).
@@ -451,6 +494,16 @@ impl UsacDecoder {
     fn output_sce(buf: &mut AudioBuffer<f32>, state: &mut SceState) -> Result<()> {
         let target = state.target;
         let scale = 1.0 / PCM_SCALE;
+
+        if let (Some(sbr), Some((mps, target2))) = (&mut state.sbr, &mut state.mps) {
+            let Some((plane0, plane1)) = buf.plane_pair_mut(target, *target2)
+            else {
+                return decode_error("aac: invalid channel");
+            };
+
+            return sbr.process_upmix(&state.pcm, mps, [plane0, plane1], scale);
+        }
+
         let Some(plane) = buf.plane_mut(target)
         else {
             return decode_error("aac: invalid channel");
@@ -515,7 +568,10 @@ impl UsacDecoder {
             ics.read_max_sfb(bs)?;
             ics.setup(ccfl, sampling_index)?;
 
+            // The second channel shares the current window but has a history of its own.
             let mut ics2 = ics.clone();
+            ics2.window_sequence_prev = state.ch1.ics.window_sequence;
+            ics2.window_shape_prev = state.ch1.ics.window_shape;
             if !bs.read_bool()? {
                 // common_max_sfb == 0: the second channel has its own max_sfb.
                 ics2.read_max_sfb_only(bs)?;
@@ -584,7 +640,8 @@ impl UsacDecoder {
             }
         }
         else {
-            // Independent ics_info() per channel.
+            // Independent ics_info() per channel; no stereo tool applies.
+            stereo.ms_mask_mode = 0;
             if tns_active {
                 tns_on_lr = bs.read_bool()?;
                 if bs.read_bool()? {
@@ -627,7 +684,7 @@ impl UsacDecoder {
                 ics1.max_sfb,
                 ics1.tns_max_bands,
                 ics1.num_windows,
-                stride,
+                ics1.window_len(ccfl),
                 &mut state.ch1.coeffs,
             );
         }
@@ -666,7 +723,7 @@ impl UsacDecoder {
                 ics1.max_sfb,
                 ics1.tns_max_bands,
                 ics1.num_windows,
-                stride,
+                ics1.window_len(ccfl),
                 &mut state.ch1.coeffs,
             );
         }

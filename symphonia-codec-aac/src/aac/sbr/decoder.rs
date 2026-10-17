@@ -343,6 +343,25 @@ pub struct SbrDecoder {
     /// PS decoder plus the second (right-channel) synthesis bank; the
     /// channel's own bank renders the left channel.
     ps: Option<PsState>,
+    /// The synthesis bank of the second output channel of an MPEG Surround upmix.
+    upmix_right: Option<SynthesisBank>,
+    /// The QMF slots handed to the upmix.
+    upmix_in: Vec<[Complex; 64]>,
+}
+
+/// The QMF slots of the two channels of an upmix.
+pub(crate) type UpmixedSlots<'a> = (&'a [[Complex; 64]], &'a [[Complex; 64]]);
+
+/// An upmix of the assembled QMF slots of a mono SBR channel to two channels, applied before
+/// the synthesis (the MPEG Surround 2-1-2 of USAC).
+pub(crate) trait QmfUpmix {
+    /// Upmix the slots of the `band_count` active QMF bands. Returns the slots of the two
+    /// output channels.
+    fn upmix(
+        &mut self,
+        qmf: &[[Complex; 64]],
+        band_count: usize,
+    ) -> core::result::Result<UpmixedSlots<'_>, ()>;
 }
 
 /// PS decoder + right-channel synthesis bank (Annex 8.A).
@@ -376,6 +395,8 @@ impl SbrDecoder {
                 .map(|_| ChannelState::new(Geometry::STANDARD, false, false, false))
                 .collect(),
             ps: None,
+            upmix_right: None,
+            upmix_in: Vec::new(),
         })
     }
 
@@ -540,6 +561,26 @@ impl SbrDecoder {
         &mut self,
         ext: &SbrExtensionData,
         core: &[&[f64]],
+    ) -> Result<Vec<Vec<f64>>> {
+        self.process_inner(ext, core, None)
+    }
+
+    /// Like [`Self::process_frame`] for a single channel, but render two channels: `upmix` turns
+    /// the assembled QMF slots of the channel into those of a pair before the synthesis.
+    pub fn process_frame_upmix(
+        &mut self,
+        ext: &SbrExtensionData,
+        core: &[&[f64]],
+        upmix: &mut dyn QmfUpmix,
+    ) -> Result<Vec<Vec<f64>>> {
+        self.process_inner(ext, core, Some(upmix))
+    }
+
+    fn process_inner(
+        &mut self,
+        ext: &SbrExtensionData,
+        core: &[&[f64]],
+        mut upmix: Option<&mut dyn QmfUpmix>,
     ) -> Result<Vec<Vec<f64>>> {
         let n_ch = self.channels.len();
         if core.len() != n_ch || ext.element.channels.len() != n_ch {
@@ -756,7 +797,31 @@ impl SbrDecoder {
             }
             let sps = ch.synthesis.samples_per_slot();
             let mut emitted = false;
-            if n_ch == 1 {
+            if let (1, Some(up)) = (n_ch, upmix.as_deref_mut()) {
+                let band_count = (bands.k_x + bands.m).clamp(4, 64) as usize;
+                // The hybrid filter of the lowest bands has a delay of 6 slots: they are fed
+                // from the newest analysis slots, six ahead of the assembled ones.
+                self.upmix_in.clear();
+                self.upmix_in.extend_from_slice(&x_cols);
+                for (l, slot) in self.upmix_in.iter_mut().enumerate() {
+                    slot[..3].copy_from_slice(&x_low[l + T_HF_ADJ + 6][..3]);
+                }
+                let (left, right) =
+                    up.upmix(&self.upmix_in, band_count).map_err(|()| Error::UpmixInvalid)?;
+                let bank = self.upmix_right.get_or_insert_with(|| {
+                    SynthesisBank::new(self.downsampled, self.low_power, self.eld)
+                });
+                let mut pcm_l = Vec::with_capacity(lf * sps);
+                let mut pcm_r = Vec::with_capacity(lf * sps);
+                for l in 0..lf {
+                    ch.synthesis.push_slot(&left[l], &mut pcm_l)?;
+                    bank.push_slot(&right[l], &mut pcm_r)?;
+                }
+                out.push(pcm_l);
+                out.push(pcm_r);
+                emitted = true;
+            }
+            if n_ch == 1 && !emitted {
                 if let Some(ps) = self.ps.as_mut() {
                     let x_input = build_x_input(&x_cols, &x_low);
                     let kx_plus_m = (bands.k_x + bands.m).max(0) as usize;

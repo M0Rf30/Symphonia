@@ -46,6 +46,8 @@ pub(crate) enum SbrError {
     /// payload, a reserved `iid_mode`/`icc_mode`, or a resolved IID/ICC
     /// index outside its Table 8.24/8.27 range.
     PsDataInvalid,
+    /// The MPEG Surround upmix of a USAC frame failed.
+    UpmixInvalid,
 }
 
 pub(crate) type SbrResult<T> = core::result::Result<T, SbrError>;
@@ -61,6 +63,7 @@ impl SbrError {
             SbrError::SbrQmfInvalid => "aac (sbr): invalid qmf filterbank input or mode switch",
             SbrError::SbrLowPowerPs => "aac (sbr): parametric stereo on a low-power sbr decoder",
             SbrError::PsDataInvalid => "aac (sbr): parametric stereo ps_data() parse failed",
+            SbrError::UpmixInvalid => "aac (sbr): invalid mpeg surround upmix",
         }
     }
 }

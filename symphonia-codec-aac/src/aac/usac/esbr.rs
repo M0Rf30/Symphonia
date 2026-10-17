@@ -20,6 +20,7 @@ use crate::aac::sbr::bits::BitReader;
 use crate::aac::sbr::decoder::SbrDecoder;
 use crate::aac::sbr::extension::SbrExtensionData;
 use crate::aac::sbr::usac::UsacSbrParser;
+use crate::aac::usac::mps212::Mps212Decoder;
 
 /// The eSBR decoder of a channel pair or single channel.
 pub struct EsbrDecoder {
@@ -90,6 +91,35 @@ impl EsbrDecoder {
 
         bs.ignore_bits((reader.bit_position() - position) as u32)?;
         self.pending = Some(ext);
+
+        Ok(())
+    }
+
+    /// Render the frame of a single channel through the MPEG Surround upmix into two channels.
+    pub fn process_upmix(
+        &mut self,
+        core: &[f32],
+        mps: &mut Mps212Decoder,
+        output: [&mut [f32]; 2],
+        scale: f32,
+    ) -> Result<()> {
+        for (d, s) in self.core[0].iter_mut().zip(core) {
+            *d = f64::from(*s);
+        }
+
+        let Some(ext) = self.pending.take()
+        else {
+            return unsupported_error("aac: usac sbr data is missing");
+        };
+
+        let refs: Vec<&[f64]> = self.core.iter().map(Vec::as_slice).collect();
+        let rendered = self.decoder.process_frame_upmix(&ext, &refs, mps)?;
+
+        for (dst, src) in output.into_iter().zip(&rendered) {
+            for (d, s) in dst.iter_mut().zip(src) {
+                *d = (*s as f32) * scale;
+            }
+        }
 
         Ok(())
     }
