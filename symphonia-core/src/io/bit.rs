@@ -875,6 +875,10 @@ impl<B: ReadBytes> ReadBitsLtr for BitStreamLtr<'_, B> {}
 ///
 /// Stated another way, if N-bits are read from a `BitReaderLtr` then bit 0, the first bit read,
 /// is the most-significant bit, and bit N-1, the last bit read, is the least-significant.
+///
+/// A `BitReaderLtr` is cheap to clone, which allows a decoder to read ahead of a position and then
+/// continue from it, or from an earlier one.
+#[derive(Clone)]
 pub struct BitReaderLtr<'a> {
     buf: &'a [u8],
     bits: u64,

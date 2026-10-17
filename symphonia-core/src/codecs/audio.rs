@@ -532,6 +532,13 @@ pub mod well_known {
     pub const CODEC_ID_BINK_AUDIO: AudioCodecId = AudioCodecId(0x1019);
     /// LC3 / LC3plus (ETSI TS 103 634)
     pub const CODEC_ID_LC3: AudioCodecId = AudioCodecId(0x101a);
+    /// MPEG-H 3D Audio (ISO/IEC 23008-3) as raw `mpegh3daFrame()` access units, the configuration
+    /// (`Mpegh3daConfig()`, usually wrapped in an `MHADecoderConfigurationRecord`) being carried
+    /// out of band in the codec extra data (`mha1`, `mha2`, Matroska `A_MPEGH/3DA`)
+    pub const CODEC_ID_MPEGH_3DA: AudioCodecId = AudioCodecId(0x101b);
+    /// MPEG-H 3D Audio (ISO/IEC 23008-3) as an MPEG-H Audio Stream (MHAS) of packets, which carry
+    /// the configuration in-band (`mhm1`, `mhm2`, Matroska `A_MPEGH/MHAS`, MPEG-TS)
+    pub const CODEC_ID_MPEGH_MHAS: AudioCodecId = AudioCodecId(0x101c);
     /// Smacker Audio
     pub const CODEC_ID_SMACKER_AUDIO: AudioCodecId = AudioCodecId(0x1020);
     /// Nellymoser Asao
@@ -581,6 +588,8 @@ pub mod well_known {
     pub const CODEC_ID_TWINVQ: AudioCodecId = AudioCodecId(0x110d);
     /// Indeo Audio Coder (IAC), the stereo-capable variant of IMC
     pub const CODEC_ID_IAC: AudioCodecId = AudioCodecId(0x110e);
+    /// CRI HCA (High Compression Audio)
+    pub const CODEC_ID_HCA: AudioCodecId = AudioCodecId(0x110f);
     /// GSM 06.10 full-rate (ETSI EN 300 961, 33-byte frames)
     pub const CODEC_ID_GSM: AudioCodecId = AudioCodecId(0x1140);
     /// Microsoft GSM 6.10 (WAVE format tag 0x0031, 65-byte blocks of two frames)
@@ -588,8 +597,6 @@ pub mod well_known {
 
     // Compressed lossless audio codecs
     //---------------------------------
-    /// CRI HCA (High Compression Audio)
-    pub const CODEC_ID_HCA: AudioCodecId = AudioCodecId(0x110f);
 
     /// Free Lossless Audio Codec (FLAC)
     pub const CODEC_ID_FLAC: AudioCodecId = AudioCodecId(0x2000);

@@ -28,6 +28,13 @@ filtering of the predicted spectrum) decode with frames of 1024 samples, without
 prediction follows FFmpeg's `predict()`, which rounds the predictor state to 16 bit floats. AAC
 SSR (gain control and the polyphase quadrature filter) is not supported.
 
+USAC (audio object type 42, xHE-AAC) decodes its frequency-domain core coder with frames of 1024
+samples: arithmetic coded spectra, mid/side and complex stereo prediction, TNS, noise filling and
+`fac_data()` (parsed, not applied). Pre-roll access units prime the decoder. The linear-prediction
+(ACELP/TCX) core, enhanced SBR, MPEG Surround 2-1-2 and time-warped MDCT are not implemented, and a
+stream or frame that needs one is rejected as unsupported. The output matches libfdk-aac to within
+1 LSB for the FD streams tested.
+
 AAC-LD (audio object type 23) and AAC-ELD (audio object type 39) are decoded with frame lengths
 of 512 and 480 samples, for any channel configuration of 1-7. Their low overlap window, the low
 delay filterbank, and their scale factor bands and syntax (which has no element identifiers and

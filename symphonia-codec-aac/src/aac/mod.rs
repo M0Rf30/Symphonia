@@ -39,6 +39,7 @@ mod eld_window;
 mod ics;
 use ics::coupling::CouplingChannel;
 mod sbr;
+mod usac;
 
 use common::*;
 
@@ -305,8 +306,8 @@ impl AacDecoder {
             AudioObjectType::Lc => asc.samples == 1024 || asc.samples == 960,
             // Prediction is only defined for the long block of 1024 samples.
             AudioObjectType::Main | AudioObjectType::Ltp => asc.samples == 1024,
-                asc.samples == 512 || asc.samples == 480
             AudioObjectType::ErAacLd | AudioObjectType::ErAacEld => {
+                asc.samples == 512 || asc.samples == 480
             }
             _ => false,
         };
@@ -328,8 +329,8 @@ impl AacDecoder {
             return unsupported_error("aac: sbr with 960 sample frames");
         }
 
-        if asc.object_type == AudioObjectType::ErAacLd && asc.sbr_present {
         // SBR with AAC LD, and the HE-AAC v2 parametric stereo tool with ELD, are not defined.
+        if asc.object_type == AudioObjectType::ErAacLd && asc.sbr_present {
             return unsupported_error("aac: sbr with aac ld");
         }
 
@@ -430,8 +431,8 @@ impl AacDecoder {
         else if asc.samples == 960 {
             GASubbandInfo::find_960(asc.sample_rate)
         }
-            GASubbandInfo::find(asc.sample_rate)
         else {
+            GASubbandInfo::find(asc.sample_rate)
         };
 
         // The pre-SBR/PS "core" buffer stays at the core channel count (mono for a PS
@@ -618,8 +619,8 @@ impl AacDecoder {
                                     return unsupported_error("aac: sbr with 960 sample frames");
                                 }
 
-                                // the core rate, and this is the first EXT_SBR_DATA payload
                                 // Implicit signalling: the ASC/ADTS header declared plain LC at
+                                // the core rate, and this is the first EXT_SBR_DATA payload
                                 // seen. Assume the standard 2× dual-rate ratio (no
                                 // `extensionSamplingFrequencyIndex` is available outside the
                                 // ASC); `self.params.sample_rate` is corrected below so any
@@ -997,12 +998,23 @@ impl RegisterableAudioDecoder for AacDecoder {
     where
         Self: Sized,
     {
+        // A USAC (xHE-AAC) stream is signalled by its audio specific config declaring object
+        // type 42; route it to the USAC decoder before the GA/ER decoder rejects it.
+        if let Some(extra_data) = &params.extra_data {
+            if let Ok(asc) = AudioSpecificConfig::read(extra_data) {
+                if asc.object_type == AudioObjectType::Usac {
+                    return Ok(Box::new(usac::UsacDecoder::try_new(params, opts)?));
+                }
+            }
+        }
+
         Ok(Box::new(AacDecoder::try_new(params, opts)?))
     }
 
     fn supported_codecs() -> &'static [SupportedAudioCodec] {
         use symphonia_core::codecs::audio::well_known::profiles::{
             CODEC_PROFILE_AAC_ELD, CODEC_PROFILE_AAC_LC, CODEC_PROFILE_AAC_LD,
+            CODEC_PROFILE_AAC_USAC,
         };
 
         &[support_audio_codec!(
@@ -1013,6 +1025,11 @@ impl RegisterableAudioDecoder for AacDecoder {
                 codec_profile!(CODEC_PROFILE_AAC_LC, "aac-lc", "Low Complexity"),
                 codec_profile!(CODEC_PROFILE_AAC_LD, "aac-ld", "Low Delay"),
                 codec_profile!(CODEC_PROFILE_AAC_ELD, "aac-eld", "Enhanced Low Delay"),
+                codec_profile!(
+                    CODEC_PROFILE_AAC_USAC,
+                    "aac-usac",
+                    "Unified Speech and Audio Coding"
+                ),
             ]
         )]
     }

@@ -9,6 +9,7 @@ pub mod adts;
 pub mod apev2;
 pub mod latm;
 pub mod mpa;
+pub mod usac;
 
 use symphonia_core::audio::{Channels, Position, layouts};
 use symphonia_core::codecs::CodecProfile;
@@ -59,6 +60,8 @@ pub enum AudioObjectType {
     ErAacEld,
     SmrSimple,
     SmrMain,
+    /// Unified Speech and Audio Coding (USAC, xHE-AAC), audio object type 42.
+    Usac,
     Reserved,
     Unknown,
 }
@@ -112,6 +115,7 @@ const AUDIO_OBJECT_TYPES: &[AudioObjectType] = &[
     AudioObjectType::ErAacEld,
     AudioObjectType::SmrSimple,
     AudioObjectType::SmrMain,
+    AudioObjectType::Usac,
 ];
 
 const AUDIO_OBJECT_TYPE_NAMES: &[&str] = &[
@@ -157,6 +161,7 @@ const AUDIO_OBJECT_TYPE_NAMES: &[&str] = &[
     "ER AAC ELD",
     "SMR Simple",
     "SMR Main",
+    "USAC",
     "(Reserved)",
     "(Unknown)",
 ];
@@ -334,6 +339,12 @@ pub struct AudioSpecificConfig {
     pub er_resilience: bool,
     /// The SBR config of an ER AAC ELD stream with low delay SBR (`ldSbrPresentFlag`).
     pub eld_sbr: Option<EldSbrConfig>,
+    /// The `UsacConfig()` of a USAC (xHE-AAC) stream (`object_type` is [`AudioObjectType::Usac`]).
+    /// For such a stream `sample_rate` is the output sampling frequency (`usacSamplingFrequency`),
+    /// `samples` the number of samples of a frame of the core coder (768 or 1024), `channels` and
+    /// `channel_elements` those of the config, and `sbr_present` is false: the SBR of USAC is part
+    /// of the elements of the config.
+    pub usac: Option<usac::UsacConfig>,
 }
 
 /// The SBR config of an `ELDSpecificConfig()` (ISO/IEC 14496-3 §4.4.1.2).
@@ -476,8 +487,14 @@ impl AudioSpecificConfig {
     pub fn read_core_from<B: ReadBitsLtr + FiniteBitStream>(
         bs: &mut B,
     ) -> Result<AudioSpecificConfig> {
+        let object_type = Self::read_audio_object_type(bs)?;
+
+        if object_type == AudioObjectType::Usac {
+            return Self::read_usac_config(bs);
+        }
+
         let mut asc = AudioSpecificConfig {
-            object_type: Self::read_audio_object_type(bs)?,
+            object_type,
             sample_rate: Self::read_sampling_frequency(bs)?,
             ..Default::default()
         };
@@ -512,6 +529,7 @@ impl AudioSpecificConfig {
             AudioObjectType::Main
             | AudioObjectType::Lc
             | AudioObjectType::Ssr
+            | AudioObjectType::Ltp
             | AudioObjectType::Scalable
             | AudioObjectType::TwinVq
             | AudioObjectType::ErAacLc
@@ -529,7 +547,6 @@ impl AudioSpecificConfig {
                     (AudioObjectType::ErAacLd, false) => 512,
                     (_, true) => 960,
                     (_, false) => 1024,
-            | AudioObjectType::Ltp
                 };
 
                 let depends_on_core = bs.read_bool()?;
@@ -722,6 +739,32 @@ impl AudioSpecificConfig {
         Ok(asc)
     }
 
+    /// Read the rest of the audio specific config of a USAC stream, after its
+    /// `audioObjectType`: the generic `samplingFrequencyIndex` and `channelConfiguration`, which
+    /// the `UsacConfig()` that follows supersedes, and the `UsacConfig()`.
+    fn read_usac_config<B: ReadBitsLtr + FiniteBitStream>(
+        bs: &mut B,
+    ) -> Result<AudioSpecificConfig> {
+        if bs.read_bits_leq32(4)? == 0xf {
+            bs.ignore_bits(24)?;
+        }
+
+        // channelConfiguration
+        bs.ignore_bits(4)?;
+
+        let usac = usac::UsacConfig::read(bs)?;
+
+        Ok(AudioSpecificConfig {
+            object_type: AudioObjectType::Usac,
+            sample_rate: usac.sampling_frequency,
+            channels: Some(usac.channels.clone()),
+            channel_elements: Some(usac.channel_elements.clone()),
+            samples: usac.core_frame_length,
+            usac: Some(usac),
+            ..Default::default()
+        })
+    }
+
     /// Read the optional trailing `syncExtensionType` extension of an audio specific config, which
     /// is how "explicit backwards compatible" HE-AAC v1/v2 signals SBR/PS on top of a plain
     /// (non-hierarchical) outer `audioObjectType`, from the bit stream.
@@ -735,6 +778,12 @@ impl AudioSpecificConfig {
         bs: &mut B,
     ) -> Result<u64> {
         let asc = self;
+
+        // The `UsacConfig()` is not followed by a `syncExtensionType`.
+        if asc.object_type == AudioObjectType::Usac {
+            return Ok(0);
+        }
+
         let start_left = bs.bits_left();
         let mut unmatched = 0;
 
@@ -1158,6 +1207,7 @@ pub fn get_audio_codec_profile(asc: &AudioSpecificConfig) -> Option<CodecProfile
         }
         AudioObjectType::ErAacLd => Some(CODEC_PROFILE_AAC_LD),
         AudioObjectType::ErAacEld => Some(CODEC_PROFILE_AAC_ELD),
+        AudioObjectType::Usac => Some(CODEC_PROFILE_AAC_USAC),
         _ => None,
     }
 }

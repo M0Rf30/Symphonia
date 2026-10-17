@@ -32,6 +32,37 @@ comments (including their spec citations) are otherwise unchanged.
 
 ----------------------------------------------------------------------
 
+The USAC (xHE-AAC) coder tables in `src/aac/usac/tables.rs` (scalefactor
+band offsets, TNS max bands, noise-fill start offsets, arithmetic-coder
+cumulative-frequency/hash/lookup tables, and MDST estimation filters)
+are normative data of ISO/IEC 23003-3 (MPEG-D USAC) as tabulated by
+Ittiam's libxaac:
+
+    libxaac
+    https://android.googlesource.com/platform/external/libxaac
+    Copyright (C) 2018 The Android Open Source Project
+    Originally developed and contributed by Ittiam Systems Pvt. Ltd, Bangalore
+
+licensed under the Apache License, Version 2.0 (see
+https://www.apache.org/licenses/LICENSE-2.0). The
+values were extracted from the libxaac decoder sources
+(`ixheaacd_arith_dec.c`, `ixheaacd_rom.c`, `ixheaacd_aac_rom.c`,
+`ixheaacd_ext_ch_ele.c`) by a generator script and are standardised
+tables; see the file header of `tables.rs` for the per-table ISO/IEC
+23003-3 clause citations.
+
+----------------------------------------------------------------------
+
+The USAC decoder's behaviour was checked against, and in places follows, the Fraunhofer FDK AAC
+codec library (https://github.com/mstorsjo/fdk-aac, "Software License for The Fraunhofer FDK AAC
+Codec Library for Android"): the selection of the complex stereo prediction MDST filters and the
+values of the previous-frame filters (`mdst_filt_coef_prev`), the downmix and upmix of
+`CJointStereo_ApplyMS()`, and the syntax of `fac_data()` and its algebraic vector quantiser
+(`CLpd_FAC_Read()`, `CLpc_DecodeAVQ()`). No FDK code is copied; the arithmetic is reimplemented in
+floating point. That license grants no patent rights; see the FDK `NOTICE` for its terms.
+
+----------------------------------------------------------------------
+
 MIT License
 
 Copyright (c) 2026 Karpelès Lab Inc.

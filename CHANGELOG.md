@@ -16,6 +16,9 @@ Changes since upstream `v0.6.1`.
 
 ### Added
 
+- AAC USAC (xHE-AAC) frequency-domain decoding (`symphonia-codec-aac`): arithmetic coder, M/S and
+  complex stereo prediction, TNS, noise filling, pre-roll. Matches libfdk-aac to within 1 LSB. The
+  LPD core, eSBR and MPS212 are not implemented.
 - AAC Main profile prediction and AAC LTP, in MP4 and ADTS (`symphonia-codec-aac`); AAC SSR is
   not supported. Matches FFmpeg's decoder at about 130 dB (LTP) and 50 dB (Main).
 - AAC-LC with 960 sample frames (`frameLengthFlag`), without SBR (`symphonia-codec-aac`).
