@@ -199,7 +199,13 @@ impl LpdDecoder {
         let num_subfrm = 4 * ccfl / 1024;
         let num_subfr_in_superfr = 4 * num_subfrm;
         let num_subfr_by2 = num_subfr_in_superfr / 2 - 1;
-        let fscale = ((core_rate as u64 * ccfl as u64 / 1024) as i32).min(24000);
+        // libxaac uses the core rate itself for a 768 sample frame.
+        let fscale = if ccfl == 768 {
+            core_rate as i32
+        }
+        else {
+            ((core_rate as u64 * ccfl as u64 / 1024) as i32).min(24000)
+        };
 
         let mut dcts = Vec::new();
         for len in [len_subfrm / 2, len_subfrm, 2 * len_subfrm, 4 * len_subfrm, ccfl / 8, ccfl / 16]
@@ -224,7 +230,7 @@ impl LpdDecoder {
             bpf_active_prev: false,
             lp_a_prev: [0.0; 2 * (ORDER + 1)],
             xcitation_prev: vec![0.0; EXC_HIST],
-            synth_prev: vec![0.0; MAX_PITCH + 448],
+            synth_prev: vec![0.0; MAX_PITCH + num_subfr_by2 * LEN_SUBFR],
             bpf_prev: [0.0; FILTER_DELAY + LEN_SUBFR],
             exc_prev: [0.0; 1 + 2 * FAC_LENGTH],
             gain_threshold: 0.0,
@@ -237,7 +243,7 @@ impl LpdDecoder {
             last_short: false,
             lpc_prev: [0.0; ORDER + 1],
             acelp_in: [0.0; 1 + 2 * FAC_LENGTH],
-            synth_buf: vec![0.0; MAX_PITCH + 448 + LEN_SUPERFRAME + 256],
+            synth_buf: vec![0.0; MAX_PITCH + num_subfr_by2 * LEN_SUBFR + LEN_SUPERFRAME + 256],
             exc_buf: vec![0.0; EXC_HIST + LEN_SUPERFRAME + 256],
             pitch: [64; 32],
             pitch_gain: [0.0; 32],
@@ -775,9 +781,15 @@ impl LpdDecoder {
             let ttt = fac_length % LEN_SUBFR;
             let mut a0 = 0;
 
+            // A 768 sample frame has a FAC length of 96, which spans three blocks: the last
+            // filter set is used for the third (libxaac reads past its two sets here).
+            let mut sets = [0.0f32; 3 * (ORDER + 1)];
+            sets[..2 * (ORDER + 1)].copy_from_slice(&self.lp_a_prev);
+            sets[2 * (ORDER + 1)..].copy_from_slice(&self.lp_a_prev[ORDER + 1..]);
+
             if ttt != 0 {
                 residual(
-                    &self.lp_a_prev,
+                    &sets,
                     false,
                     &xn2,
                     fac_length,
@@ -791,7 +803,7 @@ impl LpdDecoder {
 
             let loops = (fac_length + ttt) / LEN_SUBFR;
             residual(
-                &self.lp_a_prev[a0..],
+                &sets[a0..],
                 true,
                 &xn2,
                 fac_length + ttt,

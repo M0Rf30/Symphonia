@@ -65,6 +65,7 @@ mod lp;
 mod noise_table;
 mod ps;
 mod qmf;
+mod qmf24_table;
 mod reconstruct;
 mod time_grid;
 pub(crate) mod usac;

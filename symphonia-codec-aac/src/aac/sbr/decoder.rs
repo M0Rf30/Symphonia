@@ -63,8 +63,8 @@ use super::lp::{aliasing_degree, deg_patched};
 use super::ps::decoder::PsDecoder;
 use super::ps::hybrid::LOOKAHEAD;
 use super::qmf::{
-    AnalysisQmf, Complex, DownsampledSynthesisQmf, RealAnalysisQmf, RealDownsampledSynthesisQmf,
-    RealSynthesisQmf, SynthesisQmf,
+    AnalysisQmf, AnalysisQmf24, Complex, DownsampledSynthesisQmf, RealAnalysisQmf,
+    RealDownsampledSynthesisQmf, RealSynthesisQmf, SynthesisQmf,
 };
 use super::reconstruct::{EnvelopeScalefactors, NoiseScalefactors};
 use super::time_grid::derive_time_grid;
@@ -85,17 +85,21 @@ struct Geometry {
     /// The slots of the previous frame that the covariance window of the HF generator
     /// reaches back into.
     overlap: usize,
+    /// The bands of the analysis bank, which is also the number of core samples per slot: 32,
+    /// or 24 for the 8:3 ratio of USAC.
+    analysis_bands: usize,
 }
 
 impl Geometry {
     /// Ordinary SBR on a 1024-sample core frame.
-    const STANDARD: Geometry = Geometry { num_time_slots: 16, rate: 2, overlap: 6 };
+    const STANDARD: Geometry =
+        Geometry { num_time_slots: 16, rate: 2, overlap: 6, analysis_bands: 32 };
 
     /// Low delay SBR on a core frame of 512 or 480 samples.
     fn eld(core_samples: usize) -> Option<Geometry> {
         match core_samples {
-            512 => Some(Geometry { num_time_slots: 16, rate: 1, overlap: 0 }),
-            480 => Some(Geometry { num_time_slots: 15, rate: 1, overlap: 0 }),
+            512 => Some(Geometry { num_time_slots: 16, rate: 1, overlap: 0, analysis_bands: 32 }),
+            480 => Some(Geometry { num_time_slots: 15, rate: 1, overlap: 0, analysis_bands: 32 }),
             _ => None,
         }
     }
@@ -118,7 +122,7 @@ impl Geometry {
 
     /// The core samples of a frame: 32 per analysis slot.
     fn core_samples(&self) -> usize {
-        self.lf() * 32
+        self.lf() * self.analysis_bands
     }
 
     /// The covariance window of the HF generator.
@@ -209,11 +213,16 @@ enum AnalysisBank {
     Real(RealAnalysisQmf),
     /// The low delay bank of ELD.
     Cldfb(CldfbAnalysis),
+    /// The 24 band bank of the 8:3 ratio of USAC.
+    Complex24(AnalysisQmf24),
 }
 
 impl AnalysisBank {
-    fn new(low_power: bool, eld: bool) -> Self {
-        if eld {
+    fn new(low_power: bool, eld: bool, bands: usize) -> Self {
+        if bands == 24 {
+            AnalysisBank::Complex24(AnalysisQmf24::new())
+        }
+        else if eld {
             AnalysisBank::Cldfb(CldfbAnalysis::new())
         }
         else if low_power {
@@ -227,6 +236,7 @@ impl AnalysisBank {
     fn push_slot(&mut self, samples: &[f64]) -> Result<[Complex; 32]> {
         match self {
             AnalysisBank::Complex(a) => a.push_slot(samples),
+            AnalysisBank::Complex24(a) => a.push_slot(samples),
             AnalysisBank::Cldfb(a) => a.push_slot(samples),
             AnalysisBank::Real(a) => {
                 let w = a.push_slot(samples)?;
@@ -270,7 +280,7 @@ impl ChannelState {
     fn new(geo: Geometry, downsampled: bool, low_power: bool, eld: bool) -> Self {
         ChannelState {
             geo,
-            analysis: AnalysisBank::new(low_power, eld),
+            analysis: AnalysisBank::new(low_power, eld, geo.analysis_bands),
             synthesis: SynthesisBank::new(downsampled, low_power, eld),
             w_hist: vec![[Complex::default(); 32]; geo.t_hf_gen()],
             x_low_buf: Vec::with_capacity(geo.cols()),
@@ -295,11 +305,12 @@ impl ChannelState {
             return Err(Error::SbrQmfInvalid);
         }
         let (lf, cols, t_hf_gen) = (self.geo.lf(), self.geo.cols(), self.geo.t_hf_gen());
+        let bands = self.geo.analysis_bands;
         let mut x_low = core::mem::take(&mut self.x_low_buf);
         x_low.clear();
         x_low.extend_from_slice(&self.w_hist);
         for slot in 0..lf {
-            let w = self.analysis.push_slot(&core[slot * 32..(slot + 1) * 32])?;
+            let w = self.analysis.push_slot(&core[slot * bands..(slot + 1) * bands])?;
             x_low.push(w);
         }
         self.w_hist.clear();
@@ -398,6 +409,18 @@ impl SbrDecoder {
             upmix_right: None,
             upmix_in: Vec::new(),
         })
+    }
+
+    /// A fresh decoder for the enhanced SBR of USAC with `analysis_bands` analysis bands: 32
+    /// for the 2:1 ratio, 24 for the 8:3 ratio. `fs_sbr` is the output rate.
+    pub fn new_usac(fs_sbr: u32, num_channels: usize, analysis_bands: usize) -> Result<Self> {
+        if analysis_bands != 32 && analysis_bands != 24 {
+            return Err(Error::SbrQmfInvalid);
+        }
+        let mut dec = Self::new(fs_sbr, num_channels)?;
+        dec.geo.analysis_bands = analysis_bands;
+        dec.rebuild_banks();
+        Ok(dec)
     }
 
     /// A fresh decoder for low delay SBR (ELD). `fs_sbr` is the SBR output rate, `core_samples`

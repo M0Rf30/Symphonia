@@ -218,3 +218,21 @@ fn usac_mps212_matches_fdk() {
 
     assert!(snr >= 40.0, "signal to noise ratio {snr:.1} dB, expected at least 40");
 }
+
+/// 8:3 enhanced SBR with a 768 sample core frame (mono, 20 kbit/s, 48 kHz): 200 access units
+/// including short windows (access unit 125) and LPD frames (from 151), compared with libfdk-aac.
+/// The LPD frames agree to about 46 dB (as libxaac does), the frequency-domain ones to 80 dB.
+#[test]
+fn usac_sbr_8_3_matches_fdk() {
+    const FD_FRAMES: usize = 150;
+
+    let samples = decode(include_bytes!("fixtures/usac_sbr83.bin"), 1, 2 * FRAME);
+    let reference = include_bytes!("fixtures/usac_sbr83.s16");
+    let split = FD_FRAMES * 2 * FRAME;
+
+    let fd = snr_db(&reference[..split * 2], &samples[..split]);
+    assert!(fd >= 60.0, "frequency-domain signal to noise ratio {fd:.1} dB, expected at least 60");
+
+    let all = snr_db(reference, &samples);
+    assert!(all >= 15.0, "signal to noise ratio {all:.1} dB, expected at least 15");
+}

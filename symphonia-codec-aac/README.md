@@ -29,22 +29,24 @@ prediction follows FFmpeg's `predict()`, which rounds the predictor state to 16 
 SSR (gain control and the polyphase quadrature filter) is not supported.
 
 USAC (audio object type 42, xHE-AAC) decodes its frequency-domain core coder with frames of 1024
-samples: arithmetic coded spectra, mid/side and complex stereo prediction, TNS, noise filling and
+or 768 samples: arithmetic coded spectra, mid/side and complex stereo prediction, TNS, noise filling and
 `fac_data()` (applied when it follows an LPD frame). Pre-roll access units prime the decoder (only a decoder
-without history uses them). 2:1 enhanced SBR (without harmonic transposition, PVC or inter-TES) is
-decoded. The linear-prediction (ACELP/TCX) core is decoded for single channel elements, including
+without history uses them). 2:1 and 8:3 enhanced SBR (the latter with a 768 sample core frame and a 24 band analysis
+bank; without harmonic transposition, PVC or inter-TES) is decoded. The linear-prediction (ACELP/TCX) core is decoded for single channel elements, including
 the switching between it and the frequency-domain core (transition windows, forward aliasing
 cancellation and the stop-start window); a long window directly after an LPD frame is rejected.
 MPEG Surround 2-1-2 (`stereoConfigIndex` 1: a single core channel, eSBR, then the upmix of the QMF
 slots; phase coding, high rate mode, smoothing and decorrelation) is decoded and matches libxaac
 to better than 100 dB in the QMF domain and libfdk-aac to better than 50 dB. Its temporal shaping,
 residual coding and SBR after the upmix are not implemented.
-Linear-prediction channel pairs, the other enhanced SBR ratios and tools and
+Linear-prediction channel pairs, 4:1 enhanced SBR, the other enhanced SBR tools and
 time-warped MDCT are not implemented, and a stream or frame that needs one is rejected as
 unsupported. The output matches libfdk-aac to
 within 1 LSB for the FD streams tested; the LPD core output and the mixed FD/LPD core output match libxaac to better than 78 dB
 (except for fixed point noise on a few short window frames)
-and the final 2:1 eSBR output matches libfdk-aac to about 37 dB signal to noise ratio.
+and the final 2:1 eSBR output matches libfdk-aac to about 37 dB signal to noise ratio. A 768 sample
+core stream matches libfdk-aac to 80 dB in frequency-domain frames and, like libxaac, to about
+46 dB in LPD frames (a low-frequency difference whose cause is not known).
 
 AAC-LD (audio object type 23) and AAC-ELD (audio object type 39) are decoded with frame lengths
 of 512 and 480 samples, for any channel configuration of 1-7. Their low overlap window, the low

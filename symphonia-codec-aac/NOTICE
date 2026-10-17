@@ -58,6 +58,11 @@ libxaac decoder routines (`ixheaacd_acelp_bitparse.c`, `ixheaacd_lpc.c`, `ixheaa
 `ixheaacd_fwd_alias_cnx.c`) and its tables (`lpd/tables.rs`) were extracted from the libxaac
 sources. libxaac is licensed under the Apache License, Version 2.0 as above.
 
+The 24 band analysis filter bank of 8:3 enhanced SBR (`src/aac/sbr/qmf.rs`, `AnalysisQmf24`) and its
+window (`src/aac/sbr/qmf24_table.rs`, `esbr_qmf_c_24`) were taken from the libxaac sources
+(`ixheaacd_esbr_qmf` routines and tables). libxaac is licensed under the Apache License, Version
+2.0 as above.
+
 The MPEG Surround 2-1-2 upmix (`src/aac/usac/mps212/`) is a Rust port of the corresponding libxaac
 decoder routines (`ixheaacd_mps_dec.c`, `ixheaacd_mps_decorr.c`, `ixheaacd_mps_hybrid_filt.c`,
 `ixheaacd_mps_parse.c`, `ixheaacd_mps_calc.c`, `ixheaacd_mps_smoothing`/`ixheaacd_mps_ecdatapairdec`

@@ -28,6 +28,7 @@ pub struct EsbrDecoder {
     decoder: SbrDecoder,
     channels: usize,
     output_rate: u32,
+    analysis_bands: usize,
     pending: Option<SbrExtensionData>,
     core: Vec<Vec<f64>>,
 }
@@ -42,9 +43,11 @@ impl EsbrDecoder {
         output_rate: u32,
         core_len: usize,
     ) -> Result<Self> {
-        if ratio != UsacSbrRatio::Ratio2To1 || core_len != 1024 {
-            return unsupported_error("aac: usac sbr ratio is not yet implemented");
-        }
+        let analysis_bands = match (ratio, core_len) {
+            (UsacSbrRatio::Ratio2To1, 1024) => 32,
+            (UsacSbrRatio::Ratio8To3, 768) => 24,
+            _ => return unsupported_error("aac: usac sbr ratio is not yet implemented"),
+        };
 
         if cfg.harmonic_sbr || cfg.pvc || cfg.inter_tes {
             return unsupported_error(
@@ -52,13 +55,14 @@ impl EsbrDecoder {
             );
         }
 
-        let decoder = SbrDecoder::new(output_rate, channels)?;
+        let decoder = SbrDecoder::new_usac(output_rate, channels, analysis_bands)?;
 
         Ok(EsbrDecoder {
             parser: UsacSbrParser::new(cfg, output_rate),
             decoder,
             channels,
             output_rate,
+            analysis_bands,
             pending: None,
             core: vec![vec![0.0; core_len]; channels],
         })
@@ -69,7 +73,9 @@ impl EsbrDecoder {
         self.parser.reset();
         self.pending = None;
 
-        if let Ok(decoder) = SbrDecoder::new(self.output_rate, self.channels) {
+        if let Ok(decoder) =
+            SbrDecoder::new_usac(self.output_rate, self.channels, self.analysis_bands)
+        {
             self.decoder = decoder;
         }
     }
@@ -144,7 +150,6 @@ impl EsbrDecoder {
         else {
             return unsupported_error("aac: usac sbr data is missing");
         };
-
         let refs: Vec<&[f64]> = self.core.iter().map(Vec::as_slice).collect();
         let rendered = self.decoder.process_frame(&ext, &refs)?;
 

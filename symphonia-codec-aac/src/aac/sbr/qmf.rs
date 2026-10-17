@@ -642,6 +642,92 @@ impl AnalysisQmf {
     }
 }
 
+/// The 24 band complex analysis QMF bank of the 8:3 SBR ratio of USAC (ISO/IEC 23003-3 7.18).
+///
+/// It is the bank of [`AnalysisQmf`] for `M = 24` bands, with a window that slides over the
+/// 480 coefficients of the prototype by 24 values per slot, and the modulation scaled by
+/// `64 / M`. The structure follows the libxaac decoder (`ixheaacd_esbr_qmfanal32_winadd`).
+#[derive(Debug, Clone)]
+pub struct AnalysisQmf24 {
+    /// The ring buffer of the last ten blocks of input samples.
+    state: [f64; 240],
+    /// The write position of the next block.
+    pos: usize,
+    /// Whether the two halves of the ring buffer swap their roles in this slot.
+    odd: bool,
+    /// The offsets of the two window halves.
+    win: [usize; 2],
+    m: &'static AnalysisMatrix,
+}
+
+impl Default for AnalysisQmf24 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AnalysisQmf24 {
+    const BANDS: usize = 24;
+
+    /// A fresh bank with an all-zero history.
+    #[must_use]
+    pub fn new() -> Self {
+        static M: LazyLock<AnalysisMatrix> = LazyLock::new(|| {
+            AnalysisMatrix::new(24, 48, 64.0 / 24.0, |k, n| {
+                // The time offset of the 32 band bank (`0.5`) scaled by `24 / 32`.
+                core::f64::consts::PI / 48.0 * (k + 0.5) * (2.0 * n - 0.375)
+            })
+        });
+        AnalysisQmf24 { state: [0.0; 240], pos: 0, odd: false, win: [0, Self::BANDS], m: &M }
+    }
+
+    /// Consume the next 24 time samples and return the 24 complex subband samples of the slot
+    /// (the entries above them are zero).
+    pub fn push_slot(&mut self, samples: &[f64]) -> Result<[Complex; 32]> {
+        const N: usize = AnalysisQmf24::BANDS;
+        static WINDOW: LazyLock<Vec<f64>> = LazyLock::new(|| {
+            super::qmf24_table::QMF24_WINDOW_Q31
+                .iter()
+                .map(|&c| f64::from(c) / 2147483648.0)
+                .collect()
+        });
+
+        if samples.len() != N {
+            return Err(Error::SbrQmfInvalid);
+        }
+
+        for (z, s) in samples.iter().enumerate() {
+            self.state[self.pos + N - 1 - z] = *s;
+        }
+
+        let (s1, s2) = if self.odd { (N, 0) } else { (0, N) };
+        let [w1, w2] = self.win;
+
+        let mut u = [0.0f64; 2 * N];
+        for n in 0..N {
+            for j in 0..5 {
+                u[n] += self.state[s1 + n + 2 * N * j] * WINDOW[w1 + n + 2 * N * j];
+                u[n + N] += self.state[s2 + n + 2 * N * j] * WINDOW[w2 + n + 2 * N * j];
+            }
+        }
+
+        self.pos = if self.pos == 0 { 10 * N - N } else { self.pos - N };
+        self.odd = !self.odd;
+
+        // Advance both halves, then swap them; restart when the window would run out.
+        let (a, b) = (w1 + N, w2 + N);
+        self.win = [b, a];
+        if a > 10 * N {
+            self.win = [0, N];
+        }
+
+        let w = analyse_complex::<N>(self.m, &u);
+        let mut out = [Complex::default(); 32];
+        out[..N].copy_from_slice(&w);
+        Ok(out)
+    }
+}
+
 /// Annex 4.B.18.2 / Figure 4.B.16 — the 64-band complex **encoder**
 /// analysis QMF bank.
 ///

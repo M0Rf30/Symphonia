@@ -341,7 +341,9 @@ impl FdChannelState {
     fn spectrum_scale(&mut self, noise_fill: bool, noise_level: i32, noise_offset: i32) {
         let ics = self.ics.clone();
 
-        let noise_val = 2.0f32.powf((noise_level - 14) as f32 / 3.0);
+        // A noise level of 0 injects no noise (libxaac).
+        let noise_val =
+            if noise_level == 0 { 0.0 } else { 2.0f32.powf((noise_level - 14) as f32 / 3.0) };
         let noise_offset = noise_offset - 16;
 
         let short_frame = usize::from(self.ccfl == 768);

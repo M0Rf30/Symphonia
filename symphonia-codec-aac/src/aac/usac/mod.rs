@@ -154,7 +154,14 @@ impl UsacDecoder {
 
         let core_frame_len = config.core_frame_length;
         let core_rate = config.core_sampling_frequency();
-        let sampling_index = usac_sampling_index(core_rate);
+        // The scale factor band tables of a 768 sample frame are those of the sampling frequency
+        // for which 1024 samples last as long (ISO/IEC 23003-3 Table 85; libxaac).
+        let sampling_index = if core_frame_len == 768 {
+            usac_sampling_index(core_rate * 4 / 3)
+        }
+        else {
+            usac_sampling_index(core_rate)
+        };
 
         let filterbank = FdFilterbank::new(core_frame_len);
 
@@ -199,7 +206,7 @@ impl UsacDecoder {
 
                     Element::Sce(SceState {
                         target: targets[0],
-                        mps: Some((Mps212Decoder::new(*mps_cfg, core_frame_len / 32)?, targets[1])),
+                        mps: Some((Mps212Decoder::new(*mps_cfg, 32)?, targets[1])),
                         ch: FdChannelState::new(core_frame_len, sampling_index, NOISE_SEED_FIRST),
                         pcm: vec![0.0; core_frame_len],
                         sbr,
