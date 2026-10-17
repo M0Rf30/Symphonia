@@ -8,7 +8,7 @@
 //! The enhanced SBR (eSBR) of USAC.
 //!
 //! The SBR signal processing of HE-AAC is reused for the streams that have the same signal
-//! flow: the 2:1 SBR ratio, without harmonic transposition, predictive vector coding or
+//! flow: the 2:1, 8:3 and 4:1 SBR ratios, without harmonic transposition, predictive vector coding or
 //! inter-subband-sample temporal envelope shaping. The other eSBR configurations are rejected.
 
 use symphonia_core::errors::{Result, unsupported_error};
@@ -46,6 +46,7 @@ impl EsbrDecoder {
         let analysis_bands = match (ratio, core_len) {
             (UsacSbrRatio::Ratio2To1, 1024) => 32,
             (UsacSbrRatio::Ratio8To3, 768) => 24,
+            (UsacSbrRatio::Ratio4To1, 1024) => 16,
             _ => return unsupported_error("aac: usac sbr ratio is not yet implemented"),
         };
 
@@ -58,7 +59,7 @@ impl EsbrDecoder {
         let decoder = SbrDecoder::new_usac(output_rate, channels, analysis_bands)?;
 
         Ok(EsbrDecoder {
-            parser: UsacSbrParser::new(cfg, output_rate),
+            parser: UsacSbrParser::new(cfg, output_rate, analysis_bands == 16),
             decoder,
             channels,
             output_rate,

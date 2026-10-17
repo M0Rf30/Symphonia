@@ -33,6 +33,8 @@ use symphonia_common::mpeg::audio::usac::UsacSbrConfig;
 pub(crate) struct UsacSbrParser {
     cfg: UsacSbrConfig,
     fs_sbr: u32,
+    /// The 4:1 SBR ratio.
+    ratio4: bool,
     header: SbrHeader,
     /// A header was received, so that `bands` is valid.
     active: bool,
@@ -40,7 +42,7 @@ pub(crate) struct UsacSbrParser {
 }
 
 impl UsacSbrParser {
-    pub fn new(cfg: UsacSbrConfig, fs_sbr: u32) -> Self {
+    pub fn new(cfg: UsacSbrConfig, fs_sbr: u32, ratio4: bool) -> Self {
         let d = &cfg.dflt;
         let header = SbrHeader {
             amp_res: false,
@@ -60,7 +62,7 @@ impl UsacSbrParser {
             pre_proc: false,
         };
 
-        UsacSbrParser { cfg, fs_sbr, header, active: false, bands: None }
+        UsacSbrParser { cfg, fs_sbr, ratio4, header, active: false, bands: None }
     }
 
     /// Forget the header (after a decoder reset, the next frame is an independent one).
@@ -156,7 +158,7 @@ impl UsacSbrParser {
         }
 
         if !self.active || self.header.band_geometry_changed(&prev) {
-            self.bands = Some(self.header.derive_bands(self.fs_sbr)?);
+            self.bands = Some(self.header.derive_bands_usac(self.fs_sbr, self.ratio4)?);
         }
         self.active = true;
 

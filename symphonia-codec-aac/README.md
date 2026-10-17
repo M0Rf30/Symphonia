@@ -31,15 +31,15 @@ SSR (gain control and the polyphase quadrature filter) is not supported.
 USAC (audio object type 42, xHE-AAC) decodes its frequency-domain core coder with frames of 1024
 or 768 samples: arithmetic coded spectra, mid/side and complex stereo prediction, TNS, noise filling and
 `fac_data()` (applied when it follows an LPD frame). Pre-roll access units prime the decoder (only a decoder
-without history uses them). 2:1 and 8:3 enhanced SBR (the latter with a 768 sample core frame and a 24 band analysis
-bank; without harmonic transposition, PVC or inter-TES) is decoded. The linear-prediction (ACELP/TCX) core is decoded for single channel elements, including
+without history uses them). 2:1, 8:3 and 4:1 enhanced SBR (the latter two with a 24 and 16 band analysis bank, the 8:3
+ratio with a 768 sample core frame; without harmonic transposition, PVC or inter-TES) is decoded. The linear-prediction (ACELP/TCX) core is decoded for single channel elements, including
 the switching between it and the frequency-domain core (transition windows, forward aliasing
 cancellation and the stop-start window); a long window directly after an LPD frame is rejected.
 MPEG Surround 2-1-2 (`stereoConfigIndex` 1: a single core channel, eSBR, then the upmix of the QMF
 slots; phase coding, high rate mode, smoothing and decorrelation) is decoded and matches libxaac
 to better than 100 dB in the QMF domain and libfdk-aac to better than 50 dB. Its temporal shaping,
 residual coding and SBR after the upmix are not implemented.
-Linear-prediction channel pairs, 4:1 enhanced SBR, the other enhanced SBR tools and
+Linear-prediction channel pairs, the other enhanced SBR tools and
 time-warped MDCT are not implemented, and a stream or frame that needs one is rejected as
 unsupported. The output matches libfdk-aac to
 within 1 LSB for the FD streams tested; the LPD core output and the mixed FD/LPD core output match libxaac to better than 78 dB

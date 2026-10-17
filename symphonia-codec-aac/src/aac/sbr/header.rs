@@ -222,10 +222,28 @@ impl SbrHeader {
     /// parameters; it returns [`Error::SbrFreqBandInvalid`] for any
     /// §4.6.18.3.6-violating geometry.
     pub fn derive_bands(&self, fs_sbr: u32) -> Result<super::freq_bands::HiLoTables> {
-        let k0 = super::freq_bands::k0(fs_sbr, self.start_freq)?;
-        let k2 = super::freq_bands::k2(fs_sbr, self.stop_freq, k0)?;
-        let f_master = super::freq_bands::master_table(k0, k2, self.freq_scale, self.alter_scale)?;
-        super::freq_bands::HiLoTables::derive(&f_master, self.xover_band, self.noise_bands)
+        self.derive_bands_usac(fs_sbr, false)
+    }
+
+    /// [`Self::derive_bands`] for the 4:1 SBR ratio of USAC (`ratio4`), where `fs_sbr` is the
+    /// output rate and the low band spans at most 16 subbands.
+    pub fn derive_bands_usac(
+        &self,
+        fs_sbr: u32,
+        ratio4: bool,
+    ) -> Result<super::freq_bands::HiLoTables> {
+        use super::freq_bands::{HiLoTables, k0_usac, k2_usac, master_table_usac};
+
+        let k0 = k0_usac(fs_sbr, self.start_freq, ratio4)?;
+        let k2 = k2_usac(fs_sbr, self.stop_freq, k0, ratio4)?;
+        let f_master = master_table_usac(k0, k2, self.freq_scale, self.alter_scale, ratio4)?;
+        let tables = HiLoTables::derive(&f_master, self.xover_band, self.noise_bands)?;
+
+        if ratio4 && tables.k_x > 16 {
+            return Err(Error::SbrFreqBandInvalid);
+        }
+
+        Ok(tables)
     }
 }
 

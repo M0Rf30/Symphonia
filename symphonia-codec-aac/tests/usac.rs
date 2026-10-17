@@ -236,3 +236,17 @@ fn usac_sbr_8_3_matches_fdk() {
     let all = snr_db(reference, &samples);
     assert!(all >= 15.0, "signal to noise ratio {all:.1} dB, expected at least 15");
 }
+
+/// 4:1 enhanced SBR with a 1024 sample core frame (mono, 48 kHz output, 16 band analysis): 150
+/// frequency-domain access units, without the first one that settles the filter banks, compared
+/// with libfdk-aac.
+#[test]
+fn usac_sbr_4_1_matches_fdk() {
+    const OUT: usize = 4 * FRAME;
+
+    let samples = decode(include_bytes!("fixtures/usac_sbr41.bin"), 1, OUT);
+    let reference = include_bytes!("fixtures/usac_sbr41.s16");
+    let snr = snr_db(&reference[OUT * 2..], &samples[OUT..]);
+
+    assert!(snr >= 60.0, "signal to noise ratio {snr:.1} dB, expected at least 60");
+}

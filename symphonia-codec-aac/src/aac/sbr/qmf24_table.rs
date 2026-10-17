@@ -8,7 +8,7 @@
 //! The window of the 24 band analysis QMF bank of the 8:3 SBR ratio of USAC (ISO/IEC 23003-3
 //! 7.18). The 480 values are the Q31 coefficients of the libxaac decoder (`esbr_qmf_c_24`,
 //! Apache-2.0, see the `NOTICE` file); they are arranged for the sliding window of
-//! [`super::qmf::AnalysisQmf24`] and carry their own signs.
+//! [`super::qmf::AnalysisQmfSliding`] and carry their own signs.
 
 #[rustfmt::skip]
 pub(super) static QMF24_WINDOW_Q31: [i32; 480] = [

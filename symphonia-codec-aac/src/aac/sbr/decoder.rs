@@ -52,7 +52,9 @@ use super::element::EXTENSION_ID_PS;
 use super::env_adjust::{EnvAdjustState, EnvParams, adjust};
 use super::error::{SbrError as Error, SbrResult as Result};
 use super::extension::SbrExtensionData;
-use super::freq_bands::{HiLoTables, k0 as derive_k0, k2 as derive_k2, master_table};
+use super::freq_bands::{
+    HiLoTables, k0_usac as derive_k0, k2_usac as derive_k2, master_table_usac as master_table,
+};
 use super::header::SbrHeader;
 use super::hf_gen::{
     Patches, T_HF_ADJ, build_patches, chirp_factors, generate_hf, pre_flatten_gains,
@@ -63,7 +65,7 @@ use super::lp::{aliasing_degree, deg_patched};
 use super::ps::decoder::PsDecoder;
 use super::ps::hybrid::LOOKAHEAD;
 use super::qmf::{
-    AnalysisQmf, AnalysisQmf24, Complex, DownsampledSynthesisQmf, RealAnalysisQmf,
+    AnalysisQmf, AnalysisQmfSliding, Complex, DownsampledSynthesisQmf, RealAnalysisQmf,
     RealDownsampledSynthesisQmf, RealSynthesisQmf, SynthesisQmf,
 };
 use super::reconstruct::{EnvelopeScalefactors, NoiseScalefactors};
@@ -214,13 +216,13 @@ enum AnalysisBank {
     /// The low delay bank of ELD.
     Cldfb(CldfbAnalysis),
     /// The 24 band bank of the 8:3 ratio of USAC.
-    Complex24(AnalysisQmf24),
+    Sliding(AnalysisQmfSliding),
 }
 
 impl AnalysisBank {
     fn new(low_power: bool, eld: bool, bands: usize) -> Self {
-        if bands == 24 {
-            AnalysisBank::Complex24(AnalysisQmf24::new())
+        if bands == 24 || bands == 16 {
+            AnalysisBank::Sliding(AnalysisQmfSliding::new(bands))
         }
         else if eld {
             AnalysisBank::Cldfb(CldfbAnalysis::new())
@@ -236,7 +238,7 @@ impl AnalysisBank {
     fn push_slot(&mut self, samples: &[f64]) -> Result<[Complex; 32]> {
         match self {
             AnalysisBank::Complex(a) => a.push_slot(samples),
-            AnalysisBank::Complex24(a) => a.push_slot(samples),
+            AnalysisBank::Sliding(a) => a.push_slot(samples),
             AnalysisBank::Cldfb(a) => a.push_slot(samples),
             AnalysisBank::Real(a) => {
                 let w = a.push_slot(samples)?;
@@ -414,11 +416,17 @@ impl SbrDecoder {
     /// A fresh decoder for the enhanced SBR of USAC with `analysis_bands` analysis bands: 32
     /// for the 2:1 ratio, 24 for the 8:3 ratio. `fs_sbr` is the output rate.
     pub fn new_usac(fs_sbr: u32, num_channels: usize, analysis_bands: usize) -> Result<Self> {
-        if analysis_bands != 32 && analysis_bands != 24 {
+        if !matches!(analysis_bands, 32 | 24 | 16) {
             return Err(Error::SbrQmfInvalid);
         }
         let mut dec = Self::new(fs_sbr, num_channels)?;
         dec.geo.analysis_bands = analysis_bands;
+        if analysis_bands == 16 {
+            // The 4:1 ratio: 64 slots of 16 core samples, which the HF generator reaches 12
+            // slots back into.
+            dec.geo.rate = 4;
+            dec.geo.overlap = 12;
+        }
         dec.rebuild_banks();
         Ok(dec)
     }
@@ -618,11 +626,12 @@ impl SbrDecoder {
             Some(prev) => prev.band_geometry_changed(&ext.header),
         };
         if reset {
-            let k0v = derive_k0(self.fs_sbr, ext.header.start_freq)?;
-            let k2v = derive_k2(self.fs_sbr, ext.header.stop_freq, k0v)?;
-            let f_master = master_table(k0v, k2v, ext.header.freq_scale, ext.header.alter_scale)?;
-            let bands =
-                HiLoTables::derive(&f_master, ext.header.xover_band, ext.header.noise_bands)?;
+            let ratio4 = self.geo.rate == 4;
+            let k0v = derive_k0(self.fs_sbr, ext.header.start_freq, ratio4)?;
+            let k2v = derive_k2(self.fs_sbr, ext.header.stop_freq, k0v, ratio4)?;
+            let f_master =
+                master_table(k0v, k2v, ext.header.freq_scale, ext.header.alter_scale, ratio4)?;
+            let bands = ext.header.derive_bands_usac(self.fs_sbr, ratio4)?;
             let patches = build_patches(&f_master, k0v, bands.k_x, bands.m, self.fs_sbr)?;
             self.f_table_lim = limiter_table(
                 &bands,

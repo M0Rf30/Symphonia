@@ -104,7 +104,7 @@ fn offset_row(fs_sbr: u32) -> Option<&'static [i32; 16]> {
 
 /// §4.6.18.3.2.1 `startMin = NINT(c · 128 / FsSBR)`, with the three
 /// `c ∈ {3000, 4000, 5000}` bands keyed by `FsSBR`.
-fn start_min(fs_sbr: u32) -> i32 {
+fn start_min(fs_sbr: u32, factor: f64) -> i32 {
     let fs = fs_sbr as f64;
     let c = if fs_sbr < 32000 {
         3000.0
@@ -115,12 +115,12 @@ fn start_min(fs_sbr: u32) -> i32 {
     else {
         5000.0
     };
-    nint(c * 128.0 / fs)
+    nint(c * factor / fs)
 }
 
 /// §4.6.18.3.2.1 `stopMin = NINT(c · 128 / FsSBR)`, with the three
 /// `c ∈ {6000, 8000, 10000}` bands keyed by `FsSBR`.
-fn stop_min(fs_sbr: u32) -> i32 {
+fn stop_min(fs_sbr: u32, factor: f64) -> i32 {
     let fs = fs_sbr as f64;
     let c = if fs_sbr < 32000 {
         6000.0
@@ -131,7 +131,7 @@ fn stop_min(fs_sbr: u32) -> i32 {
     else {
         10000.0
     };
-    nint(c * 128.0 / fs)
+    nint(c * factor / fs)
 }
 
 /// §4.6.18.3.2.1 low boundary `k0`.
@@ -140,13 +140,22 @@ fn stop_min(fs_sbr: u32) -> i32 {
 /// header field (`0 ..= 15`); `fs_sbr` must be one of the tabulated SBR
 /// internal sample rates. Returns [`Error::SbrFreqBandInvalid`] for an
 /// out-of-range `bs_start_freq` or an unsupported `fs_sbr`.
+#[cfg(test)]
 pub fn k0(fs_sbr: u32, bs_start_freq: u8) -> Result<i32> {
-    let row = offset_row(fs_sbr).ok_or(Error::SbrFreqBandInvalid)?;
+    k0_usac(fs_sbr, bs_start_freq, false)
+}
+
+/// [`k0`] of the 4:1 SBR ratio of USAC (`ratio4`): the tables are those of half the output rate
+/// with `startMin = NINT(c · 64 / FsSBR)` (ISO/IEC 23003-3 7.5.5; libxaac
+/// `ixheaacd_calc_start_band`). `fs_sbr` is the output rate.
+pub fn k0_usac(fs_sbr: u32, bs_start_freq: u8, ratio4: bool) -> Result<i32> {
+    let (fs, factor) = if ratio4 { (fs_sbr / 2, 64.0) } else { (fs_sbr, 128.0) };
+    let row = offset_row(fs).ok_or(Error::SbrFreqBandInvalid)?;
     let idx = bs_start_freq as usize;
     if idx >= row.len() {
         return Err(Error::SbrFreqBandInvalid);
     }
-    Ok(start_min(fs_sbr) + row[idx])
+    Ok(start_min(fs, factor) + row[idx])
 }
 
 /// §4.6.18.3.2.1 high boundary `k2`.
@@ -157,7 +166,14 @@ pub fn k0(fs_sbr: u32, bs_start_freq: u8) -> Result<i32> {
 /// (64/stopMin)^(p/13))` for `0 <= p <= 12` and `stopDkSort` is `stopDk`
 /// sorted ascending. `bs_stop_freq == 14` gives `min(64, 2·k0)` and
 /// `== 15` gives `min(64, 3·k0)`.
+#[cfg(test)]
 pub fn k2(fs_sbr: u32, bs_stop_freq: u8, k0_val: i32) -> Result<i32> {
+    k2_usac(fs_sbr, bs_stop_freq, k0_val, false)
+}
+
+/// [`k2`] of the 4:1 SBR ratio of USAC (`ratio4`), see [`k0_usac`].
+pub fn k2_usac(fs_sbr: u32, bs_stop_freq: u8, k0_val: i32, ratio4: bool) -> Result<i32> {
+    let (fs_sbr, factor) = if ratio4 { (fs_sbr / 2, 64.0) } else { (fs_sbr, 128.0) };
     if bs_stop_freq > 15 {
         return Err(Error::SbrFreqBandInvalid);
     }
@@ -165,7 +181,7 @@ pub fn k2(fs_sbr: u32, bs_stop_freq: u8, k0_val: i32) -> Result<i32> {
         14 => (2 * k0_val).min(64),
         15 => (3 * k0_val).min(64),
         _ => {
-            let stop_min_v = stop_min(fs_sbr);
+            let stop_min_v = stop_min(fs_sbr, factor);
             if stop_min_v <= 0 {
                 return Err(Error::SbrFreqBandInvalid);
             }
@@ -199,22 +215,42 @@ pub fn k2(fs_sbr: u32, bs_stop_freq: u8, k0_val: i32) -> Result<i32> {
 /// * `bs_freq_scale ∈ {0, 1, 2, 3}` (0 = no warping/linear,
 ///   1/2/3 select `bands ∈ {12, 10, 8}`).
 /// * `bs_alter_scale ∈ {0, 1}`.
+#[cfg(test)]
 pub fn master_table(
     k0_val: i32,
     k2_val: i32,
     bs_freq_scale: u8,
     bs_alter_scale: bool,
 ) -> Result<Vec<i32>> {
+    master_table_usac(k0_val, k2_val, bs_freq_scale, bs_alter_scale, false)
+}
+
+/// [`master_table`] of the 4:1 SBR ratio of USAC (`ratio4`): the number of bands per octave is
+/// limited to `k0` and no band may be wider than `k0 - 2` (libxaac
+/// `ixheaacd_calc_master_frq_bnd_tbl`).
+pub fn master_table_usac(
+    k0_val: i32,
+    k2_val: i32,
+    bs_freq_scale: u8,
+    bs_alter_scale: bool,
+    ratio4: bool,
+) -> Result<Vec<i32>> {
     if k2_val <= k0_val || bs_freq_scale > 3 {
         return Err(Error::SbrFreqBandInvalid);
     }
 
-    if bs_freq_scale == 0 {
-        master_linear(k0_val, k2_val, bs_alter_scale)
+    let table = if bs_freq_scale == 0 {
+        master_linear(k0_val, k2_val, bs_alter_scale)?
     }
     else {
-        master_warped(k0_val, k2_val, bs_freq_scale, bs_alter_scale)
+        master_warped(k0_val, k2_val, bs_freq_scale, bs_alter_scale, ratio4)?
+    };
+
+    if ratio4 && table.windows(2).take(table.len() - 2).any(|w| w[1] - w[0] > k0_val - 2) {
+        return Err(Error::SbrFreqBandInvalid);
     }
+
+    Ok(table)
 }
 
 /// Figure 4.39 — `fMaster` for `bs_freq_scale == 0`.
@@ -270,9 +306,13 @@ fn master_warped(
     k2_val: i32,
     bs_freq_scale: u8,
     bs_alter_scale: bool,
+    ratio4: bool,
 ) -> Result<Vec<i32>> {
     // temp1 = {12, 10, 8}; bands = temp1[bs_freq_scale - 1].
-    let bands = [12.0, 10.0, 8.0][(bs_freq_scale - 1) as usize];
+    let mut bands = [12.0, 10.0, 8.0][(bs_freq_scale - 1) as usize];
+    if ratio4 && k0_val < bands as i32 {
+        bands = f64::from(k0_val - (k0_val & 1));
+    }
     // temp2 = {1.0, 1.3}; warp = temp2[bs_alter_scale].
     let warp = if bs_alter_scale { 1.3 } else { 1.0 };
 
@@ -525,19 +565,19 @@ mod tests {
     fn start_stop_min_44100() {
         // 44.1 kHz core -> FsSBR = 88200 (> 64000): c = 5000 / 10000.
         // startMin = NINT(5000 * 128 / 88200) = NINT(7.256...) = 7.
-        assert_eq!(start_min(88200), 7);
+        assert_eq!(start_min(88200, 128.0), 7);
         // stopMin = NINT(10000 * 128 / 88200) = NINT(14.51...) = 15.
-        assert_eq!(stop_min(88200), 15);
+        assert_eq!(stop_min(88200, 128.0), 15);
     }
 
     #[test]
     fn start_min_band_thresholds() {
         // FsSBR < 32000 -> c = 3000. FsSBR = 24000:
         // NINT(3000 * 128 / 24000) = NINT(16.0) = 16.
-        assert_eq!(start_min(24000), 16);
+        assert_eq!(start_min(24000, 128.0), 16);
         // 32000 <= FsSBR < 64000 -> c = 4000. FsSBR = 44100:
         // NINT(4000 * 128 / 44100) = NINT(11.61...) = 12.
-        assert_eq!(start_min(44100), 12);
+        assert_eq!(start_min(44100, 128.0), 12);
     }
 
     #[test]

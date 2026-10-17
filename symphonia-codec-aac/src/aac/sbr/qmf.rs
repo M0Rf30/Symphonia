@@ -642,13 +642,16 @@ impl AnalysisQmf {
     }
 }
 
-/// The 24 band complex analysis QMF bank of the 8:3 SBR ratio of USAC (ISO/IEC 23003-3 7.18).
+/// The 24 band (8:3 SBR ratio) and 16 band (4:1) complex analysis QMF banks of USAC (ISO/IEC
+/// 23003-3 7.18).
 ///
-/// It is the bank of [`AnalysisQmf`] for `M = 24` bands, with a window that slides over the
-/// 480 coefficients of the prototype by 24 values per slot, and the modulation scaled by
-/// `64 / M`. The structure follows the libxaac decoder (`ixheaacd_esbr_qmfanal32_winadd`).
+/// They are the bank of [`AnalysisQmf`] for `M` bands, with a window that slides over the
+/// coefficients of the prototype per slot, and the modulation scaled by `64 / M`. The structure
+/// follows the libxaac decoder (`ixheaacd_esbr_qmfanal32_winadd`).
 #[derive(Debug, Clone)]
-pub struct AnalysisQmf24 {
+pub struct AnalysisQmfSliding {
+    /// The bands: 24 or 16.
+    n: usize,
     /// The ring buffer of the last ten blocks of input samples.
     state: [f64; 240],
     /// The write position of the next block.
@@ -657,73 +660,115 @@ pub struct AnalysisQmf24 {
     odd: bool,
     /// The offsets of the two window halves.
     win: [usize; 2],
+    /// The window, scaled to `1`.
+    window: &'static [f64],
+    /// The distance of the taps of the window that are used in one slot.
+    stride: usize,
+    /// The advance of the window offsets per slot.
+    step: usize,
     m: &'static AnalysisMatrix,
 }
 
-impl Default for AnalysisQmf24 {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl AnalysisQmf24 {
-    const BANDS: usize = 24;
-
-    /// A fresh bank with an all-zero history.
+impl AnalysisQmfSliding {
+    /// A fresh bank of `bands` (24 or 16) with an all-zero history.
     #[must_use]
-    pub fn new() -> Self {
-        static M: LazyLock<AnalysisMatrix> = LazyLock::new(|| {
-            AnalysisMatrix::new(24, 48, 64.0 / 24.0, |k, n| {
-                // The time offset of the 32 band bank (`0.5`) scaled by `24 / 32`.
-                core::f64::consts::PI / 48.0 * (k + 0.5) * (2.0 * n - 0.375)
-            })
-        });
-        AnalysisQmf24 { state: [0.0; 240], pos: 0, odd: false, win: [0, Self::BANDS], m: &M }
-    }
-
-    /// Consume the next 24 time samples and return the 24 complex subband samples of the slot
-    /// (the entries above them are zero).
-    pub fn push_slot(&mut self, samples: &[f64]) -> Result<[Complex; 32]> {
-        const N: usize = AnalysisQmf24::BANDS;
-        static WINDOW: LazyLock<Vec<f64>> = LazyLock::new(|| {
+    pub fn new(bands: usize) -> Self {
+        static W24: LazyLock<Vec<f64>> = LazyLock::new(|| {
             super::qmf24_table::QMF24_WINDOW_Q31
                 .iter()
                 .map(|&c| f64::from(c) / 2147483648.0)
                 .collect()
         });
+        static W16: LazyLock<Vec<f64>> = LazyLock::new(|| {
+            super::qmf16_table::QMF16_WINDOW_Q31
+                .iter()
+                .map(|&c| f64::from(c) / 2147483648.0)
+                .collect()
+        });
+        // The time offset of the 32 band bank (`0.5`) scaled by `n / 32`.
+        static M24: LazyLock<AnalysisMatrix> = LazyLock::new(|| {
+            AnalysisMatrix::new(24, 48, 64.0 / 24.0, |k, n| {
+                core::f64::consts::PI / 48.0 * (k + 0.5) * (2.0 * n - 0.375)
+            })
+        });
+        static M16: LazyLock<AnalysisMatrix> = LazyLock::new(|| {
+            AnalysisMatrix::new(16, 32, 64.0 / 16.0, |k, n| {
+                core::f64::consts::PI / 32.0 * (k + 0.5) * (2.0 * n - 0.25)
+            })
+        });
 
-        if samples.len() != N {
+        if bands == 16 {
+            AnalysisQmfSliding {
+                n: 16,
+                state: [0.0; 240],
+                pos: 0,
+                odd: false,
+                win: [0, 64],
+                window: &W16,
+                stride: 4,
+                step: 64,
+                m: &M16,
+            }
+        }
+        else {
+            AnalysisQmfSliding {
+                n: 24,
+                state: [0.0; 240],
+                pos: 0,
+                odd: false,
+                win: [0, 24],
+                window: &W24,
+                stride: 1,
+                step: 24,
+                m: &M24,
+            }
+        }
+    }
+
+    /// Consume the next `n` time samples and return the complex subband samples of the slot
+    /// (the entries above them are zero).
+    pub fn push_slot(&mut self, samples: &[f64]) -> Result<[Complex; 32]> {
+        let n_bands = self.n;
+
+        if samples.len() != n_bands {
             return Err(Error::SbrQmfInvalid);
         }
 
         for (z, s) in samples.iter().enumerate() {
-            self.state[self.pos + N - 1 - z] = *s;
+            self.state[self.pos + n_bands - 1 - z] = *s;
         }
 
-        let (s1, s2) = if self.odd { (N, 0) } else { (0, N) };
+        let (s1, s2) = if self.odd { (n_bands, 0) } else { (0, n_bands) };
         let [w1, w2] = self.win;
 
-        let mut u = [0.0f64; 2 * N];
-        for n in 0..N {
+        let mut u = [0.0f64; 48];
+        for n in 0..n_bands {
             for j in 0..5 {
-                u[n] += self.state[s1 + n + 2 * N * j] * WINDOW[w1 + n + 2 * N * j];
-                u[n + N] += self.state[s2 + n + 2 * N * j] * WINDOW[w2 + n + 2 * N * j];
+                let t = self.stride * (n + 2 * n_bands * j);
+                u[n] += self.state[s1 + n + 2 * n_bands * j] * self.window[w1 + t];
+                u[n + n_bands] += self.state[s2 + n + 2 * n_bands * j] * self.window[w2 + t];
             }
         }
 
-        self.pos = if self.pos == 0 { 10 * N - N } else { self.pos - N };
+        self.pos = if self.pos == 0 { 10 * n_bands - n_bands } else { self.pos - n_bands };
         self.odd = !self.odd;
 
         // Advance both halves, then swap them; restart when the window would run out.
-        let (a, b) = (w1 + N, w2 + N);
+        let (a, b) = (w1 + self.step, w2 + self.step);
         self.win = [b, a];
-        if a > 10 * N {
-            self.win = [0, N];
+        if a > 10 * self.step {
+            self.win = [0, self.step];
         }
 
-        let w = analyse_complex::<N>(self.m, &u);
         let mut out = [Complex::default(); 32];
-        out[..N].copy_from_slice(&w);
+        if n_bands == 16 {
+            let w = analyse_complex::<16>(self.m, &u[..32]);
+            out[..16].copy_from_slice(&w);
+        }
+        else {
+            let w = analyse_complex::<24>(self.m, &u);
+            out[..24].copy_from_slice(&w);
+        }
         Ok(out)
     }
 }

@@ -65,6 +65,7 @@ mod lp;
 mod noise_table;
 mod ps;
 mod qmf;
+mod qmf16_table;
 mod qmf24_table;
 mod reconstruct;
 mod time_grid;
