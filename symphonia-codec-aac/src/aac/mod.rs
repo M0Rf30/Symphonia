@@ -302,7 +302,7 @@ impl AacDecoder {
             }
         }
         let supported = match asc.object_type {
-            AudioObjectType::Lc => asc.samples == 1024,
+            AudioObjectType::Lc => asc.samples == 1024 || asc.samples == 960,
             AudioObjectType::ErAacLd | AudioObjectType::ErAacEld => {
                 asc.samples == 512 || asc.samples == 480
             }
@@ -322,6 +322,11 @@ impl AacDecoder {
         }
 
         // SBR with AAC LD, and the HE-AAC v2 parametric stereo tool with ELD, are not defined.
+        // The SBR tool is only implemented for the 1024 sample frames of AAC-LC.
+        if asc.object_type == AudioObjectType::Lc && asc.samples != 1024 && asc.sbr_present {
+            return unsupported_error("aac: sbr with 960 sample frames");
+        }
+
         if asc.object_type == AudioObjectType::ErAacLd && asc.sbr_present {
             return unsupported_error("aac: sbr with aac ld");
         }
@@ -421,6 +426,9 @@ impl AacDecoder {
             }
         }
         else {
+        else if asc.samples == 960 {
+            GASubbandInfo::find_960(asc.sample_rate)
+        }
             GASubbandInfo::find(asc.sample_rate)
         };
 
@@ -605,6 +613,10 @@ impl AacDecoder {
 
                             if self.sbr.is_none() {
                                 // Implicit signalling: the ASC/ADTS header declared plain LC at
+                                if self.asc.samples != 1024 {
+                                    return unsupported_error("aac: sbr with 960 sample frames");
+                                }
+
                                 // the core rate, and this is the first EXT_SBR_DATA payload
                                 // seen. Assume the standard 2× dual-rate ratio (no
                                 // `extensionSamplingFrequencyIndex` is available outside the

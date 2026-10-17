@@ -16,6 +16,7 @@ Changes since upstream `v0.6.1`.
 
 ### Added
 
+- AAC-LC with 960 sample frames (`frameLengthFlag`), without SBR (`symphonia-codec-aac`).
 - Decoder: Dolby AC-4 (`symphonia-codec-ac4`, feature `ac4`): ASF, A-SPX, A-CPL-less stereo, 5.0 and
   5.1 streams, in MPEG-TS (registration or DVB descriptor), MP4 (`ac-4`/`dac4`), Matroska (`A_AC4`)
   and as sync frames. Matches FFmpeg's `ac4` decoder at about 131 dB SNR.

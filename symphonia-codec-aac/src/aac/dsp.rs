@@ -20,9 +20,6 @@ use crate::aac::eld_window::{ELD_WINDOW_480, ELD_WINDOW_512};
 use symphonia_core::dsp::complex::Complex64;
 use symphonia_core::dsp::window::{WindowType, generate_window};
 
-const SHORT_WIN_POINT0: usize = 512 - 64;
-const SHORT_WIN_POINT1: usize = 512 + 64;
-
 /// The length of the overlap-add state of a channel for an audio object type.
 pub fn delay_len(aot: AudioObjectType) -> usize {
     match aot {
@@ -141,7 +138,7 @@ impl MixedFft {
 
 /// An IMDCT of any (even) number of spectral samples, with the same definition and scaling as
 /// [`Imdct`]: through a DCT-IV, which is computed with an FFT of half the size.
-struct ImdctAny {
+pub(super) struct ImdctAny {
     n: usize,
     scale: f64,
     /// `exp(-i pi (j + 1/8) / n)`, the twiddle factor before and after the FFT.
@@ -154,7 +151,7 @@ struct ImdctAny {
 }
 
 impl ImdctAny {
-    fn new(n: usize, scale: f64) -> Self {
+    pub(super) fn new(n: usize, scale: f64) -> Self {
         assert!(n >= 2 && n % 2 == 0);
 
         let half = n / 2;
@@ -177,7 +174,7 @@ impl ImdctAny {
         }
     }
 
-    fn imdct(&mut self, spec: &[f32], out: &mut [f32]) {
+    pub(super) fn imdct(&mut self, spec: &[f32], out: &mut [f32]) {
         let n = self.n;
         let half = n / 2;
 
@@ -259,14 +256,17 @@ struct LdDsp {
 
 pub struct Dsp {
     ld: Option<LdDsp>,
-    kbd_long_win: [f32; 1024],
-    kbd_short_win: [f32; 128],
-    sine_long_win: [f32; 1024],
-    sine_short_win: [f32; 128],
-    imdct_long: Imdct,
-    imdct_short: Imdct,
-    pcm_long: [f32; 2048],
-    pcm_short: [f32; 1152],
+    /// The number of samples of a long block: 1024, or 960 for AAC-LC with a short frame length.
+    /// A short block has an eighth of it.
+    n: usize,
+    kbd_long_win: Vec<f32>,
+    kbd_short_win: Vec<f32>,
+    sine_long_win: Vec<f32>,
+    sine_short_win: Vec<f32>,
+    imdct_long: LdImdct,
+    imdct_short: LdImdct,
+    pcm_long: Vec<f32>,
+    pcm_short: Vec<f32>,
 }
 
 impl Dsp {
@@ -313,25 +313,31 @@ impl Dsp {
             _ => None,
         };
 
-        let mut kbd_long_win: [f32; 1024] = [0.0; 1024];
-        let mut kbd_short_win: [f32; 128] = [0.0; 128];
-        generate_window(WindowType::KaiserBessel(4.0), 1.0, 1024, true, &mut kbd_long_win);
-        generate_window(WindowType::KaiserBessel(6.0), 1.0, 128, true, &mut kbd_short_win);
-        let mut sine_long_win: [f32; 1024] = [0.0; 1024];
-        let mut sine_short_win: [f32; 128] = [0.0; 128];
-        generate_window(WindowType::Sine, 1.0, 1024, true, &mut sine_long_win);
-        generate_window(WindowType::Sine, 1.0, 128, true, &mut sine_short_win);
+        // The block sizes of the filterbank of AAC-LC and its relatives: 1024 and 128 samples, or
+        // 960 and 120 with `frameLengthFlag` (ISO/IEC 14496-3 4.6.11.3.1).
+        let n = if frame_len == 960 { 960 } else { 1024 };
+        let short = n / 8;
+
+        let mut kbd_long_win = vec![0.0; n];
+        let mut kbd_short_win = vec![0.0; short];
+        generate_window(WindowType::KaiserBessel(4.0), 1.0, n, true, &mut kbd_long_win);
+        generate_window(WindowType::KaiserBessel(6.0), 1.0, short, true, &mut kbd_short_win);
+        let mut sine_long_win = vec![0.0; n];
+        let mut sine_short_win = vec![0.0; short];
+        generate_window(WindowType::Sine, 1.0, n, true, &mut sine_long_win);
+        generate_window(WindowType::Sine, 1.0, short, true, &mut sine_short_win);
 
         Self {
             ld,
+            n,
             kbd_long_win,
             kbd_short_win,
             sine_long_win,
             sine_short_win,
-            imdct_long: Imdct::new_scaled(1024, 1.0 / 2048.0),
-            imdct_short: Imdct::new_scaled(128, 1.0 / 256.0),
-            pcm_long: [0.0; 2048],
-            pcm_short: [0.0; 1152],
+            imdct_long: LdImdct::new(n, 1.0 / (2 * n) as f64),
+            imdct_short: LdImdct::new(short, 1.0 / (2 * short) as f64),
+            pcm_long: vec![0.0; 2 * n],
+            pcm_short: vec![0.0; n + short],
         }
     }
 
@@ -351,8 +357,10 @@ impl Dsp {
             (&self.sine_long_win, &self.kbd_long_win)
         };
 
-        for (i, d) in delay.iter_mut().take(1024).enumerate() {
-            *d *= to[1023 - i] / from[1023 - i];
+        let n = self.n;
+
+        for (i, d) in delay.iter_mut().take(n).enumerate() {
+            *d *= to[n - 1 - i] / from[n - 1 - i];
         }
     }
 
@@ -375,29 +383,40 @@ impl Dsp {
             false => (&self.sine_long_win, &self.sine_short_win),
         };
 
-        // Inverse MDCT
+        let n = self.n;
+        let short = n / 8;
+        // The short windows overlap the middle of the long block: they span the samples from
+        // `point0` to `point1` of the half of the window that they slope over.
+        let point0 = n / 2 - short / 2;
+        let point1 = n / 2 + short / 2;
+
+        // Inverse MDCT. The spectra of the short windows are `128` samples apart, though they
+        // have `short` samples.
         if seq != EIGHT_SHORT_SEQUENCE {
-            self.imdct_long.imdct(coeffs, &mut self.pcm_long);
+            self.imdct_long.imdct(&coeffs[..n], &mut self.pcm_long);
         }
         else {
-            for (ain, aout) in coeffs.chunks_exact(128).zip(self.pcm_long.chunks_exact_mut(256)) {
-                self.imdct_short.imdct(ain, aout);
+            for (ain, aout) in
+                coeffs.chunks_exact(128).zip(self.pcm_long.chunks_exact_mut(2 * short))
+            {
+                self.imdct_short.imdct(&ain[..short], aout);
             }
 
             // Zero the eight short sequence buffer.
             self.pcm_short.fill(0.0);
 
-            for (w, src) in self.pcm_long.chunks_exact(256).enumerate() {
+            for (w, src) in self.pcm_long.chunks_exact(2 * short).enumerate() {
                 if w > 0 {
-                    for i in 0..128 {
-                        self.pcm_short[w * 128 + i] += src[i] * short_win[i];
-                        self.pcm_short[w * 128 + i + 128] += src[i + 128] * short_win[127 - i];
+                    for i in 0..short {
+                        self.pcm_short[w * short + i] += src[i] * short_win[i];
+                        self.pcm_short[w * short + i + short] +=
+                            src[i + short] * short_win[short - 1 - i];
                     }
                 }
                 else {
-                    for i in 0..128 {
+                    for i in 0..short {
                         self.pcm_short[i] = src[i] * prev_short_win[i];
-                        self.pcm_short[i + 128] = src[i + 128] * short_win[127 - i];
+                        self.pcm_short[i + short] = src[i + short] * short_win[short - 1 - i];
                     }
                 }
             }
@@ -406,24 +425,24 @@ impl Dsp {
         // Output new audio samples.
         match seq {
             ONLY_LONG_SEQUENCE | LONG_START_SEQUENCE => {
-                for i in 0..1024 {
+                for i in 0..n {
                     dst[i] = delay[i] + (self.pcm_long[i] * prev_long_win[i]);
                 }
             }
             EIGHT_SHORT_SEQUENCE => {
-                dst[..SHORT_WIN_POINT0].copy_from_slice(&delay[..SHORT_WIN_POINT0]);
+                dst[..point0].copy_from_slice(&delay[..point0]);
 
-                for i in SHORT_WIN_POINT0..1024 {
-                    dst[i] = delay[i] + self.pcm_short[i - SHORT_WIN_POINT0];
+                for i in point0..n {
+                    dst[i] = delay[i] + self.pcm_short[i - point0];
                 }
             }
             LONG_STOP_SEQUENCE => {
-                dst[..SHORT_WIN_POINT0].copy_from_slice(&delay[..SHORT_WIN_POINT0]);
+                dst[..point0].copy_from_slice(&delay[..point0]);
 
-                for i in SHORT_WIN_POINT0..SHORT_WIN_POINT1 {
-                    dst[i] = delay[i] + self.pcm_long[i] * prev_short_win[i - SHORT_WIN_POINT0];
+                for i in point0..point1 {
+                    dst[i] = delay[i] + self.pcm_long[i] * prev_short_win[i - point0];
                 }
-                for i in SHORT_WIN_POINT1..1024 {
+                for i in point1..n {
                     dst[i] = delay[i] + self.pcm_long[i];
                 }
             }
@@ -433,27 +452,26 @@ impl Dsp {
         // Save delay for overlap.
         match seq {
             ONLY_LONG_SEQUENCE | LONG_STOP_SEQUENCE => {
-                for i in 0..1024 {
-                    delay[i] = self.pcm_long[i + 1024] * long_win[1023 - i];
+                for i in 0..n {
+                    delay[i] = self.pcm_long[i + n] * long_win[n - 1 - i];
                 }
             }
             EIGHT_SHORT_SEQUENCE => {
-                for i in 0..SHORT_WIN_POINT1 {
+                for i in 0..point1 {
                     // Last part is already windowed.
-                    delay[i] = self.pcm_short[i + 512 + 64];
+                    delay[i] = self.pcm_short[i + n / 2 + short / 2];
                 }
 
-                delay[SHORT_WIN_POINT1..].fill(0.0);
+                delay[point1..].fill(0.0);
             }
             LONG_START_SEQUENCE => {
-                delay[..SHORT_WIN_POINT0]
-                    .copy_from_slice(&self.pcm_long[1024..(SHORT_WIN_POINT0 + 1024)]);
+                delay[..point0].copy_from_slice(&self.pcm_long[n..(point0 + n)]);
 
-                for i in SHORT_WIN_POINT0..SHORT_WIN_POINT1 {
-                    delay[i] = self.pcm_long[i + 1024] * short_win[127 - (i - SHORT_WIN_POINT0)];
+                for i in point0..point1 {
+                    delay[i] = self.pcm_long[i + n] * short_win[short - 1 - (i - point0)];
                 }
 
-                delay[SHORT_WIN_POINT1..].fill(0.0);
+                delay[point1..].fill(0.0);
             }
             _ => unreachable!(),
         };

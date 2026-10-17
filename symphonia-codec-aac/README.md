@@ -19,6 +19,10 @@ Parametric Stereo is only supported when the whole stream is a single mono `SCE`
 element (the near-universal real-world HE-AAC v2 shape); PS combined with any other channel
 configuration is rejected as unsupported rather than guessed at.
 
+AAC-LC also decodes frames of 960 samples (`frameLengthFlag` of the audio specific config, with
+960 sample long and 120 sample short windows); SBR with 960 sample frames is rejected as
+unsupported.
+
 AAC-LD (audio object type 23) and AAC-ELD (audio object type 39) are decoded with frame lengths
 of 512 and 480 samples, for any channel configuration of 1-7. Their low overlap window, the low
 delay filterbank, and their scale factor bands and syntax (which has no element identifiers and
