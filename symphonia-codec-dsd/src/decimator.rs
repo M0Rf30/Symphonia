@@ -99,6 +99,15 @@ impl DecimationConfig {
             _ => 8,
         };
 
+        // The exact integer CIC filter has a DC gain of `decimation^stages`, which must fit.
+        if u32::try_from(cic_stages)
+            .ok()
+            .and_then(|n| (cic_decimation as u64).checked_pow(n))
+            .is_none_or(|gain| gain > 1 << 56)
+        {
+            return decode_error("dsd: PCM rate is too low for the DSD rate");
+        }
+
         debug!(
             "DSD decimation config: {} -> {} (total: {}, CIC: {}x{}, FIR: {} stages)",
             dsd_rate, pcm_rate, total_decimation, cic_decimation, cic_stages, fir_stages
@@ -449,6 +458,13 @@ mod tests {
     use std::f64::consts::PI;
 
     const DSD64: u32 = 2_822_400;
+
+    #[test]
+    fn rejects_ratios_whose_cic_gain_overflows() {
+        // 2 * 1411 leaves one FIR stage and a CIC decimation of 1411, and 1411^8 overflows.
+        assert!(DecimationConfig::new(2 * 1411 * 100, 100).is_err());
+        assert!(DecimationConfig::new(DSD64, 44_100).is_ok());
+    }
 
     /// Modulate a sine of `freq` Hz and `amplitude` with a second order 1-bit delta-sigma
     /// modulator, to `seconds` of DSD64 packed with the first sample in the most significant bit.
