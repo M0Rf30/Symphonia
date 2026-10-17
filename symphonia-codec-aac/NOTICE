@@ -51,6 +51,13 @@ values were extracted from the libxaac decoder sources
 tables; see the file header of `tables.rs` for the per-table ISO/IEC
 23003-3 clause citations.
 
+The linear-prediction-domain core (`src/aac/usac/lpd/`) is a Rust port of the corresponding
+libxaac decoder routines (`ixheaacd_acelp_bitparse.c`, `ixheaacd_lpc.c`, `ixheaacd_lpc_dec.c`,
+`ixheaacd_avq_dec.c`, `ixheaacd_acelp_decode.c`, `ixheaacd_acelp_tools.c`,
+`ixheaacd_acelp_mdct.c`, `ixheaacd_tcx_fwd_alcnx.c`, `ixheaacd_tcx_fwd_mdct.c` and
+`ixheaacd_fwd_alias_cnx.c`) and its tables (`lpd/tables.rs`) were extracted from the libxaac
+sources. libxaac is licensed under the Apache License, Version 2.0 as above.
+
 ----------------------------------------------------------------------
 
 The USAC decoder's behaviour was checked against, and in places follows, the Fraunhofer FDK AAC

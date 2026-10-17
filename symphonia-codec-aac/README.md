@@ -30,10 +30,14 @@ SSR (gain control and the polyphase quadrature filter) is not supported.
 
 USAC (audio object type 42, xHE-AAC) decodes its frequency-domain core coder with frames of 1024
 samples: arithmetic coded spectra, mid/side and complex stereo prediction, TNS, noise filling and
-`fac_data()` (parsed, not applied). Pre-roll access units prime the decoder. The linear-prediction
-(ACELP/TCX) core, enhanced SBR, MPEG Surround 2-1-2 and time-warped MDCT are not implemented, and a
-stream or frame that needs one is rejected as unsupported. The output matches libfdk-aac to within
-1 LSB for the FD streams tested.
+`fac_data()` (parsed, not applied). Pre-roll access units prime the decoder (only a decoder
+without history uses them). 2:1 enhanced SBR (without harmonic transposition, PVC or inter-TES) is
+decoded. The linear-prediction (ACELP/TCX) core is decoded for single channel elements whose
+frames are all linear-prediction coded; switching between it and the frequency-domain core,
+linear-prediction channel pairs, MPEG Surround 2-1-2 and time-warped MDCT are not implemented, and
+a stream or frame that needs one is rejected as unsupported. The output matches libfdk-aac to
+within 1 LSB for the FD streams tested; the LPD core output matches libxaac to better than 78 dB
+and the final 2:1 eSBR output matches libfdk-aac to about 37 dB signal to noise ratio.
 
 AAC-LD (audio object type 23) and AAC-ELD (audio object type 39) are decoded with frame lengths
 of 512 and 480 samples, for any channel configuration of 1-7. Their low overlap window, the low

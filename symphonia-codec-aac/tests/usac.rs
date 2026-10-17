@@ -132,3 +132,25 @@ fn usac_esbr_mono_matches_fdk() {
     let snr = 10.0 * (signal / noise.max(1e-9)).log10();
     assert!(snr >= 45.0, "signal to noise ratio {snr:.1} dB, expected at least 45");
 }
+
+/// A 2:1 eSBR mono stream coded with the linear prediction domain core (TCX and ACELP, 40 access
+/// units from a speech signal). The ACELP synthesis and the SBR tool are floating point here
+/// and fixed point in libfdk-aac, so the output is compared by signal to noise ratio.
+#[test]
+fn usac_lpd_mono_matches_fdk() {
+    let samples = decode(include_bytes!("fixtures/usac_lpd_mono.bin"), 1, 2 * FRAME);
+    let reference = include_bytes!("fixtures/usac_lpd_mono.s16");
+    assert_eq!(reference.len(), samples.len() * 2);
+
+    let mut signal = 0.0f64;
+    let mut noise = 0.0f64;
+    for (r, &s) in reference.chunks_exact(2).zip(&samples) {
+        let r = f64::from(i16::from_le_bytes([r[0], r[1]]));
+        let e = f64::from((s * 32768.0).clamp(-32768.0, 32767.0).round()) - r;
+        signal += r * r;
+        noise += e * e;
+    }
+
+    let snr = 10.0 * (signal / noise.max(1e-9)).log10();
+    assert!(snr >= 33.0, "signal to noise ratio {snr:.1} dB, expected at least 33");
+}

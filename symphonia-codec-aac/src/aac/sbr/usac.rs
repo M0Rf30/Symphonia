@@ -192,7 +192,7 @@ fn parse_single(
 ) -> Result<SbrElement> {
     let n_q = bands.n_q();
 
-    let grid = SbrGrid::parse_with(reader, GridSyntax::Standard)?;
+    let grid = SbrGrid::parse_with(reader, GridSyntax::Usac)?;
     let dtdf = SbrDtdf::parse_usac(reader, grid.num_env, grid.num_noise, independent)?;
     let invf = SbrInvf::parse(reader, n_q)?;
     let eff_amp = grid.effective_amp_res(amp_res);
@@ -219,7 +219,7 @@ fn parse_pair(
     let coupling = read_flag(reader)?;
 
     let channels = if coupling {
-        let grid = SbrGrid::parse_with(reader, GridSyntax::Standard)?;
+        let grid = SbrGrid::parse_with(reader, GridSyntax::Usac)?;
         let dtdf0 = SbrDtdf::parse_usac(reader, grid.num_env, grid.num_noise, independent)?;
         let dtdf1 = SbrDtdf::parse_usac(reader, grid.num_env, grid.num_noise, independent)?;
         let invf0 = SbrInvf::parse(reader, n_q)?;
@@ -253,8 +253,8 @@ fn parse_pair(
         ]
     }
     else {
-        let grid0 = SbrGrid::parse_with(reader, GridSyntax::Standard)?;
-        let grid1 = SbrGrid::parse_with(reader, GridSyntax::Standard)?;
+        let grid0 = SbrGrid::parse_with(reader, GridSyntax::Usac)?;
+        let grid1 = SbrGrid::parse_with(reader, GridSyntax::Usac)?;
         let dtdf0 = SbrDtdf::parse_usac(reader, grid0.num_env, grid0.num_noise, independent)?;
         let dtdf1 = SbrDtdf::parse_usac(reader, grid1.num_env, grid1.num_noise, independent)?;
         let invf0 = SbrInvf::parse(reader, n_q)?;

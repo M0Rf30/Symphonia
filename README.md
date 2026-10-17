@@ -148,7 +148,7 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | Codec                        | Status    | Gapless | Feature Flag | Default | Crate                      |
 |------------------------------|-----------|---------|--------------|---------|----------------------------|
 | AAC-LC                       | Excellent | Yes     | `aac`        | No      | [`symphonia-codec-aac`]    |
-| AAC USAC / xHE-AAC (frequency-domain core only; no LPD, eSBR or MPS) | Good | No | `aac` | No | [`symphonia-codec-aac`] |
+| AAC USAC / xHE-AAC (FD core, 2:1 eSBR, LPD in mono SCE; no FD/LPD switching, CPE LPD, MPS) | Good | No | `aac` | No | [`symphonia-codec-aac`] |
 | ADPCM                        | Excellent | Yes     | `adpcm`      | Yes     | [`symphonia-codec-adpcm`]  |
 | ALAC                         | Excellent | Yes     | `alac`       | No      | [`symphonia-codec-alac`]   |
 | APE (Monkey's Audio)         | Excellent | Yes     | `ape-format` | No      | [`symphonia-bundle-ape`]     |
@@ -289,7 +289,7 @@ Codecs and containers without a row in the tables above are not implemented. Kno
 * Video and subtitle codecs: no video or subtitle decoder exists in this repository.
 * WMA Pro, WMA Lossless and WMA Voice: codec IDs are reserved in `symphonia-core`, but no decoder crate implements them (WMA 1 and 2 are decoded).
 * AVI container: no demuxer crate exists.
-* AAC USAC: the linear-prediction core (ACELP/TCX), enhanced SBR, MPEG Surround 2-1-2 and time-warped MDCT are rejected as unsupported, which excludes most xHE-AAC streams below about 128 kbit/s stereo (see `symphonia-codec-aac`).
+* AAC USAC: switching between the frequency-domain and linear-prediction cores, linear-prediction channel pairs, the other enhanced SBR ratios and tools, MPEG Surround 2-1-2 and time-warped MDCT are rejected as unsupported, which excludes most stereo xHE-AAC streams (see `symphonia-codec-aac`).
 * AAC: error resilience tools (Huffman codeword reordering, RVLC, virtual codebooks), LTP in AAC-LD, SBR with AAC-LD, and Parametric Stereo with anything other than a single mono `SCE` core element are rejected as unsupported (see `symphonia-codec-aac`).
 * G.729: Annex B (VAD/DTX/comfort noise) SID and untransmitted frames are rejected, and the output matches FFmpeg's decoder rather than being bit-exact to the ITU-T reference decoder.
 

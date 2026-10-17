@@ -174,14 +174,19 @@ fn ptr_bits(num_env: usize) -> u32 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GridSyntax {
     Standard,
-    Eld { num_time_slots: usize },
+    /// USAC eSBR: a FIXFIX grid may carry up to 8 envelopes.
+    Usac,
+    Eld {
+        num_time_slots: usize,
+    },
 }
 
 impl SbrGrid {
     /// Parse `sbr_grid()` of the given syntax.
     pub fn parse_with(reader: &mut BitReader<'_>, syntax: GridSyntax) -> Result<Self> {
         match syntax {
-            GridSyntax::Standard => Self::parse(reader),
+            GridSyntax::Standard => Self::parse_max(reader, SBR_MAX_NUM_ENV),
+            GridSyntax::Usac => Self::parse_max(reader, 8),
             GridSyntax::Eld { num_time_slots } => Self::parse_eld(reader, num_time_slots),
         }
     }
@@ -191,7 +196,12 @@ impl SbrGrid {
     /// `num_env` is bounded by [`SBR_MAX_NUM_ENV`]; a value beyond it
     /// (only reachable for a corrupt VARVAR grid) yields
     /// [`Error::SbrGridInvalid`].
+    #[cfg(test)]
     pub fn parse(reader: &mut BitReader<'_>) -> Result<Self> {
+        Self::parse_max(reader, SBR_MAX_NUM_ENV)
+    }
+
+    fn parse_max(reader: &mut BitReader<'_>, fixfix_max: usize) -> Result<Self> {
         let frame_class = FrameClass::from_bits(read(reader, 2)?);
         let mut var_bord_0 = 0u8;
         let mut var_bord_1 = 0u8;
@@ -204,7 +214,9 @@ impl SbrGrid {
             FrameClass::FixFix => {
                 let raw = read(reader, 2)?;
                 let num_env = 1usize << raw; // bs_num_env = 2^tmp.
-                check_num_env(num_env)?;
+                if num_env > fixfix_max {
+                    return Err(Error::SbrGridInvalid);
+                }
                 if num_env == 1 {
                     amp_res_override = true; // bs_amp_res = 0.
                 }

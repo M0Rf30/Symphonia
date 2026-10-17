@@ -42,6 +42,7 @@ use super::build_elem_targets;
 
 use esbr::EsbrDecoder;
 use fd::{FdChannelState, FdFilterbank};
+use lpd::LpdDecoder;
 use stereo::StereoState;
 
 /// The scale of the internal samples, `1 / I16_SCALE`, applied when the core samples are written
@@ -68,6 +69,9 @@ struct SceState {
     ch: FdChannelState,
     pcm: Vec<f32>,
     sbr: Option<EsbrDecoder>,
+    lpd: LpdDecoder,
+    /// Whether the previous frame was linear-prediction-domain coded.
+    last_lpd: Option<bool>,
 }
 
 /// A channel pair element.
@@ -101,6 +105,10 @@ pub struct UsacDecoder {
     opts: AudioDecoderOptions,
     /// The access unit with zero padding, which the arithmetic decoder reads past the end of.
     frame_buf: Vec<u8>,
+    /// Whether an access unit has been decoded since construction or the last reset. Pre-roll
+    /// units only prime a decoder without history; replaying them in a running decoder would
+    /// corrupt its overlap and context state.
+    primed: bool,
 }
 
 /// The number of zero bits appended to an access unit. The arithmetic decoder reads 16 bits to
@@ -163,6 +171,8 @@ impl UsacDecoder {
                         ch: FdChannelState::new(core_frame_len, sampling_index, NOISE_SEED_FIRST),
                         pcm: vec![0.0; core_frame_len],
                         sbr,
+                        lpd: LpdDecoder::new(core_frame_len, core_rate),
+                        last_lpd: None,
                     })
                 }
                 UsacElementConfig::Cpe { sbr, stereo_config_index, .. } => {
@@ -188,6 +198,8 @@ impl UsacDecoder {
                         ch: FdChannelState::new(core_frame_len, sampling_index, NOISE_SEED_FIRST),
                         pcm: vec![0.0; core_frame_len],
                         sbr: None,
+                        lpd: LpdDecoder::new(core_frame_len, core_rate),
+                        last_lpd: None,
                     })
                 }
                 UsacElementConfig::Ext(_) => continue,
@@ -210,6 +222,7 @@ impl UsacDecoder {
             sampling_index,
             filterbank,
             elements,
+            primed: false,
             params,
             buf,
             opts: *opts,
@@ -308,7 +321,7 @@ impl UsacDecoder {
                 UsacElementConfig::Ext(ext) => {
                     let payload = Self::read_ext_element(ext, &mut bs)?;
 
-                    if ext.ext_type == UsacExtType::AudioPreroll && !priming {
+                    if ext.ext_type == UsacExtType::AudioPreroll && !priming && !self.primed {
                         if let Some(payload) = payload {
                             self.decode_preroll(&payload)?;
                         }
@@ -321,6 +334,8 @@ impl UsacDecoder {
         if bs.bits_left() < PAD_BITS as u64 {
             return decode_error("aac: usac access unit is truncated");
         }
+
+        self.primed = true;
 
         Ok(())
     }
@@ -370,17 +385,37 @@ impl UsacDecoder {
         data: &[u8],
         indep_flag: bool,
     ) -> Result<()> {
-        if bs.read_bool()? {
-            // core_mode == 1: linear-prediction-domain channel stream.
-            return unsupported_error("aac: usac lpd is not yet implemented");
-        }
-
-        let tns_data_present = bs.read_bool()?;
+        let lpd_frame = bs.read_bool()?;
 
         let Element::Sce(state) = &mut self.elements[elem_idx]
         else {
             return decode_error("aac: usac element mismatch");
         };
+
+        if state.last_lpd.is_some_and(|last| last != lpd_frame) {
+            return unsupported_error("aac: usac fd/lpd transitions are not yet implemented");
+        }
+
+        if lpd_frame {
+            state.lpd.decode(
+                bs,
+                &mut state.ch.arith,
+                &mut state.ch.noise_seed,
+                indep_flag,
+                &mut state.pcm,
+            )?;
+            state.last_lpd = Some(true);
+
+            if let Some(sbr) = &mut state.sbr {
+                sbr.parse(bs, data, indep_flag)?;
+            }
+
+            return Self::output_sce(&mut self.buf, state);
+        }
+
+        state.last_lpd = Some(false);
+
+        let tns_data_present = bs.read_bool()?;
 
         state.ch.parse(bs, indep_flag, noise_fill, tns_data_present, None)?;
 
@@ -401,9 +436,15 @@ impl UsacDecoder {
 
         self.filterbank.synth(&mut state.ch, &mut state.pcm);
 
+        Self::output_sce(&mut self.buf, state)
+    }
+
+    /// Write the core samples of a single channel element to its output plane, through eSBR if
+    /// the stream uses it.
+    fn output_sce(buf: &mut AudioBuffer<f32>, state: &mut SceState) -> Result<()> {
         let target = state.target;
         let scale = 1.0 / PCM_SCALE;
-        let Some(plane) = self.buf.plane_mut(target)
+        let Some(plane) = buf.plane_mut(target)
         else {
             return decode_error("aac: invalid channel");
         };
@@ -704,11 +745,14 @@ impl UsacDecoder {
 
 impl AudioDecoder for UsacDecoder {
     fn reset(&mut self) {
+        self.primed = false;
         for element in &mut self.elements {
             match element {
                 Element::Sce(state) => {
                     state.ch.reset();
                     state.pcm.fill(0.0);
+                    state.lpd.reset();
+                    state.last_lpd = None;
                     if let Some(sbr) = &mut state.sbr {
                         sbr.reset();
                     }

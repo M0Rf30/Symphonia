@@ -183,7 +183,7 @@ impl ArithState {
 
         // Undecoded pairs keep the "empty" magnitude for the next frame's context.
         self.prev[decoded..pairs].fill(1);
-        out[coded_len..n].fill(0);
+        out[decoded * 2..n].fill(0);
 
         // Signs: one bit per non-zero coefficient, zero meaning negative.
         for coefficient in &mut out[..coded_len] {
