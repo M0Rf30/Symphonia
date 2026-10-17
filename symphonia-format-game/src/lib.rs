@@ -20,6 +20,7 @@
 //! * [`AdxReader`]: CRI ADX.
 //! * [`AfcReader`]: Nintendo GameCube AFC.
 //! * [`AstReader`]: Nintendo AST (`STRM`).
+//! * [`BrstmReader`]: Nintendo BRSTM, BFSTM and BCSTM.
 //! * [`HcaReader`]: CRI HCA.
 //! * [`VagReader`]: Sony PlayStation VAG and its variants.
 
@@ -27,6 +28,7 @@ mod adp;
 mod adx;
 mod afc;
 mod ast;
+mod brstm;
 mod common;
 mod hca;
 mod vag;
@@ -35,5 +37,6 @@ pub use adp::AdpReader;
 pub use adx::AdxReader;
 pub use afc::AfcReader;
 pub use ast::AstReader;
+pub use brstm::BrstmReader;
 pub use hca::HcaReader;
 pub use vag::VagReader;

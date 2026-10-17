@@ -13,6 +13,7 @@ use std::io::Cursor;
 use std::process::{Command, Stdio};
 
 use symphonia_codec_adpcm::AdpcmDecoder;
+use symphonia_codec_pcm::PcmDecoder;
 use symphonia_core::codecs::CodecParameters;
 use symphonia_core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia_core::formats::FormatReader;
@@ -43,7 +44,10 @@ pub fn decode(reader: &mut dyn FormatReader, gapless: bool) -> Decoded {
 
     let mut opts = AudioDecoderOptions::default();
     opts.gapless = gapless;
-    let mut dec = AdpcmDecoder::try_new(params, &opts).unwrap();
+    let mut dec: Box<dyn AudioDecoder> = match AdpcmDecoder::try_new(params, &opts) {
+        Ok(dec) => Box::new(dec),
+        Err(_) => Box::new(PcmDecoder::try_new(params, &opts).unwrap()),
+    };
 
     let mut out = Decoded { rate: 0, channels: 0, packets: 0, samples: Vec::new() };
 

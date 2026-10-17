@@ -25,7 +25,7 @@ Changes since upstream `v0.6.1`.
   QuickTime/MP4 tracks (`QDMC`/`QDM2`, including FFmpeg-remuxed `glbl` extra data).
 - Game console audio (`symphonia-format-game`, `symphonia-codec-adpcm`): Nintendo GameCube DTK
   (`.adp`), AFC (`.afc`) and AST (`.ast`), Sony PlayStation VAG, SVAG, VPK, ADS/SS2, XVAG and MSF
-  (features `adp`, `afc`, `ast`, `vag`), with the Nintendo DSP, DTK, AFC and PlayStation ADPCM
+  and BRSTM, BFSTM and BCSTM (features `adp`, `afc`, `ast`, `vag`, `brstm`), with the Nintendo DSP, DTK, AFC and PlayStation ADPCM
   decoders. Synthetic streams decode bit for bit like FFmpeg.
 - Decoder and demuxer: CRI HCA (`symphonia-codec-hca`, `symphonia-format-game`, feature `hca`),
   matching FFmpeg's decoder at 139 dB SNR; the muted samples and loop points are not applied.

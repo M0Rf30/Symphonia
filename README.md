@@ -90,6 +90,7 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | CAF      | Excellent | Yes      | `caf`        | No      | [`symphonia-format-caf`]    |
 | CRI ADX (`.adx`, unencrypted) | Great | Yes | `adx`   | No      | [`symphonia-format-game`]     |
 | CRI HCA (`.hca`) | Great | Yes | `hca` | No | [`symphonia-format-game`] |
+| Nintendo BRSTM, BFSTM, BCSTM (DSP-ADPCM, PCM) | Great | Yes | `brstm` | No | [`symphonia-format-game`] |
 | Nintendo GameCube DTK (`.adp`) | Great | Yes | `adp` | No | [`symphonia-format-game`] |
 | Nintendo GameCube AFC (`.afc`) | Great | Yes | `afc` | No | [`symphonia-format-game`] |
 | Nintendo AST (`.ast`, AFC and PCM) | Great | Yes | `ast` | No | [`symphonia-format-game`] |

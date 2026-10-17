@@ -19,6 +19,7 @@ symphonia-core = { workspace = true }
 
 [dev-dependencies]
 symphonia-codec-adpcm = { workspace = true }
+symphonia-codec-pcm = { workspace = true }
 symphonia-testutil = { workspace = true }
 
 [lints]

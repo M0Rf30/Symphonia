@@ -32,6 +32,7 @@
 //! | Nintendo GameCube DTK (`.adp`) | `adp` | Yes | No |
 //! | CRI ADX (`.adx`) | `adx` | Yes     | No      |
 //! | CRI HCA (`.hca`) | `hca` | Yes | No |
+//! | Nintendo BRSTM, BFSTM, BCSTM | `brstm` | Yes | No |
 //! | Nintendo GameCube AFC (`.afc`) | `afc` | Yes | No |
 //! | Nintendo AST (`.ast`) | `ast` | Yes | No |
 //! | Sony PlayStation VAG, SVAG, VPK, ADS, XVAG, MSF | `vag` | Yes | No |
@@ -346,6 +347,8 @@ pub mod default {
         pub use symphonia_format_game::AfcReader;
         #[cfg(feature = "ast")]
         pub use symphonia_format_game::AstReader;
+        #[cfg(feature = "brstm")]
+        pub use symphonia_format_game::BrstmReader;
         #[cfg(feature = "hca")]
         pub use symphonia_format_game::HcaReader;
         #[cfg(feature = "vag")]
@@ -672,6 +675,9 @@ pub mod default {
 
         #[cfg(feature = "ast")]
         probe.register_format::<formats::AstReader<'_>>();
+
+        #[cfg(feature = "brstm")]
+        probe.register_format::<formats::BrstmReader<'_>>();
 
         #[cfg(feature = "hca")]
         probe.register_format::<formats::HcaReader<'_>>();

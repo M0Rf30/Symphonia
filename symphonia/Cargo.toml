@@ -48,6 +48,7 @@ atrac3plus = ["dep:symphonia-codec-atrac3plus"]
 atrac9 = ["dep:symphonia-codec-atrac9"]
 au = ["dep:symphonia-format-sound", "symphonia-format-sound/au"]
 avi = ["dep:symphonia-format-avi"]
+brstm = ["adpcm", "pcm", "dep:symphonia-format-game"]
 bt = ["dep:symphonia-format-bt"]
 caf = ["dep:symphonia-format-caf"]
 cook = ["dep:symphonia-codec-cook"]
@@ -179,6 +180,7 @@ all-formats = [
     "ast",
     "au",
     "avi",
+    "brstm",
     "bt",
     "caf",
     "dsd",
