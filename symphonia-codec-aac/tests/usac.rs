@@ -23,7 +23,7 @@ use symphonia_core::units::{Duration, Timestamp};
 const FRAME: usize = 1024;
 
 /// Decode all access units, returning the interleaved samples of every frame.
-fn decode(bin: &[u8], channels: usize) -> Vec<f32> {
+fn decode(bin: &[u8], channels: usize, out_frame: usize) -> Vec<f32> {
     let mut records = vec![];
     let mut pos = 0;
     while pos < bin.len() {
@@ -57,9 +57,9 @@ fn decode(bin: &[u8], channels: usize) -> Vec<f32> {
         else {
             panic!("expected f32 samples");
         };
-        assert_eq!(buf.frames(), FRAME);
+        assert_eq!(buf.frames(), out_frame);
 
-        for f in 0..FRAME {
+        for f in 0..out_frame {
             for c in 0..channels {
                 samples.push(buf.plane(c).unwrap()[f]);
             }
@@ -84,7 +84,7 @@ fn max_diff(reference: &[u8], samples: &[f32]) -> f32 {
 
 #[test]
 fn usac_fd_mono_matches_fdk() {
-    let samples = decode(include_bytes!("fixtures/usac_fd_mono.bin"), 1);
+    let samples = decode(include_bytes!("fixtures/usac_fd_mono.bin"), 1, FRAME);
     let diff = max_diff(include_bytes!("fixtures/usac_fd_mono.s16"), &samples);
 
     assert!(diff <= 1.0, "maximum difference {diff} LSB, expected at most 1");
@@ -92,7 +92,7 @@ fn usac_fd_mono_matches_fdk() {
 
 #[test]
 fn usac_fd_stereo_matches_fdk() {
-    let samples = decode(include_bytes!("fixtures/usac_fd_stereo.bin"), 2);
+    let samples = decode(include_bytes!("fixtures/usac_fd_stereo.bin"), 2, FRAME);
     let reference = include_bytes!("fixtures/usac_fd_stereo.ref");
 
     let mut pos = 0;
@@ -109,4 +109,26 @@ fn usac_fd_stereo_matches_fdk() {
         assert!(diff <= 1.0, "frames {first}..: maximum difference {diff} LSB, expected at most 1");
     }
     assert_eq!(windows, 3);
+}
+
+/// A 2:1 eSBR mono stream (24 kHz core, 48 kHz output). The SBR tool is compared by signal to
+/// noise ratio: the transposer and the envelope adjuster are floating point here and fixed point
+/// in libfdk-aac.
+#[test]
+fn usac_esbr_mono_matches_fdk() {
+    let samples = decode(include_bytes!("fixtures/usac_sbr_mono.bin"), 1, 2 * FRAME);
+    let reference = include_bytes!("fixtures/usac_sbr_mono.s16");
+    assert_eq!(reference.len(), samples.len() * 2);
+
+    let mut signal = 0.0f64;
+    let mut noise = 0.0f64;
+    for (r, &s) in reference.chunks_exact(2).zip(&samples) {
+        let r = f64::from(i16::from_le_bytes([r[0], r[1]]));
+        let e = f64::from((s * 32768.0).clamp(-32768.0, 32767.0).round()) - r;
+        signal += r * r;
+        noise += e * e;
+    }
+
+    let snr = 10.0 * (signal / noise.max(1e-9)).log10();
+    assert!(snr >= 45.0, "signal to noise ratio {snr:.1} dB, expected at least 45");
 }

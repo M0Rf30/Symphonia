@@ -413,6 +413,26 @@ impl SbrDtdf {
         }
         Ok(SbrDtdf { df_env, df_noise })
     }
+
+    /// Parse `sbr_dtdf()` of USAC (ISO/IEC 23003-3 Table 24): in an independent frame the first
+    /// envelope and the first noise floor are always coded in the frequency direction, and
+    /// their flags are not transmitted.
+    pub fn parse_usac(
+        reader: &mut BitReader<'_>,
+        num_env: usize,
+        num_noise: usize,
+        independent: bool,
+    ) -> Result<Self> {
+        let mut df_env = Vec::with_capacity(num_env);
+        for i in 0..num_env {
+            df_env.push(if i == 0 && independent { false } else { read_flag(reader)? });
+        }
+        let mut df_noise = Vec::with_capacity(num_noise);
+        for i in 0..num_noise {
+            df_noise.push(if i == 0 && independent { false } else { read_flag(reader)? });
+        }
+        Ok(SbrDtdf { df_env, df_noise })
+    }
 }
 
 /// `sbr_invf()` (Table 4.71) — the 2-bit inverse-filtering mode per

@@ -33,13 +33,14 @@ use symphonia_core::packet::PacketRef;
 use symphonia_core::{codec_profile, support_audio_codec};
 
 use symphonia_common::mpeg::audio::usac::{
-    UsacConfig, UsacElementConfig, UsacExtElementConfig, UsacExtType, UsacSbrRatio,
+    UsacConfig, UsacElementConfig, UsacExtElementConfig, UsacExtType, UsacSbrConfig,
     read_escaped_value,
 };
 use symphonia_common::mpeg::audio::{AudioObjectType, AudioSpecificConfig};
 
 use super::build_elem_targets;
 
+use esbr::EsbrDecoder;
 use fd::{FdChannelState, FdFilterbank};
 use stereo::StereoState;
 
@@ -66,6 +67,7 @@ struct SceState {
     target: usize,
     ch: FdChannelState,
     pcm: Vec<f32>,
+    sbr: Option<EsbrDecoder>,
 }
 
 /// A channel pair element.
@@ -77,6 +79,7 @@ struct CpeState {
     pcm0: Vec<f32>,
     pcm1: Vec<f32>,
     stereo_config_index: u8,
+    sbr: Option<EsbrDecoder>,
 }
 
 /// The state of one syntactic element (SCE, CPE or LFE).
@@ -126,13 +129,8 @@ impl UsacDecoder {
             None => return decode_error("aac: usac stream without a usac config"),
         };
 
-        // eSBR and the linear-prediction-domain and MPS212 tools are not implemented yet; reject
-        // configurations that require them up front (the frequency-domain core streams without
-        // SBR are the first supported subset).
-        if config.sbr_ratio != UsacSbrRatio::None {
-            return unsupported_error("aac: usac sbr is not yet implemented");
-        }
-
+        // The linear-prediction-domain and MPS212 tools are not implemented yet; reject
+        // configurations that require them up front.
         for element in &config.elements {
             if let UsacElementConfig::Cpe { stereo_config_index, .. } = element {
                 if *stereo_config_index > 0 {
@@ -159,17 +157,18 @@ impl UsacDecoder {
                 UsacElementConfig::Sce { sbr, .. } => {
                     let (is_pair, targets) = target_iter.next().expect("element targets align");
                     debug_assert!(!is_pair);
-                    let _ = sbr;
+                    let sbr = Self::make_sbr(&config, sbr, 1, core_frame_len)?;
                     Element::Sce(SceState {
                         target: targets[0],
                         ch: FdChannelState::new(core_frame_len, sampling_index, NOISE_SEED_FIRST),
                         pcm: vec![0.0; core_frame_len],
+                        sbr,
                     })
                 }
                 UsacElementConfig::Cpe { sbr, stereo_config_index, .. } => {
                     let (is_pair, targets) = target_iter.next().expect("element targets align");
                     debug_assert!(is_pair);
-                    let _ = sbr;
+                    let sbr = Self::make_sbr(&config, sbr, 2, core_frame_len)?;
                     Element::Cpe(CpeState {
                         targets,
                         ch0: FdChannelState::new(core_frame_len, sampling_index, NOISE_SEED_FIRST),
@@ -178,6 +177,7 @@ impl UsacDecoder {
                         pcm0: vec![0.0; core_frame_len],
                         pcm1: vec![0.0; core_frame_len],
                         stereo_config_index: *stereo_config_index,
+                        sbr,
                     })
                 }
                 UsacElementConfig::Lfe => {
@@ -187,6 +187,7 @@ impl UsacDecoder {
                         target: targets[0],
                         ch: FdChannelState::new(core_frame_len, sampling_index, NOISE_SEED_FIRST),
                         pcm: vec![0.0; core_frame_len],
+                        sbr: None,
                     })
                 }
                 UsacElementConfig::Ext(_) => continue,
@@ -214,6 +215,25 @@ impl UsacDecoder {
             opts: *opts,
             frame_buf: Vec::new(),
         })
+    }
+
+    /// The eSBR decoder of an element, if its configuration has one.
+    fn make_sbr(
+        config: &UsacConfig,
+        sbr: &Option<UsacSbrConfig>,
+        channels: usize,
+        core_frame_len: usize,
+    ) -> Result<Option<EsbrDecoder>> {
+        match sbr {
+            Some(cfg) => Ok(Some(EsbrDecoder::new(
+                *cfg,
+                config.sbr_ratio,
+                channels,
+                config.sampling_frequency,
+                core_frame_len,
+            )?)),
+            None => Ok(None),
+        }
     }
 
     /// Decode one USAC access unit into the internal output buffer.
@@ -270,7 +290,7 @@ impl UsacDecoder {
                         return unsupported_error("aac: usac time warped mdct");
                     }
 
-                    self.decode_sce(elem_idx, noise_fill, &mut bs, indep_flag)?;
+                    self.decode_sce(elem_idx, noise_fill, &mut bs, data, indep_flag)?;
                     elem_idx += 1;
                 }
                 UsacElementConfig::Cpe { core, stereo_config_index, .. } => {
@@ -282,7 +302,7 @@ impl UsacDecoder {
                         return unsupported_error("aac: usac mps212 is not yet implemented");
                     }
 
-                    self.decode_cpe(elem_idx, core.noise_filling, &mut bs, indep_flag)?;
+                    self.decode_cpe(elem_idx, core.noise_filling, &mut bs, data, indep_flag)?;
                     elem_idx += 1;
                 }
                 UsacElementConfig::Ext(ext) => {
@@ -347,6 +367,7 @@ impl UsacDecoder {
         elem_idx: usize,
         noise_fill: bool,
         bs: &mut BitReaderLtr<'_>,
+        data: &[u8],
         indep_flag: bool,
     ) -> Result<()> {
         if bs.read_bool()? {
@@ -362,6 +383,10 @@ impl UsacDecoder {
         };
 
         state.ch.parse(bs, indep_flag, noise_fill, tns_data_present, None)?;
+
+        if let Some(sbr) = &mut state.sbr {
+            sbr.parse(bs, data, indep_flag)?;
+        }
 
         // TNS is applied to a single channel after the stereo tools (a no-op here).
         let ics = state.ch.ics.clone();
@@ -382,6 +407,11 @@ impl UsacDecoder {
         else {
             return decode_error("aac: invalid channel");
         };
+
+        if let Some(sbr) = &mut state.sbr {
+            return sbr.process(&[&state.pcm], &mut [plane], scale);
+        }
+
         for (dst, src) in plane.iter_mut().zip(&state.pcm) {
             *dst = src * scale;
         }
@@ -395,6 +425,7 @@ impl UsacDecoder {
         elem_idx: usize,
         noise_fill: bool,
         bs: &mut BitReaderLtr<'_>,
+        data: &[u8],
         indep_flag: bool,
     ) -> Result<()> {
         let core_mode0 = bs.read_bool()?;
@@ -522,6 +553,10 @@ impl UsacDecoder {
             state.ch1.parse(bs, indep_flag, noise_fill, tns_data_present1, None)?;
         }
 
+        if let Some(sbr) = &mut state.sbr {
+            sbr.parse(bs, data, indep_flag)?;
+        }
+
         // The dequantized spectra of the two channels.
         let ics0 = state.ch0.ics.clone();
         let ics1 = state.ch1.ics.clone();
@@ -597,18 +632,19 @@ impl UsacDecoder {
 
         let scale = 1.0 / PCM_SCALE;
         let [l, r] = state.targets;
-        let Some(plane) = self.buf.plane_mut(l)
+        let Some((plane_l, plane_r)) = self.buf.plane_pair_mut(l, r)
         else {
             return decode_error("aac: invalid channel");
         };
-        for (dst, src) in plane.iter_mut().zip(&state.pcm0) {
+
+        if let Some(sbr) = &mut state.sbr {
+            return sbr.process(&[&state.pcm0, &state.pcm1], &mut [plane_l, plane_r], scale);
+        }
+
+        for (dst, src) in plane_l.iter_mut().zip(&state.pcm0) {
             *dst = src * scale;
         }
-        let Some(plane) = self.buf.plane_mut(r)
-        else {
-            return decode_error("aac: invalid channel");
-        };
-        for (dst, src) in plane.iter_mut().zip(&state.pcm1) {
+        for (dst, src) in plane_r.iter_mut().zip(&state.pcm1) {
             *dst = src * scale;
         }
 
@@ -673,6 +709,9 @@ impl AudioDecoder for UsacDecoder {
                 Element::Sce(state) => {
                     state.ch.reset();
                     state.pcm.fill(0.0);
+                    if let Some(sbr) = &mut state.sbr {
+                        sbr.reset();
+                    }
                 }
                 Element::Cpe(state) => {
                     state.ch0.reset();
@@ -680,6 +719,9 @@ impl AudioDecoder for UsacDecoder {
                     state.stereo.reset();
                     state.pcm0.fill(0.0);
                     state.pcm1.fill(0.0);
+                    if let Some(sbr) = &mut state.sbr {
+                        sbr.reset();
+                    }
                 }
             }
         }

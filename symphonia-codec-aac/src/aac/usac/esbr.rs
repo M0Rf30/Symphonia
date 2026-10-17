@@ -5,32 +5,125 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-//! Enhanced SBR of USAC (harmonic transposer, PVC, inter-TES).
+//! The enhanced SBR (eSBR) of USAC.
 //!
-//! This module is owned by the `UsacEsbr` workstream; the decoder below is the agreed
-//! coordination interface, currently rejecting eSBR so the core coder can land first.
-#![allow(dead_code)] // coordination stub; owned by `UsacEsbr`
+//! The SBR signal processing of HE-AAC is reused for the streams that have the same signal
+//! flow: the 2:1 SBR ratio, without harmonic transposition, predictive vector coding or
+//! inter-subband-sample temporal envelope shaping. The other eSBR configurations are rejected.
 
 use symphonia_core::errors::{Result, unsupported_error};
+use symphonia_core::io::{BitReaderLtr, FiniteBitStream, ReadBitsLtr};
 
 use symphonia_common::mpeg::audio::usac::{UsacSbrConfig, UsacSbrRatio};
 
+use crate::aac::sbr::bits::BitReader;
+use crate::aac::sbr::decoder::SbrDecoder;
+use crate::aac::sbr::extension::SbrExtensionData;
+use crate::aac::sbr::usac::UsacSbrParser;
+
 /// The eSBR decoder of a channel pair or single channel.
 pub struct EsbrDecoder {
-    _cfg: UsacSbrConfig,
-    _ratio: UsacSbrRatio,
-    _channels: usize,
+    parser: UsacSbrParser,
+    decoder: SbrDecoder,
+    channels: usize,
+    output_rate: u32,
+    pending: Option<SbrExtensionData>,
+    core: Vec<Vec<f64>>,
 }
 
 impl EsbrDecoder {
-    pub fn new(cfg: UsacSbrConfig, ratio: UsacSbrRatio, channels: usize) -> Self {
-        EsbrDecoder { _cfg: cfg, _ratio: ratio, _channels: channels }
+    /// `output_rate` is the sampling frequency of the decoded signal and `core_len` the number of
+    /// core samples of a frame.
+    pub fn new(
+        cfg: UsacSbrConfig,
+        ratio: UsacSbrRatio,
+        channels: usize,
+        output_rate: u32,
+        core_len: usize,
+    ) -> Result<Self> {
+        if ratio != UsacSbrRatio::Ratio2To1 || core_len != 1024 {
+            return unsupported_error("aac: usac sbr ratio is not yet implemented");
+        }
+
+        if cfg.harmonic_sbr || cfg.pvc || cfg.inter_tes {
+            return unsupported_error(
+                "aac: usac harmonic sbr, pvc and inter-tes are not yet implemented",
+            );
+        }
+
+        let decoder = SbrDecoder::new(output_rate, channels)?;
+
+        Ok(EsbrDecoder {
+            parser: UsacSbrParser::new(cfg, output_rate),
+            decoder,
+            channels,
+            output_rate,
+            pending: None,
+            core: vec![vec![0.0; core_len]; channels],
+        })
     }
 
-    /// Decode one frame of SBR data and process the core time-domain samples into the full-rate
-    /// output. Not yet implemented by `UsacEsbr`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn process(&mut self, _core_samples: &[f32], _output: &mut [f32]) -> Result<()> {
-        unsupported_error("aac: usac esbr decoding is not yet implemented")
+    /// Forget the carried-over header and the filterbank history.
+    pub fn reset(&mut self) {
+        self.parser.reset();
+        self.pending = None;
+
+        if let Ok(decoder) = SbrDecoder::new(self.output_rate, self.channels) {
+            self.decoder = decoder;
+        }
+    }
+
+    /// Parse the `sbr_data()` of the element that starts at the current position of `bs`, which
+    /// reads from `data`.
+    pub fn parse(
+        &mut self,
+        bs: &mut BitReaderLtr<'_>,
+        data: &[u8],
+        independent: bool,
+    ) -> Result<()> {
+        let position = data.len() as u64 * 8 - bs.bits_left();
+
+        let mut reader = BitReader::new(data);
+        reader.ignore_bits(position as u32)?;
+
+        let ext = self.parser.parse(&mut reader, self.channels == 2, independent)?;
+
+        bs.ignore_bits((reader.bit_position() - position) as u32)?;
+        self.pending = Some(ext);
+
+        Ok(())
+    }
+
+    /// Render the frame: `core` holds the core signal of each channel, `output` receives the
+    /// full-rate signal.
+    pub fn process(
+        &mut self,
+        core: &[&[f32]],
+        output: &mut [&mut [f32]],
+        scale: f32,
+    ) -> Result<()> {
+        // The SBR tool works on samples of the full scale of 16 bit PCM; `scale` converts the
+        // core samples to the output scale.
+        for (dst, src) in self.core.iter_mut().zip(core) {
+            for (d, s) in dst.iter_mut().zip(*src) {
+                *d = f64::from(*s);
+            }
+        }
+
+        let Some(ext) = self.pending.take()
+        else {
+            return unsupported_error("aac: usac sbr data is missing");
+        };
+
+        let refs: Vec<&[f64]> = self.core.iter().map(Vec::as_slice).collect();
+        let rendered = self.decoder.process_frame(&ext, &refs)?;
+
+        for (dst, src) in output.iter_mut().zip(&rendered) {
+            for (d, s) in dst.iter_mut().zip(src) {
+                *d = (*s as f32) * scale;
+            }
+        }
+
+        Ok(())
     }
 }

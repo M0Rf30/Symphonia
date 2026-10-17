@@ -55,7 +55,8 @@ use super::extension::SbrExtensionData;
 use super::freq_bands::{HiLoTables, k0 as derive_k0, k2 as derive_k2, master_table};
 use super::header::SbrHeader;
 use super::hf_gen::{
-    Patches, T_HF_ADJ, build_patches, chirp_factors, generate_hf, reflection_coefficient,
+    Patches, T_HF_ADJ, build_patches, chirp_factors, generate_hf, pre_flatten_gains,
+    reflection_coefficient,
 };
 use super::limiter::limiter_table;
 use super::lp::{aliasing_degree, deg_patched};
@@ -648,7 +649,14 @@ impl SbrDecoder {
             let rate = self.geo.rate as i32;
             let (lf, window) = (self.geo.lf(), self.geo.window());
             let l_range = (rate * grid.t_e[0])..(rate * grid.t_e[grid.t_e.len() - 1]);
-            let x_high = generate_hf(&x_low, patches, &bw, bands, l_range, window)?;
+            let pre_gain = if ext.header.pre_proc {
+                Some(pre_flatten_gains(&x_low, self.k0.clamp(0, 32) as usize, l_range.clone()))
+            }
+            else {
+                None
+            };
+            let x_high =
+                generate_hf(&x_low, patches, &bw, bands, l_range, window, pre_gain.as_deref())?;
 
             // §4.6.18.8.3 aliasing detection (low power): reflection
             // coefficients over the low band, the Figure 4.53 degree
@@ -868,6 +876,7 @@ mod tests {
             limiter_gains: 2,
             interpol_freq: true,
             smoothing_mode: true,
+            pre_proc: false,
         };
         let bands = header.derive_bands(fs_sbr).unwrap();
         let n_high = bands.n_high();

@@ -107,6 +107,9 @@ pub struct SbrHeader {
     pub interpol_freq: bool,
     /// `bs_smoothing_mode` — smoothing flag (Table 4.111).
     pub smoothing_mode: bool,
+    /// `bs_sbr_preprocessing` of USAC: the high frequency generator flattens the spectral
+    /// envelope of the low band before the transposition. Always `false` for HE-AAC.
+    pub pre_proc: bool,
 }
 
 impl SbrHeader {
@@ -162,6 +165,7 @@ impl SbrHeader {
             limiter_gains,
             interpol_freq,
             smoothing_mode,
+            pre_proc: false,
         })
     }
 
@@ -184,6 +188,7 @@ impl SbrHeader {
             limiter_gains: cfg.limiter_gains,
             interpol_freq: cfg.interpol_freq,
             smoothing_mode: cfg.smoothing_mode,
+            pre_proc: false,
         }
     }
 

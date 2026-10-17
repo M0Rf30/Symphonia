@@ -67,6 +67,7 @@ mod ps;
 mod qmf;
 mod reconstruct;
 mod time_grid;
+pub(crate) mod usac;
 
 /// Minimal local mirror of `oxideav_aac::raw_data_block::IdSynEle` — the
 /// AAC core `id_syn_ele` kind an SBR payload attaches to

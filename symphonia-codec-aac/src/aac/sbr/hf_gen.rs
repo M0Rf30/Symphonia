@@ -233,6 +233,107 @@ pub fn chirp_factors(cur_invf: &[u8], prev_invf: &[u8], prev_bw: &[f64]) -> Vec<
         .collect()
 }
 
+/// The scale of the QMF subband samples relative to the full scale of 16 bit PCM that
+/// `bs_sbr_preprocessing` expects.
+const PRE_PROC_SCALE: f64 = 1.0;
+
+/// The gains of the pre-flattening of the high frequency generator (`bs_sbr_preprocessing`,
+/// ISO/IEC 23003-3 7.5.5.? and libxaac `ixheaacd_pre_processing`): a cubic polynomial is fitted
+/// to the mean energy in dB of each of the `num_bands` low bands over the time range `l_range`;
+/// the gain of a band moves its energy to the mean of the bands.
+pub fn pre_flatten_gains(
+    x_low: &[[Complex; 32]],
+    num_bands: usize,
+    l_range: core::ops::Range<i32>,
+) -> Vec<f64> {
+    const DEGREE: usize = 3;
+
+    let mut low_env = vec![0.0f64; num_bands];
+    let mut mean = 0.0;
+
+    let slots = (l_range.end - l_range.start).max(0) as usize;
+
+    if num_bands != 0 && slots != 0 {
+        for (k, env) in low_env.iter_mut().enumerate() {
+            let mut energy = 0.0;
+            for l in l_range.clone() {
+                let c = l as usize + T_HF_ADJ;
+                if let Some(x) = x_low.get(c) {
+                    let v = x[k];
+                    energy += v.re * v.re + v.im * v.im;
+                }
+            }
+            energy = energy * PRE_PROC_SCALE * PRE_PROC_SCALE / slots as f64;
+            *env = 10.0 * (energy + 1.0).log10();
+            mean += *env;
+        }
+        mean /= num_bands as f64;
+    }
+
+    // Least squares fit y(k) ~ p0 k^3 + p1 k^2 + p2 k + p3 by the normal equations.
+    let mut a = [[0.0f64; DEGREE + 1]; DEGREE + 1];
+    let mut b = [0.0f64; DEGREE + 1];
+
+    for (k, y) in low_env.iter().enumerate() {
+        let mut v = [1.0f64; 2 * DEGREE + 1];
+        for i in 1..=2 * DEGREE {
+            v[i] = k as f64 * v[i - 1];
+        }
+        for i in 0..=DEGREE {
+            b[i] += v[DEGREE - i] * y;
+            for j in 0..=DEGREE {
+                a[i][j] += v[2 * DEGREE - i - j];
+            }
+        }
+    }
+
+    // Gaussian elimination with partial pivoting.
+    let n = DEGREE + 1;
+    for i in 0..n {
+        let mut imax = i;
+        for k in i + 1..n {
+            if a[k][i].abs() > a[imax][i].abs() {
+                imax = k;
+            }
+        }
+        if imax != i {
+            b.swap(imax, i);
+            a.swap(imax, i);
+        }
+        let v = a[i][i];
+        if v == 0.0 {
+            continue;
+        }
+        b[i] /= v;
+        for j in i..n {
+            a[i][j] /= v;
+        }
+        for k in i + 1..n {
+            let v = a[k][i];
+            b[k] -= v * b[i];
+            for j in i + 1..n {
+                a[k][j] -= v * a[i][j];
+            }
+        }
+    }
+
+    let mut p = [0.0f64; DEGREE + 1];
+    for i in (0..n).rev() {
+        p[i] = b[i];
+        for j in i + 1..n {
+            p[i] -= a[i][j] * p[j];
+        }
+    }
+
+    (0..num_bands)
+        .map(|k| {
+            let x = k as f64;
+            let slope = ((p[0] * x + p[1]) * x + p[2]) * x + p[3];
+            10f64.powf((mean - slope) / 20.0)
+        })
+        .collect()
+}
+
 /// §4.6.18.6.2 covariance-method prediction coefficients
 /// `(α0(k), α1(k))` for low subband `k`.
 ///
@@ -336,6 +437,7 @@ pub fn generate_hf(
     bands: &HiLoTables,
     l_range: core::ops::Range<i32>,
     n_slots_frame: usize,
+    pre_gain: Option<&[f64]>,
 ) -> Result<Vec<[Complex; 64]>> {
     let k_x = bands.k_x;
     let mut x_high = vec![[Complex::default(); 64]; x_low.len()];
@@ -378,8 +480,11 @@ pub fn generate_hf(
                 if c >= x_low.len() || c < 2 {
                     return Err(Error::SbrFreqBandInvalid);
                 }
-                x_high[c][k] =
-                    x_low[c][p] + (a0 * bw) * x_low[c - 1][p] + (a1 * bw2) * x_low[c - 2][p];
+                let v = x_low[c][p] + (a0 * bw) * x_low[c - 1][p] + (a1 * bw2) * x_low[c - 2][p];
+                x_high[c][k] = match pre_gain {
+                    Some(g) => v * g.get(p).copied().unwrap_or(1.0),
+                    None => v,
+                };
             }
         }
         k_off += p_num;
@@ -557,14 +662,14 @@ mod tests {
         let bands = tiny_bands();
         // bw = 0: XHigh(k) == XLow(p) on the generated range. Patch
         // maps source 2..10 → 8..16; k = 8 comes from p = 2.
-        let hi = generate_hf(&x, &patches, &[0.0], &bands, 0..32, 32).unwrap();
+        let hi = generate_hf(&x, &patches, &[0.0], &bands, 0..32, 32, None).unwrap();
         for l in 0..32usize {
             let c = l + T_HF_ADJ;
             assert_eq!(hi[c][8], x[c][2]);
         }
         // bw = 1: the inverse filter cancels the AR(2) recursion (to
         // the O(εInv) accuracy of the relaxed covariance solution).
-        let hi = generate_hf(&x, &patches, &[1.0], &bands, 0..32, 32).unwrap();
+        let hi = generate_hf(&x, &patches, &[1.0], &bands, 0..32, 32, None).unwrap();
         let sig: f64 = (0..32).map(|l| x[l + T_HF_ADJ][2].norm_sqr()).sum();
         let res: f64 = (0..32).map(|l| hi[l + T_HF_ADJ][8].norm_sqr()).sum();
         assert!(res < 1e-10 * sig, "residual {res} vs signal {sig}");
