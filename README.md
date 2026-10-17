@@ -89,6 +89,11 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | APE      | Excellent | Yes      | `ape-format` | No      | [`symphonia-bundle-ape`]      |
 | CAF      | Excellent | Yes      | `caf`        | No      | [`symphonia-format-caf`]    |
 | CRI ADX (`.adx`, unencrypted) | Great | Yes | `adx`   | No      | [`symphonia-format-game`]     |
+| CRI HCA (`.hca`) | Great | Yes | `hca` | No | [`symphonia-format-game`] |
+| Nintendo GameCube DTK (`.adp`) | Great | Yes | `adp` | No | [`symphonia-format-game`] |
+| Nintendo GameCube AFC (`.afc`) | Great | Yes | `afc` | No | [`symphonia-format-game`] |
+| Nintendo AST (`.ast`, AFC and PCM) | Great | Yes | `ast` | No | [`symphonia-format-game`] |
+| Sony PlayStation VAG, SVAG, VPK, ADS/SS2, XVAG (PS-ADPCM, PCM), MSF | Great | Yes | `vag` | No | [`symphonia-format-game`] |
 | DSD (DSF, DFF) | Great | Yes    | `dsd`        | No      | [`symphonia-format-dsd`]      |
 | Elementary streams (AC-3, E-AC-3, DTS, TrueHD/MLP, Dolby E in SMPTE ST 337) | Great | Yes\*\* | `es`   | No      | [`symphonia-format-es`]       |
 | IEC 61937 / S/PDIF data bursts (AC-3, E-AC-3, DTS, MPEG audio, AAC) | Great | No | `spdif` | No | [`symphonia-format-spdif`] |
@@ -160,7 +165,8 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | TTA (True Audio)             | Excellent | Yes     | `tta`        | No      | [`symphonia-bundle-tta`]     |
 | Nellymoser                   | Excellent | No      | `nellymoser` | No      | [`symphonia-codec-nellymoser`]|
 | RealAudio Cook               | Excellent | No      | `cook`       | No      | [`symphonia-codec-cook`]     |
-| QDesign Music Codec (QDMC/QDM2, in MP4) | Excellent | No | `qdesign` | No | [`symphonia-codec-qdesign`]  |
+| QDesign Music Codec (QDMC/QDM2, in MP4 and Matroska) | Excellent | No | `qdesign` | No | [`symphonia-codec-qdesign`]  |
+| CRI HCA                      | Excellent | No      | `hca`        | No      | [`symphonia-codec-hca`]      |
 | ATRAC1, ATRAC3 (also RealAudio `atrc`) | Excellent | No | `atrac`  | No      | [`symphonia-codec-atrac`]    |
 | ATRAC3+                      | Excellent | No      | `atrac3plus` | No      | [`symphonia-codec-atrac3plus`]|
 | ATRAC9                       | Excellent | No      | `atrac9`     | No      | [`symphonia-codec-atrac9`]    |
@@ -224,6 +230,7 @@ mp3PRO streams decode as plain MP3 by default. The `mp3pro` feature enables `Mp3
 [`symphonia-codec-sipr`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-sipr
 [`symphonia-codec-ralf`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-ralf
 [`symphonia-codec-imc`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-imc
+[`symphonia-codec-hca`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-hca
 [`symphonia-codec-qdesign`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-qdesign
 [`symphonia-codec-wma`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-wma
 [`symphonia-format-asf`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-asf

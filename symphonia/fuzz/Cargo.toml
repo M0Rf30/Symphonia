@@ -515,3 +515,9 @@ name = "demux_qcp"
 path = "fuzz_targets/demux_qcp.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "demux_game"
+path = "fuzz_targets/demux_game.rs"
+test = false
+doc = false

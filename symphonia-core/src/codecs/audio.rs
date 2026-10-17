@@ -464,6 +464,12 @@ pub mod well_known {
     pub const CODEC_ID_ADPCM_ADX: AudioCodecId = AudioCodecId(0x240);
     /// Nintendo DSP ADPCM (GameCube/Wii DSPADPCM, THP audio)
     pub const CODEC_ID_ADPCM_NINTENDO_DSP: AudioCodecId = AudioCodecId(0x241);
+    /// Sony PlayStation ADPCM (VAG, 16 byte frames of 28 samples)
+    pub const CODEC_ID_ADPCM_PSX: AudioCodecId = AudioCodecId(0x242);
+    /// Nintendo GameCube AFC ADPCM (9 byte frames of 16 samples)
+    pub const CODEC_ID_ADPCM_AFC: AudioCodecId = AudioCodecId(0x243);
+    /// Nintendo GameCube DTK ADPCM (stereo, 32 byte blocks of 28 samples per channel)
+    pub const CODEC_ID_ADPCM_NINTENDO_DTK: AudioCodecId = AudioCodecId(0x244);
 
     // Compressed lossy audio codecs
     //------------------------------
@@ -582,6 +588,8 @@ pub mod well_known {
 
     // Compressed lossless audio codecs
     //---------------------------------
+    /// CRI HCA (High Compression Audio)
+    pub const CODEC_ID_HCA: AudioCodecId = AudioCodecId(0x110f);
 
     /// Free Lossless Audio Codec (FLAC)
     pub const CODEC_ID_FLAC: AudioCodecId = AudioCodecId(0x2000);

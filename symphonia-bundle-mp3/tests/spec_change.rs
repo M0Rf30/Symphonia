@@ -25,8 +25,6 @@ use symphonia_core::io::MediaSourceStream;
 const STEREO_44K: &[u8] = include_bytes!("fixtures/mp3_cbr128_st_44k_notag.mp3");
 /// 22.05 kHz mono MPEG-2 Layer III.
 const MONO_22K: &[u8] = include_bytes!("fixtures/mp3_mpeg2_mono_22k.mp3");
-/// 44.1 kHz mono MPEG-1 Layer III.
-
 /// The samples of one run of frames with the same signal specification.
 #[derive(Debug, PartialEq)]
 struct Run {

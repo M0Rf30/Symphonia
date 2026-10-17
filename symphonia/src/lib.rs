@@ -29,7 +29,12 @@
 //! | AIFF     | `aiff`       | Yes      | No      |
 //! | ASF/WMA (`.wma`, `.asf`) | `asf` | Yes   | No      |
 //! | AVI (`.avi`, audio streams) | `avi` | No | No |
+//! | Nintendo GameCube DTK (`.adp`) | `adp` | Yes | No |
 //! | CRI ADX (`.adx`) | `adx` | Yes     | No      |
+//! | CRI HCA (`.hca`) | `hca` | Yes | No |
+//! | Nintendo GameCube AFC (`.afc`) | `afc` | Yes | No |
+//! | Nintendo AST (`.ast`) | `ast` | Yes | No |
+//! | Sony PlayStation VAG, SVAG, VPK, ADS, XVAG, MSF | `vag` | Yes | No |
 //! | Sun/NeXT AU (`.au`, `.snd`) | `au` | Yes | No |
 //! | Creative Voice (`.voc`) | `voc` | Yes | No |
 //! | IFF 8SVX/16SV (`.iff`, `.8svx`) | `iff` | Yes | No |
@@ -70,6 +75,7 @@
 //! | DTS (core, XCH/XXCH/X96/XBR, XLL) | `dca` | No | No |
 //! | FLAC     | `flac`       | Yes     | Yes     |
 //! | GSM 06.10, Microsoft GSM | `gsm` | No | No |
+//! | CRI HCA  | `hca`        | No      | No      |
 //! | MP1      | `mp1`, `mpa` | No      | No      |
 //! | MP2      | `mp2`, `mpa` | No      | No      |
 //! | MP3      | `mp3`, `mpa` | Yes     | No      |
@@ -236,6 +242,8 @@ pub mod default {
         pub use symphonia_codec_g7231::G7231Decoder;
         #[cfg(feature = "gsm")]
         pub use symphonia_codec_gsm::GsmDecoder;
+        #[cfg(feature = "hca")]
+        pub use symphonia_codec_hca::HcaDecoder;
         #[cfg(feature = "ilbc")]
         pub use symphonia_codec_ilbc::IlbcDecoder;
         #[cfg(feature = "imc")]
@@ -330,8 +338,18 @@ pub mod default {
         pub use symphonia_format_es::{Ac3Reader, DtsReader, S337mReader, TrueHdReader};
         #[cfg(feature = "flv")]
         pub use symphonia_format_flv::FlvReader;
+        #[cfg(feature = "adp")]
+        pub use symphonia_format_game::AdpReader;
         #[cfg(feature = "adx")]
         pub use symphonia_format_game::AdxReader;
+        #[cfg(feature = "afc")]
+        pub use symphonia_format_game::AfcReader;
+        #[cfg(feature = "ast")]
+        pub use symphonia_format_game::AstReader;
+        #[cfg(feature = "hca")]
+        pub use symphonia_format_game::HcaReader;
+        #[cfg(feature = "vag")]
+        pub use symphonia_format_game::VagReader;
         #[cfg(feature = "isomp4")]
         pub use symphonia_format_isomp4::IsoMp4Reader;
         #[cfg(feature = "mkv")]
@@ -482,6 +500,9 @@ pub mod default {
 
         #[cfg(feature = "qdesign")]
         registry.register_audio_decoder::<codecs::QdesignDecoder>();
+
+        #[cfg(feature = "hca")]
+        registry.register_audio_decoder::<codecs::HcaDecoder>();
 
         #[cfg(feature = "evrc")]
         registry.register_audio_decoder::<codecs::EvrcDecoder>();
@@ -640,8 +661,23 @@ pub mod default {
         #[cfg(feature = "flv")]
         probe.register_format::<formats::FlvReader<'_>>();
 
+        #[cfg(feature = "adp")]
+        probe.register_format::<formats::AdpReader<'_>>();
+
         #[cfg(feature = "adx")]
         probe.register_format::<formats::AdxReader<'_>>();
+
+        #[cfg(feature = "afc")]
+        probe.register_format::<formats::AfcReader<'_>>();
+
+        #[cfg(feature = "ast")]
+        probe.register_format::<formats::AstReader<'_>>();
+
+        #[cfg(feature = "hca")]
+        probe.register_format::<formats::HcaReader<'_>>();
+
+        #[cfg(feature = "vag")]
+        probe.register_format::<formats::VagReader<'_>>();
 
         #[cfg(feature = "real")]
         probe.register_format::<formats::RealReader<'_>>();

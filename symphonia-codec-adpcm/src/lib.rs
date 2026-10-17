@@ -21,12 +21,16 @@ use symphonia_core::support_audio_codec;
 use symphonia_core::audio::{
     AsGenericAudioBufferRef, Audio, AudioBuffer, AudioMut, AudioSpec, GenericAudioBufferRef,
 };
+use symphonia_core::codecs::audio::well_known::CODEC_ID_ADPCM_NINTENDO_DSP;
 use symphonia_core::codecs::audio::well_known::{
     CODEC_ID_ADPCM_ADX, CODEC_ID_ADPCM_CT, CODEC_ID_ADPCM_G722, CODEC_ID_ADPCM_G726,
     CODEC_ID_ADPCM_G726LE, CODEC_ID_ADPCM_IMA_DK3, CODEC_ID_ADPCM_IMA_DK4, CODEC_ID_ADPCM_IMA_OKI,
     CODEC_ID_ADPCM_IMA_QT, CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_IMA_WS, CODEC_ID_ADPCM_IMA_XBOX,
     CODEC_ID_ADPCM_MS, CODEC_ID_ADPCM_SBPRO_2, CODEC_ID_ADPCM_SBPRO_3, CODEC_ID_ADPCM_SBPRO_4,
     CODEC_ID_ADPCM_SWF, CODEC_ID_ADPCM_YAMAHA, CODEC_ID_DPCM_8SVX_EXP, CODEC_ID_DPCM_8SVX_FIB,
+};
+use symphonia_core::codecs::audio::well_known::{
+    CODEC_ID_ADPCM_AFC, CODEC_ID_ADPCM_NINTENDO_DTK, CODEC_ID_ADPCM_PSX,
 };
 use symphonia_core::codecs::audio::{AudioCodecId, AudioCodecParameters, AudioDecoderOptions};
 use symphonia_core::codecs::audio::{AudioDecoder, FinalizeResult};
@@ -35,6 +39,8 @@ use symphonia_core::packet::PacketRef;
 
 mod codec_8svx;
 mod codec_adx;
+mod codec_afc;
+mod codec_dtk;
 mod codec_g722;
 mod codec_g726;
 mod codec_ima_dk;
@@ -43,6 +49,8 @@ mod codec_ima_wav;
 mod codec_ima_ws;
 mod codec_ms;
 mod codec_nibble;
+mod codec_nintendo_dsp;
+mod codec_psx;
 mod codec_sbpro;
 mod codec_swf;
 mod common;
@@ -66,6 +74,10 @@ fn is_supported_adpcm_codec(codec_id: AudioCodecId) -> bool {
             | CODEC_ID_ADPCM_IMA_XBOX
             | CODEC_ID_ADPCM_IMA_WS
             | CODEC_ID_ADPCM_ADX
+            | CODEC_ID_ADPCM_NINTENDO_DSP
+            | CODEC_ID_ADPCM_PSX
+            | CODEC_ID_ADPCM_AFC
+            | CODEC_ID_ADPCM_NINTENDO_DTK
             | CODEC_ID_ADPCM_SBPRO_4
             | CODEC_ID_ADPCM_SBPRO_3
             | CODEC_ID_ADPCM_SBPRO_2
@@ -97,6 +109,14 @@ enum InnerDecoder {
     ImaWs(codec_ima_ws::ImaWsDecoder),
     /// CRI ADX with the filter of its stream header.
     Adx(codec_adx::AdxDecoder),
+    /// Nintendo DSP-ADPCM with its coefficients and the history carried between packets.
+    NintendoDsp(codec_nintendo_dsp::NintendoDspDecoder),
+    /// Sony PlayStation ADPCM (VAG) with the history carried between packets.
+    Psx(codec_psx::PsxDecoder),
+    /// Nintendo GameCube AFC with the history carried between packets.
+    Afc(codec_afc::AfcDecoder),
+    /// Nintendo GameCube DTK with the history carried between packets.
+    Dtk(codec_dtk::DtkDecoder),
     Swf,
     /// Sound Blaster Pro ADPCM with the state carried between packets.
     Sbpro(codec_sbpro::SbproDecoder),
@@ -169,6 +189,9 @@ impl AdpcmDecoder {
             CODEC_ID_ADPCM_IMA_WAV => codec_ima_wav::MAX_CHANNELS,
             CODEC_ID_ADPCM_MS => 6,
             CODEC_ID_ADPCM_ADX => codec_adx::MAX_CHANNELS,
+            CODEC_ID_ADPCM_NINTENDO_DSP => codec_nintendo_dsp::MAX_CHANNELS,
+            CODEC_ID_ADPCM_PSX => codec_psx::MAX_CHANNELS,
+            CODEC_ID_ADPCM_AFC => codec_afc::MAX_CHANNELS,
             CODEC_ID_ADPCM_G722
             | CODEC_ID_ADPCM_G726
             | CODEC_ID_ADPCM_G726LE
@@ -227,6 +250,24 @@ impl AdpcmDecoder {
             CODEC_ID_ADPCM_ADX => {
                 let header = params.extra_data.as_deref().unwrap_or_default();
                 InnerDecoder::Adx(codec_adx::AdxDecoder::try_new(header, channel_count)?)
+            }
+            CODEC_ID_ADPCM_NINTENDO_DSP => {
+                let coeffs = params.extra_data.as_deref().unwrap_or_default();
+                InnerDecoder::NintendoDsp(codec_nintendo_dsp::NintendoDspDecoder::try_new(
+                    coeffs,
+                    channel_count,
+                )?)
+            }
+            CODEC_ID_ADPCM_PSX => InnerDecoder::Psx(codec_psx::PsxDecoder::try_new(
+                channel_count,
+                params.frames_per_block,
+            )?),
+            CODEC_ID_ADPCM_AFC => InnerDecoder::Afc(codec_afc::AfcDecoder::try_new(
+                channel_count,
+                params.frames_per_block,
+            )?),
+            CODEC_ID_ADPCM_NINTENDO_DTK => {
+                InnerDecoder::Dtk(codec_dtk::DtkDecoder::try_new(channel_count)?)
             }
             CODEC_ID_ADPCM_SWF => InnerDecoder::Swf,
             CODEC_ID_ADPCM_SBPRO_4 => {
@@ -435,6 +476,67 @@ impl AdpcmDecoder {
                 }
                 return self.finish(packet);
             }
+            InnerDecoder::NintendoDsp(dec) => {
+                // The packet is the planar frames of every channel; its duration is the number
+                // of samples of each.
+                let num_frames = packet.block_dur().get() as usize;
+                if num_frames > self.buf.capacity() {
+                    return decode_error("adpcm: packet exceeds maximum frames per packet");
+                }
+                let mut pos = dec.begin(data, num_frames)?;
+                let len = codec_nintendo_dsp::data_len(num_frames);
+                self.buf.clear();
+                self.buf.render_uninit(Some(num_frames));
+                for ch in 0..self.buf.spec().channels().count() {
+                    let out =
+                        self.buf.plane_mut(ch).ok_or(Error::DecodeError("adpcm: no plane"))?;
+                    dec.decode_channel(ch, &data[pos..pos + len], out);
+                    pos += len;
+                }
+                return self.finish(packet);
+            }
+            InnerDecoder::Psx(dec) => {
+                let num_frames = dec.begin(data)?;
+                if num_frames > self.buf.capacity() {
+                    return decode_error("adpcm: packet exceeds maximum frames per packet");
+                }
+                self.buf.clear();
+                self.buf.render_uninit(Some(num_frames));
+                for ch in 0..self.buf.spec().channels().count() {
+                    let out =
+                        self.buf.plane_mut(ch).ok_or(Error::DecodeError("adpcm: no plane"))?;
+                    dec.decode_channel(data, ch, out);
+                }
+                return self.finish(packet);
+            }
+            InnerDecoder::Afc(dec) => {
+                let num_frames = dec.begin(data)?;
+                if num_frames > self.buf.capacity() {
+                    return decode_error("adpcm: packet exceeds maximum frames per packet");
+                }
+                self.buf.clear();
+                self.buf.render_uninit(Some(num_frames));
+                for ch in 0..self.buf.spec().channels().count() {
+                    let out =
+                        self.buf.plane_mut(ch).ok_or(Error::DecodeError("adpcm: no plane"))?;
+                    dec.decode_channel(data, ch, out);
+                }
+                return self.finish(packet);
+            }
+            InnerDecoder::Dtk(dec) => {
+                let num_frames = dec.begin(data)?;
+                if num_frames > self.buf.capacity() {
+                    return decode_error("adpcm: packet exceeds maximum frames per packet");
+                }
+                self.buf.clear();
+                self.buf.render_uninit(Some(num_frames));
+                for ch in 0..self.buf.spec().channels().count() {
+                    let out =
+                        self.buf.plane_mut(ch).ok_or(Error::DecodeError("adpcm: no plane"))?;
+                    dec.decode_channel(data, ch, out);
+                }
+                return self.finish(packet);
+            }
             _ => (),
         }
 
@@ -570,6 +672,10 @@ impl AdpcmDecoder {
             | InnerDecoder::ImaWs(_)
             | InnerDecoder::Swf
             | InnerDecoder::Adx(_)
+            | InnerDecoder::NintendoDsp(_)
+            | InnerDecoder::Psx(_)
+            | InnerDecoder::Afc(_)
+            | InnerDecoder::Dtk(_)
             | InnerDecoder::Sbpro(_)
             | InnerDecoder::EightSvx(_)
             | InnerDecoder::G722(_)
@@ -598,6 +704,10 @@ impl AudioDecoder for AdpcmDecoder {
             InnerDecoder::Nibble(dec) => dec.reset(),
             InnerDecoder::ImaWs(dec) => dec.reset(),
             InnerDecoder::Adx(dec) => dec.reset(),
+            InnerDecoder::NintendoDsp(dec) => dec.reset(),
+            InnerDecoder::Psx(dec) => dec.reset(),
+            InnerDecoder::Afc(dec) => dec.reset(),
+            InnerDecoder::Dtk(dec) => dec.reset(),
             InnerDecoder::Sbpro(dec) => dec.reset(),
             InnerDecoder::G722(decs) => decs.iter_mut().for_each(|dec| dec.reset()),
             InnerDecoder::G726(decs) => decs.iter_mut().for_each(|dec| dec.reset()),
@@ -685,6 +795,18 @@ impl RegisterableAudioDecoder for AdpcmDecoder {
             support_audio_codec!(CODEC_ID_ADPCM_IMA_XBOX, "adpcm_ima_xbox", "ADPCM IMA Xbox"),
             support_audio_codec!(CODEC_ID_ADPCM_IMA_WS, "adpcm_ima_ws", "ADPCM IMA Westwood"),
             support_audio_codec!(CODEC_ID_ADPCM_ADX, "adpcm_adx", "CRI ADX ADPCM"),
+            support_audio_codec!(
+                CODEC_ID_ADPCM_NINTENDO_DSP,
+                "adpcm_nintendo_dsp",
+                "Nintendo DSP-ADPCM"
+            ),
+            support_audio_codec!(CODEC_ID_ADPCM_PSX, "adpcm_psx", "Sony PlayStation ADPCM"),
+            support_audio_codec!(CODEC_ID_ADPCM_AFC, "adpcm_afc", "Nintendo GameCube AFC ADPCM"),
+            support_audio_codec!(
+                CODEC_ID_ADPCM_NINTENDO_DTK,
+                "adpcm_dtk",
+                "Nintendo GameCube DTK ADPCM"
+            ),
             support_audio_codec!(CODEC_ID_ADPCM_G722, "adpcm_g722", "ITU-T G.722 ADPCM"),
             support_audio_codec!(CODEC_ID_ADPCM_G726, "adpcm_g726", "ITU-T G.726 ADPCM"),
             support_audio_codec!(CODEC_ID_ADPCM_G726LE, "adpcm_g726le", "ITU-T G.726 ADPCM (LE)"),

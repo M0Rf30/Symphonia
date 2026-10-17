@@ -1,0 +1,9 @@
+This crate (`symphonia-codec-hca`) is a pure-Rust CRI HCA decoder. It is licensed under the Mozilla
+Public License, v. 2.0, like the rest of Project Symphonia (see `LICENSE`).
+
+The header parsing, the frame syntax, the dequantization, the high frequency reconstruction, the
+intensity stereo processing, the 56-bit cipher and the overlap-add follow FFmpeg's
+`libavcodec/hcadec.c`. The constant tables (`src/tables.rs`, generated programmatically) are those
+of FFmpeg's `libavcodec/hca_data.h`. FFmpeg is distributed under the GNU Lesser General Public
+License, version 2.1 or later; `hcadec.c` is Copyright (c) 2020 Paul B Mahol and the FFmpeg
+developers.

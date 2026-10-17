@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 //! Gapless playback with the mp3PRO decoder.
 //!
 //! The SBR output lags the core by 962 samples at the output rate (481 core samples). With

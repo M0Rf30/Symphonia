@@ -29,7 +29,9 @@ aac = ["dep:symphonia-codec-aac"]
 aac-sbr-fft-qmf = ["aac", "symphonia-codec-aac/sbr-fft-qmf"]
 ac3 = ["dep:symphonia-codec-ac3"]
 adpcm = ["dep:symphonia-codec-adpcm"]
+adp = ["adpcm", "dep:symphonia-format-game"]
 adx = ["adpcm", "dep:symphonia-format-game"]
+afc = ["adpcm", "dep:symphonia-format-game"]
 aiff = ["dep:symphonia-format-riff", "symphonia-format-riff/aiff"]
 alac = ["dep:symphonia-codec-alac"]
 als = ["dep:symphonia-codec-als"]
@@ -40,6 +42,7 @@ ape = ["symphonia-metadata/ape"]
 ape-format = ["dep:symphonia-bundle-ape"]
 aptx = ["dep:symphonia-codec-aptx"]
 asf = ["dep:symphonia-format-asf"]
+ast = ["adpcm", "dep:symphonia-format-game"]
 atrac = ["dep:symphonia-codec-atrac"]
 atrac3plus = ["dep:symphonia-codec-atrac3plus"]
 atrac9 = ["dep:symphonia-codec-atrac9"]
@@ -58,6 +61,7 @@ flv = ["dep:symphonia-format-flv"]
 g7231 = ["dep:symphonia-codec-g7231"]
 g729 = ["dep:symphonia-codec-g729"]
 gsm = ["dep:symphonia-codec-gsm"]
+hca = ["dep:symphonia-codec-hca", "dep:symphonia-format-game"]
 id3v1 = ["symphonia-metadata/id3v1"]
 id3v2 = ["symphonia-metadata/id3v2"]
 iff = ["dep:symphonia-format-sound", "symphonia-format-sound/iff"]
@@ -97,6 +101,7 @@ truehd = ["dep:symphonia-codec-truehd"]
 truespeech = ["dep:symphonia-codec-truespeech"]
 tta = ["dep:symphonia-bundle-tta"]
 twinvq = ["dep:symphonia-codec-twinvq"]
+vag = ["adpcm", "dep:symphonia-format-game"]
 voc = ["dep:symphonia-format-sound", "symphonia-format-sound/voc"]
 vorbis = ["dep:symphonia-codec-vorbis"]
 vqf = ["dep:symphonia-format-vqf"]
@@ -129,6 +134,7 @@ all-codecs = [
     "g7231",
     "g729",
     "gsm",
+    "hca",
     "ilbc",
     "imc",
     "lc3",
@@ -163,11 +169,14 @@ all-codecs = [
 
 # Enable all supported container formats.
 all-formats = [
+    "adp",
     "adx",
+    "afc",
     "aiff",
     "amr",
     "ape-format",
     "asf",
+    "ast",
     "au",
     "avi",
     "bt",
@@ -175,6 +184,7 @@ all-formats = [
     "dsd",
     "es",
     "flv",
+    "hca",
     "iff",
     "isomp4",
     "mkv",
@@ -189,6 +199,7 @@ all-formats = [
     "spdif",
     "tak",
     "tta",
+    "vag",
     "voc",
     "vqf",
     "wav",
@@ -330,6 +341,10 @@ workspace = true
 optional = true
 
 [dependencies.symphonia-codec-ra]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-hca]
 workspace = true
 optional = true
 

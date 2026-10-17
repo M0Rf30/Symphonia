@@ -23,6 +23,12 @@ Changes since upstream `v0.6.1`.
   Opus decoder with a CELT-only encoder (`symphonia-codec-opus`).
 - Decoder: QDesign Music Codec 1 and 2 (`symphonia-codec-qdesign`, feature `qdesign`), for
   QuickTime/MP4 tracks (`QDMC`/`QDM2`, including FFmpeg-remuxed `glbl` extra data).
+- Game console audio (`symphonia-format-game`, `symphonia-codec-adpcm`): Nintendo GameCube DTK
+  (`.adp`), AFC (`.afc`) and AST (`.ast`), Sony PlayStation VAG, SVAG, VPK, ADS/SS2, XVAG and MSF
+  (features `adp`, `afc`, `ast`, `vag`), with the Nintendo DSP, DTK, AFC and PlayStation ADPCM
+  decoders. Synthetic streams decode bit for bit like FFmpeg.
+- Decoder and demuxer: CRI HCA (`symphonia-codec-hca`, `symphonia-format-game`, feature `hca`),
+  matching FFmpeg's decoder at 139 dB SNR; the muted samples and loop points are not applied.
 - Decoder: GSM 06.10 full-rate and Microsoft GSM 6.10 (`symphonia-codec-gsm`, feature `gsm`),
   mapped from WAVE `0x0031`/`0x0032`/`0x1500`, AIFF-C `GSM `, CAF `agsm`/`ms\0\x31`, QuickTime
   `agsm`/`ms\0\x31` and Matroska `A_MS/ACM`.

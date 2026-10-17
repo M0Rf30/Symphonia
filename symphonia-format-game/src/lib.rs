@@ -16,9 +16,24 @@
 
 //! Demuxers of the audio formats of games consoles and their middleware.
 //!
+//! * [`AdpReader`]: Nintendo GameCube DTK (`.adp`).
 //! * [`AdxReader`]: CRI ADX.
+//! * [`AfcReader`]: Nintendo GameCube AFC.
+//! * [`AstReader`]: Nintendo AST (`STRM`).
+//! * [`HcaReader`]: CRI HCA.
+//! * [`VagReader`]: Sony PlayStation VAG and its variants.
 
+mod adp;
 mod adx;
+mod afc;
+mod ast;
 mod common;
+mod hca;
+mod vag;
 
+pub use adp::AdpReader;
 pub use adx::AdxReader;
+pub use afc::AfcReader;
+pub use ast::AstReader;
+pub use hca::HcaReader;
+pub use vag::VagReader;

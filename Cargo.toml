@@ -22,6 +22,7 @@ members = [
     "symphonia-codec-dolby-e",
     "symphonia-codec-sbc",
     "symphonia-codec-aptx",
+    "symphonia-codec-hca",
     "symphonia-codec-lc3",
     "symphonia-codec-ldac",
     "symphonia-codec-mace",
@@ -109,6 +110,7 @@ symphonia-codec-mace = { version = "0.6.1", path = "symphonia-codec-mace", defau
 symphonia-codec-nellymoser = { version = "0.6.1", path = "symphonia-codec-nellymoser", default-features = false }
 symphonia-codec-qdesign = { version = "0.6.1", path = "symphonia-codec-qdesign", default-features = false }
 symphonia-codec-atrac3plus = { version = "0.6.1", path = "symphonia-codec-atrac3plus", default-features = false }
+symphonia-codec-hca = { version = "0.6.1", path = "symphonia-codec-hca", default-features = false }
 symphonia-codec-atrac9 = { version = "0.6.1", path = "symphonia-codec-atrac9", default-features = false }
 symphonia-codec-ralf = { version = "0.6.1", path = "symphonia-codec-ralf", default-features = false }
 symphonia-codec-sipr = { version = "0.6.1", path = "symphonia-codec-sipr", default-features = false }

@@ -40,6 +40,7 @@ use log::{debug, info};
 
 pub enum ByteOrder {
     LittleEndian,
+    #[cfg_attr(not(feature = "aiff"), allow(dead_code))]
     BigEndian,
 }
 
@@ -188,6 +189,7 @@ pub trait ParseChunk: Sized {
     fn parse<B: ReadBytes>(reader: &mut B, tag: [u8; 4], len: u32) -> Result<Self>;
 
     /// Parse the chunk and discard any unread data in the chunk.
+    #[cfg_attr(not(feature = "aiff"), allow(dead_code))]
     fn parse_and_skip_unread<B: ReadBytes>(reader: &mut B, tag: [u8; 4], len: u32) -> Result<Self> {
         let pos = reader.pos();
         let result = Self::parse(reader, tag, len);
@@ -220,6 +222,7 @@ impl<P: ParseChunk> ChunkParser<P> {
         P::parse(reader, self.tag, self.len)
     }
 
+    #[cfg_attr(not(feature = "aiff"), allow(dead_code))]
     pub fn parse_and_skip_unread<B: ReadBytes>(&self, reader: &mut B) -> Result<P> {
         P::parse_and_skip_unread(reader, self.tag, self.len)
     }
