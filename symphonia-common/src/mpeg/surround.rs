@@ -442,7 +442,7 @@ pub struct Ac4Header {
 }
 
 impl Ac4Header {
-    /// Parse the header of the sync frame at the start of `buf` (at least [`AC4_MIN_HEADER`]
+    /// Parse the header of the sync frame at the start of `buf` (at least `AC4_MIN_HEADER`
     /// bytes).
     pub fn parse(buf: &[u8]) -> Option<Self> {
         if buf.len() < AC4_MIN_HEADER || buf[0] != 0xac || !matches!(buf[1], 0x40 | 0x41) {
