@@ -77,7 +77,7 @@ impl ChannelPair {
         if common_window {
             // Decode the common ICS info block into the first channel.
             // do not call self.ics0.info.decode() as it will skip required validations present in self.ics0.decode_info()
-            self.ics0.decode_info(bs)?;
+            self.ics0.decode_info(bs, true)?;
 
             // Mid-side stereo mask decoding.
             self.ms_mask_present = bs.read_bits_leq32(2)? as u8;
@@ -114,60 +114,74 @@ impl ChannelPair {
         self.ics0.decode(bs, lcg, aot, common_window)?;
         self.ics1.decode(bs, lcg, aot, common_window)?;
 
-        // Joint-stereo decoding
+        // Joint-stereo decoding: the mid-side stereo precedes the prediction of the main profile
+        // and the intensity stereo follows it.
         if common_window {
-            let bands = self.ics0.get_bands();
+            self.joint_stereo(false);
+            self.ics0.apply_prediction();
+            self.ics1.apply_prediction();
+            self.joint_stereo(true);
+        }
 
-            let mut g = 0;
+        Ok(())
+    }
 
-            for w in 0..self.ics0.info.num_windows {
-                if w > 0 && !self.ics0.info.scale_factor_grouping[w - 1] {
-                    g += 1;
+    /// Mid-side stereo (`intensity_pass` false) or intensity stereo (`intensity_pass` true) of the
+    /// channels of a pair with a common window.
+    fn joint_stereo(&mut self, intensity_pass: bool) {
+        let bands = self.ics0.get_bands();
+
+        let mut g = 0;
+
+        for w in 0..self.ics0.info.num_windows {
+            if w > 0 && !self.ics0.info.scale_factor_grouping[w - 1] {
+                g += 1;
+            }
+
+            for sfb in 0..self.ics0.info.max_sfb {
+                let start = w * 128 + bands[sfb];
+                let end = w * 128 + bands[sfb + 1];
+
+                if self.ics1.is_intensity(g, sfb) {
+                    if !intensity_pass {
+                        continue;
+                    }
+
+                    // Intensity stereo
+                    // Section 4.6.8.2.3
+                    // invert_intensity() (ISO/IEC 13818-7 §8.3.? / 14496-3): the phase is
+                    // inverted by ms_used only when ms_mask_present == 1. faad2 follows this;
+                    // FFmpeg also inverts for ms_mask_present == 2 (non-conformant).
+                    let invert = self.ms_mask_present == 1 && self.ms_used[g][sfb];
+                    let dir = if self.ics1.get_intensity_dir(g, sfb) { 1.0 } else { -1.0 };
+                    let factor = if invert { -1.0 } else { 1.0 };
+
+                    let scale = dir * factor * self.ics1.scales[g][sfb];
+
+                    let left = &self.ics0.coeffs[start..end];
+                    let right = &mut self.ics1.coeffs[start..end];
+
+                    for (l, r) in left.iter().zip(right) {
+                        *r = scale * l;
+                    }
                 }
+                else if self.ics0.is_noise(g, sfb) || self.ics1.is_noise(g, sfb) {
+                    // Perceptual noise substitution, do not do joint-stereo decoding.
+                    // Section 4.6.13.3
+                }
+                else if self.ms_used[g][sfb] && !intensity_pass {
+                    // Mid-side stereo.
+                    let mid = &mut self.ics0.coeffs[start..end];
+                    let side = &mut self.ics1.coeffs[start..end];
 
-                for sfb in 0..self.ics0.info.max_sfb {
-                    let start = w * 128 + bands[sfb];
-                    let end = w * 128 + bands[sfb + 1];
-
-                    if self.ics1.is_intensity(g, sfb) {
-                        // Intensity stereo
-                        // Section 4.6.8.2.3
-                        // invert_intensity() (ISO/IEC 13818-7 §8.3.? / 14496-3): the phase is
-                        // inverted by ms_used only when ms_mask_present == 1. faad2 follows this;
-                        // FFmpeg also inverts for ms_mask_present == 2 (non-conformant).
-                        let invert = self.ms_mask_present == 1 && self.ms_used[g][sfb];
-                        let dir = if self.ics1.get_intensity_dir(g, sfb) { 1.0 } else { -1.0 };
-                        let factor = if invert { -1.0 } else { 1.0 };
-
-                        let scale = dir * factor * self.ics1.scales[g][sfb];
-
-                        let left = &self.ics0.coeffs[start..end];
-                        let right = &mut self.ics1.coeffs[start..end];
-
-                        for (l, r) in left.iter().zip(right) {
-                            *r = scale * l;
-                        }
-                    }
-                    else if self.ics0.is_noise(g, sfb) || self.ics1.is_noise(g, sfb) {
-                        // Perceptual noise substitution, do not do joint-stereo decoding.
-                        // Section 4.6.13.3
-                    }
-                    else if self.ms_used[g][sfb] {
-                        // Mid-side stereo.
-                        let mid = &mut self.ics0.coeffs[start..end];
-                        let side = &mut self.ics1.coeffs[start..end];
-
-                        for (m, s) in mid.iter_mut().zip(side) {
-                            let tmp = *m - *s;
-                            *m += *s;
-                            *s = tmp;
-                        }
+                    for (m, s) in mid.iter_mut().zip(side) {
+                        let tmp = *m - *s;
+                        *m += *s;
+                        *s = tmp;
                     }
                 }
             }
         }
-
-        Ok(())
     }
 
     pub fn synth_audio(
@@ -197,9 +211,11 @@ impl ChannelPair {
             };
 
             couple(ics, CouplingPoint::BeforeTns);
+            ics.apply_ltp(dsp);
             ics.apply_tns(rate_idx);
             couple(ics, CouplingPoint::AfterTns);
             ics.imdct(dsp, dst);
+            ics.update_ltp(dst);
 
             for cce in cces.iter().flatten() {
                 cce.couple_time(is_cpe, tag, ch, dst);

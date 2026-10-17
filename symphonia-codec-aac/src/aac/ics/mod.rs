@@ -101,7 +101,14 @@ pub struct IcsInfo {
     pub num_windows: usize,
     pub max_sfb: usize,
     pub long_win: bool,
+    /// The `predictor_data_present` flag of a long window.
+    pub predictor_present: bool,
+    /// The LTP data of the channel, and of the second channel of a channel pair with a common
+    /// window (which is read with the `ics_info()`).
     pub ltp: Option<ltp::LtpData>,
+    pub ltp_next: Option<ltp::LtpData>,
+    /// The prediction data of the main profile.
+    pub pred: Option<ltp::MainPredData>,
 }
 
 impl IcsInfo {
@@ -117,14 +124,27 @@ impl IcsInfo {
             window_groups: 0,
             max_sfb: 0,
             ltp: None,
+            ltp_next: None,
+            pred: None,
+            predictor_present: false,
             long_win: true,
         }
     }
 
     /// this method should be called from Ics::decode_info() which will perform additional validations for max_sfb
-    pub fn decode<B: ReadBitsLtr>(&mut self, bs: &mut B, aot: AudioObjectType) -> Result<()> {
+    pub fn decode<B: ReadBitsLtr>(
+        &mut self,
+        bs: &mut B,
+        aot: AudioObjectType,
+        rate_idx: usize,
+        common_window: bool,
+    ) -> Result<()> {
         self.prev_window_sequence = self.window_sequence;
         self.prev_window_shape = self.window_shape;
+        self.predictor_present = false;
+        self.ltp = None;
+        self.ltp_next = None;
+        self.pred = None;
 
         if aot == AudioObjectType::ErAacEld {
             // The `ics_info()` of AAC ELD has no `window_sequence` and `window_shape`: the window
@@ -134,7 +154,6 @@ impl IcsInfo {
             self.long_win = true;
             self.num_windows = 1;
             self.max_sfb = bs.read_bits_leq32(6)? as usize;
-            self.ltp = None;
             return Ok(());
         }
 
@@ -186,7 +205,25 @@ impl IcsInfo {
             self.long_win = true;
             self.num_windows = 1;
             self.max_sfb = bs.read_bits_leq32(6)? as usize;
-            self.ltp = ltp::LtpData::read(bs)?;
+            self.predictor_present = bs.read_bool()?;
+
+            if self.predictor_present {
+                match aot {
+                    AudioObjectType::Main => {
+                        self.pred = Some(ltp::MainPredData::read(bs, self.max_sfb, rate_idx)?);
+                    }
+                    AudioObjectType::Ltp => {
+                        if bs.read_bool()? {
+                            self.ltp = Some(ltp::LtpData::read(bs, self.max_sfb)?);
+                        }
+
+                        if common_window && bs.read_bool()? {
+                            self.ltp_next = Some(ltp::LtpData::read(bs, self.max_sfb)?);
+                        }
+                    }
+                    _ => return decode_error("aac: prediction is not allowed in this profile"),
+                }
+            }
         }
         Ok(())
     }
@@ -197,6 +234,10 @@ impl IcsInfo {
         let prev_window_shape = self.window_shape;
 
         *self = other.clone();
+
+        // The LTP data of the second channel follows that of the first in the `ics_info()`.
+        self.ltp = other.ltp_next;
+        self.ltp_next = None;
 
         self.prev_window_sequence = prev_window_sequence;
         self.prev_window_shape = prev_window_shape;
@@ -233,6 +274,11 @@ pub struct Ics {
     pub coeffs: [f32; 1024],
     /// The overlap-add state of the filterbank.
     delay: Vec<f32>,
+    /// The state of LTP: the output of the two previous frames and the overlap-add state of the
+    /// last one. Empty unless the object type is AAC LTP.
+    ltp_state: Vec<f32>,
+    /// The predictors of the spectral samples of the main profile. Empty for other profiles.
+    predictors: Vec<ltp::Predictor>,
 }
 
 impl Ics {
@@ -252,12 +298,21 @@ impl Ics {
             aot,
             coeffs: [0.0; 1024],
             delay: vec![0.0; dsp::delay_len(aot)],
+            ltp_state: if aot == AudioObjectType::Ltp { vec![0.0; 3 * 1024] } else { vec![] },
+            predictors: if aot == AudioObjectType::Main {
+                vec![ltp::Predictor::default(); 1024]
+            }
+            else {
+                vec![]
+            },
         }
     }
 
     pub fn reset(&mut self) {
         self.info = IcsInfo::new();
         self.delay.fill(0.0);
+        self.ltp_state.fill(0.0);
+        self.predictors.iter_mut().for_each(ltp::Predictor::reset);
     }
 
     fn decode_section_data<B: ReadBitsLtr>(&mut self, bs: &mut B) -> Result<()> {
@@ -326,8 +381,9 @@ impl Ics {
         self.sfb_cb[g][sfb] == INTENSITY_HCB
     }
 
-    pub fn decode_info<B: ReadBitsLtr>(&mut self, bs: &mut B) -> Result<()> {
-        self.info.decode(bs, self.aot)?;
+    pub fn decode_info<B: ReadBitsLtr>(&mut self, bs: &mut B, common_window: bool) -> Result<()> {
+        let rate_idx = self.rate_idx();
+        self.info.decode(bs, self.aot, rate_idx, common_window)?;
 
         // validate info.max_sfb - it should not be bigger than bands array len - 1
         if self.info.max_sfb + 1 > self.get_bands().len() {
@@ -448,7 +504,7 @@ impl Ics {
         // If a common window is used, a common ICS info was decoded previously.
         if !common_window {
             // do not call self.info.decode() as it will skip required validations present in the decode_info()
-            self.decode_info(bs)?;
+            self.decode_info(bs, false)?;
         }
 
         self.decode_section_data(bs)?;
@@ -513,7 +569,110 @@ impl Ics {
             );
         }
 
+        // The prediction of a channel of a pair with a common window follows its stereo
+        // processing.
+        if !common_window {
+            self.apply_prediction();
+        }
+
         Ok(())
+    }
+
+    /// The sampling frequency index of the scale factor band tables.
+    fn rate_idx(&self) -> usize {
+        GASubbandInfo::find_idx(self.sbinfo.min_srate)
+    }
+
+    /// Apply the backward adaptive prediction of the main profile to the spectrum, and update
+    /// the predictors with it (ISO/IEC 14496-3 4.6.6). The predictors are reset by short windows
+    /// and by the reset group of the frame.
+    pub fn apply_prediction(&mut self) {
+        if self.predictors.is_empty() {
+            return;
+        }
+
+        if self.info.long_win {
+            let bands = self.get_bands();
+            let num_bands = ltp::MainPredData::num_bands(self.rate_idx()).min(bands.len() - 1);
+            let pred = self.info.pred;
+
+            for sfb in 0..num_bands {
+                let used = pred.is_some_and(|p| p.used[sfb]);
+
+                for k in bands[sfb]..bands[sfb + 1] {
+                    self.predictors[k].predict(&mut self.coeffs[k], used);
+                }
+            }
+
+            if let Some(group) = pred.map(|p| usize::from(p.reset_group)).filter(|&g| g != 0) {
+                for p in self.predictors.iter_mut().skip(group - 1).step_by(30) {
+                    p.reset();
+                }
+            }
+        }
+        else {
+            self.predictors.iter_mut().for_each(ltp::Predictor::reset);
+        }
+    }
+
+    /// Add the long term prediction to the spectrum: the signal of the lag in the output of the
+    /// previous frames is transformed like the current frame, and added to the bands it is used
+    /// in (ISO/IEC 14496-3 4.6.7.3).
+    pub fn apply_ltp(&mut self, dsp: &mut dsp::Dsp) {
+        let Some(ltp) = self.info.ltp.filter(|_| self.info.long_win && !self.ltp_state.is_empty())
+        else {
+            return;
+        };
+
+        let lag = ltp.lag;
+        let mut pred = [0.0f32; 2048];
+        let num_samples = if lag < 1024 { lag + 1024 } else { 2048 };
+
+        for (i, p) in pred.iter_mut().enumerate().take(num_samples) {
+            *p = self.ltp_state[i + 2048 - lag] * ltp.coef;
+        }
+
+        let mut spec = [0.0f32; 1024];
+
+        dsp.ltp_mdct(
+            &mut pred,
+            self.info.window_sequence,
+            self.info.window_shape,
+            self.info.prev_window_shape,
+            &mut spec,
+        );
+
+        let bands = self.get_bands();
+
+        // The prediction goes through the filter of the TNS, in the direction of the encoder.
+        if let Some(tns) = &self.tns {
+            tns.analysis(
+                &self.info,
+                bands,
+                self.rate_idx(),
+                self.sbinfo.tns_max_long_bands,
+                &mut spec,
+            );
+        }
+
+        for sfb in 0..self.info.max_sfb.min(ltp::MAX_LTP_SFB) {
+            if ltp.used[sfb] {
+                for i in bands[sfb]..bands[sfb + 1] {
+                    self.coeffs[i] += spec[i];
+                }
+            }
+        }
+    }
+
+    /// Update the state of LTP with the output `dst` of the frame and the overlap of it.
+    pub fn update_ltp(&mut self, dst: &[f32]) {
+        if self.ltp_state.is_empty() {
+            return;
+        }
+
+        self.ltp_state.copy_within(1024..2048, 0);
+        self.ltp_state[1024..2048].copy_from_slice(&dst[..1024]);
+        self.ltp_state[2048..].copy_from_slice(&self.delay[..1024]);
     }
 
     /// Apply the TNS filters, if any, to the spectrum.
@@ -532,8 +691,10 @@ impl Ics {
     }
 
     pub fn synth_channel(&mut self, dsp: &mut dsp::Dsp, rate_idx: usize, dst: &mut [f32]) {
+        self.apply_ltp(dsp);
         self.apply_tns(rate_idx);
         self.imdct(dsp, dst);
+        self.update_ltp(dst);
     }
 
     /// Transform the spectrum to the time domain, with windowing and overlap-add.

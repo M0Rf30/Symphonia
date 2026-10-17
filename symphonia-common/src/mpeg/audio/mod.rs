@@ -529,6 +529,7 @@ impl AudioSpecificConfig {
                     (AudioObjectType::ErAacLd, false) => 512,
                     (_, true) => 960,
                     (_, false) => 1024,
+            | AudioObjectType::Ltp
                 };
 
                 let depends_on_core = bs.read_bool()?;

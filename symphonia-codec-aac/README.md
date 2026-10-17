@@ -23,6 +23,11 @@ AAC-LC also decodes frames of 960 samples (`frameLengthFlag` of the audio specif
 960 sample long and 120 sample short windows); SBR with 960 sample frames is rejected as
 unsupported.
 
+The AAC Main profile (backward adaptive prediction) and AAC LTP (long term prediction, with TNS
+filtering of the predicted spectrum) decode with frames of 1024 samples, without SBR. The Main
+prediction follows FFmpeg's `predict()`, which rounds the predictor state to 16 bit floats. AAC
+SSR (gain control and the polyphase quadrature filter) is not supported.
+
 AAC-LD (audio object type 23) and AAC-ELD (audio object type 39) are decoded with frame lengths
 of 512 and 480 samples, for any channel configuration of 1-7. Their low overlap window, the low
 delay filterbank, and their scale factor bands and syntax (which has no element identifiers and

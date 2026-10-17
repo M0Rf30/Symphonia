@@ -207,4 +207,69 @@ impl Tns {
             }
         }
     }
+
+    /// Apply the analysis (moving average) filters of the TNS, the inverse of [`Tns::synth`], to
+    /// a spectrum: LTP filters the spectrum of its prediction like the encoder did.
+    pub fn analysis(
+        &self,
+        info: &IcsInfo,
+        bands: &[usize],
+        rate_idx: usize,
+        ld_max_bands: usize,
+        coeffs: &mut [f32; 1024],
+    ) {
+        let tns_max_bands = (if info.long_win && ld_max_bands != 0 {
+            ld_max_bands
+        }
+        else if info.long_win {
+            TNS_MAX_LONG_BANDS[rate_idx]
+        }
+        else {
+            TNS_MAX_SHORT_BANDS[rate_idx]
+        })
+        .min(info.max_sfb);
+
+        for w in 0..info.num_windows {
+            let mut bottom = bands.len() - 1;
+
+            for f in 0..self.n_filt[w] {
+                let top = bottom;
+
+                bottom = top.saturating_sub(self.coeffs[w][f].length);
+
+                let order = self.coeffs[w][f].order;
+
+                if order == 0 {
+                    continue;
+                }
+
+                let start = w * 128 + bands[bottom.min(tns_max_bands)];
+                let end = w * 128 + bands[top.min(tns_max_bands)];
+
+                if end <= start {
+                    continue;
+                }
+
+                let lpc = &self.coeffs[w][f].coef;
+                let original: Vec<f32> = coeffs[start..end].to_vec();
+
+                if !self.coeffs[w][f].direction {
+                    for m in 0..end - start {
+                        for j in 0..order.min(m) {
+                            coeffs[start + m] += original[m - j - 1] * lpc[j];
+                        }
+                    }
+                }
+                else {
+                    let size = end - start;
+                    for m in 0..size {
+                        let i = size - 1 - m;
+                        for j in 0..order.min(m) {
+                            coeffs[start + i] += original[i + j + 1] * lpc[j];
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

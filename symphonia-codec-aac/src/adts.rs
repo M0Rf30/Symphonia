@@ -12,6 +12,9 @@ use symphonia_core::audio::Channels;
 use symphonia_core::codecs::CodecParameters;
 use symphonia_core::codecs::audio::AudioCodecParameters;
 use symphonia_core::codecs::audio::well_known::CODEC_ID_AAC;
+use symphonia_core::codecs::audio::well_known::profiles::{
+    CODEC_PROFILE_AAC_LTP, CODEC_PROFILE_AAC_MAIN,
+};
 use symphonia_core::errors::{Result, SeekErrorKind, decode_error, seek_error};
 use symphonia_core::formats::prelude::*;
 use symphonia_core::formats::probe::{ProbeFormatData, ProbeableFormat, Score, Scoreable};
@@ -113,6 +116,19 @@ impl<'s> AdtsReader<'s> {
             codec_params.with_extra_data(plain.clone().unwrap_or_default());
         }
 
+        if matches!(header.profile, AudioObjectType::Main | AudioObjectType::Ltp) {
+            if let Some(plain) = &plain {
+                codec_params.with_extra_data(plain.clone());
+            }
+
+            codec_params.with_profile(if header.profile == AudioObjectType::Main {
+                CODEC_PROFILE_AAC_MAIN
+            }
+            else {
+                CODEC_PROFILE_AAC_LTP
+            });
+        }
+
         // If the stream has SBR, the codec parameters describe the output of the decoder, and
         // the audio specific config tells the decoder.
         let mut ratio = 1;
@@ -200,8 +216,20 @@ fn probe_stream(
     let needs_pce = header.channel_config == 0 && header.profile == AudioObjectType::Lc;
 
     if !can_have_sbr && !needs_pce {
-        let plain = (header.profile == AudioObjectType::Lc && header.channels.is_some())
-            .then(|| plain_asc(header.sample_rate, header.channel_config));
+        // The decoder needs the object type of a stream of the main or LTP profile.
+        let plain = (matches!(
+            header.profile,
+            AudioObjectType::Lc | AudioObjectType::Main | AudioObjectType::Ltp
+        ) && header.channels.is_some())
+        .then(|| match header.profile {
+            AudioObjectType::Main => {
+                build_asc(1, header.sample_rate, header.channel_config, None, None)
+            }
+            AudioObjectType::Ltp => {
+                build_asc(4, header.sample_rate, header.channel_config, None, None)
+            }
+            _ => plain_asc(header.sample_rate, header.channel_config),
+        });
 
         return Ok((plain, ImplicitExtensions::default()));
     }

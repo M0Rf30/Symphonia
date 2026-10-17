@@ -16,6 +16,8 @@ Changes since upstream `v0.6.1`.
 
 ### Added
 
+- AAC Main profile prediction and AAC LTP, in MP4 and ADTS (`symphonia-codec-aac`); AAC SSR is
+  not supported. Matches FFmpeg's decoder at about 130 dB (LTP) and 50 dB (Main).
 - AAC-LC with 960 sample frames (`frameLengthFlag`), without SBR (`symphonia-codec-aac`).
 - Decoder: Dolby AC-4 (`symphonia-codec-ac4`, feature `ac4`): ASF, A-SPX, A-CPL-less stereo, 5.0 and
   5.1 streams, in MPEG-TS (registration or DVB descriptor), MP4 (`ac-4`/`dac4`), Matroska (`A_AC4`)

@@ -477,6 +477,77 @@ impl Dsp {
         };
     }
 
+    /// The MDCT of the 2048 samples `x` of the signal that LTP predicts, which are windowed like
+    /// the block of the frame (ISO/IEC 14496-3 4.6.9.2, with the windows of FFmpeg's
+    /// `windowing_and_mdct_ltp()`), to the 1024 spectral samples `out`. The frame length must be
+    /// 1024.
+    pub fn ltp_mdct(
+        &mut self,
+        x: &mut [f32],
+        seq: u8,
+        window_shape: bool,
+        prev_window_shape: bool,
+        out: &mut [f32],
+    ) {
+        let (long_win, short_win) = match window_shape {
+            true => (&self.kbd_long_win, &self.kbd_short_win),
+            false => (&self.sine_long_win, &self.sine_short_win),
+        };
+
+        let (prev_long_win, prev_short_win) = match prev_window_shape {
+            true => (&self.kbd_long_win, &self.kbd_short_win),
+            false => (&self.sine_long_win, &self.sine_short_win),
+        };
+
+        if seq != LONG_STOP_SEQUENCE {
+            for (v, w) in x[..1024].iter_mut().zip(prev_long_win.iter()) {
+                *v *= w;
+            }
+        }
+        else {
+            x[..448].fill(0.0);
+
+            for (v, w) in x[448..576].iter_mut().zip(prev_short_win.iter()) {
+                *v *= w;
+            }
+        }
+
+        if seq != LONG_START_SEQUENCE {
+            for (i, v) in x[1024..2048].iter_mut().enumerate() {
+                *v *= long_win[1023 - i];
+            }
+        }
+        else {
+            for (i, v) in x[1024 + 448..1024 + 576].iter_mut().enumerate() {
+                *v *= short_win[127 - i];
+            }
+
+            x[1024 + 576..].fill(0.0);
+        }
+
+        // The MDCT folds the four quarters (a, b, c, d) of the input to (-c_r - d, a - b_r), the
+        // DCT-IV of which is the spectrum. The DCT-IV is read from the output of the IMDCT, which
+        // is its extension (`pcm_long[3 n / 2 - 1 - j] = -dct[j] * scale`, with the scale of the
+        // IMDCT). The spectrum is scaled so that the IMDCT of the MDCT of a signal is the signal
+        // with its aliasing: 4 is `2 * 2`, the gain of the pair of the DCT-IV (n / 2) and the
+        // scale of the IMDCT (1 / 2 n).
+        let n = 1024;
+        let h = n / 2;
+        let mut folded = [0.0f32; 1024];
+
+        for k in 0..h {
+            folded[k] = -x[3 * h - 1 - k] - x[3 * h + k];
+            folded[h + k] = x[k] - x[2 * h - 1 - k];
+        }
+
+        self.imdct_long.imdct(&folded, &mut self.pcm_long);
+
+        let gain = -((2 * n) as f32) * 4.0;
+        for (j, o) in out.iter_mut().enumerate().take(n) {
+            *o = self.pcm_long[3 * h - 1 - j] * gain;
+        }
+    }
+
     /// Synthesise a frame of AAC LD: an IMDCT of `n` spectral samples, windowed and overlapped
     /// like a long window of AAC LC, with the window length (`2 n`) of the frame length. The
     /// window shape bit selects the sine window or, instead of the KBD window, a low overlap

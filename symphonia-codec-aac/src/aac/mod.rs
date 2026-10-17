@@ -304,6 +304,8 @@ impl AacDecoder {
         let supported = match asc.object_type {
             AudioObjectType::Lc => asc.samples == 1024 || asc.samples == 960,
             AudioObjectType::ErAacLd | AudioObjectType::ErAacEld => {
+            // Prediction is only defined for the long block of 1024 samples.
+            AudioObjectType::Main | AudioObjectType::Ltp => asc.samples == 1024,
                 asc.samples == 512 || asc.samples == 480
             }
             _ => false,
@@ -468,7 +470,7 @@ impl AacDecoder {
     /// ends with its `ID_END` element. The state of the parser is not meaningful as a decoder.
     pub(crate) fn measure_raw_data_block(&mut self, data: &[u8]) -> Result<usize> {
         match self.asc.object_type {
-            AudioObjectType::Lc => (),
+            AudioObjectType::Lc | AudioObjectType::Main | AudioObjectType::Ltp => (),
             _ => return unsupported_error("aac: object type"),
         }
 
@@ -901,7 +903,9 @@ impl AacDecoder {
 
         // Choose decode step based on the object type.
         match self.asc.object_type {
-            AudioObjectType::Lc => self.decode_ga(&mut bs, packet.data)?,
+            AudioObjectType::Lc | AudioObjectType::Main | AudioObjectType::Ltp => {
+                self.decode_ga(&mut bs, packet.data)?
+            }
             AudioObjectType::ErAacLd | AudioObjectType::ErAacEld => {
                 self.decode_er(&mut bs, packet.data)?
             }
