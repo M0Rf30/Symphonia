@@ -9,10 +9,11 @@
 
 use symphonia_core::dsp::mdct::Imdct;
 use symphonia_core::dsp::window::{WindowType, generate_window};
-use symphonia_core::errors::{Result, decode_error};
+use symphonia_core::errors::{Result, decode_error, unsupported_error};
 use symphonia_core::io::{BitReaderLtr, ReadBitsLtr};
 
 use super::arith::ArithState;
+use super::lpd::{LpdDecoder, read_fac};
 use super::tables::{
     NOISE_FILL_START_OFFSET, NUM_SWB_96, NUM_SWB_128, NUM_SWB_768, NUM_SWB_1024, SWB_OFFSET_96,
     SWB_OFFSET_128, SWB_OFFSET_768, SWB_OFFSET_1024, TNS_MAX_BANDS_128, TNS_MAX_BANDS_1024,
@@ -184,11 +185,18 @@ pub struct FdChannelState {
     pub coeffs: Vec<f32>,
     pub prev_coeffs: Vec<f32>,
     pub delay: Vec<f32>,
+    /// The unwindowed second half of the last long IMDCT: the overlap a following LPD frame
+    /// windows itself.
+    pub delay_raw: Vec<f32>,
     pub sfo: [i16; 8 * MAX_BANDS],
     pub ics: IcsInfo,
     pub tns: Tns,
     pub arith: ArithState,
     pub noise_seed: u32,
+    /// The `fac_data()` of the frame (`fac_len` values and the gain index), if present.
+    pub fac_present: bool,
+    pub fac_gain: i32,
+    pub fac: [i32; 128],
     ccfl: usize,
     sampling_index: usize,
 }
@@ -199,11 +207,15 @@ impl FdChannelState {
             coeffs: vec![0.0; 1024],
             prev_coeffs: vec![0.0; 1024],
             delay: vec![0.0; 1024],
+            delay_raw: vec![0.0; 1024],
             sfo: [0; 8 * MAX_BANDS],
             ics: IcsInfo::new(),
             tns: Tns::new(),
             arith: ArithState::new(),
             noise_seed,
+            fac_present: false,
+            fac_gain: 0,
+            fac: [0; 128],
             ccfl,
             sampling_index,
         }
@@ -213,6 +225,7 @@ impl FdChannelState {
         self.coeffs.fill(0.0);
         self.prev_coeffs.fill(0.0);
         self.delay.fill(0.0);
+        self.delay_raw.fill(0.0);
         self.sfo = [0; 8 * MAX_BANDS];
         self.ics = IcsInfo::new();
         self.tns.reset();
@@ -287,9 +300,12 @@ impl FdChannelState {
         }
 
         // fac_data()
-        if bs.read_bool()? {
+        self.fac_present = bs.read_bool()?;
+
+        if self.fac_present {
             let fac_len = if ics.window_sequence == EIGHT_SHORT { ccfl / 16 } else { ccfl / 8 };
-            skip_fac_data(bs, fac_len)?;
+            self.fac_gain = bs.read_bits_leq32(7)? as i32;
+            read_fac(bs, &mut self.fac[..fac_len])?;
         }
 
         // Spectral noise filling and the scale factor application (ISO/IEC 23003-3 7.5.1.4).
@@ -406,39 +422,6 @@ fn noise_random_sign(seed: &mut u32) -> f32 {
     if new_seed & 0x1_0000 != 0 { -1.0 } else { 1.0 }
 }
 
-/// Consume the `fac_data()` of a frame (ISO/IEC 23003-3 Table 30; FDK `CLpd_FAC_Read()`): a 7 bit
-/// gain and `fac_len` algebraic vector quantised (RE8) coefficients in vectors of 8, each with a
-/// unary coded codebook number `qn`, `4 * n` bits of base codebook index and, from `qn` 5 on, 8
-/// Voronoi extension indexes of `(qn - 3) / 2` bits each.
-fn skip_fac_data(bs: &mut BitReaderLtr<'_>, fac_len: usize) -> Result<()> {
-    bs.read_bits_leq32(7)?;
-
-    for _ in 0..fac_len / 8 {
-        let mut qn = 0;
-
-        // Unary code, `Q0 = 0, Q2 = 10, Q3 = 110, ...`, limited like FDK's `NQ_MAX`.
-        while qn <= 36 && bs.read_bool()? {
-            qn += 1;
-        }
-
-        if qn > 0 {
-            qn += 1;
-        }
-
-        let (mut n, mut nk) = (qn, 0);
-
-        if qn > 4 {
-            nk = (qn - 3) >> 1;
-            n = qn - nk * 2;
-        }
-
-        bs.ignore_bits(4 * n as u32)?;
-        bs.ignore_bits(8 * nk as u32)?;
-    }
-
-    Ok(())
-}
-
 /// The IMDCT of a USAC window length: 1024/128 use the core FFT-based transform, 768/96 the
 /// arbitrary-size one.
 enum FdImdct {
@@ -509,7 +492,15 @@ impl FdFilterbank {
 
     /// Synthesize one channel: IMDCT, window and overlap-add, writing `ccfl` time-domain samples
     /// (at the core sample rate, on the INT16 scale) into `out`.
-    pub fn synth(&mut self, state: &mut FdChannelState, out: &mut [f32]) {
+    ///
+    /// `after_lpd` is the LPD decoder of the channel when the previous frame was LPD coded: the
+    /// frame then starts from its state and the transition window and the FAC apply.
+    pub fn synth(
+        &mut self,
+        state: &mut FdChannelState,
+        out: &mut [f32],
+        mut after_lpd: Option<&mut LpdDecoder>,
+    ) -> Result<()> {
         let ics = &state.ics;
         let ccfl = self.ccfl;
         let short = self.short;
@@ -532,6 +523,22 @@ impl FdFilterbank {
         };
 
         let seq = ics.window_sequence;
+
+        // A long start window after a start, short or stop-start window (or an LPD frame, which
+        // leaves EIGHT_SHORT as the previous sequence) is a STOP_START window: it has the left
+        // half of a stop window and the right half of a start window (ISO/IEC 23003-3 and
+        // libxaac `ixheaacd_win_seq_select`).
+        let stop_start =
+            seq == LONG_START && matches!(ics.window_sequence_prev, LONG_START | EIGHT_SHORT);
+        let left_stop = seq == LONG_STOP || stop_start;
+
+        if let Some(lpd) = after_lpd.as_deref_mut() {
+            if seq == ONLY_LONG {
+                return unsupported_error("aac: usac long window directly after an lpd frame");
+            }
+
+            lpd.dec_update(&mut state.delay[..ccfl]);
+        }
 
         if seq != EIGHT_SHORT {
             self.imdct_long.imdct(&state.coeffs[..ccfl], &mut self.buf);
@@ -564,9 +571,35 @@ impl FdFilterbank {
 
         // Output new samples by overlap-adding the windowed IMDCT with the saved tail.
         match seq {
-            ONLY_LONG | LONG_START => {
+            ONLY_LONG | LONG_START if !stop_start => {
                 for i in 0..ccfl {
                     out[i] = state.delay[i] + self.buf[i] * prev_long_win[i];
+                }
+            }
+            EIGHT_SHORT if after_lpd.is_some() => {
+                // libxaac `ixheaacd_windowing_short1/2` and `combine_fac`.
+                let lfac = ccfl / 16;
+                let mut fac = [0.0f32; 128 * 2];
+                out[..point0].copy_from_slice(&state.delay[..point0]);
+
+                if state.fac_present {
+                    if let Some(lpd) = after_lpd.as_deref_mut() {
+                        lpd.fac_for_fd(state.fac_gain, &state.fac[..lfac], lfac, &mut fac);
+                    }
+
+                    out[point0..point0 + lfac].copy_from_slice(&state.delay[point0..point0 + lfac]);
+                    out[point0 + lfac..ccfl].copy_from_slice(&self.pcm_short[lfac..ccfl - point0]);
+                    for k in 0..2 * lfac {
+                        out[ccfl / 2 + k] += fac[k];
+                    }
+                }
+                else {
+                    for i in 0..short {
+                        out[point0 + i] = state.delay[point0 + i] * prev_short_win[short - 1 - i]
+                            + self.pcm_short[i];
+                    }
+                    out[point0 + short..ccfl]
+                        .copy_from_slice(&self.pcm_short[short..ccfl - point0]);
                 }
             }
             EIGHT_SHORT => {
@@ -575,7 +608,38 @@ impl FdFilterbank {
                     out[i] = state.delay[i] + self.pcm_short[i - point0];
                 }
             }
-            LONG_STOP => {
+            _ if left_stop && after_lpd.is_some() => {
+                let lfac = ccfl / 8;
+                let ntrans = 2 * lfac;
+                let nflat = ccfl / 2 - lfac;
+                let mut win = vec![0.0f32; ntrans];
+                generate_window(WindowType::Sine, 1.0, ntrans, true, &mut win);
+
+                if state.fac_present {
+                    let mut fac = [0.0f32; 128 * 2];
+
+                    if let Some(lpd) = after_lpd.as_deref_mut() {
+                        lpd.fac_for_fd(state.fac_gain, &state.fac[..lfac], lfac, &mut fac);
+                    }
+
+                    out[..ccfl / 2].copy_from_slice(&state.delay[..ccfl / 2]);
+                    for i in 0..lfac {
+                        out[ccfl / 2 + i] = self.buf[ccfl / 2 + i] * win[lfac + i] + fac[i];
+                        out[ccfl / 2 + lfac + i] = self.buf[ccfl / 2 + lfac + i] + fac[lfac + i];
+                    }
+                    out[ccfl / 2 + 2 * lfac..ccfl]
+                        .copy_from_slice(&self.buf[ccfl / 2 + 2 * lfac..ccfl]);
+                }
+                else {
+                    out[..nflat].copy_from_slice(&state.delay[..nflat]);
+                    for i in nflat..nflat + ntrans {
+                        out[i] = self.buf[i] * win[i - nflat]
+                            + state.delay[i] * win[ntrans - 1 - (i - nflat)];
+                    }
+                    out[nflat + ntrans..ccfl].copy_from_slice(&self.buf[nflat + ntrans..ccfl]);
+                }
+            }
+            _ if left_stop => {
                 out[..point0].copy_from_slice(&state.delay[..point0]);
                 for i in point0..point1 {
                     out[i] = state.delay[i] + self.buf[i] * prev_short_win[i - point0];
@@ -587,9 +651,13 @@ impl FdFilterbank {
             _ => unreachable!("window sequence is 0..3"),
         }
 
+        if seq != EIGHT_SHORT {
+            state.delay_raw[..ccfl].copy_from_slice(&self.buf[ccfl..2 * ccfl]);
+        }
+
         // Save the windowed tail for the next frame.
         match seq {
-            ONLY_LONG | LONG_STOP => {
+            ONLY_LONG | LONG_STOP if !stop_start => {
                 for i in 0..ccfl {
                     state.delay[i] = self.buf[i + ccfl] * long_win[ccfl - 1 - i];
                 }
@@ -599,6 +667,12 @@ impl FdFilterbank {
                     state.delay[i] = self.pcm_short[i + point1];
                 }
                 state.delay[point1..ccfl].fill(0.0);
+
+                // A following LPD frame windows the last short window's tail itself.
+                state.delay_raw[..point0].copy_from_slice(&state.delay[..point0]);
+                let last = 7 * 2 * short + short;
+                state.delay_raw[point0..point1].copy_from_slice(&self.buf[last..last + short]);
+                state.delay_raw[point1..ccfl].fill(0.0);
             }
             LONG_START => {
                 state.delay[..point0].copy_from_slice(&self.buf[ccfl..ccfl + point0]);
@@ -609,5 +683,11 @@ impl FdFilterbank {
             }
             _ => unreachable!("window sequence is 0..3"),
         }
+
+        if let Some(lpd) = after_lpd {
+            lpd.bpf_fix(false, out);
+        }
+
+        Ok(())
     }
 }

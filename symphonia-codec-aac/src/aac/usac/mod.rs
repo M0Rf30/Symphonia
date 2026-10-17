@@ -392,11 +392,12 @@ impl UsacDecoder {
             return decode_error("aac: usac element mismatch");
         };
 
-        if state.last_lpd.is_some_and(|last| last != lpd_frame) {
-            return unsupported_error("aac: usac fd/lpd transitions are not yet implemented");
-        }
-
         if lpd_frame {
+            if state.last_lpd == Some(false) {
+                let last_short = state.ch.ics.window_sequence == fd::EIGHT_SHORT;
+                state.lpd.set_overlap(&state.ch.delay_raw, last_short);
+            }
+
             state.lpd.decode(
                 bs,
                 &mut state.ch.arith,
@@ -406,6 +407,10 @@ impl UsacDecoder {
             )?;
             state.last_lpd = Some(true);
 
+            // The window shape of the next FD frame's left half is the sine one.
+            state.ch.ics.window_shape = false;
+            state.ch.ics.window_sequence = fd::EIGHT_SHORT;
+
             if let Some(sbr) = &mut state.sbr {
                 sbr.parse(bs, data, indep_flag)?;
             }
@@ -413,6 +418,7 @@ impl UsacDecoder {
             return Self::output_sce(&mut self.buf, state);
         }
 
+        let after_lpd = state.last_lpd == Some(true);
         state.last_lpd = Some(false);
 
         let tns_data_present = bs.read_bool()?;
@@ -434,7 +440,8 @@ impl UsacDecoder {
             &mut state.ch.coeffs,
         );
 
-        self.filterbank.synth(&mut state.ch, &mut state.pcm);
+        let lpd = if after_lpd { Some(&mut state.lpd) } else { None };
+        self.filterbank.synth(&mut state.ch, &mut state.pcm, lpd)?;
 
         Self::output_sce(&mut self.buf, state)
     }
@@ -668,8 +675,8 @@ impl UsacDecoder {
         state.ch0.prev_coeffs.copy_from_slice(&state.ch0.coeffs);
         state.ch1.prev_coeffs.copy_from_slice(&state.ch1.coeffs);
 
-        self.filterbank.synth(&mut state.ch0, &mut state.pcm0);
-        self.filterbank.synth(&mut state.ch1, &mut state.pcm1);
+        self.filterbank.synth(&mut state.ch0, &mut state.pcm0, None)?;
+        self.filterbank.synth(&mut state.ch1, &mut state.pcm1, None)?;
 
         let scale = 1.0 / PCM_SCALE;
         let [l, r] = state.targets;

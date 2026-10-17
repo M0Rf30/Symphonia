@@ -176,6 +176,11 @@ pub struct LpdDecoder {
     pub overlap: Vec<f32>,
     /// Whether the previous frame of this channel was LPD coded (`td_frame_prev`).
     pub prev_lpd: bool,
+    /// Whether the frequency-domain frame before this one used short windows.
+    last_short: bool,
+    /// The LP filter and excitation of the last ACELP frame, for the FAC of a following FD frame.
+    lpc_prev: [f32; ORDER + 1],
+    acelp_in: [f32; 1 + 2 * FAC_LENGTH],
 
     synth_buf: Vec<f32>,
     exc_buf: Vec<f32>,
@@ -229,6 +234,9 @@ impl LpdDecoder {
             fac_fd_data: [0.0; FAC_LENGTH / 4],
             overlap: vec![0.0; 2 * ccfl],
             prev_lpd: false,
+            last_short: false,
+            lpc_prev: [0.0; ORDER + 1],
+            acelp_in: [0.0; 1 + 2 * FAC_LENGTH],
             synth_buf: vec![0.0; MAX_PITCH + 448 + LEN_SUPERFRAME + 256],
             exc_buf: vec![0.0; EXC_HIST + LEN_SUPERFRAME + 256],
             pitch: [64; 32],
@@ -256,6 +264,9 @@ impl LpdDecoder {
         self.gain_threshold = 0.0;
         self.overlap.fill(0.0);
         self.prev_lpd = false;
+        self.last_short = false;
+        self.lpc_prev = [0.0; ORDER + 1];
+        self.acelp_in = [0.0; 1 + 2 * FAC_LENGTH];
     }
 
     /// Decode one LPD frame into `out` (`ccfl` samples, int16 scale) including the overlap-add
@@ -270,16 +281,7 @@ impl LpdDecoder {
     ) -> Result<()> {
         // `ixheaacd_tw_buff_update` and `ixheaacd_fix2flt_data` of a frame after FD coding.
         if !self.prev_lpd {
-            self.mode_prev = -1;
-            self.pitch_prev = [64; 8];
-            self.gain_prev = [0.0; 8];
-            self.bpf_active_prev = false;
-            self.lp_a_prev = [0.0; 2 * (ORDER + 1)];
-            self.xcitation_prev.fill(0.0);
-            self.synth_prev.fill(0.0);
-            self.bpf_prev = [0.0; FILTER_DELAY + LEN_SUBFR];
-            self.gain_threshold = 0.0;
-            self.exc_prev = [0.0; 1 + 2 * FAC_LENGTH];
+            self.begin_after_fd();
         }
 
         let mut frame = core::mem::replace(&mut self.frame, LpdFrame::new());
@@ -295,7 +297,7 @@ impl LpdDecoder {
 
         // td_frm_dec
         let nlong = self.ccfl;
-        let lfac = nlong / 8;
+        let lfac = if self.last_short { nlong / 16 } else { nlong / 8 };
         let mod0 = frame.mod_[0];
 
         if !self.prev_lpd {
@@ -318,6 +320,168 @@ impl LpdDecoder {
         self.frame = frame;
 
         Ok(())
+    }
+
+    /// `ixheaacd_tw_buff_update` and `ixheaacd_fix2flt_data`: prepare for the first LPD frame
+    /// after a frequency-domain one, whose overlap is in `self.overlap`.
+    fn begin_after_fd(&mut self) {
+        let ccfl = self.ccfl;
+        let len_subfrm = self.len_subfrm;
+
+        self.mode_prev = if self.last_short { -2 } else { -1 };
+        self.pitch_prev = [64; 8];
+        self.gain_prev = [0.0; 8];
+        self.bpf_active_prev = false;
+
+        let fac_length = if self.last_short { ccfl / 16 } else { len_subfrm / 2 };
+        let win = sine_window(2 * fac_length);
+
+        // The overlap is windowed and cut where the LPD frame takes over.
+        for i in 0..2 * fac_length {
+            self.overlap[ccfl / 2 - fac_length + i] *= win[2 * fac_length - 1 - i];
+        }
+        self.overlap[ccfl / 2 + fac_length..ccfl].fill(0.0);
+
+        self.lp_a_prev = [0.0; 2 * (ORDER + 1)];
+        self.xcitation_prev.fill(0.0);
+        self.synth_prev.fill(0.0);
+        self.bpf_prev = [0.0; FILTER_DELAY + LEN_SUBFR];
+        self.gain_threshold = 0.0;
+
+        self.exc_prev = [0.0; 1 + 2 * FAC_LENGTH];
+        let base = len_subfrm / 2 - fac_length;
+        for i in 0..2 * fac_length + 1 {
+            self.exc_prev[base + i] = self.overlap[i + ccfl / 2 - fac_length - 1];
+        }
+    }
+
+    /// Hand over the overlap of the frequency-domain frame before the next LPD frame.
+    pub fn set_overlap(&mut self, fd_overlap: &[f32], last_short: bool) {
+        let ccfl = self.ccfl;
+        self.overlap[..ccfl].copy_from_slice(&fd_overlap[..ccfl]);
+        self.overlap[ccfl..].fill(0.0);
+        self.last_short = last_short;
+    }
+
+    /// `ixheaacd_lpd_dec_update`: the state an FD frame after an LPD frame continues from, written
+    /// to the overlap buffer of the FD coder (`ccfl` samples).
+    pub fn dec_update(&mut self, overlap: &mut [f32]) {
+        let ccfl = self.ccfl;
+        let synth_delay = self.synth_delay;
+        let fac_length = self.len_subfrm / 2;
+        let lpd_delay = (4 * self.num_subfrm / 2) * LEN_SUBFR;
+
+        for i in 0..LEN_SUBFR + synth_delay {
+            overlap[i] = self.synth_prev[MAX_PITCH - LEN_SUBFR + i];
+        }
+
+        let base = LEN_SUBFR + synth_delay - fac_length;
+        overlap[base..base + 2 * fac_length].copy_from_slice(&self.exc_prev[1..1 + 2 * fac_length]);
+
+        overlap[lpd_delay + fac_length..ccfl].fill(0.0);
+
+        if self.mode_prev == 0 {
+            self.lpc_prev.copy_from_slice(&self.lp_a_prev[ORDER + 1..]);
+            self.acelp_in = self.exc_prev;
+        }
+
+        self.prev_lpd = false;
+    }
+
+    /// `ixheaacd_lpd_bpf_fix`: finish the bass post-filter of the last LPD frame over the first
+    /// samples of the FD frame that follows it.
+    pub fn bpf_fix(&mut self, is_short: bool, out: &mut [f32]) {
+        let ccfl = self.ccfl;
+        let lpd_sbf_len = 4 * self.num_subfrm / 2;
+        let nsb2 = lpd_sbf_len - 1;
+        let synth_delay = nsb2 * LEN_SUBFR;
+
+        let mut synth_buf = vec![0.0f32; MAX_PITCH + synth_delay + ccfl + LEN_SUBFR];
+        synth_buf[..MAX_PITCH + synth_delay].copy_from_slice(&self.synth_prev);
+        let n = (synth_delay + ccfl + LEN_SUBFR).min(out.len());
+        synth_buf[MAX_PITCH - LEN_SUBFR..MAX_PITCH - LEN_SUBFR + n].copy_from_slice(&out[..n]);
+
+        let mut pitch = [64i32; 16];
+        let mut gain = [0.0f32; 16];
+
+        pitch[..nsb2].copy_from_slice(&self.pitch_prev[..nsb2]);
+        gain[..nsb2].copy_from_slice(&self.gain_prev[..nsb2]);
+
+        if self.mode_prev == 0 {
+            pitch[nsb2] = pitch[nsb2 - 1];
+            gain[nsb2] = gain[nsb2 - 1];
+
+            if !is_short {
+                pitch[nsb2 + 1] = pitch[nsb2];
+                gain[nsb2 + 1] = gain[nsb2];
+            }
+        }
+
+        let sy = MAX_PITCH;
+
+        for i in 0..nsb2 + 2 {
+            let tp = pitch[i].clamp(0, MAX_PITCH as i32) as usize;
+
+            if gain[i] > 0.0 {
+                let p = sy + i * LEN_SUBFR;
+                let mut corr = 0.0f32;
+                let mut energy = 1e-6f32;
+
+                for k in 0..LEN_SUBFR {
+                    corr += synth_buf[p + k] * synth_buf[p - tp + k];
+                    energy += synth_buf[p - tp + k] * synth_buf[p - tp + k];
+                }
+
+                gain[i] = corr / energy;
+            }
+        }
+
+        let len = (lpd_sbf_len + 2) * LEN_SUBFR + LEN_SUBFR;
+        let mut signal = vec![0.0f32; len + LEN_SUBFR];
+
+        Self::bass_post_filter(
+            &synth_buf,
+            &pitch,
+            &gain,
+            &mut self.bpf_prev,
+            &mut signal,
+            len,
+            ccfl - (lpd_sbf_len + 4) * LEN_SUBFR,
+        );
+
+        out[..len].copy_from_slice(&signal[..len]);
+    }
+
+    /// `ixheaacd_cal_fac_data`: the time-domain FAC signal (`2 * lfac` samples) of an FD frame
+    /// after an LPD frame, from the FAC values `fac` and their gain index.
+    pub fn fac_for_fd(&mut self, gain_idx: i32, fac: &[i32], lfac: usize, out: &mut [f32]) {
+        let n_long = self.ccfl;
+        let gain = 10f64.powf(f64::from(gain_idx) / 28.0) as f32;
+
+        let mut x = [0.0f32; FAC_LENGTH];
+        for i in 0..lfac {
+            x[i] = fac[i] as f32;
+        }
+
+        let mut sig = [0.0f32; ORDER + 2 * FAC_LENGTH];
+        dct(&mut self.dcts, &x[..lfac], &mut sig[ORDER..ORDER + lfac]);
+
+        let a = lpc_weight(&self.lpc_prev);
+        synthesis_in_place(&a, &mut sig, 2 * lfac);
+
+        let win = sine_window(2 * lfac);
+        let len = n_long / 4;
+
+        for i in 0..lfac {
+            let w1 = win[lfac + i] * win[lfac + i];
+            let fw_hi = 1.0 - w1;
+            let fw_lo = win[lfac - 1 - i] * win[lfac + i];
+
+            out[i] = gain * sig[ORDER + i]
+                + self.acelp_in[1 + len / 2 + i] * fw_hi
+                + self.acelp_in[1 + len / 2 - 1 - i] * fw_lo;
+            out[lfac + i] = gain * sig[ORDER + lfac + i];
+        }
     }
 
     fn lpd_dec(&mut self, frame: &LpdFrame, seed: &mut u32, fsynth: &mut [f32]) {
@@ -477,7 +641,15 @@ impl LpdDecoder {
         }
 
         let len2 = if mod_[3] == 0 { synth_delay } else { synth_delay - len_subfrm / 2 };
-        self.bass_post_filter(fsynth, len_fr, len2);
+        Self::bass_post_filter(
+            &self.synth_buf,
+            &self.pitch,
+            &self.pitch_gain,
+            &mut self.bpf_prev,
+            fsynth,
+            len_fr,
+            len2,
+        );
     }
 
     /// The initialisation of the synthesis memories from the overlap of the previous frame
@@ -1097,17 +1269,26 @@ impl LpdDecoder {
         self.lp_a_prev[ORDER + 1..].copy_from_slice(&sets[2]);
     }
 
-    fn bass_post_filter(&mut self, out: &mut [f32], len_fr: usize, len2: usize) {
+    /// `ixheaacd_bass_post_filter`: `sig` holds the synthesis with `MAX_PITCH` samples of history
+    /// before the first output sample.
+    fn bass_post_filter(
+        sig: &[f32],
+        pitch: &[i32],
+        pitch_gain: &[f32],
+        bpf_prev: &mut [f32; FILTER_DELAY + LEN_SUBFR],
+        out: &mut [f32],
+        len_fr: usize,
+        len2: usize,
+    ) {
         let sy = MAX_PITCH;
-        let sig = &self.synth_buf;
 
         out[..len_fr].copy_from_slice(&sig[sy - LEN_SUBFR..sy - LEN_SUBFR + len_fr]);
 
         let mut noise_buf = [0.0f32; FILTER_DELAY + 2 * LEN_SUBFR];
 
         for (sf, num_subfr) in (0..len_fr).step_by(LEN_SUBFR).enumerate() {
-            let mut pitch_lag = self.pitch[sf].clamp(0, 2 * MAX_PITCH as i32) as usize;
-            let mut gain = self.pitch_gain[sf].clamp(0.0, 1.0);
+            let mut pitch_lag = pitch[sf].clamp(0, 2 * MAX_PITCH as i32) as usize;
+            let mut gain = pitch_gain[sf].clamp(0.0, 1.0);
 
             if (pitch_lag >> 1) + 96 > MAX_PITCH + num_subfr {
                 pitch_lag = (MAX_PITCH + num_subfr - 96) << 1;
@@ -1166,10 +1347,9 @@ impl LpdDecoder {
                 }
             }
 
-            noise_buf[..FILTER_DELAY + LEN_SUBFR].copy_from_slice(&self.bpf_prev);
+            noise_buf[..FILTER_DELAY + LEN_SUBFR].copy_from_slice(&*bpf_prev);
             noise_buf[FILTER_DELAY + LEN_SUBFR..].copy_from_slice(&noise2);
-            self.bpf_prev
-                .copy_from_slice(&noise_buf[LEN_SUBFR..LEN_SUBFR + FILTER_DELAY + LEN_SUBFR]);
+            bpf_prev.copy_from_slice(&noise_buf[LEN_SUBFR..LEN_SUBFR + FILTER_DELAY + LEN_SUBFR]);
 
             for i in 0..LEN_SUBFR {
                 let c = FILTER_DELAY + i;

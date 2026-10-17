@@ -154,3 +154,27 @@ fn usac_lpd_mono_matches_fdk() {
     let snr = 10.0 * (signal / noise.max(1e-9)).log10();
     assert!(snr >= 33.0, "signal to noise ratio {snr:.1} dB, expected at least 33");
 }
+
+/// A 2:1 eSBR mono stream switching between the frequency-domain and the linear prediction
+/// domain cores (128 access units of speech, tones and noise bursts at 32 kHz): long start, stop
+/// and stop-start windows, eight short windows, and the transitions in both directions
+/// (including a short window directly after an LPD frame). Output compared with libfdk-aac by
+/// signal to noise ratio.
+#[test]
+fn usac_fd_lpd_transitions_match_fdk() {
+    let samples = decode(include_bytes!("fixtures/usac_lpd_fd_mix.bin"), 1, 2 * FRAME);
+    let reference = include_bytes!("fixtures/usac_lpd_fd_mix.s16");
+    assert_eq!(reference.len(), samples.len() * 2);
+
+    let mut signal = 0.0f64;
+    let mut noise = 0.0f64;
+    for (r, &s) in reference.chunks_exact(2).zip(&samples) {
+        let r = f64::from(i16::from_le_bytes([r[0], r[1]]));
+        let e = f64::from((s * 32768.0).clamp(-32768.0, 32767.0).round()) - r;
+        signal += r * r;
+        noise += e * e;
+    }
+
+    let snr = 10.0 * (signal / noise.max(1e-9)).log10();
+    assert!(snr >= 38.0, "signal to noise ratio {snr:.1} dB, expected at least 38");
+}
