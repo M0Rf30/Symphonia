@@ -10,7 +10,7 @@ use core::str;
 use log::{debug, warn};
 use symphonia_core::audio::{Channels, Position};
 use symphonia_core::codecs::audio::well_known::{
-    CODEC_ID_AC3, CODEC_ID_ADPCM_IMA_QT, CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_MS,
+    CODEC_ID_AC3, CODEC_ID_AC4, CODEC_ID_ADPCM_IMA_QT, CODEC_ID_ADPCM_IMA_WAV, CODEC_ID_ADPCM_MS,
     CODEC_ID_AMR_NB, CODEC_ID_AMR_WB, CODEC_ID_DCA, CODEC_ID_EAC3, CODEC_ID_GSM, CODEC_ID_GSM_MS,
     CODEC_ID_ILBC, CODEC_ID_MACE3, CODEC_ID_MACE6, CODEC_ID_QDM2, CODEC_ID_QDMC, CODEC_ID_TRUEHD,
 };
@@ -36,9 +36,9 @@ use symphonia_core::codecs::{CodecParameters, CodecProfile};
 
 use crate::atoms::qt_meta::PayloadAtom;
 use crate::atoms::{
-    AlacAtom, Atom, AtomHeader, AtomIterator, AtomType, AvcCAtom, Dac3Atom, DamrAtom, DdtsAtom,
-    Dec3Atom, DmlpAtom, DoviAtom, EsdsAtom, FlacAtom, HvcCAtom, OpusAtom, ReadAtom, Result,
-    WaveAtom, decode_error, unsupported_error,
+    AlacAtom, Atom, AtomHeader, AtomIterator, AtomType, AvcCAtom, Dac3Atom, Dac4Atom, DamrAtom,
+    DdtsAtom, Dec3Atom, DmlpAtom, DoviAtom, EsdsAtom, FlacAtom, HvcCAtom, OpusAtom, ReadAtom,
+    Result, WaveAtom, decode_error, unsupported_error,
 };
 use crate::fp::FpU16;
 
@@ -78,6 +78,7 @@ impl Atom for StsdAtom {
             AtomType::AudioSampleEntryMp4a
             | AtomType::AudioSampleEntryAlac
             | AtomType::AudioSampleEntryAc3
+            | AtomType::AudioSampleEntryAc4
             | AtomType::AudioSampleEntryEc3
             | AtomType::AudioSampleEntryDtsc
             | AtomType::AudioSampleEntryDtse
@@ -545,6 +546,8 @@ impl Atom for AudioSampleEntry {
             | AtomType::AudioSampleEntryDtsh
             | AtomType::AudioSampleEntryDtsl => entry.codec_id = CODEC_ID_DCA,
             AtomType::AudioSampleEntryMlpa => entry.codec_id = CODEC_ID_TRUEHD,
+            // The `dac4` atom refines the sample rate and holds the stream configuration.
+            AtomType::AudioSampleEntryAc4 => entry.codec_id = CODEC_ID_AC4,
             _ => (),
         }
 
@@ -598,6 +601,10 @@ impl Atom for AudioSampleEntry {
                 }
                 AtomType::Ac3Config => {
                     let atom = it.read_atom::<Dac3Atom>()?;
+                    atom.fill_audio_sample_entry(&mut entry);
+                }
+                AtomType::Ac4Config => {
+                    let atom = it.read_atom::<Dac4Atom>()?;
                     atom.fill_audio_sample_entry(&mut entry);
                 }
                 AtomType::AudioSampleEntryAlac => {
@@ -669,7 +676,7 @@ impl Atom for AudioSampleEntry {
             && entry.num_channels > 0
             && matches!(
                 entry.codec_id,
-                CODEC_ID_AC3 | CODEC_ID_EAC3 | CODEC_ID_DCA | CODEC_ID_TRUEHD
+                CODEC_ID_AC3 | CODEC_ID_AC4 | CODEC_ID_EAC3 | CODEC_ID_DCA | CODEC_ID_TRUEHD
             )
         {
             entry.channels = u16::try_from(entry.num_channels).ok().map(Channels::Discrete);
@@ -1675,6 +1682,38 @@ mod tests {
         let params = audio_params(stsd_audio_entry(b"ec-3", 0, 2, 48_000 << 16, &dec3));
         assert_eq!(params.codec, CODEC_ID_EAC3);
         assert_eq!(params.channels.map(|c| c.count()), Some(8));
+    }
+
+    #[test]
+    fn ac4_entry_signals_rate_and_keeps_the_dsi() {
+        use symphonia_core::codecs::audio::well_known::CODEC_ID_AC4;
+
+        // ac4_dsi_v1: version 1, bitstream version 2, fs_index 1 (48 kHz), frame_rate_index 13,
+        // 2 presentations. The sample entry says 44.1 kHz and 2 channels.
+        let dsi = [0x20, 0xba, 0x02, 0x40, 0x00, 0x7d, 0x00];
+        let params =
+            audio_params(stsd_audio_entry(b"ac-4", 0, 2, 44_100 << 16, &atom(b"dac4", &dsi)));
+        assert_eq!(params.codec, CODEC_ID_AC4);
+        assert_eq!(params.sample_rate, Some(48_000));
+        assert_eq!(params.channels.map(|c| c.count()), Some(2));
+        assert_eq!(params.extra_data.as_deref(), Some(dsi.as_slice()));
+
+        // fs_index 0 is 44.1 kHz.
+        let dsi = [0x20, 0x9a, 0x02, 0x40, 0x00];
+        let params =
+            audio_params(stsd_audio_entry(b"ac-4", 0, 6, 48_000 << 16, &atom(b"dac4", &dsi)));
+        assert_eq!(params.sample_rate, Some(44_100));
+        assert_eq!(params.channels.map(|c| c.count()), Some(6));
+    }
+
+    #[test]
+    fn ac4_entry_without_dac4_uses_the_entry_rate() {
+        use symphonia_core::codecs::audio::well_known::CODEC_ID_AC4;
+
+        let params = audio_params(stsd_audio_entry(b"ac-4", 0, 2, 48_000 << 16, &[]));
+        assert_eq!(params.codec, CODEC_ID_AC4);
+        assert_eq!(params.sample_rate, Some(48_000));
+        assert!(params.extra_data.is_none());
     }
 
     #[test]

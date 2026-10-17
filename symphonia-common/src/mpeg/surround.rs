@@ -6,7 +6,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! Frame header parsing and elementary stream framing of Dolby Digital (AC-3), Dolby Digital Plus
-//! (E-AC-3), DTS Coherent Acoustics (DCA), and Dolby TrueHD/MLP.
+//! (E-AC-3), Dolby AC-4 sync frames, DTS Coherent Acoustics (DCA), and Dolby TrueHD/MLP.
 //!
 //! The frame sizes and durations follow the ATSC A/52 and ETSI TS 102 114 / TS 102 366 headers.
 //! The grouping of frames into packets follows FFmpeg's parsers:
@@ -19,7 +19,7 @@
 use symphonia_core::audio::{Channels, Position};
 use symphonia_core::codecs::audio::AudioCodecParameters;
 use symphonia_core::codecs::audio::well_known::{
-    CODEC_ID_AC3, CODEC_ID_DCA, CODEC_ID_EAC3, CODEC_ID_TRUEHD,
+    CODEC_ID_AC3, CODEC_ID_AC4, CODEC_ID_DCA, CODEC_ID_EAC3, CODEC_ID_TRUEHD,
 };
 
 use super::es::{EsFrame, EsInfo, EsParser};
@@ -410,6 +410,180 @@ impl EsParser for Ac3Es {
 
     fn fresh(&self) -> Box<dyn EsParser> {
         Box::new(Ac3Es::new())
+    }
+
+    fn frame_grid(&self) -> u64 {
+        self.samples
+    }
+}
+
+// -------------------------------------------------------------------------------------------------
+// AC-4
+// -------------------------------------------------------------------------------------------------
+
+/// The number of samples per channel of an AC-4 frame by `frame_rate_index` (ETSI TS 103 190-1
+/// table 83, 48 kHz; the 44.1 kHz stream only uses index 13). Zero marks reserved indexes.
+const AC4_FRAME_LEN: [u16; 16] =
+    [1920, 1920, 2048, 1536, 1536, 960, 960, 1024, 768, 768, 512, 384, 384, 2048, 0, 0];
+
+/// The shortest sync frame header: sync word and size, and the start of the table of contents.
+const AC4_MIN_HEADER: usize = 11;
+
+/// The header of an AC-4 sync frame (ETSI TS 103 190-1 annex C: `0xAC40` without and `0xAC41` with
+/// a CRC-16 trailer).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Ac4Header {
+    /// The size of the sync frame in bytes, including the sync word, the size and the CRC.
+    pub frame_size: usize,
+    /// The sample rate in Hz.
+    pub sample_rate: u32,
+    /// The number of samples per channel in the frame.
+    pub samples: u32,
+}
+
+impl Ac4Header {
+    /// Parse the header of the sync frame at the start of `buf` (at least [`AC4_MIN_HEADER`]
+    /// bytes).
+    pub fn parse(buf: &[u8]) -> Option<Self> {
+        if buf.len() < AC4_MIN_HEADER || buf[0] != 0xac || !matches!(buf[1], 0x40 | 0x41) {
+            return None;
+        }
+
+        let crc = if buf[1] == 0x41 { 2 } else { 0 };
+        let mut size = usize::from(u16::from_be_bytes([buf[2], buf[3]]));
+        let mut offset = 4;
+        if size == 0xffff {
+            size = (usize::from(buf[4]) << 16) | (usize::from(buf[5]) << 8) | usize::from(buf[6]);
+            offset = 7;
+        }
+        if size == 0 {
+            return None;
+        }
+
+        // ac4_toc(): bitstream_version, sequence_counter, wait_frames, fs_index, frame_rate_index.
+        let mut pos = offset * 8;
+        let mut bits = |n: usize| {
+            let mut v = 0u32;
+            for _ in 0..n {
+                let byte = buf.get(pos >> 3).copied().unwrap_or(0);
+                v = (v << 1) | u32::from((byte >> (7 - (pos & 7))) & 1);
+                pos += 1;
+            }
+            v
+        };
+
+        if bits(2) == 3 {
+            // variable_bits(2): the version extension, groups of two bits and a continuation bit.
+            for _ in 0..8 {
+                bits(2);
+                if bits(1) == 0 {
+                    break;
+                }
+            }
+        }
+        bits(10);
+        if bits(1) != 0 && bits(3) > 0 {
+            bits(2);
+        }
+        let fs_index = bits(1);
+        let samples = AC4_FRAME_LEN[bits(4) as usize];
+        if samples == 0 {
+            return None;
+        }
+
+        Some(Ac4Header {
+            frame_size: offset + size + crc,
+            sample_rate: if fs_index != 0 { 48000 } else { 44100 },
+            samples: u32::from(samples),
+        })
+    }
+}
+
+/// An AC-4 elementary stream parser for sync frames (`0xAC40`/`0xAC41`, ATSC 3.0 and MPEG-TS). A
+/// frame is an access unit.
+#[derive(Default)]
+pub struct Ac4Es {
+    buf: SyncBuffer,
+    info: Option<EsInfo>,
+    samples: u64,
+}
+
+impl Ac4Es {
+    pub fn new() -> Self {
+        Default::default()
+    }
+}
+
+impl EsParser for Ac4Es {
+    fn push(&mut self, data: &[u8]) {
+        self.buf.push(data);
+    }
+
+    fn next_frame(&mut self, flush: bool) -> Option<EsFrame> {
+        loop {
+            let data = &self.buf[..];
+            let pos = data.windows(2).position(|w| w == [0xac, 0x40] || w == [0xac, 0x41])?;
+
+            if pos > 0 {
+                self.buf.consume(pos);
+                continue;
+            }
+            if data.len() < AC4_MIN_HEADER {
+                if flush {
+                    self.buf.clear();
+                }
+                return None;
+            }
+            let Some(hdr) = Ac4Header::parse(data)
+            else {
+                // Not a valid header, resynchronize.
+                self.buf.consume(1);
+                continue;
+            };
+            if data.len() < hdr.frame_size {
+                if flush {
+                    self.buf.clear();
+                }
+                return None;
+            }
+
+            let start = self.buf.base();
+            let frame: Box<[u8]> = data[..hdr.frame_size].into();
+            self.buf.consume(hdr.frame_size);
+
+            if self.info.is_none() {
+                let mut params = AudioCodecParameters::new();
+                params.for_codec(CODEC_ID_AC4).with_sample_rate(hdr.sample_rate);
+                self.info = Some(EsInfo { params, rate: hdr.sample_rate });
+            }
+            self.samples = u64::from(hdr.samples);
+
+            return Some(EsFrame {
+                start,
+                data: frame,
+                dur: u64::from(hdr.samples),
+                trim_start: 0,
+                trim_end: 0,
+            });
+        }
+    }
+
+    fn clear(&mut self) {
+        self.buf.clear();
+    }
+
+    fn info(&self) -> Option<&EsInfo> {
+        self.info.as_ref()
+    }
+
+    fn seek_start_ts(&self, target: i64) -> i64 {
+        // The overlap of the transform is the only state carried over to the next frame; the
+        // decoder needs an I-frame, which the stream provides about once a second, to resume.
+        target - self.samples as i64
+    }
+
+    fn fresh(&self) -> Box<dyn EsParser> {
+        Box::new(Ac4Es::new())
     }
 
     fn frame_grid(&self) -> u64 {

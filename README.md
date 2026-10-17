@@ -16,7 +16,7 @@
 
 <p>
     <strong>
-        Symphonia is a pure Rust audio decoding and media demuxing library supporting AAC, AC-3, E-AC-3, ADPCM, AIFF, ALAC, APE, CAF, DSD, DTS, FLAC, FLV, MACE, MKV, MP1, MP2, MP3, mp3PRO, MP4, MPEG-PS, MPEG-TS, Musepack, Nellymoser, IMC/IAC, OGG, Opus, PCM, SBC, aptX, LC3, Dolby E, AMR, QCP, Speex, TrueHD, MLP, TrueSpeech, GSM, Vorbis, WAV, WavPack, WMA/ASF, and WebM.
+        Symphonia is a pure Rust audio decoding and media demuxing library supporting AAC, AC-3, E-AC-3, AC-4, ADPCM, AIFF, ALAC, APE, CAF, DSD, DTS, FLAC, FLV, MACE, MKV, MP1, MP2, MP3, mp3PRO, MP4, MPEG-PS, MPEG-TS, Musepack, Nellymoser, IMC/IAC, OGG, Opus, PCM, SBC, aptX, LC3, Dolby E, AMR, QCP, Speex, TrueHD, MLP, TrueSpeech, GSM, Vorbis, WAV, WavPack, WMA/ASF, and WebM.
     </strong>
 </p>
 
@@ -152,6 +152,7 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | ALAC                         | Excellent | Yes     | `alac`       | No      | [`symphonia-codec-alac`]   |
 | APE (Monkey's Audio)         | Excellent | Yes     | `ape-format` | No      | [`symphonia-bundle-ape`]     |
 | AC-3, E-AC-3                 | Great     | No      | `ac3`        | No      | [`symphonia-codec-ac3`]      |
+| AC-4 (stereo, 5.0, 5.1; ASF, A-SPX; no speech frontend synthesis) | Great | No | `ac4` | No | [`symphonia-codec-ac4`] |
 | DSD                          | Great     | Yes     | `dsd`        | No      | [`symphonia-codec-dsd`]      |
 | DTS (core, XCH, XXCH, X96, XBR, XLL, LBR) | Great | No   | `dca`        | No      | [`symphonia-codec-dca`]      |
 | FLAC                         | Excellent | Yes     | `flac`       | Yes     | [`symphonia-bundle-flac`]  |
@@ -218,6 +219,7 @@ mp3PRO streams decode as plain MP3 by default. The `mp3pro` feature enables `Mp3
 [`symphonia-bundle-tak`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-bundle-tak
 [`symphonia-bundle-tta`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-bundle-tta
 [`symphonia-codec-ac3`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-ac3
+[`symphonia-codec-ac4`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-ac4
 [`symphonia-codec-dca`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-dca
 [`symphonia-codec-dsd`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-dsd
 [`symphonia-codec-mace`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-codec-mace

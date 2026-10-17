@@ -354,6 +354,7 @@ fn get_codec_id(track: &TrackElement) -> Option<CodecId> {
         "A_MPC" => CodecId::Audio(CODEC_ID_MUSEPACK),
         "A_AC3" | "A_AC3/BSID9" | "A_AC3/BSID10" => CodecId::Audio(CODEC_ID_AC3),
         "A_EAC3" => CodecId::Audio(CODEC_ID_EAC3),
+        "A_AC4" => CodecId::Audio(CODEC_ID_AC4),
         // The TrueHD decoder handles both TrueHD and MLP access units.
         "A_TRUEHD" | "A_MLP" => CodecId::Audio(CODEC_ID_TRUEHD),
         "A_ALAC" => CodecId::Audio(CODEC_ID_ALAC),
@@ -521,10 +522,11 @@ mod tests {
     fn verify_surround_codec_ids() {
         use symphonia_core::codecs::CodecParameters;
         use symphonia_core::codecs::audio::well_known::{
-            CODEC_ID_AC3, CODEC_ID_DCA, CODEC_ID_EAC3, CODEC_ID_TRUEHD,
+            CODEC_ID_AC3, CODEC_ID_AC4, CODEC_ID_DCA, CODEC_ID_EAC3, CODEC_ID_TRUEHD,
         };
 
         let cases = [
+            ("A_AC4", CODEC_ID_AC4),
             ("A_AC3", CODEC_ID_AC3),
             ("A_AC3/BSID9", CODEC_ID_AC3),
             ("A_AC3/BSID10", CODEC_ID_AC3),

@@ -11,7 +11,7 @@ use std::io::{ErrorKind, Seek, SeekFrom};
 use symphonia_codec_aac::detect_implicit_sbr;
 use symphonia_common::mpeg::es::{AdtsEs, EsParser, EsTrack, LatmEs, MpaEs, OpusEs};
 use symphonia_common::mpeg::pes::{parse_pes_header, split_pes};
-use symphonia_common::mpeg::surround::{Ac3Es, DcaEs, TrueHdEs};
+use symphonia_common::mpeg::surround::{Ac3Es, Ac4Es, DcaEs, TrueHdEs};
 use symphonia_common::mpeg::timeline::ticks_to_clock;
 use symphonia_common::mpeg::track::{
     LastPes, PROBE_SCAN_LEN, SeekPlan, bisect_pts, build_audio_track, check_forward_only,
@@ -355,7 +355,7 @@ fn is_hdmv(registration: Option<[u8; 4]>) -> bool {
     matches!(registration, Some(r) if r == *b"HDMV" || r == *b"HDPR")
 }
 
-/// Create the parser of an AC-3 or DTS stream identified by the registration descriptor or a DVB
+/// Create the parser of an AC-3, AC-4 or DTS stream identified by the registration descriptor or a DVB
 /// descriptor of a stream.
 fn make_parser_from_descriptors(d: &StreamDescriptors) -> Option<Box<dyn EsParser>> {
     let is_dts = matches!(d.registration, Some(r) if [*b"DTS1", *b"DTS2", *b"DTS3"].contains(&r));
@@ -363,6 +363,9 @@ fn make_parser_from_descriptors(d: &StreamDescriptors) -> Option<Box<dyn EsParse
 
     if is_ac3 || d.has_ac3 || d.has_eac3 {
         Some(Box::new(Ac3Es::new()))
+    }
+    else if d.has_ac4 || d.registration == Some(*b"AC-4") {
+        Some(Box::new(Ac4Es::new()))
     }
     else if is_dts || d.has_dts {
         Some(Box::new(DcaEs::new()))
@@ -380,9 +383,6 @@ fn unsupported_stream(stream: &PmtStream) -> Option<&'static str> {
         // AC-3, 0xc2 is E-AC-3, and 0xcf is AAC (ADTS).
         0xc1 | 0xc2 | 0xcf => {
             Some("HLS SAMPLE-AES encrypted audio, the frames cannot be decrypted")
-        }
-        _ if stream.descriptors.has_ac4 => {
-            Some("Dolby AC-4 is recognised (DVB AC-4 descriptor) but there is no AC-4 decoder")
         }
         _ => None,
     }
@@ -1107,7 +1107,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_encrypted_and_ac4_streams_are_reported_unsupported() {
+    fn verify_encrypted_streams_are_reported_unsupported_and_ac4_is_parsed() {
         // HLS SAMPLE-AES streams are dropped even if their descriptors identify AC-3 or E-AC-3.
         for stream_type in [0xc1, 0xc2, 0xcf] {
             let d = StreamDescriptors { has_ac3: true, ..Default::default() };
@@ -1119,8 +1119,8 @@ mod tests {
         // AC-4 in PES private data.
         let d = StreamDescriptors { has_ac4: true, ..Default::default() };
         let stream = pmt_stream(0x06, d);
-        assert!(unsupported_stream(&stream).unwrap().contains("AC-4"));
-        assert!(make_parsers(&stream, false).is_empty());
+        assert!(unsupported_stream(&stream).is_none());
+        assert_eq!(make_parsers(&stream, false).len(), 1);
 
         // Streams that are supported are unaffected.
         let stream = pmt_stream(0x81, StreamDescriptors::default());

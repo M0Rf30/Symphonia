@@ -229,6 +229,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "decode_ac4"
+path = "fuzz_targets/decode_ac4.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "decode_dca"
 path = "fuzz_targets/decode_dca.rs"
 test = false

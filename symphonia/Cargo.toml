@@ -28,6 +28,7 @@ aac = ["dep:symphonia-codec-aac"]
 # Compute the complex QMF banks of SBR with an FFT: faster, but not bit for bit identical.
 aac-sbr-fft-qmf = ["aac", "symphonia-codec-aac/sbr-fft-qmf"]
 ac3 = ["dep:symphonia-codec-ac3"]
+ac4 = ["dep:symphonia-codec-ac4"]
 adpcm = ["dep:symphonia-codec-adpcm"]
 adp = ["adpcm", "dep:symphonia-format-game"]
 adx = ["adpcm", "dep:symphonia-format-game"]
@@ -117,6 +118,7 @@ mpa = ["mp1", "mp2", "mp3"]
 all-codecs = [
     "aac",
     "ac3",
+    "ac4",
     "adpcm",
     "alac",
     "als",
@@ -287,6 +289,10 @@ workspace = true
 optional = true
 
 [dependencies.symphonia-codec-ac3]
+workspace = true
+optional = true
+
+[dependencies.symphonia-codec-ac4]
 workspace = true
 optional = true
 

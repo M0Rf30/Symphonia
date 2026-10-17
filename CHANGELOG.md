@@ -16,6 +16,9 @@ Changes since upstream `v0.6.1`.
 
 ### Added
 
+- Decoder: Dolby AC-4 (`symphonia-codec-ac4`, feature `ac4`): ASF, A-SPX, A-CPL-less stereo, 5.0 and
+  5.1 streams, in MPEG-TS (registration or DVB descriptor), MP4 (`ac-4`/`dac4`), Matroska (`A_AC4`)
+  and as sync frames. Matches FFmpeg's `ac4` decoder at about 131 dB SNR.
 - Decoders: AC-3 and E-AC-3 (`symphonia-codec-ac3`), DTS including DTS-HD Master Audio
   and DTS Express (LBR) (`symphonia-codec-dca`), Dolby TrueHD and MLP (`symphonia-codec-truehd`), Speex
   (`symphonia-codec-speex`), Nellymoser Asao (`symphonia-codec-nellymoser`), mp3PRO

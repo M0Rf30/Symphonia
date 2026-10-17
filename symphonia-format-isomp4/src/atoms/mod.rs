@@ -24,6 +24,7 @@ pub(crate) mod avcc;
 pub(crate) mod chpl;
 pub(crate) mod co64;
 pub(crate) mod dac3;
+pub(crate) mod dac4;
 pub(crate) mod damr;
 pub(crate) mod ddts;
 pub(crate) mod dec3;
@@ -78,6 +79,7 @@ pub use avcc::AvcCAtom;
 pub use chpl::ChplAtom;
 pub use co64::Co64Atom;
 pub use dac3::Dac3Atom;
+pub use dac4::Dac4Atom;
 pub use damr::DamrAtom;
 pub use ddts::DdtsAtom;
 pub use dec3::Dec3Atom;
@@ -127,6 +129,7 @@ pub use wave::WaveAtom;
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum AtomType {
     Ac3Config,
+    Ac4Config,
     AmrConfig,
     AudioSampleEntrySamr,
     AudioSampleEntrySawb,
@@ -137,6 +140,7 @@ pub enum AtomType {
     ArrangerTag,
     ArtistTag,
     AudioSampleEntryAc3,
+    AudioSampleEntryAc4,
     AudioSampleEntryAlac,
     AudioSampleEntryDtsc,
     AudioSampleEntryDtse,
@@ -322,6 +326,7 @@ impl From<[u8; 4]> for AtomType {
         match &val {
             b".mp3" => AtomType::AudioSampleEntryMp3,
             b"ac-3" => AtomType::AudioSampleEntryAc3,
+            b"ac-4" => AtomType::AudioSampleEntryAc4,
             b"alac" => AtomType::AudioSampleEntryAlac,
             b"alaw" => AtomType::AudioSampleEntryALaw,
             b"av01" => AtomType::VisualSampleEntryAv1,
@@ -334,6 +339,7 @@ impl From<[u8; 4]> for AtomType {
             b"co64" => AtomType::ChunkOffset64,
             b"ctts" => AtomType::CompositionTimeToSample,
             b"dac3" => AtomType::Ac3Config,
+            b"dac4" => AtomType::Ac4Config,
             b"damr" => AtomType::AmrConfig,
             b"samr" => AtomType::AudioSampleEntrySamr,
             b"sawb" => AtomType::AudioSampleEntrySawb,

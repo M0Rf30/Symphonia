@@ -72,6 +72,7 @@
 //! | AAC-LC, HE-AAC v1/v2, multichannel | `aac` | No | No |
 //! | ADPCM    | `adpcm`      | Yes     | Yes     |
 //! | AC-3, E-AC-3 | `ac3`     | No      | No      |
+//! | AC-4 (stereo, 5.0, 5.1) | `ac4` | No | No |
 //! | ALAC     | `alac`       | Yes     | No      |
 //! | DTS (core, XCH/XXCH/X96/XBR, XLL) | `dca` | No | No |
 //! | FLAC     | `flac`       | Yes     | Yes     |
@@ -209,6 +210,8 @@ pub mod default {
         pub use symphonia_codec_aac::AacDecoder;
         #[cfg(feature = "ac3")]
         pub use symphonia_codec_ac3::Ac3Decoder;
+        #[cfg(feature = "ac4")]
+        pub use symphonia_codec_ac4::Ac4Decoder;
         #[cfg(feature = "adpcm")]
         pub use symphonia_codec_adpcm::AdpcmDecoder;
         #[cfg(feature = "alac")]
@@ -453,6 +456,9 @@ pub mod default {
 
         #[cfg(feature = "ac3")]
         registry.register_audio_decoder::<codecs::Ac3Decoder>();
+
+        #[cfg(feature = "ac4")]
+        registry.register_audio_decoder::<codecs::Ac4Decoder>();
 
         #[cfg(feature = "alac")]
         registry.register_audio_decoder::<codecs::AlacDecoder>();

@@ -12,8 +12,6 @@
 //! a frame is parsed from the TOC, the audio payload is Huffman-decoded into a quantized
 //! spectrum, inverse-quantized, and reconstructed by an inverse MDCT; an optional A-SPX
 //! (Spectral Band Replication) stage synthesizes the high band in the QMF domain.
-//!
-//! This crate is a work in progress.
 
 #![warn(rust_2018_idioms)]
 #![forbid(unsafe_code)]
@@ -26,13 +24,20 @@
 #![allow(clippy::collapsible_else_if)]
 // Index loops mirror the structure of the reference implementation.
 #![allow(clippy::needless_range_loop)]
-// The decoder is still being ported; large portions of the context are not yet read.
-#![allow(dead_code)]
 
+mod aspx_data;
 mod bit;
+mod codebooks;
+mod ctx;
 mod decoder;
+mod elements;
 mod mdct;
+mod post;
+mod sbr;
+mod spectral;
+#[rustfmt::skip]
 mod tables;
+mod toc;
 mod vlc;
 
 pub use decoder::Ac4Decoder;

@@ -44,7 +44,8 @@ impl Vlc {
                     node += 1;
                     if bit == 0 {
                         next0[cur] = node as i32;
-                    } else {
+                    }
+                    else {
                         next1[cur] = node as i32;
                     }
                     next0.push(-1);

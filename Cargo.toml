@@ -47,6 +47,7 @@ members = [
     "symphonia-codec-truehd",
     "symphonia-codec-dca",
     "symphonia-codec-ac3",
+    "symphonia-codec-ac4",
     "symphonia-codec-dsd",
     "symphonia-codec-opus",
     "symphonia-codec-pcm",
@@ -103,14 +104,15 @@ symphonia-bundle-tta = { version = "0.6.1", path = "symphonia-bundle-tta", defau
 symphonia-codec-aac = { version = "0.6.1", path = "symphonia-codec-aac", default-features = false }
 symphonia-codec-adpcm = { version = "0.6.1", path = "symphonia-codec-adpcm", default-features = false }
 symphonia-codec-ac3 = { version = "0.6.1", path = "symphonia-codec-ac3", default-features = false }
+symphonia-codec-ac4 = { version = "0.6.1", path = "symphonia-codec-ac4", default-features = false }
 symphonia-codec-atrac = { version = "0.6.1", path = "symphonia-codec-atrac", default-features = false }
 symphonia-codec-dca = { version = "0.6.1", path = "symphonia-codec-dca", default-features = false }
 symphonia-codec-truehd = { version = "0.6.1", path = "symphonia-codec-truehd", default-features = false }
 symphonia-codec-mace = { version = "0.6.1", path = "symphonia-codec-mace", default-features = false }
 symphonia-codec-nellymoser = { version = "0.6.1", path = "symphonia-codec-nellymoser", default-features = false }
+symphonia-codec-hca = { version = "0.6.1", path = "symphonia-codec-hca", default-features = false }
 symphonia-codec-qdesign = { version = "0.6.1", path = "symphonia-codec-qdesign", default-features = false }
 symphonia-codec-atrac3plus = { version = "0.6.1", path = "symphonia-codec-atrac3plus", default-features = false }
-symphonia-codec-hca = { version = "0.6.1", path = "symphonia-codec-hca", default-features = false }
 symphonia-codec-atrac9 = { version = "0.6.1", path = "symphonia-codec-atrac9", default-features = false }
 symphonia-codec-ralf = { version = "0.6.1", path = "symphonia-codec-ralf", default-features = false }
 symphonia-codec-sipr = { version = "0.6.1", path = "symphonia-codec-sipr", default-features = false }

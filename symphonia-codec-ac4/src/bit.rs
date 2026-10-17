@@ -7,7 +7,7 @@
 
 //! A MSB-first bit reader mirroring FFmpeg's `GetBitContext` (see `NOTICE`).
 
-use symphonia_core::errors::{Result, decode_error};
+use symphonia_core::errors::Result;
 
 /// Tracks the position within a bitstream.
 pub struct BitReader<'a> {
@@ -29,11 +29,6 @@ impl<'a> BitReader<'a> {
     /// Number of bits consumed so far.
     pub fn bit_pos(&self) -> usize {
         self.pos
-    }
-
-    /// Byte offset of the current read position, rounded up.
-    pub fn byte_pos(&self) -> usize {
-        (self.pos + 7) >> 3
     }
 
     /// Reads a single bit, returning `0` past the end of the buffer.
@@ -62,6 +57,11 @@ impl<'a> BitReader<'a> {
         self.pos += bits as usize;
     }
 
+    /// Skips an arbitrary number of bits (FFmpeg `skip_bits_long`).
+    pub fn skip_long(&mut self, bits: usize) {
+        self.pos = self.pos.saturating_add(bits);
+    }
+
     /// Aligns the read position to the next byte boundary.
     pub fn align(&mut self) {
         self.pos = (self.pos + 7) & !7;
@@ -72,23 +72,11 @@ impl<'a> BitReader<'a> {
 pub fn variable_bits(br: &mut BitReader<'_>, bits: u32) -> Result<i32> {
     let mut value = 0i32;
     loop {
-        value += br.get(bits) as i32;
+        value = value.wrapping_add(br.get(bits) as i32);
         if br.get1() == 0 {
             break;
         }
-        value = (value << bits) + (1 << bits);
+        value = (value << bits).wrapping_add(1 << bits);
     }
     Ok(value)
-}
-
-/// A unary value: the number of consecutive `1` bits before a `0` bit.
-pub fn get_unary(br: &mut BitReader<'_>, stop: u32) -> Result<i32> {
-    let mut v = 0;
-    for _ in 0..stop {
-        if br.get1() == 0 {
-            return Ok(v);
-        }
-        v += 1;
-    }
-    decode_error("ac4: invalid unary code")
 }
