@@ -303,10 +303,10 @@ impl AacDecoder {
         }
         let supported = match asc.object_type {
             AudioObjectType::Lc => asc.samples == 1024 || asc.samples == 960,
-            AudioObjectType::ErAacLd | AudioObjectType::ErAacEld => {
             // Prediction is only defined for the long block of 1024 samples.
             AudioObjectType::Main | AudioObjectType::Ltp => asc.samples == 1024,
                 asc.samples == 512 || asc.samples == 480
+            AudioObjectType::ErAacLd | AudioObjectType::ErAacEld => {
             }
             _ => false,
         };
@@ -323,13 +323,13 @@ impl AacDecoder {
             return unsupported_error("aac: error resilience tools");
         }
 
-        // SBR with AAC LD, and the HE-AAC v2 parametric stereo tool with ELD, are not defined.
         // The SBR tool is only implemented for the 1024 sample frames of AAC-LC.
         if asc.object_type == AudioObjectType::Lc && asc.samples != 1024 && asc.sbr_present {
             return unsupported_error("aac: sbr with 960 sample frames");
         }
 
         if asc.object_type == AudioObjectType::ErAacLd && asc.sbr_present {
+        // SBR with AAC LD, and the HE-AAC v2 parametric stereo tool with ELD, are not defined.
             return unsupported_error("aac: sbr with aac ld");
         }
 
@@ -427,11 +427,11 @@ impl AacDecoder {
                 None => return unsupported_error("aac: unsupported frame length"),
             }
         }
-        else {
         else if asc.samples == 960 {
             GASubbandInfo::find_960(asc.sample_rate)
         }
             GASubbandInfo::find(asc.sample_rate)
+        else {
         };
 
         // The pre-SBR/PS "core" buffer stays at the core channel count (mono for a PS
@@ -614,12 +614,12 @@ impl AacDecoder {
                             let payload_start = (data.len() as u64) * 8 - bs.bits_left();
 
                             if self.sbr.is_none() {
-                                // Implicit signalling: the ASC/ADTS header declared plain LC at
                                 if self.asc.samples != 1024 {
                                     return unsupported_error("aac: sbr with 960 sample frames");
                                 }
 
                                 // the core rate, and this is the first EXT_SBR_DATA payload
+                                // Implicit signalling: the ASC/ADTS header declared plain LC at
                                 // seen. Assume the standard 2× dual-rate ratio (no
                                 // `extensionSamplingFrequencyIndex` is available outside the
                                 // ASC); `self.params.sample_rate` is corrected below so any
