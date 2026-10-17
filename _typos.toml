@@ -68,3 +68,4 @@ permut = "permut"   # permutation
 bse = "bse"         # base
 ciph = "ciph"       # cipher
 sawp = "sawp"       # MP4 sample entry brand
+hel = "hel"         # truncated test string
