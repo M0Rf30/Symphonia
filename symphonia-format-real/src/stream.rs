@@ -446,9 +446,11 @@ impl AudioStream {
 
     fn drain_es(&mut self, flush: bool, out: &mut VecDeque<Packet>) {
         while let Some(frame) = self.es.as_mut().and_then(|es| es.next_frame(flush)) {
-            if let Some(info) = self.es.as_ref().and_then(|es| es.info())
-                && info.rate != 0
-                && u64::from(info.rate) != self.clock.rate
+            if let Some(info) = self
+                .es
+                .as_ref()
+                .and_then(|es| es.info())
+                .filter(|info| info.rate != 0 && u64::from(info.rate) != self.clock.rate)
             {
                 debug!("real: AC-3 sample rate is {}", info.rate);
                 self.clock.rate = u64::from(info.rate);

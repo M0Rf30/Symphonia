@@ -95,7 +95,14 @@ fn print_numbers() {
 
 #[test]
 fn print_ref_numbers() {
-    let dir = PathBuf::from(std::env::var("HOME").unwrap()).join(".cache/Siren/vec");
+    // The reference vectors are not part of the repository.
+    let Some(dir) = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache/Siren/vec"))
+    else {
+        return;
+    };
+    if !dir.is_dir() {
+        return;
+    }
     for (tag, rate) in [("s7", 16000u32), ("s14", 32000)] {
         for br in [24000usize, 32000, 48000] {
             let size = br / 400;

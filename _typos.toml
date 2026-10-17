@@ -6,6 +6,8 @@ extend-exclude = [
     "**/tests/data/**",
     "**/tests/fixtures/**",
     "Cargo.lock",
+    # Documents the misspelled names that were renamed.
+    "docs/guides/migration/typo-renames.md",
 ]
 
 [default]
@@ -55,3 +57,14 @@ wre = "wre"         # FFT real part of twiddle
 mis = "mis"
 tha = "tha"
 fo = "fo"
+# Identifiers and abbreviations of reference implementations and specifications.
+indx = "indx"       # index, as in the reference decoders
+levl = "levl"       # level
+rin = "rin"         # input
+formant = "formant" # speech formants
+delt = "delt"       # delta
+reord = "reord"     # reordering
+permut = "permut"   # permutation
+bse = "bse"         # base
+ciph = "ciph"       # cipher
+sawp = "sawp"       # MP4 sample entry brand

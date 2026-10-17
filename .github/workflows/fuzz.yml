@@ -49,7 +49,7 @@ jobs:
 
       - name: Build targets
         working-directory: symphonia/fuzz
-        run: cargo fuzz build
+        run: cargo fuzz build --target x86_64-unknown-linux-gnu
 
       - name: Run targets
         working-directory: symphonia/fuzz
@@ -110,7 +110,7 @@ jobs:
         working-directory: symphonia/fuzz
         env:
           SECONDS_PER_TARGET: ${{ inputs.seconds || '600' }}
-        run: cargo fuzz run "${{ matrix.target }}" -- -max_total_time="$SECONDS_PER_TARGET"
+        run: cargo fuzz run --target x86_64-unknown-linux-gnu "${{ matrix.target }}" -- -max_total_time="$SECONDS_PER_TARGET"
 
       - name: Upload crashes
         if: failure()

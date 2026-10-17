@@ -17,7 +17,7 @@ for target in "${TARGETS[@]}"; do
     echo "Fuzzing target: $target"
     echo "----------------------------------------------------------------"
     # -max_total_time is a libFuzzer flag passed via cargo fuzz
-    cargo fuzz run "$target" -- -max_total_time="$DURATION"
+    cargo fuzz run --target "${FUZZ_TARGET:-x86_64-unknown-linux-gnu}" "$target" -- -max_total_time="$DURATION"
 done
 
 echo "----------------------------------------------------------------"

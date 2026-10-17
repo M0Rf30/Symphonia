@@ -137,14 +137,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libpulse-dev
 
       - name: Test default features
-        run: cargo test --target "$TARGET" --all
-        env:
-          TARGET: ${{ matrix.config.target }}
+        run: cargo test --target ${{ matrix.config.target }} --all
 
       - name: Test all features
-        run: cargo test --target "$TARGET" --all --all-features
-        env:
-          TARGET: ${{ matrix.config.target }}
+        run: cargo test --target ${{ matrix.config.target }} --all --all-features
 
   # Big-endian coverage. The decoders and bit readers are written for little-endian hosts first,
   # so byte-order bugs only show here. The scope is limited to the crates that read or convert raw

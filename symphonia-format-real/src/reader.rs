@@ -488,9 +488,8 @@ impl<'s> RealReader<'s> {
         tracks[0].with_flags(TrackFlags::DEFAULT);
 
         // Read the index of the packets.
-        if let Some(index_pos) = props.as_ref().map(|p| p.index_pos).filter(|&p| p != 0)
-            && mss.is_seekable()
-        {
+        let index_pos = props.as_ref().map(|p| p.index_pos).filter(|&p| p != 0);
+        if let (Some(index_pos), true) = (index_pos, mss.is_seekable()) {
             match Self::read_index(&mut mss, index_pos, &mut streams) {
                 Ok(()) => info!("real: read the index"),
                 Err(err) => debug!("real: ignoring the index: {err}"),
