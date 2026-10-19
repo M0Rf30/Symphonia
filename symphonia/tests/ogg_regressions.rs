@@ -32,6 +32,20 @@ fn have_encoder(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The `libopus.so.0.N` soname minor of the libopus ffmpeg links, if `ldd` can tell.
+/// libopus 1.6 is `libopus.so.0.11`; earlier releases have smaller minors.
+fn linked_libopus_minor() -> Option<u32> {
+    let ffmpeg = Command::new("sh").args(["-c", "command -v ffmpeg"]).output().ok()?;
+    let ffmpeg = String::from_utf8_lossy(&ffmpeg.stdout).trim().to_owned();
+    let ldd = Command::new("ldd").arg(&ffmpeg).output().ok()?;
+    let ldd = String::from_utf8_lossy(&ldd.stdout).into_owned();
+    let line = ldd.lines().find(|l| l.trim_start().starts_with("libopus.so"))?;
+    let lib = line.split("=>").nth(1)?.split_whitespace().next()?;
+    let real = std::fs::canonicalize(lib).ok()?;
+    let name = real.file_name()?.to_str()?.to_owned();
+    name.strip_prefix("libopus.so.0.")?.split('.').next()?.parse().ok()
+}
+
 fn fixtures_dir() -> PathBuf {
     common::fixtures_dir("symphonia-ogg-regression-fixtures")
 }
@@ -836,8 +850,16 @@ fn external_chained_samples() {
 /// clamps the SILK output to [-32767, 32767]; the following resampler then rings differently if
 /// -32768 is delivered instead (bit-exactness regression). 10 ms frames and 8/12 kHz SILK are
 /// not affected and must keep -32768.
-fn check_loud_mono(name: &str, extra_args: &[&str]) {
+///
+/// `osce` marks the cases that depend on that enhancer clamp (20 ms+ frames of 16 kHz SILK).
+/// They are skipped when ffmpeg links a libopus older than 1.6, whose output differs by a
+/// couple of 16-bit LSBs there; an undeterminable version still runs the check.
+fn check_loud_mono(name: &str, osce: bool, extra_args: &[&str]) {
     if !have_encoder("libopus") {
+        return;
+    }
+    if osce && linked_libopus_minor().is_some_and(|minor| minor < 11) {
+        eprintln!("{name}: reference libopus is older than 1.6 (no OSCE clamp); skipping");
         return;
     }
     let path = fixtures_dir().join(format!("{name}.opus"));
@@ -873,13 +895,14 @@ fn check_loud_mono(name: &str, extra_args: &[&str]) {
 fn opus_mono_silk_loud_matches_libopus_float() {
     check_loud_mono(
         "opus_mono_silk_loud",
+        true,
         &["-application", "voip", "-cutoff", "8000", "-b:a", "24k"],
     );
 }
 
 #[test]
 fn opus_mono_loud_matches_libopus_float() {
-    check_loud_mono("opus_mono_loud", &["-application", "voip", "-b:a", "48k"]);
+    check_loud_mono("opus_mono_loud", true, &["-application", "voip", "-b:a", "48k"]);
 }
 
 /// 8 kHz SILK: the enhancer stage does not run, `-32768` is kept.
@@ -887,6 +910,7 @@ fn opus_mono_loud_matches_libopus_float() {
 fn opus_mono_silk_nb_loud_matches_libopus_float() {
     check_loud_mono(
         "opus_mono_silk_nb_loud",
+        false,
         &["-application", "voip", "-cutoff", "4000", "-b:a", "16k"],
     );
 }
@@ -896,6 +920,7 @@ fn opus_mono_silk_nb_loud_matches_libopus_float() {
 fn opus_mono_silk_mb_loud_matches_libopus_float() {
     check_loud_mono(
         "opus_mono_silk_mb_loud",
+        false,
         &["-application", "voip", "-cutoff", "6000", "-b:a", "20k"],
     );
 }
@@ -905,6 +930,7 @@ fn opus_mono_silk_mb_loud_matches_libopus_float() {
 fn opus_mono_silk_10ms_loud_matches_libopus_float() {
     check_loud_mono(
         "opus_mono_silk_10ms_loud",
+        false,
         &["-application", "voip", "-cutoff", "8000", "-b:a", "24k", "-frame_duration", "10"],
     );
 }
@@ -914,6 +940,7 @@ fn opus_mono_silk_10ms_loud_matches_libopus_float() {
 fn opus_mono_silk_60ms_loud_matches_libopus_float() {
     check_loud_mono(
         "opus_mono_silk_60ms_loud",
+        true,
         &["-application", "voip", "-cutoff", "8000", "-b:a", "24k", "-frame_duration", "60"],
     );
 }

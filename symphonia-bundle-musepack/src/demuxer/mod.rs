@@ -89,10 +89,14 @@ pub(crate) struct StreamInfo {
 /// `u64` overflow.
 pub(crate) const MAX_SAMPLES: u64 = 1 << 48;
 
+/// Largest SV8 `block_pwr`: the `SH` block stores it as a 3-bit field times two (libmpcdec
+/// `streaminfo_read_header_sv8`).
+pub(crate) const MAX_BLOCK_PWR: u8 = 14;
+
 impl StreamInfo {
     /// Number of frames in one packet (SV8 packs `2^block_pwr` frames into one `AP` block).
     pub fn block_frames(&self) -> u64 {
-        1u64 << self.block_pwr.min(20)
+        1u64 << self.block_pwr.min(MAX_BLOCK_PWR)
     }
 
     /// Number of sample-frames the decoder produces from one packet.

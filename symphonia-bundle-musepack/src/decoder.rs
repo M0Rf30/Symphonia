@@ -26,7 +26,9 @@ use symphonia_core::support_audio_codec;
 
 use crate::bits::BitReader;
 use crate::decoder_core::{Decoder as Core, FRAME_LENGTH, ScfSync};
-use crate::demuxer::{PACKET_TAG_NOISE, PACKET_TAG_PLAIN, PACKET_TAG_SILENCE, PACKET_TAG_SYNC};
+use crate::demuxer::{
+    MAX_BLOCK_PWR, PACKET_TAG_NOISE, PACKET_TAG_PLAIN, PACKET_TAG_SILENCE, PACKET_TAG_SYNC,
+};
 
 /// Musepack (SV4-SV8) decoder.
 pub struct MpcDecoder {
@@ -56,6 +58,9 @@ struct ExtraData {
 fn parse_extra_data(data: &[u8]) -> Result<ExtraData> {
     if data.len() < 21 {
         return decode_error("musepack: extra data too short");
+    }
+    if data[4] > MAX_BLOCK_PWR {
+        return decode_error("musepack: invalid block size");
     }
     Ok(ExtraData {
         stream_version: u32::from(data[0]),
@@ -87,8 +92,8 @@ impl MpcDecoder {
         core.set_sv46_layout(extra.raw_res, extra.is_start);
 
         let spec = symphonia_core::audio::AudioSpec::new(sample_rate, channels);
-        let max_frames = (1usize << extra.block_pwr.min(20)) * FRAME_LENGTH;
-        let buf = AudioBuffer::new(spec, max_frames);
+        let buf =
+            AudioBuffer::new(spec, Self::packet_frames(extra.stream_version, extra.block_pwr));
 
         Ok(MpcDecoder {
             params: params.clone(),
@@ -99,6 +104,13 @@ impl MpcDecoder {
             channels: extra.channels as usize,
             buf,
         })
+    }
+
+    /// Frames in one packet: SV8 packs `2^block_pwr` frames into one `AP` block, older streams
+    /// one frame per packet.
+    fn packet_frames(stream_version: u32, block_pwr: u8) -> usize {
+        let frames = if stream_version >= 8 { 1usize << block_pwr } else { 1 };
+        frames * FRAME_LENGTH
     }
 
     fn decode_inner(&mut self, packet: &PacketRef<'_>) -> Result<()> {
@@ -132,8 +144,7 @@ impl MpcDecoder {
 
         // The demuxer sizes `dur + trim_start + trim_end` to the number of frames actually
         // present (the last SV8 packet may hold fewer than `2^block_pwr`).
-        let max_frames: u64 =
-            if self.stream_version >= 8 { 1u64 << self.block_pwr.min(20) } else { 1 };
+        let max_frames: u64 = if self.stream_version >= 8 { 1u64 << self.block_pwr } else { 1 };
         let block_frames = match packet.block_dur().get() {
             0 => max_frames,
             dur => dur.div_ceil(FRAME_LENGTH as u64).min(max_frames),
@@ -234,5 +245,42 @@ impl RegisterableAudioDecoder for MpcDecoder {
 
     fn supported_codecs() -> &'static [SupportedAudioCodec] {
         &[support_audio_codec!(CODEC_ID_MUSEPACK, "musepack", "Musepack (SV4-SV8)")]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use symphonia_core::audio::layouts::CHANNEL_LAYOUT_STEREO;
+
+    use super::*;
+
+    fn params(stream_version: u8, block_pwr: u8) -> AudioCodecParameters {
+        let mut extra = [0u8; 21];
+        extra[0] = stream_version;
+        extra[3] = 2;
+        extra[4] = block_pwr;
+        let mut params = AudioCodecParameters::new();
+        params
+            .for_codec(CODEC_ID_MUSEPACK)
+            .with_sample_rate(44100)
+            .with_channels(CHANNEL_LAYOUT_STEREO)
+            .with_extra_data(extra.into());
+        params
+    }
+
+    #[test]
+    fn block_pwr_above_the_sv8_maximum_is_rejected() {
+        let opts = AudioDecoderOptions::default();
+        assert!(MpcDecoder::try_new(&params(8, MAX_BLOCK_PWR), &opts).is_ok());
+        assert!(MpcDecoder::try_new(&params(8, MAX_BLOCK_PWR + 1), &opts).is_err());
+        assert!(MpcDecoder::try_new(&params(10, 20), &opts).is_err());
+    }
+
+    #[test]
+    fn pre_sv8_buffer_holds_one_frame() {
+        assert_eq!(MpcDecoder::packet_frames(7, MAX_BLOCK_PWR), FRAME_LENGTH);
+        assert_eq!(MpcDecoder::packet_frames(8, 4), 16 * FRAME_LENGTH);
     }
 }
