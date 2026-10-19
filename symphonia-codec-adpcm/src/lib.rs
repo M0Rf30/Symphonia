@@ -214,6 +214,19 @@ impl AdpcmDecoder {
 
         let inner_decoder = match params.codec {
             CODEC_ID_ADPCM_MS => {
+                // A block holds a two sample preamble per channel, so it needs at least 2 frames.
+                // Mono and 3+ channel blocks code two samples per byte, so an odd frame count
+                // would leave the last sample unwritten (FFmpeg leaves it undefined); stereo
+                // codes one frame per byte and may be odd.
+                let fpb = params.frames_per_block.unwrap_or(0);
+                if fpb < 2 {
+                    return unsupported_error("adpcm (ms): frames per block must be at least 2");
+                }
+                if channel_count != 2 && fpb % 2 != 0 {
+                    return unsupported_error(
+                        "adpcm (ms): frames per block must be even for non-stereo",
+                    );
+                }
                 // The WAVEFORMATEX extension may carry its own coefficient set.
                 let coeffs = params
                     .extra_data
@@ -861,6 +874,40 @@ mod tests {
         assert!(AdpcmDecoder::try_new(&params, &opts).is_ok());
         let params = adpcm_params(CODEC_ID_ADPCM_MS, 500);
         assert!(AdpcmDecoder::try_new(&params, &opts).is_ok());
+    }
+
+    #[test]
+    fn ms_rejects_frames_per_block_below_2() {
+        let opts = AudioDecoderOptions::default();
+        for fpb in [1, 0] {
+            let params = adpcm_params(CODEC_ID_ADPCM_MS, fpb);
+            assert!(AdpcmDecoder::try_new(&params, &opts).is_err());
+        }
+        assert!(AdpcmDecoder::try_new(&adpcm_params(CODEC_ID_ADPCM_MS, 2), &opts).is_ok());
+    }
+
+    #[test]
+    fn ms_rejects_odd_frames_per_block_unless_stereo() {
+        let opts = AudioDecoderOptions::default();
+        assert!(AdpcmDecoder::try_new(&adpcm_params(CODEC_ID_ADPCM_MS, 3), &opts).is_err());
+        let mut params = adpcm_params(CODEC_ID_ADPCM_MS, 3);
+        params.with_channels(Channels::Discrete(2));
+        assert!(AdpcmDecoder::try_new(&params, &opts).is_ok());
+    }
+
+    #[test]
+    fn ms_extreme_coefficients_do_not_overflow() {
+        // Coefficients of -32768 with full-scale samples overflowed an i32 product sum.
+        let mut params = adpcm_params(CODEC_ID_ADPCM_MS, 4);
+        let mut extra = vec![4u8, 0, 1, 0];
+        extra.extend_from_slice(&i16::MIN.to_le_bytes());
+        extra.extend_from_slice(&i16::MIN.to_le_bytes());
+        params.with_extra_data(extra.into_boxed_slice());
+        let mut decoder = AdpcmDecoder::try_new(&params, &AudioDecoderOptions::default()).unwrap();
+        // predictor 0, delta 16, sample1 = sample2 = -32768, then two code bytes' worth.
+        let data = [0u8, 16, 0, 0, 0x80, 0, 0x80, 0x77];
+        let out = decode_packet_s16(&mut decoder, &data, 4).unwrap();
+        assert_eq!(out, vec![-32768, -32768, 32767, 394]);
     }
 
     #[test]
