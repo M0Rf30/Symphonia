@@ -156,7 +156,19 @@ impl Scoreable for AfcReader<'_> {
         // number of groups.
         let rate = u16::from_be_bytes([header[8], header[9]]);
         let size = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
-        let plausible = rate >= 4000 && size > 0 && size % GROUP_LEN as u32 == 0;
+        let duration = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
+        let groups = size / GROUP_LEN as u32;
+
+        // The duration fits in the audio, and the audio fits in the file when its length is known.
+        let fits = src
+            .inner()
+            .byte_len()
+            .is_none_or(|len| u64::from(size) <= len.saturating_sub(HEADER_LEN));
+        let plausible = rate >= 4000
+            && size > 0
+            && size % GROUP_LEN as u32 == 0
+            && u64::from(duration) <= u64::from(groups) * GROUP_SAMPLES
+            && fits;
 
         Ok(if plausible { Score::Supported(10) } else { Score::Unsupported })
     }

@@ -411,6 +411,11 @@ fn parse_msf(h: &Head<'_>) -> Result<Layout> {
     Ok(layout)
 }
 
+/// The bounds of the channel count and the sample rate of an MSF header that are probed.
+const MSF_MAX_CHANNELS: u32 = 8;
+const MSF_MIN_RATE: u32 = 4000;
+const MSF_MAX_RATE: u32 = 192_000;
+
 /// A function that parses the header of a variant of the format.
 type ParseHead = fn(&Head<'_>) -> Result<Layout>;
 
@@ -584,7 +589,13 @@ impl Scoreable for VagReader<'_> {
         else if h.tag(0, b"VPK ") || (h.tag(0, b"SShd") && h.tag(32, b"SSbd")) {
             170
         }
-        else if h.tag(0, b"MSF") && h.be(8).is_ok_and(|c| c > 0) && h.be(16).is_ok_and(|r| r > 0)
+        else if h.tag(0, b"MSF")
+            && h.be(8).is_ok_and(|c| (1..=MSF_MAX_CHANNELS).contains(&c))
+            && h.be(16).is_ok_and(|r| (MSF_MIN_RATE..=MSF_MAX_RATE).contains(&r))
+            && h.be(12).is_ok_and(|size| {
+                // The size of the data must fit in the file, if its length is known.
+                src.inner().byte_len().is_none_or(|len| u64::from(size) <= len.saturating_sub(0x40))
+            })
         {
             // FFmpeg rates the files with a codec it does not know lower.
             if h.be(4).is_ok_and(|codec| codec > 16) { 50 } else { 170 }

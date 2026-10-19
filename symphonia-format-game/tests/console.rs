@@ -442,3 +442,50 @@ fn bfstm_dsp_matches_ffmpeg() {
         check_stream(name, &s, "bfstm", 41);
     }
 }
+
+/// The fixtures score, and random buffers never score as AFC or VAG/MSF. (AFC has no marker, so
+/// the score function is called directly.)
+#[test]
+fn probe_is_strict() {
+    use symphonia_core::formats::probe::{Score, Scoreable};
+    use symphonia_core::io::ScopedStream;
+
+    fn scores<T: Scoreable>(data: &[u8]) -> bool {
+        let mut m = mss(data);
+        matches!(T::score(ScopedStream::new(&mut m, 4096)), Ok(Score::Supported(_)))
+    }
+
+    let mut rng = XorShift64(0x9e3779b97f4a7c15);
+    let groups = 4usize;
+    let mut afc = vec![0u8; 32];
+    afc[0..4].copy_from_slice(&((groups * 18) as u32).to_be_bytes());
+    afc[4..8].copy_from_slice(&((groups * 16) as u32).to_be_bytes());
+    afc[8..10].copy_from_slice(&32000u16.to_be_bytes());
+    afc.extend_from_slice(&random_bytes(&mut rng, groups * 18));
+    assert!(scores::<AfcReader<'_>>(&afc));
+
+    let mut msf = vec![0u8; 0x40];
+    msf[0..4].copy_from_slice(b"MSF\x01");
+    msf[4..8].copy_from_slice(&3u32.to_be_bytes());
+    msf[8..12].copy_from_slice(&1u32.to_be_bytes());
+    msf[12..16].copy_from_slice(&1600u32.to_be_bytes());
+    msf[16..20].copy_from_slice(&44100u32.to_be_bytes());
+    msf.extend_from_slice(&psx_frames(&mut rng, 100));
+    assert!(scores::<VagReader<'_>>(&msf));
+    // Other versions of the header are not rejected.
+    msf[3] = b'3';
+    assert!(scores::<VagReader<'_>>(&msf));
+    // More channels than possible, and data that does not fit in the file.
+    msf[8..12].copy_from_slice(&9u32.to_be_bytes());
+    assert!(!scores::<VagReader<'_>>(&msf));
+    msf[8..12].copy_from_slice(&1u32.to_be_bytes());
+    msf[12..16].copy_from_slice(&u32::MAX.to_be_bytes());
+    assert!(!scores::<VagReader<'_>>(&msf));
+
+    for _ in 0..10_000 {
+        let n = 32 + (rng.next_u64() % 200) as usize;
+        let buf = random_bytes(&mut rng, n);
+        assert!(!scores::<AfcReader<'_>>(&buf));
+        assert!(!scores::<VagReader<'_>>(&buf));
+    }
+}

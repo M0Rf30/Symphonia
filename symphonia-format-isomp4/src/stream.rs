@@ -16,6 +16,8 @@ pub struct SampleDataDesc {
     /// The starting byte position within the media data of the group of samples that contains the
     /// sample described.
     pub base_pos: u64,
+    /// The index of the run (or chunk) that contains the sample, within its segment.
+    pub run: u32,
     /// The offset relative to the base position of the sample described.
     pub offset: Option<u64>,
     /// The size of the sample.
@@ -84,9 +86,34 @@ struct SequenceInfo {
     default_sample_size: u32,
 }
 
+/// Get the position after the last byte of the data of the runs of a track fragment.
+fn traf_data_end(traf: &TrafAtom, base: u64, default_size: u32) -> Result<u64> {
+    let mut pos = base;
+
+    for trun in traf.truns.iter() {
+        if let Some(offset) = trun.data_offset {
+            let start = if offset.is_negative() {
+                base.checked_sub(u64::from(offset.unsigned_abs()))
+            }
+            else {
+                base.checked_add(u64::from(offset.unsigned_abs()))
+            };
+            pos = start.ok_or(Error::DecodeError("isomp4: track fragment run offset overflow"))?;
+        }
+
+        pos = pos
+            .checked_add(trun.total_size(default_size))
+            .ok_or(Error::DecodeError("isomp4: track fragment run offset overflow"))?;
+    }
+
+    Ok(pos)
+}
+
 pub struct MoofSegment {
     moof: MoofAtom,
     seq: Vec<SequenceInfo>,
+    /// The base data offset of each track fragment of the moof, in track fragment order.
+    traf_bases: Vec<u64>,
 }
 
 impl MoofSegment {
@@ -168,7 +195,33 @@ impl MoofSegment {
             seq.push(info);
         }
 
-        Ok(MoofSegment { moof, seq })
+        // ISO/IEC 14496-12 8.8.7: without a base-data-offset or default-base-is-moof, the base of
+        // the first track fragment is the start of the moof and that of the others is the end of
+        // the data of the previous track fragment.
+        let mut traf_bases: Vec<u64> = Vec::with_capacity(moof.trafs.len());
+        let mut prev_end = moof.moof_base_pos;
+
+        for traf in moof.trafs.iter() {
+            let tfhd = &traf.tfhd;
+            let base = match tfhd.base_data_offset {
+                Some(pos) => pos,
+                None if tfhd.default_base_is_moof => moof.moof_base_pos,
+                None if traf_bases.is_empty() => moof.moof_base_pos,
+                None => prev_end,
+            };
+
+            let default_size = tfhd.default_sample_size.unwrap_or_else(|| {
+                mvex.trexs
+                    .iter()
+                    .find(|trex| trex.track_id == tfhd.track_id)
+                    .map_or(0, |trex| trex.default_sample_size)
+            });
+
+            prev_end = traf_data_end(traf, base, default_size)?;
+            traf_bases.push(base);
+        }
+
+        Ok(MoofSegment { moof, seq, traf_bases })
     }
 
     /// Try to get the Track Fragment atom associated with the track identified by `track_num`.
@@ -268,12 +321,12 @@ impl StreamSegment for MoofSegment {
             None => return decode_error("isomp4: no track fragment for track"),
         };
 
-        // If an explicit anchor-point is set, then use that for the position, otherwise use the
-        // first-byte of the enclosing moof atom.
-        let traf_base_pos = match traf.tfhd.base_data_offset {
-            Some(pos) => pos,
-            _ => self.moof.moof_base_pos,
+        // The anchor-point of the track fragment (see `with_track_ids`).
+        let Some(traf_idx) = self.seq[track_num].traf_idx
+        else {
+            return decode_error("isomp4: no track fragment for track");
         };
+        let traf_base_pos = self.traf_bases[traf_idx];
 
         let Some(mut sample_num_rel) = sample_num.checked_sub(self.seq[track_num].first_sample)
         else {
@@ -284,7 +337,7 @@ impl StreamSegment for MoofSegment {
         let default_size =
             traf.tfhd.default_sample_size.unwrap_or(self.seq[track_num].default_sample_size);
 
-        for trun in traf.truns.iter() {
+        for (run, trun) in traf.truns.iter().enumerate() {
             // If a data offset is present for this track fragment run, then calculate the new base
             // position for the run. When a data offset is not present, do nothing because this run
             // follows the previous run.
@@ -317,7 +370,7 @@ impl StreamSegment for MoofSegment {
                     (None, size)
                 };
 
-                return Ok(SampleDataDesc { base_pos: trun_offset, size, offset });
+                return Ok(SampleDataDesc { base_pos: trun_offset, run: run as u32, size, offset });
             }
 
             // Get the total size of the track fragment run.
@@ -516,7 +569,7 @@ impl StreamSegment for MoovSegment {
             }
         };
 
-        Ok(SampleDataDesc { base_pos, size, offset })
+        Ok(SampleDataDesc { base_pos, run: chunk_in_stream, size, offset })
     }
 
     fn track_sample_range(&self, track_num: usize) -> Range<u32> {
@@ -598,8 +651,19 @@ mod tests {
         count: u32,
         trun_fields: &[u8],
     ) -> Vec<u8> {
+        traf_for(1, tfhd_flags, tfhd_fields, trun_flags, count, trun_fields)
+    }
+
+    fn traf_for(
+        track_id: u32,
+        tfhd_flags: u32,
+        tfhd_fields: &[u8],
+        trun_flags: u32,
+        count: u32,
+        trun_fields: &[u8],
+    ) -> Vec<u8> {
         let mut tfhd = tfhd_flags.to_be_bytes().to_vec();
-        tfhd.extend_from_slice(&1u32.to_be_bytes());
+        tfhd.extend_from_slice(&track_id.to_be_bytes());
         tfhd.extend_from_slice(tfhd_fields);
 
         let mut trun = trun_flags.to_be_bytes().to_vec();
@@ -638,13 +702,16 @@ mod tests {
             traks: Vec::new(),
             mvex: Some(MvexAtom {
                 mehd: None,
-                trexs: vec![TrexAtom {
-                    track_id: 1,
-                    default_sample_desc_idx: 1,
-                    default_sample_duration: 0,
-                    default_sample_size: 0,
-                    default_sample_flags: 0,
-                }],
+                trexs: [1, 2]
+                    .into_iter()
+                    .map(|track_id| TrexAtom {
+                        track_id,
+                        default_sample_desc_idx: 1,
+                        default_sample_duration: 0,
+                        default_sample_size: 0,
+                        default_sample_flags: 0,
+                    })
+                    .collect(),
             }),
             udta: None,
             meta: None,
@@ -686,9 +753,55 @@ mod tests {
         // The run data offset (-8) is before the start of the file (the moof is at position 0).
         let trafs = [traf(0, &[], 0x1, 1, &(-8i32).to_be_bytes())];
 
-        let seg =
-            moof_segment(&trafs, &PrevSegment { sample_end: 0, ts_end: 0 }).expect("valid segment");
+        assert!(moof_segment(&trafs, &PrevSegment { sample_end: 0, ts_end: 0 }).is_err());
+    }
 
-        assert!(seg.sample_data(0, 0, false).is_err());
+    #[test]
+    fn non_first_traf_without_base_starts_after_previous_traf() {
+        // Track 2 (first traf): a run at moof + 100 of 2 samples of 10 bytes: data ends at 120.
+        // Track 1 (second traf): no base-data-offset and no default-base-is-moof, so it starts
+        // at 120. Its run has no data offset.
+        let size10 = 10u32.to_be_bytes();
+        let size7 = 7u32.to_be_bytes();
+        let trafs = [
+            traf_for(2, 0x10, &size10, 0x1, 2, &100i32.to_be_bytes()),
+            traf_for(1, 0x10, &size7, 0, 2, &[]),
+        ];
+        let seg = moof_segment(&trafs, &PrevSegment { sample_end: 0, ts_end: 0 }).expect("seg");
+        let d = seg.sample_data(0, 1, true).expect("sample");
+        assert_eq!((d.base_pos, d.offset, d.size), (120, Some(7), 7));
+
+        // With default-base-is-moof the base is the start of the moof.
+        let trafs = [
+            traf_for(2, 0x10, &size10, 0x1, 2, &100i32.to_be_bytes()),
+            traf_for(1, 0x2_0010, &size7, 0, 2, &[]),
+        ];
+        let seg = moof_segment(&trafs, &PrevSegment { sample_end: 0, ts_end: 0 }).expect("seg");
+        assert_eq!(seg.sample_data(0, 1, true).expect("sample").base_pos, 0);
+    }
+
+    #[test]
+    fn running_run_offsets_match_exact_offsets() {
+        // A run of 3000 samples of varying sizes (flag 0x200: a size per sample), two runs.
+        let count = 3000u32;
+        let sizes: Vec<u32> = (0..count).map(|i| 1 + (i * 7) % 23).collect();
+        let mut fields = 64i32.to_be_bytes().to_vec();
+        for s in &sizes {
+            fields.extend_from_slice(&s.to_be_bytes());
+        }
+        let trafs = [traf(0, &[], 0x201, count, &fields)];
+        let seg = moof_segment(&trafs, &PrevSegment { sample_end: 0, ts_end: 0 }).expect("seg");
+
+        let mut pos = None;
+        for n in 0..count {
+            let exact = seg.sample_data(0, n, true).expect("exact");
+            let run = seg.sample_data(0, n, false).expect("run");
+            assert_eq!(run.run, exact.run);
+            let want = exact.base_pos + exact.offset.expect("offset");
+            if let Some(p) = pos {
+                assert_eq!(p, want, "sample {n}");
+            }
+            pos = Some(want + u64::from(exact.size));
+        }
     }
 }

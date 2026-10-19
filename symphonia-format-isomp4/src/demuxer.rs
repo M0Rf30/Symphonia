@@ -57,6 +57,15 @@ const ISOMP4_FORMAT_INFO: FormatInfo = FormatInfo {
     long_name: "ISO Base Media File Format",
 };
 
+/// The position of the next sample of a run, so it is not recomputed from the sizes.
+#[derive(Clone, Copy)]
+struct NextPos {
+    seg_idx: usize,
+    run: u32,
+    sample: u32,
+    pos: u64,
+}
+
 pub struct TrackState {
     /// The track number.
     track_num: usize,
@@ -66,8 +75,9 @@ pub struct TrackState {
     cur_seg: usize,
     /// The current sample index relative to the track.
     next_sample: u32,
-    /// The current sample byte position relative to the start of the track.
-    next_sample_pos: u64,
+    /// The segment, run, sample and position of the sample following the last one consumed, if
+    /// it is in the same run: the exact position is only recomputed when the run changes.
+    next_pos: Option<NextPos>,
     /// The number of decoded audio frames per tick of the track's timebase. This is 1 for almost
     /// all audio tracks. For HE-AAC (SBR), the timescale of a track may be the core codec rate
     /// while the decoded output has twice the sample rate.
@@ -211,8 +221,8 @@ impl TrackState {
             track_num,
             track_id: trak.tkhd.id,
             cur_seg: 0,
+            next_pos: None,
             next_sample: 0,
-            next_sample_pos: 0,
             frames_per_tick: frames_per_tick.unwrap_or(1),
             start_offset,
             media_time_base: TimeBase::from_recip(timescale),
@@ -1072,27 +1082,38 @@ impl<'s> IsoMp4Reader<'s> {
         // Get the segment associated with the sample.
         let seg = &self.segs[info.seg_idx];
 
-        // Get the sample data descriptor.
-        let sample_data_desc = seg.sample_data(track.track_num, track.next_sample, false)?;
+        // Get the sample data descriptor. The offset within the run is only needed when the sample
+        // does not directly follow the previous one of the same run.
+        let cached =
+            track.next_pos.filter(|n| n.seg_idx == info.seg_idx && n.sample == track.next_sample);
+        let desc = seg.sample_data(track.track_num, track.next_sample, cached.is_none())?;
 
-        // The sample base position in the sample data descriptor remains constant if the sample
-        // followed immediately after the previous sample. In this case, the track state's
-        // next_sample_pos is the position of the current sample. If the base position has jumped,
-        // then the base position is the position of current the sample.
-        let pos = if sample_data_desc.base_pos > track.next_sample_pos {
-            sample_data_desc.base_pos
-        }
-        else {
-            track.next_sample_pos
+        let pos = match cached {
+            Some(n) if n.run == desc.run => n.pos,
+            _ => {
+                // The exact position: the base of the run and the offset within the run.
+                let desc = seg.sample_data(track.track_num, track.next_sample, true)?;
+                match desc.offset.and_then(|o| desc.base_pos.checked_add(o)) {
+                    Some(pos) => pos,
+                    None => return decode_error("isomp4: sample position out of range"),
+                }
+            }
         };
+
+        track.next_pos = pos.checked_add(u64::from(desc.size)).map(|pos| NextPos {
+            seg_idx: info.seg_idx,
+            run: desc.run,
+            sample: track.next_sample + 1,
+            pos,
+        });
 
         // Advance the track's current segment to the next sample's segment.
         track.cur_seg = info.seg_idx;
 
-        // Advance the track's next sample number and position.
+        // Advance the track's next sample number.
         track.next_sample += 1;
-        track.next_sample_pos = pos + u64::from(sample_data_desc.size);
 
+        let sample_data_desc = desc;
         Ok(Some(SampleDataInfo { pos, len: sample_data_desc.size }))
     }
 
@@ -1247,19 +1268,12 @@ impl<'s> IsoMp4Reader<'s> {
             _ => return seek_error(SeekErrorKind::OutOfRange),
         };
 
-        // Get the sample information.
-        let data_desc = seg.sample_data(track_num, sample_num, true)?;
-
         // Update the track's next sample information to point to the seeked sample.
         let track = &mut self.track_states[track_num];
 
         track.cur_seg = seek_loc.seg_idx;
         track.next_sample = sample_num;
-        track.next_sample_pos = data_desc.base_pos
-            + match data_desc.offset {
-                Some(o) => o,
-                None => return seek_error(SeekErrorKind::OutOfRange),
-            };
+        track.next_pos = None;
 
         debug!(
             "seeked track_num={} (track_id={}) to packet_ts={} (delta={})",
