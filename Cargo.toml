@@ -56,6 +56,7 @@ members = [
     "symphonia-codec-wma",
     "symphonia-common",
     "symphonia-core",
+    "symphonia-format-caf",
     "symphonia-format-asf",
     "symphonia-format-avi",
     "symphonia-format-dsd",

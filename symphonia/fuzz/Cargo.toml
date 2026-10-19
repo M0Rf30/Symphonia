@@ -527,3 +527,9 @@ name = "demux_game"
 path = "fuzz_targets/demux_game.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "decode_ldac"
+path = "fuzz_targets/decode_ldac.rs"
+test = false
+doc = false

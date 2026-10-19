@@ -813,7 +813,7 @@ impl Probe {
     /// Find the best reader.
     fn find_best_reader(
         &self,
-        mss: &mut MediaSourceStream,
+        mss: &mut MediaSourceStream<'_>,
         is_trailing: bool,
     ) -> Result<Option<ProbeMatch>> {
         // Read upto a 16 byte window starting with the marker.
@@ -895,7 +895,7 @@ fn read_and_append_metadata<'s>(
 }
 
 fn find_reader(
-    mss: &mut MediaSourceStream,
+    mss: &mut MediaSourceStream<'_>,
     descs: &[GenericProbeMatch],
     win: &[u8],
     max_depth: u16,
@@ -953,7 +953,7 @@ fn find_reader(
 
 fn score(
     candidate: &GenericProbeMatch,
-    mss: &mut MediaSourceStream,
+    mss: &mut MediaSourceStream<'_>,
     max_depth: u16,
 ) -> Result<Score> {
     // Save the initial position to rewind back to after scoring is complete.

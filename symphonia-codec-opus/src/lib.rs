@@ -5,6 +5,9 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+#![forbid(unsafe_code)]
+#![warn(rust_2018_idioms)]
+
 //! A pure-Rust, native Opus (RFC 6716) decoder.
 //!
 //! This is a faithful, from-scratch port of the reference `libopus` decoder (v1.5.2, BSD-3

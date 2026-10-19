@@ -29,7 +29,7 @@ macro_rules! impl_fourcc_id {
         }
 
         impl ::std::fmt::Display for $t {
-            fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
                 write!(f, "{:#x}", self.0)
             }
         }

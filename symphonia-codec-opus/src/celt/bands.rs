@@ -231,7 +231,7 @@ struct SplitCtx {
 /// them in libopus is inside an `if (encode)` block — so they are dropped from the signature).
 #[allow(clippy::too_many_arguments)]
 fn compute_theta(
-    ctx: &mut BandCtx,
+    ctx: &mut BandCtx<'_, '_, '_>,
     n: i32,
     b: &mut i32,
     bb: i32,
@@ -329,7 +329,7 @@ fn compute_theta(
 
 /// C: `quant_band_n1` (decode direction).
 fn quant_band_n1(
-    ctx: &mut BandCtx,
+    ctx: &mut BandCtx<'_, '_, '_>,
     x: &mut [f32],
     y: Option<&mut [f32]>,
     lowband_out: Option<&mut [f32]>,
@@ -357,7 +357,7 @@ fn quant_band_n1(
 /// C: `quant_partition` (decode direction).
 #[allow(clippy::too_many_arguments)]
 fn quant_partition(
-    ctx: &mut BandCtx,
+    ctx: &mut BandCtx<'_, '_, '_>,
     x: &mut [f32],
     n: i32,
     b: i32,
@@ -502,7 +502,7 @@ fn quant_partition(
 /// C: `quant_band` (decode direction).
 #[allow(clippy::too_many_arguments)]
 fn quant_band(
-    ctx: &mut BandCtx,
+    ctx: &mut BandCtx<'_, '_, '_>,
     x: &mut [f32],
     n: i32,
     b: i32,
@@ -615,7 +615,7 @@ fn quant_band(
 /// C: `quant_band_stereo` (decode direction).
 #[allow(clippy::too_many_arguments)]
 fn quant_band_stereo(
-    ctx: &mut BandCtx,
+    ctx: &mut BandCtx<'_, '_, '_>,
     x: &mut [f32],
     y: &mut [f32],
     n: i32,

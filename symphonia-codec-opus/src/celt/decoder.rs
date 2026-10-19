@@ -794,7 +794,7 @@ impl CeltDecoder {
         }
 
         let mut owned_rd;
-        let rd: &mut RangeDecoder = match rd {
+        let rd: &mut RangeDecoder<'_> = match rd {
             Some(r) => r,
             None => {
                 owned_rd = RangeDecoder::new(data);
