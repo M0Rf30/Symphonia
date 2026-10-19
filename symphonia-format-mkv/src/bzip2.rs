@@ -16,7 +16,9 @@
 //! Deviation: blocks with the `randomised` flag, which were last produced by bzip2 0.9.0 and are
 //! deprecated, are rejected instead of derandomised.
 
+use symphonia_core::checksum::Crc32;
 use symphonia_core::errors::{Result, decode_error};
+use symphonia_core::io::Monitor;
 
 /// The maximum size of a decompressed frame. No frame of an audio codec is anywhere close.
 const MAX_OUTPUT: usize = 1 << 28;
@@ -34,23 +36,6 @@ const MAX_SELECTORS: usize = 18002;
 
 const RUNA: u16 = 0;
 const RUNB: u16 = 1;
-
-/// The CRC-32 of bzip2: polynomial 0x04c11db7, MSB first, no reflection.
-static CRC_TABLE: [u32; 256] = {
-    let mut table = [0u32; 256];
-    let mut i = 0;
-    while i < 256 {
-        let mut c = (i as u32) << 24;
-        let mut j = 0;
-        while j < 8 {
-            c = if c & 0x8000_0000 != 0 { (c << 1) ^ 0x04c1_1db7 } else { c << 1 };
-            j += 1;
-        }
-        table[i] = c;
-        i += 1;
-    }
-    table
-};
 
 struct BitReader<'a> {
     data: &'a [u8],
@@ -196,11 +181,9 @@ pub(crate) fn bzip2_decompress(data: &[u8]) -> Result<Vec<u8>> {
         let block_start = out.len();
         decode_block(&mut br, max_block, &mut tt, &mut out)?;
 
-        let mut crc = 0xffff_ffffu32;
-        for &b in &out[block_start..] {
-            crc = (crc << 8) ^ CRC_TABLE[usize::from((crc >> 24) as u8 ^ b)];
-        }
-        crc = !crc;
+        let mut crc = Crc32::new(0xffff_ffff);
+        crc.process_buf_bytes(&out[block_start..]);
+        let crc = !crc.crc();
 
         if crc != block_crc {
             return decode_error("mkv: bzip2 block crc mismatch");

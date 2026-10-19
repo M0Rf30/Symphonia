@@ -95,6 +95,6 @@ impl<'a> BitReader<'a> {
     pub(crate) fn read_signed(&mut self, n: u32) -> Result<i32> {
         debug_assert!(n >= 1);
         let val = self.read(n)?;
-        Ok(((val << (32 - n)) as i32) >> (32 - n))
+        Ok(symphonia_core::util::bits::sign_extend_leq32_to_i32(val, n))
     }
 }

@@ -78,14 +78,6 @@ impl<'a> BitReader<'a> {
     }
 }
 
-/// Sign-extends the low `bits` bits of `val`.
-#[inline]
-pub(crate) fn sign_extend(val: u32, bits: u32) -> i32 {
-    debug_assert!((1..=32).contains(&bits));
-    let shift = 32 - bits;
-    ((val << shift) as i32) >> shift
-}
-
 /// A single-level lookup table for a Huffman code.
 pub(crate) struct Vlc {
     bits: u32,
@@ -213,9 +205,9 @@ mod tests {
 
     #[test]
     fn sign_extension() {
-        assert_eq!(sign_extend(0b111, 3), -1);
-        assert_eq!(sign_extend(0b011, 3), 3);
-        assert_eq!(sign_extend(0b100, 3), -4);
+        assert_eq!(symphonia_core::util::bits::sign_extend_leq32_to_i32(0b111, 3), -1);
+        assert_eq!(symphonia_core::util::bits::sign_extend_leq32_to_i32(0b011, 3), 3);
+        assert_eq!(symphonia_core::util::bits::sign_extend_leq32_to_i32(0b100, 3), -4);
     }
 
     #[test]

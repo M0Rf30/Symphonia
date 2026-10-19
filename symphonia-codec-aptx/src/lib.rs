@@ -110,12 +110,6 @@ fn diff_sign(x: i32, y: i32) -> i32 {
     i32::from(x > y) - i32::from(x < y)
 }
 
-/// `sign_extend`: sign extend the low `bits` bits of `val`.
-fn sign_extend(val: u32, bits: u32) -> i32 {
-    let shift = 32 - bits;
-    ((val << shift) as i32) >> shift
-}
-
 /// The history of the samples of a filter (`FilterSignal`), a ring buffer stored twice so that
 /// the taps are always contiguous.
 #[derive(Clone, Default)]
@@ -394,7 +388,8 @@ impl Channel {
         let mut shift = 0;
 
         for (sb, &width) in widths.iter().enumerate() {
-            self.subbands[sb].quantized_sample = sign_extend(codeword >> shift, width);
+            self.subbands[sb].quantized_sample =
+                symphonia_core::util::bits::sign_extend_leq32_to_i32(codeword >> shift, width);
             shift += width;
         }
 

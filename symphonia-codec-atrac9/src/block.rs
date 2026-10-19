@@ -10,7 +10,9 @@
 
 use symphonia_core::errors::{Result, decode_error};
 
-use crate::bits::{BitReader, Codebooks, Vlc, sign_extend};
+use symphonia_core::util::bits::sign_extend_leq32_to_i32;
+
+use crate::bits::{BitReader, Codebooks, Vlc};
 use crate::noise::Lfg;
 use crate::tables::{
     B_DIST, BAND_EXT_CNT, BAND_EXT_GROUP, BAND_EXT_LENGTHS, BAND_EXT_SCALES_M0, BAND_EXT_SCALES_M2,
@@ -500,14 +502,14 @@ impl BlockData {
                 for j in 0..groups {
                     let mut val = tab.read(br)? as u32;
                     for k in 0..value_cnt {
-                        coeffs[j * value_cnt + k] = sign_extend(val, value_bits);
+                        coeffs[j * value_cnt + k] = sign_extend_leq32_to_i32(val, value_bits);
                         val >>= value_bits;
                     }
                 }
             }
             else {
                 for coeff in coeffs.iter_mut() {
-                    *coeff = sign_extend(br.get(prec as u32), prec as u32);
+                    *coeff = sign_extend_leq32_to_i32(br.get(prec as u32), prec as u32);
                 }
             }
         }
@@ -530,7 +532,7 @@ impl BlockData {
             let len = (c.precision_fine[i] + 1) as u32;
 
             for j in start..end {
-                c.q_coeffs_fine[j] = sign_extend(br.get(len), len);
+                c.q_coeffs_fine[j] = sign_extend_leq32_to_i32(br.get(len), len);
             }
         }
     }

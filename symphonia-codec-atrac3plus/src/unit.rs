@@ -10,6 +10,7 @@
 //! This follows FFmpeg's `libavcodec/atrac3plus.c` function by function.
 
 use symphonia_core::errors::{Result, decode_error};
+use symphonia_core::util::bits::sign_extend_leq32_to_i32;
 
 use crate::bits::{BitReader, Vlc};
 use crate::codebooks::Codebooks;
@@ -195,11 +196,6 @@ impl ChanUnit {
             prev_buf: [[0.0; FRAME_SAMPLES]; 2],
         })
     }
-}
-
-#[inline]
-fn sign_extend(val: u32, bits: u32) -> i32 {
-    ((val << (32 - bits)) as i32) >> (32 - bits)
 }
 
 /// Floor of the base-2 logarithm, `0` for `0` (FFmpeg's `av_log2`).
@@ -513,7 +509,8 @@ fn decode_channel_sf_idx(
 
                 for i in 0..used {
                     let delta = tab.decode(gb)?;
-                    chan.qu_sf_idx[i] = (chan.qu_sf_idx[i] + sign_extend(delta, 4)) & 0x3f;
+                    chan.qu_sf_idx[i] =
+                        (chan.qu_sf_idx[i] + sign_extend_leq32_to_i32(delta, 4)) & 0x3f;
                 }
             }
         }
@@ -536,7 +533,7 @@ fn decode_channel_sf_idx(
 
                     for i in 1..used {
                         let delta = tab.decode(gb)?;
-                        diff = (diff + sign_extend(delta, 4)) & 0x3f;
+                        diff = (diff + sign_extend_leq32_to_i32(delta, 4)) & 0x3f;
                         chan.qu_sf_idx[i] = (diff + chan.qu_sf_idx[i]) & 0x3f;
                     }
                 }
@@ -739,7 +736,7 @@ fn decode_qu_spectra(
                 for _ in 0..num_coeffs {
                     let mut cf = (val & ((1 << bits) - 1)) as i32;
                     if is_signed != 0 {
-                        cf = sign_extend(cf as u32, bits);
+                        cf = sign_extend_leq32_to_i32(cf as u32, bits);
                     }
                     else if cf != 0 && gb.get1() {
                         cf = -cf;
@@ -1356,7 +1353,7 @@ fn decode_band_numwavs(
         2 => {
             for sb in 0..num_tone_bands {
                 if band_has_tones[sb] {
-                    let delta = sign_extend(cb.tone[2].decode(gb)?, 3);
+                    let delta = sign_extend_leq32_to_i32(cb.tone[2].decode(gb)?, 3);
                     dst[sb].num_wavs = ((ref_num[sb] as i32 + delta) & 0xf) as usize;
                 }
             }
@@ -1441,7 +1438,7 @@ fn decode_tones_frequency(
             let ref_num = ref_info[sb].num_wavs;
             let out_start = dst[sb].start_index;
             for i in 0..dst[sb].num_wavs {
-                let delta = sign_extend(cb.tone[6].decode(gb)?, 8);
+                let delta = sign_extend_leq32_to_i32(cb.tone[6].decode(gb)?, 8);
                 let pred = if i < ref_num {
                     waves[ref_start + i].freq_index
                 }
@@ -1543,7 +1540,7 @@ fn decode_tones_amplitude(
             // VLC modulo delta to the master (slave only).
             2 => {
                 for i in 0..num {
-                    let delta = sign_extend(cb.tone[5].decode(gb)?, 5);
+                    let delta = sign_extend_leq32_to_i32(cb.tone[5].decode(gb)?, 5);
                     let pred = ref_amp(waves, start + i, 34);
                     waves[start + i].amp_sf = (pred + delta) & 0x3f;
                 }

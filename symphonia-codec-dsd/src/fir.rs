@@ -8,6 +8,8 @@
 
 use std::f64::consts::PI;
 
+use symphonia_core::dsp::window::bessel_i0 as core_bessel_i0;
+
 /// The stopband attenuation, in dB, that the FIR filters are designed for. Together with the
 /// CIC filter it keeps everything that aliases into the passband more than 100 dB down.
 pub const STOPBAND_ATTENUATION_DB: f64 = 110.0;
@@ -17,18 +19,8 @@ pub const STOPBAND_ATTENUATION_DB: f64 = 110.0;
 const LANES: usize = 4;
 
 /// Modified Bessel function of the first kind, order 0.
-fn bessel_i0(x: f64) -> f64 {
-    let half = x / 2.0;
-    let mut term = 1.0;
-    let mut sum = 1.0;
-    for k in 1..100 {
-        term *= (half / f64::from(k)).powi(2);
-        sum += term;
-        if term < sum * 1e-17 {
-            break;
-        }
-    }
-    sum
+fn bessel_i0(z: f64) -> f64 {
+    core_bessel_i0(z * z / 4.0)
 }
 
 /// The Kaiser window parameter for a stopband attenuation of `db` (> 50) dB.

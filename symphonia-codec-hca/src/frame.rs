@@ -9,26 +9,11 @@
 //! `dequantize_coefficients`, `reconstruct_hfr` and `apply_intensity_stereo` of FFmpeg's
 //! `libavcodec/hcadec.c`).
 
+use symphonia_core::checksum::Crc16Ansi;
+use symphonia_core::io::Monitor;
+
 use crate::header::BANDS;
 use crate::tables::*;
-
-/// The CRC-16 of a frame: polynomial 0x8005, most significant bit first, initial value 0
-/// (`AV_CRC_16_ANSI`). It is 0 for a frame that ends with its own CRC.
-const CRC_TABLE: [u16; 256] = {
-    let mut table = [0u16; 256];
-    let mut i = 0;
-    while i < 256 {
-        let mut crc = (i as u16) << 8;
-        let mut bit = 0;
-        while bit < 8 {
-            crc = if crc & 0x8000 != 0 { (crc << 1) ^ 0x8005 } else { crc << 1 };
-            bit += 1;
-        }
-        table[i] = crc;
-        i += 1;
-    }
-    table
-};
 
 /// A reader of the bits of a frame, most significant bit first. Each byte is substituted through
 /// `cipher` as it is read, so that an encrypted frame is decrypted without a copy. Reads past the
@@ -75,12 +60,13 @@ impl<'a> BitReader<'a> {
         self.pos > self.data.len() * 8
     }
 
-    /// The CRC-16 of the frame after the substitution. 0 if the frame is intact.
+    /// The CRC-16 (ANSI, initial value 0, `AV_CRC_16_ANSI`) of the frame after the substitution. 0 if the frame is intact.
     pub fn crc(&self) -> u16 {
-        self.data.iter().fold(0u16, |crc, &b| {
-            let b = self.cipher[usize::from(b)];
-            (crc << 8) ^ CRC_TABLE[usize::from((crc >> 8) as u8 ^ b)]
-        })
+        let mut crc = Crc16Ansi::new(0);
+        for &b in self.data {
+            crc.process_byte(self.cipher[usize::from(b)]);
+        }
+        crc.crc()
     }
 }
 

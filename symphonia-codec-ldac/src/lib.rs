@@ -218,12 +218,6 @@ fn huff_decode(br: &mut BitReader<'_>, table: &[(u16, u8)]) -> Option<usize> {
     None
 }
 
-/// Extends an `n`-bit value to a signed 32-bit integer.
-fn sign_extend(value: u32, n: i32) -> i32 {
-    let shift = 32 - n;
-    ((value << shift) as i32) >> shift
-}
-
 /// LDAC decoder.
 pub struct LdacDecoder {
     params: AudioCodecParameters,
@@ -437,7 +431,11 @@ impl LdacDecoder {
 
         for i in 0..nqus {
             let symbol = huff_decode(br, huff).ok_or_else(|| derr("ldac: invalid Huffman code"))?;
-            scale_factors[i] = other[i] + sign_extend(symbol as u32, bitlen);
+            scale_factors[i] = other[i]
+                + symphonia_core::util::bits::sign_extend_leq32_to_i32(
+                    symbol as u32,
+                    bitlen as u32,
+                );
         }
 
         Ok(())

@@ -11,11 +11,11 @@
 //! Ported from `init_tables`, `imdct_calc` and `transform` of FFmpeg's `libavcodec/dolby_e.c`
 //! (LGPL-2.1-or-later, Copyright (c) 2017 foo86).
 
-use std::f64::consts::{FRAC_1_SQRT_2, PI};
+use std::f64::consts::FRAC_1_SQRT_2;
 use std::sync::LazyLock;
 
 use symphonia_core::dsp::mdct::Imdct;
-use symphonia_core::dsp::window::bessel_i0;
+use symphonia_core::dsp::window::{WindowType, generate_window};
 
 use crate::tables::*;
 
@@ -47,26 +47,6 @@ pub(crate) struct Tables {
     pub gain: [f32; 1024],
     /// The windows of all the shapes of the blocks, selected by `Group::win_ofs`.
     pub window: [f32; WINDOW_LEN],
-}
-
-/// The first `n` samples of the Kaiser-Bessel-derived window (of `2 * n` samples) of `alpha`.
-fn kbd_window(alpha: f64, out: &mut [f32]) {
-    let n = out.len();
-    let alpha2 = (alpha * PI / n as f64) * (alpha * PI / n as f64);
-
-    let mut sum = 0.0;
-    let mut cumulative = Vec::with_capacity(n);
-
-    for i in 0..n {
-        sum += bessel_i0((i * (n - i)) as f64 * alpha2);
-        cumulative.push(sum);
-    }
-
-    sum += 1.0;
-
-    for (w, c) in out.iter_mut().zip(cumulative) {
-        *w = (c / sum).sqrt() as f32;
-    }
 }
 
 impl Tables {
@@ -120,7 +100,7 @@ impl Tables {
         let w = &mut t.window;
 
         // Short 1.
-        kbd_window(3.0, &mut w[..128]);
+        generate_window(WindowType::KaiserBessel(3.0), 1.0, 128, true, &mut w[..128]);
         for i in 0..128 {
             w[128 + i] = w[127 - i];
         }
@@ -147,7 +127,7 @@ impl Tables {
         w[1088..1152].fill(1.0);
 
         // Long.
-        kbd_window(3.0, &mut w[1408..1664]);
+        generate_window(WindowType::KaiserBessel(3.0), 1.0, 256, true, &mut w[1408..1664]);
         w[1664..2304].fill(1.0);
         for i in 0..256 {
             let v = w[1663 - i];

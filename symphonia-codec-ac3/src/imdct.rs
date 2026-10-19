@@ -11,6 +11,8 @@
 use std::f64::consts::PI;
 use std::sync::LazyLock;
 
+use symphonia_core::dsp::window::{WindowType, generate_window};
+
 /// Number of PCM samples produced per channel per audio block.
 pub const BLOCK_SIZE: usize = 256;
 
@@ -104,47 +106,9 @@ pub struct Transforms {
     window: [f32; BLOCK_SIZE],
 }
 
-fn bessel_i0(x: f64) -> f64 {
-    // Power series: I0(x) = sum_k ((x/2)^k / k!)^2.
-    let q = x * x / 4.0;
-    let mut term = 1.0;
-    let mut sum = 1.0;
-    for k in 1..200 {
-        term *= q / (k * k) as f64;
-        sum += term;
-        if term < sum * 1e-17 {
-            break;
-        }
-    }
-    sum
-}
-
-/// Kaiser-Bessel-derived window of `n` samples (the rising half of a `2n` sample window).
-fn kbd_window(alpha: f64, n: usize) -> Vec<f64> {
-    let kernel: Vec<f64> = (0..=n)
-        .map(|j| {
-            let arg = 4.0 * (j * (n - j)) as f64 * (alpha * PI / n as f64).powi(2);
-            bessel_i0(arg.sqrt())
-        })
-        .collect();
-
-    let total: f64 = kernel.iter().sum();
-
-    let mut acc = 0.0;
-    kernel[..n]
-        .iter()
-        .map(|v| {
-            acc += v;
-            (acc / total).sqrt()
-        })
-        .collect()
-}
-
 static TRANSFORMS: LazyLock<Transforms> = LazyLock::new(|| {
     let mut window = [0.0f32; BLOCK_SIZE];
-    for (w, v) in window.iter_mut().zip(kbd_window(5.0, BLOCK_SIZE)) {
-        *w = v as f32;
-    }
+    generate_window(WindowType::KaiserBessel(5.0), 1.0, BLOCK_SIZE, true, &mut window);
     Transforms { long: Imdct::new(BLOCK_SIZE), short: Imdct::new(BLOCK_SIZE / 2), window }
 });
 

@@ -42,8 +42,9 @@ pub fn generate_window(mode: WindowType, scale: f32, size: usize, half: bool, ds
             }
         }
         WindowType::KaiserBessel(alpha) => {
-            let dlen = if half { size as f32 } else { (size as f32) * 0.5 };
-            let alpha2 = f64::from((alpha * consts::PI / dlen) * (alpha * consts::PI / dlen));
+            let dlen = if half { size as f64 } else { (size as f64) * 0.5 };
+            let a = f64::from(alpha) * consts64::PI / dlen;
+            let alpha2 = a * a;
 
             let mut kb: Vec<f64> = Vec::with_capacity(size);
             let mut sum = 0.0;

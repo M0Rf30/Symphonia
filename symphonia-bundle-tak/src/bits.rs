@@ -79,7 +79,7 @@ impl<'a> BitReader<'a> {
             return 0;
         }
         let v = self.get(n);
-        ((v << (32 - n)) as i32) >> (32 - n)
+        symphonia_core::util::bits::sign_extend_leq32_to_i32(v, n)
     }
 
     /// Skips `n` bits.

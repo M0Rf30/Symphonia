@@ -7,6 +7,8 @@
 
 //! Shared decoder state, translated from the structures of FFmpeg's `ac4dec.c` (see `NOTICE`).
 
+use symphonia_core::dsp::window::{WindowType, generate_window};
+
 use crate::mdct::ImdctSet;
 use crate::tables::*;
 
@@ -683,33 +685,6 @@ pub(crate) struct Ac4Core {
     pub(crate) substream: Box<Substream>,
 }
 
-/// Number of Bessel I0 series iterations (FFmpeg `BESSEL_I0_ITER`).
-const BESSEL_I0_ITER: u32 = 50;
-
-/// A Kaiser-Bessel derived window of length `n` (FFmpeg's `ff_kbd_window_init`).
-fn kbd_window(out: &mut [f32], alpha: f32, n: usize) {
-    let mut local_window = [0.0f64; 2048];
-    let mut sum = 0.0f64;
-    let x = f64::from(alpha) * std::f64::consts::PI / n as f64;
-    let alpha2 = x * x;
-
-    for i in 0..n {
-        let tmp = (i * (n - i)) as f64 * alpha2;
-        let mut bessel = 1.0f64;
-        for j in (1..=BESSEL_I0_ITER).rev() {
-            bessel = bessel * tmp / f64::from(j * j) + 1.0;
-        }
-        sum += bessel;
-        local_window[i] = sum;
-    }
-
-    sum += 1.0;
-
-    for i in 0..n {
-        out[i] = (local_window[i] / sum).sqrt() as f32;
-    }
-}
-
 /// Returns the five transform lengths of a `frame_len_base_idx` (`transf_length_48khz[idx]`).
 pub(crate) fn transf_length_48khz(idx: usize) -> &'static [u16; 5] {
     match idx {
@@ -729,7 +704,13 @@ impl Ac4Core {
         let mut kbd = Box::new([[[0.0f32; 2048]; 5]; 8]);
         for j in 0..8 {
             for (i, &n_w) in transf_length_48khz(j).iter().enumerate() {
-                kbd_window(&mut kbd[j][i], KBD_WINDOW_ALPHA[j][i], usize::from(n_w));
+                generate_window(
+                    WindowType::KaiserBessel(KBD_WINDOW_ALPHA[j][i]),
+                    1.0,
+                    usize::from(n_w),
+                    true,
+                    &mut kbd[j][i],
+                );
             }
         }
 
