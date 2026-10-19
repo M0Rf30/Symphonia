@@ -435,7 +435,12 @@ fn parse_aiff_header(header: &[u8]) -> Result<SourceFormat> {
     if !(-63..=63).contains(&exp) {
         return decode_error("shorten: invalid sample rate exponent");
     }
-    let rate = if exp >= 0 { val << exp } else { (val + (1u64 << (-exp - 1))) >> -exp };
+    let rate = if exp >= 0 {
+        u128::from(val) << exp
+    }
+    else {
+        (u128::from(val) + (1u128 << (-exp - 1))) >> -exp
+    };
     let sample_rate = match u32::try_from(rate) {
         Ok(rate) if rate != 0 && rate <= i32::MAX as u32 => rate,
         _ => return decode_error("shorten: invalid sample rate"),
@@ -479,6 +484,21 @@ mod tests {
         h.extend_from_slice(b"data");
         h.extend_from_slice(&data_len.to_le_bytes());
         h
+    }
+
+    #[test]
+    fn aiff_rate_rounding_does_not_overflow() {
+        let mut h = Vec::new();
+        h.extend_from_slice(b"FORM");
+        h.extend_from_slice(&0u32.to_be_bytes());
+        h.extend_from_slice(b"AIFFCOMM");
+        h.extend_from_slice(&18u32.to_be_bytes());
+        h.extend_from_slice(&[0, 2, 0, 0, 0, 0]);
+        h.extend_from_slice(&16u16.to_be_bytes());
+        // Exponent -1 with the largest mantissa: rounding adds to `u64::MAX`.
+        h.extend_from_slice(&(16383u16 + 62).to_be_bytes());
+        h.extend_from_slice(&u64::MAX.to_be_bytes());
+        assert!(parse_aiff_header(&h).is_err());
     }
 
     #[test]

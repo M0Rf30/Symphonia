@@ -466,8 +466,15 @@ impl WavPackDecoder {
                 return decode_error("wavpack v4/v5: DSD block without DSD data");
             };
 
-            dsd::unpack_dsd(flags, block_samples, dsd_block, header.crc, &mut out.samples)
-                .map_err(Self::unpack_error)?;
+            dsd::unpack_dsd(
+                &mut scratch.dsd,
+                flags,
+                block_samples,
+                dsd_block,
+                header.crc,
+                &mut out.samples,
+            )
+            .map_err(Self::unpack_error)?;
 
             return Ok(());
         }

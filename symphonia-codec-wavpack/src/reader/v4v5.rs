@@ -124,9 +124,8 @@ pub(super) struct Correction<'a> {
 
 /// A saved read position of a `Correction`.
 pub(super) struct CorrectionMark {
-    pos: u64,
-    pending: Option<WvcBlock>,
-    pending_pos: u64,
+    /// Where reading resumes (see `Correction::resume_pos`): a block read ahead is read again.
+    resume_pos: u64,
     done: bool,
 }
 
@@ -143,18 +142,12 @@ impl<'a> Correction<'a> {
     }
 
     pub(super) fn mark(&self) -> CorrectionMark {
-        CorrectionMark {
-            pos: self.reader.pos(),
-            pending: self.pending.clone(),
-            pending_pos: self.pending_pos,
-            done: self.done,
-        }
+        CorrectionMark { resume_pos: self.resume_pos(), done: self.done }
     }
 
     pub(super) fn restore(&mut self, mark: CorrectionMark) -> Result<()> {
-        self.reader.seek(SeekFrom::Start(mark.pos))?;
-        self.pending = mark.pending;
-        self.pending_pos = mark.pending_pos;
+        // The block read ahead (if any) is read again rather than cloned.
+        self.restart_at(mark.resume_pos)?;
         self.done = mark.done;
         Ok(())
     }

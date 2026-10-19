@@ -301,3 +301,28 @@ fn corrupt_streams_match_ffmpeg() {
         }
     }
 }
+
+/// A group that never ends must not be buffered without bound: the reader gives up with an
+/// error once the buffer exceeds what a group of the stream's block size can need.
+#[test]
+fn endless_group_is_an_error_not_unbounded_buffering() {
+    let original = fixture("s16lh_c2_");
+    let mut too_large = false;
+
+    // The stream is cut at every position that might be the end of the header, and followed by
+    // zeros: a unary code that never ends.
+    for cut in 40..200 {
+        let mut data = original[..cut].to_vec();
+        data.resize(cut + (4 << 20), 0);
+
+        let mss = MediaSourceStream::new(Box::new(Cursor::new(data)), Default::default());
+        let Ok(mut reader) = ShortenReader::try_new(mss, FormatOptions::default())
+        else {
+            continue;
+        };
+        if let Err(e) = reader.next_packet() {
+            too_large |= e.to_string().contains("group too large");
+        }
+    }
+    assert!(too_large);
+}

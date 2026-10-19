@@ -630,6 +630,8 @@ impl DstDecoder {
             let total: i32 = taps.iter().sum();
 
             // sums[k] is the sum of the coefficients of the set bits of k.
+            // The coefficients have 9 bits (-256..256), so an entry is at most 8 * 256 = 2048 in
+            // magnitude and the `as i16` casts below never truncate.
             let mut sums = [0i32; 256];
             for k in 1..256usize {
                 sums[k] = sums[k & (k - 1)] + taps[k.trailing_zeros() as usize];
@@ -738,7 +740,9 @@ impl DstDecoder {
                 for (g, table) in filter.iter().enumerate() {
                     sum += i32::from(table[((h >> (8 * g)) & 0xFF) as usize]);
                 }
-                // The filter output is a 16-bit quantity.
+                // The filter output is a 16-bit quantity. The 16 table entries of at most 2048
+                // each sum to at most 32768 in magnitude, so the cast only wraps (as the 16-bit
+                // accumulator of the reference does) for the single extreme value 32768.
                 let predict = sum as i16;
 
                 let p = if i < half_bits[ch] {

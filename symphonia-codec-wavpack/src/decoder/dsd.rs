@@ -40,6 +40,7 @@ fn byte_ready(low: u32, high: u32) -> bool {
 /// `out` is replaced by `block_samples` bytes per decoded channel, interleaved if there are
 /// two channels. A `FALSE_STEREO` block decodes one channel. The CRC is verified.
 pub fn unpack_dsd(
+    scratch: &mut DsdScratch,
     flags: u32,
     block_samples: u32,
     dsd_block: &[u8],
@@ -73,7 +74,7 @@ pub fn unpack_dsd(
             }
             out.extend(data.iter().map(|&b| i32::from(b)));
         }
-        1 => decode_fast(data, channels, total, out)?,
+        1 => decode_fast(scratch, data, channels, total, out)?,
         3 => decode_high(data, channels, total, out)?,
         _ => return Err(UnpackError::Malformed),
     }
@@ -84,6 +85,14 @@ pub fn unpack_dsd(
     }
 
     Ok(())
+}
+
+/// The tables of the "fast" mode, kept across blocks to reuse their allocations.
+#[derive(Default)]
+pub struct DsdScratch {
+    probabilities: Vec<[u8; 256]>,
+    summed: Vec<[u16; 256]>,
+    lookup: Vec<u8>,
 }
 
 /// A byte-wise reader of the range coder's input.
@@ -117,6 +126,7 @@ impl Input<'_> {
 /// `init_dsd_block_fast()` and `decode_fast()`: the range coder with the probability tables
 /// of the (history_bins x 256) previous byte contexts.
 fn decode_fast(
+    scratch: &mut DsdScratch,
     data: &[u8],
     channels: usize,
     total: usize,
@@ -132,7 +142,9 @@ fn decode_fast(
     let bins = 1usize << history_bits;
     let max_probability = input.next().ok_or(UnpackError::Malformed)? as u8;
 
-    let mut probabilities = vec![[0u8; 256]; bins];
+    let DsdScratch { probabilities, summed, lookup } = scratch;
+    probabilities.clear();
+    probabilities.resize(bins, [0u8; 256]);
 
     if max_probability < 0xff {
         let flat_len = bins * 256;
@@ -170,10 +182,11 @@ fn decode_fast(
         return Err(UnpackError::Malformed);
     }
 
-    let mut summed = vec![[0u16; 256]; bins];
+    summed.clear();
+    summed.resize(bins, [0u16; 256]);
     // The value lookup tables of all bins, `lookup_start[bi]` being where bin `bi`'s starts
     // (`usize::MAX` if the bin has no probabilities).
-    let mut lookup: Vec<u8> = Vec::new();
+    lookup.clear();
     lookup.try_reserve_exact(bins * MAX_BYTES_PER_BIN).map_err(|_| UnpackError::Malformed)?;
     let mut lookup_start = [usize::MAX; 32];
     let mut total_summed = 0usize;
@@ -467,18 +480,24 @@ mod tests {
         let crc = bytes.iter().fold(u32::MAX, |c, &b| crc_accumulate(c, u32::from(b)));
 
         let mut out = Vec::new();
-        unpack_dsd(0, 2, &block, crc, &mut out).unwrap();
+        unpack_dsd(&mut DsdScratch::default(), 0, 2, &block, crc, &mut out).unwrap();
         assert_eq!(out, [0x69, 0x96, 0x00, 0xff]);
 
         // A mismatching CRC, a wrong length and an unknown mode are errors.
-        assert_eq!(unpack_dsd(0, 2, &block, crc ^ 1, &mut out), Err(UnpackError::Crc));
-        assert_eq!(unpack_dsd(0, 3, &block, crc, &mut out), Err(UnpackError::Malformed));
         assert_eq!(
-            unpack_dsd(0, 2, &[2, 2, 0, 0, 0, 0], crc, &mut out),
+            unpack_dsd(&mut DsdScratch::default(), 0, 2, &block, crc ^ 1, &mut out),
+            Err(UnpackError::Crc)
+        );
+        assert_eq!(
+            unpack_dsd(&mut DsdScratch::default(), 0, 3, &block, crc, &mut out),
             Err(UnpackError::Malformed)
         );
         assert_eq!(
-            unpack_dsd(0, 2, &[40, 0, 1, 2, 3, 4], crc, &mut out),
+            unpack_dsd(&mut DsdScratch::default(), 0, 2, &[2, 2, 0, 0, 0, 0], crc, &mut out),
+            Err(UnpackError::Malformed)
+        );
+        assert_eq!(
+            unpack_dsd(&mut DsdScratch::default(), 0, 2, &[40, 0, 1, 2, 3, 4], crc, &mut out),
             Err(UnpackError::Malformed)
         );
     }
@@ -491,7 +510,14 @@ mod tests {
                     let mut block = vec![3u8, mode];
                     block.extend(std::iter::repeat_n(fill, len));
                     for flags in [0, MONO_DATA] {
-                        let _ = unpack_dsd(flags, 64, &block, 0, &mut Vec::new());
+                        let _ = unpack_dsd(
+                            &mut DsdScratch::default(),
+                            flags,
+                            64,
+                            &block,
+                            0,
+                            &mut Vec::new(),
+                        );
                     }
                 }
             }

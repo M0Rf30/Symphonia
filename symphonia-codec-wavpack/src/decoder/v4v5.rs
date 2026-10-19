@@ -781,6 +781,8 @@ struct HybridWords {
 #[derive(Default)]
 pub struct UnpackScratch {
     words: HybridWords,
+    /// The tables of DSD "fast" mode blocks.
+    pub(super) dsd: super::dsd::DsdScratch,
     /// The decorrelation passes before a correction block is tried, to restore them if it fails.
     saved_passes: Vec<DecorrPass>,
 }

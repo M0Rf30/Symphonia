@@ -27,7 +27,7 @@ use symphonia_core::codecs::audio::well_known::CODEC_ID_ALAC;
 use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoderOptions};
 use symphonia_core::codecs::audio::{AudioDecoder, FinalizeResult};
 use symphonia_core::codecs::registry::{RegisterableAudioDecoder, SupportedAudioCodec};
-use symphonia_core::errors::{Result, decode_error, unsupported_error};
+use symphonia_core::errors::{Error, Result, decode_error, unsupported_error};
 use symphonia_core::io::{BitReaderLtr, ReadBitsLtr};
 use symphonia_core::packet::PacketRef;
 use symphonia_core::support_audio_codec;
@@ -57,8 +57,8 @@ const ALAC_ELEM_TAG_END: u32 = 7;
 /// The ALAC channel order is the channel order of the Apple channel layout tag, and the
 /// `AudioBuffer` order is the order of the bits of the channel positions (FL, FR, FC, LFE, RL,
 /// RR, FLC, FRC, RC, ...).
-fn map_channels(channels: &Channels) -> [u8; 8] {
-    match *channels {
+fn map_channels(channels: &Channels) -> Result<[u8; 8]> {
+    Ok(match *channels {
         // C
         layouts::CHANNEL_LAYOUT_MONO => [0, 0, 0, 0, 0, 0, 0, 0],
         // L R
@@ -75,8 +75,8 @@ fn map_channels(channels: &Channels) -> [u8; 8] {
         layouts::CHANNEL_LAYOUT_AAC_6P1 => [2, 0, 1, 4, 5, 6, 3, 0],
         // C Lc Rc L R Ls Rs LFE
         layouts::CHANNEL_LAYOUT_MPEG_7P1_B => [2, 6, 7, 0, 1, 4, 5, 3],
-        _ => unreachable!(),
-    }
+        _ => return decode_error("alac: unsupported channel layout"),
+    })
 }
 
 #[derive(Debug)]
@@ -369,7 +369,7 @@ impl AlacDecoder {
     fn decode_inner(&mut self, packet: &PacketRef<'_>) -> Result<()> {
         let mut bs = BitReaderLtr::new(packet.data);
 
-        let channel_map = map_channels(&self.config.channels);
+        let channel_map = map_channels(&self.config.channels)?;
         let num_channels = self.config.num_channels as usize;
         let mut next_channel = 0;
         let mut num_frames = 0;
@@ -386,7 +386,7 @@ impl AlacDecoder {
                     let out0 = self
                         .buf
                         .plane_mut(channel_map[next_channel] as usize)
-                        .expect("invalid channel map");
+                        .ok_or(Error::DecodeError("alac: invalid channel map"))?;
 
                     num_frames =
                         decode_sce_or_cpe(&self.config, &mut bs, &mut self.tail_bits, out0, None)?;
@@ -406,7 +406,7 @@ impl AlacDecoder {
                             channel_map[next_channel + 0] as usize,
                             channel_map[next_channel + 1] as usize,
                         )
-                        .expect("invalid channel map");
+                        .ok_or(Error::DecodeError("alac: invalid channel map"))?;
 
                     num_frames = decode_sce_or_cpe(
                         &self.config,
@@ -423,9 +423,8 @@ impl AlacDecoder {
                     let align_flag = bs.read_bool()?;
 
                     let count = match bs.read_bits_leq32(8)? {
-                        val @ 0..=254 => val,
-                        val @ 255 => val + bs.read_bits_leq32(8)?,
-                        _ => unreachable!(),
+                        255 => 255 + bs.read_bits_leq32(8)?,
+                        val => val,
                     };
 
                     if align_flag {
@@ -436,9 +435,8 @@ impl AlacDecoder {
                 }
                 ALAC_ELEM_TAG_FIL => {
                     let count = match bs.read_bits_leq32(4)? {
-                        val @ 0..=14 => val,
-                        val @ 15 => val + bs.read_bits_leq32(8)? - 1,
-                        _ => unreachable!(),
+                        15 => 14 + bs.read_bits_leq32(8)?,
+                        val => val,
                     };
 
                     bs.ignore_bits(8 * count)?;
@@ -449,7 +447,7 @@ impl AlacDecoder {
                     return decode_error("alac: unsupported element");
                 }
                 ALAC_ELEM_TAG_END => break,
-                _ => unreachable!(),
+                _ => return decode_error("alac: invalid element tag"),
             }
 
             // Exit if all channels are decoded.
@@ -751,7 +749,7 @@ mod tests {
         };
         assert_eq!(apple_order.len(), set.bits().count_ones() as usize);
 
-        let map = map_channels(&layout);
+        let map = map_channels(&layout).unwrap();
 
         for (i, pos) in apple_order.iter().enumerate() {
             // The buffer index is the rank of the position within the layout.
@@ -759,6 +757,12 @@ mod tests {
             let idx = (set.bits() & (pos.bits() - 1)).count_ones() as u8;
             assert_eq!(map[i], idx, "alac channel {i} ({pos:?})");
         }
+    }
+
+    #[test]
+    fn verify_unsupported_channel_layout_is_an_error() {
+        assert!(map_channels(&layouts::CHANNEL_LAYOUT_2P1).is_err());
+        assert!(map_channels(&Channels::Discrete(3)).is_err());
     }
 
     #[test]
@@ -806,7 +810,10 @@ mod tests {
                 P::LFE1,
             ],
         );
-        assert_eq!(map_channels(&layouts::CHANNEL_LAYOUT_AAC_6P1)[..7], [2, 0, 1, 4, 5, 6, 3]);
+        assert_eq!(
+            map_channels(&layouts::CHANNEL_LAYOUT_AAC_6P1).unwrap()[..7],
+            [2, 0, 1, 4, 5, 6, 3]
+        );
     }
 
     #[test]

@@ -64,6 +64,8 @@ const SHORTEN_FORMAT_INFO: FormatInfo = FormatInfo {
 const MAGIC: [u8; 4] = *b"ajkg";
 
 /// How many bytes are read from the source at a time.
+/// Extra bytes allowed in a group beyond 8 bytes per sample.
+const MAX_GROUP_SLACK: usize = 1 << 20;
 const READ_CHUNK: usize = 32 * 1024;
 /// The most bytes the header (parameters and the verbatim canonical header) may take.
 const MAX_HEADER_BYTES: usize = 256 * 1024;
@@ -267,6 +269,13 @@ impl<'s> ShortenReader<'s> {
             self.buf.drain(..self.head);
             self.buf_pos += self.head as u64;
             self.head = 0;
+        }
+        // A corrupt group must not make the buffer grow without bound: a group needs at most a
+        // few bytes per sample, plus some slack for commands such as verbatim chunks.
+        let cap = self.scan.blocksize().max(self.header.blocksize) * self.header.channels * 8
+            + MAX_GROUP_SLACK;
+        if self.buf.len() > cap {
+            return decode_error("shorten: group too large");
         }
         // Groups can be large, so grow geometrically to keep rescanning one cheap.
         let mut want = READ_CHUNK.max(self.buf.len());
