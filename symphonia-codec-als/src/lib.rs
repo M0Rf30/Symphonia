@@ -1515,7 +1515,7 @@ impl AlsDecoder {
         let frame_length = self.cfg.frame_length as u64;
         self.cur_frame_length = if self.cfg.samples != u32::MAX {
             u64::from(self.cfg.samples)
-                .wrapping_sub(self.frame_id.wrapping_mul(frame_length))
+                .saturating_sub(self.frame_id.saturating_mul(frame_length))
                 .min(frame_length) as usize
         }
         else {
@@ -1551,6 +1551,9 @@ impl AudioDecoder for AlsDecoder {
         // The frames are numbered from the start of the stream.
         self.frame_id = 0;
         self.js_switch = false;
+        // The history of the previous frame is not that of the next one.
+        self.raw.fill(0);
+        self.prev_raw.fill(0);
         // The CRC can only be checked when decoding from the start.
         self.crc = None;
         self.clear_buf();

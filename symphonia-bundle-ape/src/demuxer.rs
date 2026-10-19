@@ -292,6 +292,8 @@ impl FormatReader for ApeReader<'_> {
         let frame_blocks = self.file_info.frame_block_count(frame_idx);
 
         if frame_bytes > MAX_FRAME_BYTES {
+            // Move past the frame, or every following call would report it again.
+            self.current_frame += 1;
             return decode_error("ape: frame data exceeds maximum size");
         }
 

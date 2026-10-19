@@ -94,3 +94,73 @@ fn crc_verification_passes() {
         }
     }
 }
+
+/// Open `name` and return its decoder and the packets of the audio track.
+fn open(name: &str) -> Option<(AlsDecoder, Vec<symphonia_core::packet::Packet>)> {
+    let mss = open_sample(name)?;
+    let mut reader = IsoMp4Reader::try_new(mss, FormatOptions::default()).unwrap();
+    let track = reader.default_track(TrackType::Audio).unwrap();
+    let id = track.id;
+    let Some(CodecParameters::Audio(params)) = track.codec_params.clone()
+    else {
+        panic!("not audio");
+    };
+    let opts = AudioDecoderOptions::default().gapless(false);
+    let dec = AlsDecoder::try_new(&params, &opts).unwrap();
+    let mut packets = Vec::new();
+    while let Some(p) = reader.next_packet().unwrap() {
+        if p.track_id == id {
+            packets.push(p);
+        }
+    }
+    Some((dec, packets))
+}
+
+fn decode_s16(dec: &mut AlsDecoder, p: &symphonia_core::packet::Packet) -> Vec<i16> {
+    match dec.decode(p).unwrap() {
+        GenericAudioBufferRef::S16(b) => {
+            let mut v = Vec::new();
+            b.copy_to_vec_interleaved::<i16>(&mut v);
+            v
+        }
+        _ => panic!("unexpected sample format"),
+    }
+}
+
+#[test]
+fn reset_forgets_the_history_of_the_previous_frames() {
+    for n in 0..6 {
+        let name = format!("als/als_0{n}_2ch48k16b.mp4");
+        let Some((mut fresh, packets)) = open(&name)
+        else {
+            return;
+        };
+        let (mut dec, _) = open(&name).unwrap();
+        let expected = decode_s16(&mut fresh, &packets[0]);
+
+        // Decode a few frames, then start over with the first one.
+        for p in &packets[..packets.len().min(5)] {
+            decode_s16(&mut dec, p);
+        }
+        dec.reset();
+        assert!(decode_s16(&mut dec, &packets[0]) == expected, "{name}");
+    }
+}
+
+#[test]
+fn frames_past_the_declared_samples_are_empty() {
+    let Some((mut dec, packets)) = open("als/als_00_2ch48k16b.mp4")
+    else {
+        return;
+    };
+    for p in &packets {
+        decode_s16(&mut dec, p);
+    }
+    // The stream is over: a further frame must not be a full frame of garbage.
+    let extra = dec.decode(&packets[0]);
+    match extra {
+        Ok(GenericAudioBufferRef::S16(b)) => assert_eq!(b.frames(), 0),
+        Ok(_) => panic!("unexpected sample format"),
+        Err(_) => {}
+    }
+}

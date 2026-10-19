@@ -221,3 +221,21 @@ fn parses_the_header_of_the_oldest_format() {
     assert_eq!(params.bits_per_sample, Some(16));
     assert_eq!(params.channels.as_ref().map(|c| c.count()), Some(2));
 }
+
+#[test]
+fn an_oversized_frame_is_reported_once() {
+    let mut file = silent_file(3, &[]);
+    // The seek table entry of the second frame is far beyond the maximum size of a frame.
+    let entry = 52 + 24 + 4;
+    file[entry..entry + 4].copy_from_slice(&le32(200 * 1024 * 1024));
+
+    let mss =
+        MediaSourceStream::new(Box::new(Cursor::new(file)), MediaSourceStreamOptions::default());
+    let mut reader = ApeReader::try_new(mss, FormatOptions::default()).expect("valid header");
+
+    let first = reader.next_packet().expect_err("oversized frame").to_string();
+    assert!(first.contains("exceeds"), "{first}");
+    // Each call moves on to the following frame: the file ends, it does not fail forever.
+    let ended = (0..10).any(|_| matches!(reader.next_packet(), Ok(None)));
+    assert!(ended, "the oversized frame is reported again and again");
+}

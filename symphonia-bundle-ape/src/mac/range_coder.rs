@@ -261,6 +261,12 @@ impl RangeCoder {
 
                 // Detect overflow signaling: decode again with a forced pivot
                 if overflow == OVERFLOW_SIGNAL {
+                    // Zero padding past the data decodes to the signal again and again.
+                    if br.is_past_end() {
+                        return Err(ApeError::DecodingError(
+                            "range coder: data ends inside an overflow signal",
+                        ));
+                    }
                     *pivot_value = OVERFLOW_PIVOT_VALUE;
                     continue;
                 }

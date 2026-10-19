@@ -101,12 +101,16 @@ impl<'a> BitCursor<'a> {
             if bits != 0 {
                 let zeros = bits.leading_zeros();
                 self.index += u64::from(zeros) + 1;
-                return Ok(count + zeros);
+                return count
+                    .checked_add(zeros)
+                    .ok_or(ApeError::DecodingError("bit array: unary code is too long"));
             }
 
             let consumed = 32 - u64::from(shift);
             self.index += consumed;
-            count = count.wrapping_add(consumed as u32);
+            count = count
+                .checked_add(consumed as u32)
+                .ok_or(ApeError::DecodingError("bit array: unary code is too long"))?;
 
             if self.index > limit {
                 return Err(ApeError::DecodingError("bit array: unary code runs past the frame"));
@@ -126,7 +130,7 @@ impl<'a> BitCursor<'a> {
         if k == 0 {
             Ok(overflow)
         }
-        else if k > 32 {
+        else if k >= 32 {
             Err(ApeError::DecodingError("bit array: invalid Rice parameter"))
         }
         else {
@@ -310,6 +314,24 @@ mod tests {
         let mut bits = BitCursor::new(&data, 0);
         assert_eq!(bits.read_unary().unwrap(), 64);
         assert_eq!(bits.read_bits(0), 0);
+    }
+
+    /// Needs 512 MiB of zero bits; run with `--ignored`.
+    #[test]
+    #[ignore]
+    fn unary_count_over_u32_is_an_error() {
+        // 2^32 zero bits, then a one bit: the count does not fit in 32 bits.
+        let mut data = vec![0u8; (1usize << 29) + 16];
+        data[(1 << 29) + 3] = 0x80;
+        let mut bits = BitCursor::new(&data, 0);
+        assert!(bits.read_unary().is_err());
+    }
+
+    #[test]
+    fn rice_parameter_of_32_is_rejected() {
+        let data = [0x80u8; 16];
+        let mut bits = BitCursor::new(&data, 0);
+        assert!(bits.decode_rice_unsigned(32).is_err());
     }
 
     #[test]
