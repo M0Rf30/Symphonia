@@ -1336,7 +1336,9 @@ impl CoreDecoder {
 
         // Number of bits for loudspeaker mask.
         self.xxch_mask_nbits = gb.get(5) as usize + 1;
-        if self.xxch_mask_nbits <= spkr::CS {
+        // The mask has one bit per speaker output; FFmpeg's dca_core.c likewise bounds it by
+        // DCA_SPEAKER_COUNT.
+        if self.xxch_mask_nbits <= spkr::CS || self.xxch_mask_nbits > spkr::COUNT {
             return decode_error("dca: invalid number of bits for xxch speaker mask");
         }
 
@@ -2859,6 +2861,26 @@ mod tests {
 
     const STREAM: &[u8] = include_bytes!("../tests/data/sine_5_1.dts");
     const FRAME_SIZE: usize = 1884;
+
+    #[test]
+    fn xxch_rejects_oversized_speaker_mask() {
+        // Sync word, header size 0, no CRC, mask bits field 31 (32 bits > 28 speakers).
+        let mut data = SYNC_XXCH.to_be_bytes().to_vec();
+        data.extend_from_slice(&[0x00, 0x7C, 0, 0, 0, 0, 0, 0]);
+        // 6 bits size (0), 1 crc (0), 5 bits (11111) => 0b0000_0001 1111_0000
+        data[4] = 0x01;
+        data[5] = 0xF0;
+
+        let mut dec = CoreDecoder::new();
+        let mut gb = BitReader::new(&data);
+        match dec.parse_xxch_frame(&mut gb) {
+            Err(symphonia_core::errors::Error::DecodeError(msg)) => {
+                assert!(msg.contains("speaker mask"), "{msg}")
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+        assert_eq!(dec.xxch_mask_nbits, 32);
+    }
 
     /// The fixed-point and floating-point core decoders are independent implementations of the
     /// same filter bank and must agree to within the precision of the fixed-point path.

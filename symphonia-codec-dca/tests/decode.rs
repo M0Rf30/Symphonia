@@ -236,9 +236,33 @@ fn decodes_alternate_bitstream_forms() {
     check(&decode_all(&le14));
 }
 
+/// Splits a raw stream into packets: at core sync words, or into 2048-byte extension substream
+/// packets (DTS Express) when the stream starts with an extension substream sync word.
+fn split_packets(data: &[u8]) -> Vec<Vec<u8>> {
+    const CORE_SYNC: [u8; 4] = [0x7f, 0xfe, 0x80, 0x01];
+    const EXSS_SYNC: [u8; 4] = [0x64, 0x58, 0x20, 0x25];
+
+    if data[..4] == EXSS_SYNC {
+        return data.chunks(2048).map(<[u8]>::to_vec).collect();
+    }
+    let starts: Vec<usize> = (0..data.len() - 3).filter(|&i| data[i..i + 4] == CORE_SYNC).collect();
+    starts
+        .iter()
+        .enumerate()
+        .map(|(n, &s)| data[s..starts.get(n + 1).copied().unwrap_or(data.len())].to_vec())
+        .collect()
+}
+
 #[test]
 fn corrupt_packets_do_not_panic() {
-    let packets = core_packets();
+    let mut packets: Vec<Vec<u8>> = Vec::new();
+    for entry in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "dts") {
+            packets.extend(split_packets(&std::fs::read(path).unwrap()));
+        }
+    }
+    assert!(packets.len() >= 3);
     let mut dec = new_decoder();
 
     // Deterministic xorshift generator.
@@ -250,8 +274,8 @@ fn corrupt_packets_do_not_panic() {
         seed
     };
 
-    for _ in 0..300 {
-        let mut p = packets[(rnd() % 3) as usize].clone();
+    for _ in 0..2000 {
+        let mut p = packets[(rnd() as usize) % packets.len()].clone();
 
         match rnd() % 3 {
             0 => p.truncate((rnd() as usize) % p.len()),
