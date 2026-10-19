@@ -825,3 +825,79 @@ fn v3_unknown_chunk_with_max_size_returns_error() {
     let mss = MediaSourceStream::new(Box::new(Cursor::new(riff)), Default::default());
     assert!(WavPackReader::try_new(mss, FormatOptions::default()).is_err());
 }
+
+// ---------------------------------------------------------------------------
+// Block boundaries and I/O errors
+// ---------------------------------------------------------------------------
+
+/// A v3 block as written by WavPack 3.97: `ck_size` covers the header only and the compressed
+/// audio runs to the next block header.
+fn wvpk_v3_block_header_only(
+    num_channels: u16,
+    bytes_per_sample: u16,
+    n_frames: i32,
+    audio: &[u8],
+) -> Vec<u8> {
+    let mut b = wvpk_v3_block(num_channels, bytes_per_sample, n_frames, audio);
+    b[4..8].copy_from_slice(&28i32.to_le_bytes());
+    b
+}
+
+#[test]
+fn header_only_block_keeps_marker_bytes_inside_the_payload() {
+    // The compressed audio may contain the bytes "wvpk"; only a marker followed by a plausible
+    // block header ends the packet.
+    let audio1 = [1u8, 2, b'w', b'v', b'p', b'k', 9, 9, 9, 9, 3];
+    let audio2 = [7u8; 5];
+    let b1 = wvpk_v3_block_header_only(2, 2, 100, &audio1);
+    let b2 = wvpk_v3_block_header_only(2, 2, 100, &audio2);
+    let mut reader = open(build_riff(2, 44100, 2, &[], &[b1, b2]));
+
+    let p1 = reader.next_packet().unwrap().unwrap();
+    assert_eq!(&p1.data[32..], audio1.as_slice());
+    let p2 = reader.next_packet().unwrap().unwrap();
+    assert_eq!(&p2.data[32..], audio2.as_slice());
+    assert!(reader.next_packet().unwrap().is_none());
+}
+
+/// A source that fails with a non-EOF error instead of reporting the end of the data.
+struct FailAtEnd(Cursor<Vec<u8>>);
+
+impl std::io::Read for FailAtEnd {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self.0.read(buf)? {
+            0 if !buf.is_empty() => Err(std::io::Error::other("device failure")),
+            n => Ok(n),
+        }
+    }
+}
+
+impl std::io::Seek for FailAtEnd {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.0.seek(pos)
+    }
+}
+
+impl symphonia_core::io::MediaSource for FailAtEnd {
+    fn is_seekable(&self) -> bool {
+        true
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        None
+    }
+}
+
+#[test]
+fn io_error_is_not_reported_as_end_of_stream() {
+    let block = wvpk_v3_block(2, 2, 10, &[0u8; 4]);
+    let data = build_riff(2, 44100, 2, &[], &[block]);
+    let mss = MediaSourceStream::new(Box::new(FailAtEnd(Cursor::new(data))), Default::default());
+    let mut reader = WavPackReader::try_new(mss, FormatOptions::default()).expect("try_new failed");
+
+    // An unreadable stream gives no trustworthy total.
+    assert_eq!(reader.tracks()[0].num_frames, None);
+
+    assert!(reader.next_packet().unwrap().is_some());
+    assert!(reader.next_packet().is_err(), "a device failure must not look like the end");
+}

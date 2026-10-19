@@ -547,10 +547,15 @@ impl WavPackReader<'_> {
         num_channels: u16,
         bytes_per_sample: u16,
     ) -> Result<Option<Packet>> {
-        if find_next_block(&mut self.reader, 65536).is_err() {
+        // Only a clean end of stream ends iteration; any other failure is a real error.
+        if find_next_block(&mut self.reader, 65536)?.is_none() {
             return Ok(None);
         }
-        let hdr = Header3::decode(&mut self.reader)?;
+        let hdr = match Header3::decode(&mut self.reader) {
+            Ok(hdr) => hdr,
+            Err(err) if is_eof(&err) => return Ok(None),
+            Err(err) => return Err(err),
+        };
 
         let header_payload = Header3::header_payload_size(hdr.version);
         let ck_size = hdr.ck_size as u32;
@@ -568,8 +573,8 @@ impl WavPackReader<'_> {
         }
         else {
             // Real WavPack 3.97 files: ck_size == header only; compressed audio
-            // follows the block header and extends to the next "wvpk" or EOF.
-            let audio = read_v3_audio(&mut self.reader)?;
+            // follows the block header and extends to the next block header or EOF.
+            let audio = read_v3_audio(&mut self.reader, hdr.version)?;
             pkt_data.extend_from_slice(&audio);
         }
 
@@ -905,13 +910,31 @@ impl Header3 {
     }
 }
 
-/// Read compressed audio bytes from `reader` until the next `wvpk` marker or EOF.
+/// Returns true if `err` is an end-of-stream condition.
+fn is_eof(err: &symphonia_core::errors::Error) -> bool {
+    matches!(err, symphonia_core::errors::Error::IoError(e)
+        if e.kind() == std::io::ErrorKind::UnexpectedEof)
+}
+
+/// Returns true if the bytes following a `wvpk` marker look like the start of a v3 block of
+/// `version`: `ck_size` (i32) then `version` (i16). A marker inside compressed audio is
+/// otherwise indistinguishable from a real block boundary.
+fn is_v3_block_header(rest: &[u8; 6], version: i16) -> bool {
+    let ck_size = i32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
+    let rest_version = i16::from_le_bytes([rest[4], rest[5]]);
+    rest_version == version && ck_size >= Header3::header_payload_size(version) as i32
+}
+
+/// Read compressed audio bytes from `reader` until the next v3 block header or EOF.
 ///
 /// Used for real WavPack 3.97 files where `ck_size` only covers the block header
-/// metadata and the compressed audio runs implicitly to the next block boundary.
-fn read_v3_audio(reader: &mut MediaSourceStream<'_>) -> Result<Vec<u8>> {
-    // We need 4 bytes of seekback so we can "unread" the next "wvpk" marker.
-    reader.ensure_seekback_buffer(4);
+/// metadata and the compressed audio runs implicitly to the next block boundary. The
+/// end is the next `wvpk` marker followed by a plausible header of the same `version`,
+/// so marker bytes occurring inside the compressed payload do not truncate the packet.
+fn read_v3_audio(reader: &mut MediaSourceStream<'_>, version: i16) -> Result<Vec<u8>> {
+    // Seekback for the marker plus the header bytes peeked after it.
+    const PEEK: usize = 6;
+    reader.ensure_seekback_buffer(4 + PEEK);
 
     let mut audio: Vec<u8> = Vec::new();
     loop {
@@ -922,7 +945,19 @@ fn read_v3_audio(reader: &mut MediaSourceStream<'_>) -> Result<Vec<u8>> {
         };
         audio.push(b);
         let n = audio.len();
-        if n >= 4 && &audio[n - 4..] == b"wvpk" {
+        if n < 4 || audio[n - 4..] != STREAM_MARKER {
+            continue;
+        }
+
+        let start = reader.pos();
+        let mut rest = [0u8; PEEK];
+        let peeked = match reader.read_buf_exact(&mut rest) {
+            Ok(()) => is_v3_block_header(&rest, version),
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => false,
+            Err(e) => return Err(symphonia_core::errors::Error::IoError(e)),
+        };
+        reader.seek_buffered_rev((reader.pos() - start) as usize);
+        if peeked {
             audio.truncate(n - 4);
             reader.seek_buffered_rev(4);
             return Ok(audio);
@@ -930,21 +965,31 @@ fn read_v3_audio(reader: &mut MediaSourceStream<'_>) -> Result<Vec<u8>> {
     }
 }
 
-fn find_next_block(source: &mut MediaSourceStream<'_>, max_bytes: usize) -> Result<u64> {
+/// Scan forward for the next `wvpk` marker, leaving the stream positioned on it. Returns
+/// `None` at a clean end of stream.
+fn find_next_block(source: &mut MediaSourceStream<'_>, max_bytes: usize) -> Result<Option<u64>> {
     let mut n = 0usize;
     source.ensure_seekback_buffer(max_bytes);
     loop {
         if n + 4 >= max_bytes {
-            return decode_error("no block found");
+            return decode_error("wavpack v3: no block found");
         }
-        let b = source.read_u8()?;
+        let b = match source.read_u8() {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+            Err(e) => return Err(symphonia_core::errors::Error::IoError(e)),
+        };
         n += 1;
         if b == b'w' {
-            let t = source.read_triple_bytes()?;
+            let t = match source.read_triple_bytes() {
+                Ok(t) => t,
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+                Err(e) => return Err(symphonia_core::errors::Error::IoError(e)),
+            };
             n += 3;
             if t == *b"vpk" {
                 source.seek_buffered_rev(4);
-                return Ok(n as u64);
+                return Ok(Some(n as u64));
             }
         }
     }
@@ -962,31 +1007,37 @@ fn scan_v3_total_samples(mss: &mut MediaSourceStream<'_>, data_start_pos: u64) -
         return None;
     }
 
-    let mut total: u64 = 0;
-    loop {
-        if find_next_block(mss, 65536).is_err() {
-            break;
-        }
-        let hdr = match Header3::decode(mss) {
-            Ok(h) => h,
-            Err(_) => break,
-        };
-        total = total.saturating_add(hdr.total_samples.max(0) as u64);
+    // A clean end of stream finishes the scan; any other failure means the total is unknown.
+    let scan = (|| -> Result<u64> {
+        let mut total: u64 = 0;
+        loop {
+            if find_next_block(mss, 65536)?.is_none() {
+                return Ok(total);
+            }
+            let hdr = match Header3::decode(mss) {
+                Ok(h) => h,
+                Err(err) if is_eof(&err) => return Ok(total),
+                Err(err) => return Err(err),
+            };
+            total = total.saturating_add(hdr.total_samples.max(0) as u64);
 
-        let header_payload = Header3::header_payload_size(hdr.version);
-        let ck_size = hdr.ck_size as u32;
-        let skip_ok = if ck_size > header_payload {
-            mss.ignore_bytes((ck_size - header_payload) as u64).is_ok()
+            let header_payload = Header3::header_payload_size(hdr.version);
+            let ck_size = hdr.ck_size as u32;
+            let skipped = if ck_size > header_payload {
+                mss.ignore_bytes((ck_size - header_payload) as u64).map_err(Into::into).map(|_| ())
+            }
+            else {
+                read_v3_audio(mss, hdr.version).map(|_| ())
+            };
+            match skipped {
+                Ok(()) => (),
+                Err(err) if is_eof(&err) => return Ok(total),
+                Err(err) => return Err(err),
+            }
         }
-        else {
-            read_v3_audio(mss).is_ok()
-        };
-        if !skip_ok {
-            break;
-        }
-    }
+    })();
 
     // Restore the stream to where packet reading actually begins.
     let _ = mss.seek(std::io::SeekFrom::Start(data_start_pos));
-    Some(total)
+    scan.ok()
 }

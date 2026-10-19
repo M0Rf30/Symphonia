@@ -15,6 +15,15 @@ mod v3;
 mod v4v5;
 mod words;
 
+/// The largest block, in samples per channel, accepted by any of the unpackers. WavPack's own
+/// encoder caps block size at 131072 samples (`--blocksize`); this is a generous multiple of
+/// that, used to reject a malformed/mutated sample count before it can cause an arithmetic
+/// overflow or an unbounded allocation.
+pub(crate) const MAX_BLOCK_SAMPLES: u32 = 1 << 20;
+
+/// The number of samples of history kept per decorrelation pass (the largest "short" term).
+pub(crate) const MAX_TERM: usize = 8;
+
 /// Fold `value` into a running WavPack checksum.
 #[inline(always)]
 fn crc_accumulate(crc: u32, value: u32) -> u32 {
@@ -44,12 +53,9 @@ use crate::block::{
 };
 use crate::reader::matroska_block_to_packet;
 
-use v3::{
-    DcState, DecorrPass, MAX_BLOCK_SAMPLES as MAX_V3_BLOCK_SAMPLES, MONO_FLAG, unpack_init3,
-    unpack_samples_v3,
-};
+use v3::{DcState, MONO_FLAG, unpack_init3, unpack_samples_v3};
 use v4v5::{
-    DecorrPass as DecorrPass45, UnpackError, WordsState as WordsState45, WvcInput, WvxInput,
+    DecorrPass, UnpackError, UnpackScratch, WordsState as WordsState45, WvcInput, WvxInput,
     parse_decorr_samples, parse_decorr_terms, parse_decorr_weights, parse_entropy_vars,
     parse_int32_info, unpack_samples_v4v5,
 };
@@ -61,7 +67,8 @@ pub(crate) const PACKET_MAGIC: &[u8; 4] = b"WV45";
 
 /// One physical wvpk block's decoded samples: a stream is a mono or stereo pair of
 /// output channels; a multichannel "block group" is made of several of these (see
-/// `WavPackDecoder::decode_inner_v4v5`).
+/// `WavPackDecoder::decode_inner_v4v5`). The sample buffer is reused from packet to packet.
+#[derive(Default)]
 struct StreamDecode {
     /// Interleaved decoded samples: `block_samples` long if mono, `block_samples * 2`
     /// if stereo (or false-stereo).
@@ -196,6 +203,13 @@ pub struct WavPackDecoder {
     decorr: Vec<DecorrPass>,
     num_terms: usize,
     word_state: WordState,
+    // Decoded v3 samples, reused from packet to packet.
+    v3_samples: Vec<i32>,
+    // v4/v5 buffers reused from packet to packet.
+    streams: Vec<StreamDecode>,
+    plane_source: Vec<(usize, usize)>,
+    decorr_v45: Vec<DecorrPass>,
+    scratch: UnpackScratch,
     initialized: bool,
     last_flags: i16,
     /// The stream comes from Matroska/WebM (`A_WAVPACK4`): packets are bare WavPack frames
@@ -241,6 +255,11 @@ impl WavPackDecoder {
             decorr: Vec::new(),
             num_terms: 0,
             word_state: WordState::default(),
+            v3_samples: Vec::new(),
+            streams: Vec::new(),
+            plane_source: Vec::new(),
+            decorr_v45: Vec::new(),
+            scratch: UnpackScratch::default(),
             initialized: false,
             last_flags: 0,
             matroska,
@@ -273,7 +292,7 @@ impl WavPackDecoder {
             return Ok(());
         }
         // The sample count comes from untrusted input and sizes the output allocation.
-        if hdr.total_samples as u32 > MAX_V3_BLOCK_SAMPLES {
+        if hdr.total_samples as u32 > MAX_BLOCK_SAMPLES {
             return decode_error("wavpack: block sample count out of range");
         }
         // The precision shift is applied as `<<`/`>>` on 32-bit samples (unpack3.c), so it must
@@ -301,7 +320,7 @@ impl WavPackDecoder {
         }
 
         // Decode
-        let samples = unpack_samples_v3(
+        unpack_samples_v3(
             hdr.version,
             hdr.bits,
             hdr.flags,
@@ -313,7 +332,9 @@ impl WavPackDecoder {
             &mut self.decorr,
             self.num_terms,
             &mut self.word_state,
+            &mut self.v3_samples,
         );
+        let samples = &self.v3_samples;
 
         if samples.is_empty() && sample_count > 0 {
             return decode_error("wavpack: no samples decoded (unsupported flags?)");
@@ -396,7 +417,13 @@ impl WavPackDecoder {
     /// Per-block decorrelation/entropy state (`decorr`/`words`) is local: v4/v5 blocks always
     /// resend their coefficients and medians from scratch, so there is nothing to persist across
     /// calls.
-    fn decode_v4v5_stream(main: &[u8], wvc_block: &[u8]) -> Result<StreamDecode> {
+    fn decode_v4v5_stream(
+        main: &[u8],
+        wvc_block: &[u8],
+        decorr: &mut Vec<DecorrPass>,
+        scratch: &mut UnpackScratch,
+        out: &mut StreamDecode,
+    ) -> Result<()> {
         let Some(header) = BlockHeader::parse(main)
         else {
             return decode_error("wavpack v4/v5: stream block too short");
@@ -420,15 +447,15 @@ impl WavPackDecoder {
         let is_false_stereo = flags & FALSE_STEREO != 0 && !is_true_mono;
         let channel_count = if is_true_mono { 1 } else { 2 };
 
+        out.samples.clear();
+        out.channel_count = channel_count;
+        out.is_false_stereo = is_false_stereo;
+        out.block_samples = block_samples;
+        out.flags = flags;
+        out.lossless = true;
+
         if block_samples == 0 {
-            return Ok(StreamDecode {
-                samples: Vec::new(),
-                channel_count,
-                is_false_stereo,
-                block_samples,
-                flags,
-                lossless: true,
-            });
+            return Ok(());
         }
 
         let parts = BlockParts::new(&main[HEADER_LEN..]);
@@ -439,17 +466,10 @@ impl WavPackDecoder {
                 return decode_error("wavpack v4/v5: DSD block without DSD data");
             };
 
-            let samples = dsd::unpack_dsd(flags, block_samples, dsd_block, header.crc)
+            dsd::unpack_dsd(flags, block_samples, dsd_block, header.crc, &mut out.samples)
                 .map_err(Self::unpack_error)?;
 
-            return Ok(StreamDecode {
-                samples,
-                channel_count,
-                is_false_stereo,
-                block_samples,
-                flags,
-                lossless: true,
-            });
+            return Ok(());
         }
 
         // The correction block, if it is usable: a correction block that is corrupt or has no
@@ -457,14 +477,13 @@ impl WavPackDecoder {
         let wvc_header = BlockHeader::parse(wvc_block).filter(|_| verify_block(wvc_block));
         let wvc_parts = wvc_header.map(|_| BlockParts::new(&wvc_block[HEADER_LEN..]));
 
-        let mut decorr: Vec<DecorrPass45> = Vec::new();
         let mut words = WordsState45::default();
 
-        if !parse_decorr_terms(parts.terms, &mut decorr) {
+        if !parse_decorr_terms(parts.terms, decorr) {
             return decode_error("wavpack v4/v5: invalid decorrelation terms");
         }
-        parse_decorr_weights(parts.weights, &mut decorr, is_mono);
-        parse_decorr_samples(parts.samples, &mut decorr, is_mono);
+        parse_decorr_weights(parts.weights, decorr, is_mono);
+        parse_decorr_samples(parts.samples, decorr, is_mono);
         parse_entropy_vars(parts.entropy, &mut words, is_mono);
         if (flags & HYBRID_FLAG) != 0 {
             v4v5::parse_hybrid_profile(parts.hybrid, &mut words, is_mono, flags);
@@ -484,25 +503,27 @@ impl WavPackDecoder {
             _ => None,
         };
 
-        let (samples, lossless) = unpack_samples_v4v5(
+        out.lossless = unpack_samples_v4v5(
             flags,
             block_samples,
             header.crc,
-            &mut decorr,
+            decorr,
             &mut words,
             &i32info,
             float_info.as_ref(),
             main_wvx,
             wvc.as_ref(),
             parts.audio,
+            scratch,
+            &mut out.samples,
         )
         .map_err(Self::unpack_error)?;
 
-        if samples.is_empty() {
+        if out.samples.is_empty() {
             return decode_error("wavpack v4/v5: no samples decoded");
         }
 
-        Ok(StreamDecode { samples, channel_count, is_false_stereo, block_samples, flags, lossless })
+        Ok(())
     }
 
     fn unpack_error(err: UnpackError) -> symphonia_core::errors::Error {
@@ -543,12 +564,25 @@ impl WavPackDecoder {
             Ok(slice)
         };
 
-        let mut streams: Vec<StreamDecode> = Vec::with_capacity(stream_count.min(64));
-        for _ in 0..stream_count {
+        // The per-stream buffers persist between packets. `stream_count` is untrusted, but
+        // each stream consumes bytes of the packet, so the buffers only grow as far as the
+        // packet is long.
+        for i in 0..stream_count {
             let main = take()?;
             let wvc = take()?;
-            streams.push(Self::decode_v4v5_stream(main, wvc)?);
+            if self.streams.len() <= i {
+                self.streams.push(StreamDecode::default());
+            }
+            Self::decode_v4v5_stream(
+                main,
+                wvc,
+                &mut self.decorr_v45,
+                &mut self.scratch,
+                &mut self.streams[i],
+            )?;
         }
+
+        let streams = &self.streams[..stream_count];
 
         if streams.is_empty() || streams[0].block_samples == 0 {
             self.buf.clear();
@@ -560,13 +594,15 @@ impl WavPackDecoder {
         // Map each OUTPUT channel (in file order) to (stream index, this stream's local
         // data-channel 0/1), so any channel count (mono/stereo/quad/5.1/7.1/...)
         // interleaves the same way WavPack's own `unpack_samples_interleave()` does.
-        let mut plane_source: Vec<(usize, usize)> = Vec::with_capacity(streams.len() * 2);
+        let plane_source = &mut self.plane_source;
+        plane_source.clear();
         for (i, s) in streams.iter().enumerate() {
             plane_source.push((i, 0));
             if s.channel_count == 2 {
                 plane_source.push((i, if s.is_false_stereo { 0 } else { 1 }));
             }
         }
+        let plane_source = &self.plane_source;
 
         // Defensive against malformed/truncated multichannel input (a stream that
         // decoded fewer samples than its declared `block_samples`): read back zero
@@ -662,7 +698,7 @@ impl WavPackDecoder {
                 let flags = streams[0].flags;
                 md5.samples.clear();
                 for idx in 0..decoded_frames {
-                    for &(si, ch) in &plane_source {
+                    for &(si, ch) in plane_source {
                         md5.samples.push(sample_at(si, ch, idx));
                     }
                 }
@@ -684,6 +720,10 @@ impl AudioDecoder for WavPackDecoder {
         self.decorr.clear();
         self.num_terms = 0;
         self.word_state = WordState::default();
+        // The running MD5 is meaningless after a discontinuity (e.g., a seek), so stop verifying
+        // rather than report a false mismatch.
+        self.md5 = None;
+        self.md5_valid = false;
         self.buf.clear();
     }
 
@@ -776,6 +816,27 @@ mod tests {
 
     fn packet(data: Vec<u8>) -> Packet {
         Packet::new(0, Timestamp::new(0), Duration::new(0), data)
+    }
+
+    #[test]
+    fn verify_reset_discards_the_running_md5() {
+        let mut params = AudioCodecParameters::new();
+        params
+            .for_codec(CODEC_ID_WAVPACK)
+            .with_sample_rate(44100)
+            .with_channels(CHANNEL_LAYOUT_STEREO)
+            .with_sample_format(SampleFormat::S16)
+            .with_verification_code(VerificationCheck::Md5([0x55; 16]));
+        let opts = AudioDecoderOptions::default().verify(true);
+
+        // Without a seek the (empty) audio is compared with the stream's MD5.
+        let mut dec = WavPackDecoder::try_new(&params, &opts).unwrap();
+        assert_eq!(dec.finalize().verify_ok, Some(false));
+
+        // After a discontinuity the MD5 of what follows cannot match: no verdict at all.
+        let mut dec = WavPackDecoder::try_new(&params, &opts).unwrap();
+        dec.reset();
+        assert_eq!(dec.finalize().verify_ok, None);
     }
 
     #[test]

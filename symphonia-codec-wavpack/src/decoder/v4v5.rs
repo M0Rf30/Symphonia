@@ -10,7 +10,7 @@
 // (https://github.com/dbry/WavPack, BSD licence).
 
 use super::bits::{Bits, count_bits};
-use super::crc_accumulate;
+use super::{MAX_BLOCK_SAMPLES, MAX_TERM, crc_accumulate};
 
 pub(crate) use crate::block::{
     CROSS_DECORR, FLOAT_DATA, HYBRID_BALANCE, HYBRID_BITRATE, HYBRID_FLAG, HYBRID_SHAPE,
@@ -37,13 +37,7 @@ fn samples_crc(buf: &[i32]) -> u32 {
 // ---------------------------------------------------------------------------
 
 const MAX_NTERMS: usize = 16;
-const MAX_TERM: usize = 8;
 const LIMIT_ONES: u32 = 16;
-
-/// WavPack's own encoder caps block size at 131072 samples (`--blocksize`); this is a
-/// generous multiple of that used to reject a malformed/mutated `block_samples` field
-/// before it can cause an arithmetic overflow or an unbounded allocation.
-const MAX_BLOCK_SAMPLES: u32 = 1 << 20;
 
 // INC/DEC median divisors
 const DIV0: u32 = 128;
@@ -86,10 +80,11 @@ fn read_code(bs: &mut Bits<'_>, maxcode: u32) -> u32 {
     }
 
     let bitcount = count_bits(maxcode);
-    let extras = (1u32 << bitcount) - maxcode - 1;
+    // `bitcount` is 32 for `maxcode >= 1 << 31`, so `1 << bitcount` needs 64 bits.
+    let extras = ((1u64 << bitcount) - u64::from(maxcode) - 1) as u32;
     let code = bs.getbits(bitcount - 1);
 
-    if code >= extras { (code << 1) - extras + bs.getbit() } else { code }
+    if code >= extras { (code << 1).wrapping_sub(extras).wrapping_add(bs.getbit()) } else { code }
 }
 
 // ---------------------------------------------------------------------------
@@ -604,11 +599,13 @@ fn get_words_lossless(
     ws: &mut WordsState,
     flags: u32,
     block_samples: u32,
-) -> Option<Vec<i32>> {
+    buffer: &mut Vec<i32>,
+) -> Option<()> {
     let is_mono = (flags & MONO_DATA) != 0;
     // The C reference doubles nsamples for stereo and iterates one sample at a time.
     let nsamples = if is_mono { block_samples } else { block_samples.saturating_mul(2) };
-    let mut buffer = vec![0i32; nsamples as usize];
+    buffer.clear();
+    buffer.resize(nsamples as usize, 0);
     let mut csamples: u32 = 0;
 
     wp_trace!(
@@ -749,7 +746,7 @@ fn get_words_lossless(
     }
 
     wp_trace!("[gwl] done: decoded {} of {} samples", csamples, nsamples);
-    Some(buffer)
+    Some(())
 }
 
 // ---------------------------------------------------------------------------
@@ -767,7 +764,8 @@ fn get_words_lossless(
 const SLS: u32 = 8;
 const SLO: u32 = 1 << (SLS - 1);
 
-/// The result of [`get_words_hybrid`].
+/// The result of [`get_words_hybrid`]; the buffers are reused from block to block.
+#[derive(Default)]
 struct HybridWords {
     /// The (possibly lossy) words, interleaved for stereo.
     samples: Vec<i32>,
@@ -776,6 +774,15 @@ struct HybridWords {
     corrections: Vec<i32>,
     /// The number of words that were decoded before the bitstream ended.
     decoded: u32,
+}
+
+/// Buffers that persist between calls of [`unpack_samples_v4v5`], so that decoding a block does
+/// not allocate once they have grown to the size of the largest block.
+#[derive(Default)]
+pub struct UnpackScratch {
+    words: HybridWords,
+    /// The decorrelation passes before a correction block is tried, to restore them if it fails.
+    saved_passes: Vec<DecorrPass>,
 }
 
 /// Port of `get_word()` in read_words.c, run over a whole block. If `wvc` is given, the
@@ -787,11 +794,18 @@ fn get_words_hybrid(
     flags: u32,
     block_samples: u32,
     mut wvc: Option<&mut Bits<'_>>,
-) -> Option<HybridWords> {
+    words: &mut HybridWords,
+) -> Option<()> {
     let is_mono = (flags & MONO_DATA) != 0;
     let nsamples = if is_mono { block_samples } else { block_samples.saturating_mul(2) };
-    let mut buffer = vec![0i32; nsamples as usize];
-    let mut corrections = if wvc.is_some() { vec![0i32; nsamples as usize] } else { Vec::new() };
+    let buffer = &mut words.samples;
+    let corrections = &mut words.corrections;
+    buffer.clear();
+    buffer.resize(nsamples as usize, 0);
+    corrections.clear();
+    if wvc.is_some() {
+        corrections.resize(nsamples as usize, 0);
+    }
     let mut csamples: u32 = 0;
 
     while csamples < nsamples {
@@ -954,7 +968,8 @@ fn get_words_hybrid(
         csamples += 1;
     }
 
-    Some(HybridWords { samples: buffer, corrections, decoded: csamples })
+    words.decoded = csamples;
+    Some(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1417,6 +1432,7 @@ fn shaping_step(dc: &mut ShapingState, ch: usize, flags: u32, correction: i32) -
 /// Returns the samples (before the final shift) and the CRC computed over them, or `None` if
 /// a bitstream ended early or a sample is implausibly large (the reference "mutes" the block
 /// in those cases).
+#[allow(clippy::too_many_arguments)]
 fn unpack_hybrid_lossless(
     flags: u32,
     block_samples: u32,
@@ -1424,7 +1440,9 @@ fn unpack_hybrid_lossless(
     ws: &mut WordsState,
     audio: &[u8],
     wvc: &WvcInput<'_>,
-) -> Option<(Vec<i32>, u32)> {
+    scratch: &mut HybridWords,
+    out: &mut Vec<i32>,
+) -> Option<u32> {
     let is_mono = (flags & MONO_DATA) != 0;
     let n = block_samples as usize;
 
@@ -1435,17 +1453,18 @@ fn unpack_hybrid_lossless(
 
     let mut bs = Bits::new(audio);
     let mut wvc_bs = Bits::new(wvc.bits);
-    let words = get_words_hybrid(&mut bs, ws, flags, block_samples, Some(&mut wvc_bs))?;
+    get_words_hybrid(&mut bs, ws, flags, block_samples, Some(&mut wvc_bs), scratch)?;
     let nsamples = if is_mono { n } else { n * 2 };
-    if words.decoded as usize != nsamples {
+    if scratch.decoded as usize != nsamples {
         return None;
     }
-    let (words, corr) = (words.samples, words.corrections);
+    let (words, corr) = (&scratch.samples, &scratch.corrections);
 
     let mag = (flags & MAG_MASK) >> MAG_LSB;
     let mute_limit: i64 = (1i64 << mag) + 2;
     let mut crc: u32 = 0xffff_ffff;
-    let mut out: Vec<i32> = Vec::with_capacity(nsamples);
+    out.clear();
+    out.reserve(nsamples);
     let mut m = 0usize;
 
     if is_mono {
@@ -1454,6 +1473,11 @@ fn unpack_hybrid_lossless(
             let correction = corr[i];
 
             for p in passes.iter_mut() {
+                // Negative terms are stereo cross-channel terms; a mono pass skips them (as
+                // `decorr_mono_passes` does) instead of indexing with a wrapped negative term.
+                if p.term <= 0 {
+                    continue;
+                }
                 let sam;
                 let k;
                 if p.term > MAX_TERM as i32 {
@@ -1653,7 +1677,7 @@ fn unpack_hybrid_lossless(
         }
     }
 
-    Some((out, crc))
+    Some(crc)
 }
 
 /// Hybrid-lossless decode of one block: samples plus the check of both CRCs. `None` means the
@@ -1669,8 +1693,10 @@ fn unpack_with_correction(
     main_wvx: Option<WvxInput<'_>>,
     audio: &[u8],
     wvc: &WvcInput<'_>,
-) -> Option<Vec<i32>> {
-    let (mut buf, crc) = unpack_hybrid_lossless(flags, block_samples, passes, ws, audio, wvc)?;
+    scratch: &mut HybridWords,
+    buf: &mut Vec<i32>,
+) -> Option<()> {
+    let crc = unpack_hybrid_lossless(flags, block_samples, passes, ws, audio, wvc, scratch, buf)?;
 
     if crc != wvc.crc {
         wp_trace!("[wvc] CRC mismatch: computed {:08x}, expected {:08x}", crc, wvc.crc);
@@ -1691,16 +1717,16 @@ fn unpack_with_correction(
                     max_shifted_ones: max_ones,
                     ..info
                 };
-                super::floats::float_values(&mut buf, &info, Some(&mut bits))
+                super::floats::float_values(buf, &info, Some(&mut bits))
             }
             None => {
-                super::floats::float_values(&mut buf, &info, None);
+                super::floats::float_values(buf, &info, None);
                 None
             }
         }
     }
     else {
-        fixup_samples(&mut buf, flags, i32info, false, wvx.as_ref())
+        fixup_samples(buf, flags, i32info, false, wvx.as_ref())
     };
 
     if let (Some(crc_x), Some(wvx)) = (crc_x, &wvx) {
@@ -1710,7 +1736,7 @@ fn unpack_with_correction(
         }
     }
 
-    Some(buf)
+    Some(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1736,7 +1762,9 @@ pub fn unpack_samples_v4v5(
     wvx: Option<WvxInput<'_>>,
     wvc: Option<&WvcInput<'_>>,
     audio: &[u8],
-) -> Result<(Vec<i32>, bool), UnpackError> {
+    scratch: &mut UnpackScratch,
+    buf: &mut Vec<i32>,
+) -> Result<bool, UnpackError> {
     // WavPack's own encoder caps block size at 131072 samples (`--blocksize`); reject
     // anything wildly larger up front rather than risk an unbounded allocation or an
     // arithmetic overflow further down from a malformed/mutated `block_samples` field
@@ -1746,10 +1774,12 @@ pub fn unpack_samples_v4v5(
     }
 
     if let Some(wvc) = wvc.filter(|_| (flags & HYBRID_FLAG) != 0) {
-        let saved_passes = passes.to_vec();
+        scratch.saved_passes.clear();
+        scratch.saved_passes.extend_from_slice(passes);
+        // `WordsState` is plain data: this copy does not allocate.
         let saved_ws = ws.clone();
 
-        if let Some(buf) = unpack_with_correction(
+        if unpack_with_correction(
             flags,
             block_samples,
             passes,
@@ -1759,36 +1789,40 @@ pub fn unpack_samples_v4v5(
             wvx,
             audio,
             wvc,
-        ) {
-            return Ok((buf, true));
+            &mut scratch.words,
+            buf,
+        )
+        .is_some()
+        {
+            return Ok(true);
         }
 
         log::warn!("wavpack: correction block does not match, decoding the lossy block only");
-        passes.clone_from_slice(&saved_passes);
+        passes.clone_from_slice(&scratch.saved_passes);
         *ws = saved_ws;
     }
 
     let is_mono = (flags & MONO_DATA) != 0;
     let mut bs = Bits::new(audio);
 
-    let mut buf = if (flags & HYBRID_FLAG) != 0 {
-        get_words_hybrid(&mut bs, ws, flags, block_samples, None)
-            .ok_or(UnpackError::Malformed)?
-            .samples
+    if (flags & HYBRID_FLAG) != 0 {
+        get_words_hybrid(&mut bs, ws, flags, block_samples, None, &mut scratch.words)
+            .ok_or(UnpackError::Malformed)?;
+        std::mem::swap(buf, &mut scratch.words.samples);
     }
     else {
-        get_words_lossless(&mut bs, ws, flags, block_samples).ok_or(UnpackError::Malformed)?
-    };
+        get_words_lossless(&mut bs, ws, flags, block_samples, buf).ok_or(UnpackError::Malformed)?;
+    }
 
     // Apply the decorrelation passes in forward order, then undo the joint stereo.
     if is_mono {
-        decorr_mono_passes(passes, &mut buf);
+        decorr_mono_passes(passes, buf);
     }
     else {
-        decorr_stereo_passes(passes, &mut buf, (flags & JOINT_STEREO) != 0);
+        decorr_stereo_passes(passes, buf, (flags & JOINT_STEREO) != 0);
     }
 
-    if samples_crc(&buf) != crc {
+    if samples_crc(buf) != crc {
         wp_trace!("[crc] mismatch: header {:08x}", crc);
         return Err(UnpackError::Crc);
     }
@@ -1808,16 +1842,16 @@ pub fn unpack_samples_v4v5(
                     max_shifted_ones: max_ones,
                     ..info
                 };
-                super::floats::float_values(&mut buf, &info, Some(&mut bits))
+                super::floats::float_values(buf, &info, Some(&mut bits))
             }
             None => {
-                super::floats::float_values(&mut buf, &info, None);
+                super::floats::float_values(buf, &info, None);
                 None
             }
         }
     }
     else {
-        fixup_samples(&mut buf, flags, i32info, (flags & HYBRID_FLAG) != 0, wvx.as_ref())
+        fixup_samples(buf, flags, i32info, (flags & HYBRID_FLAG) != 0, wvx.as_ref())
     };
 
     if let (Some(crc_x), Some(wvx)) = (crc_x, &wvx) {
@@ -1827,5 +1861,49 @@ pub fn unpack_samples_v4v5(
         }
     }
 
-    Ok((buf, (flags & HYBRID_FLAG) == 0))
+    Ok((flags & HYBRID_FLAG) == 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_read_code_with_32_bit_range() {
+        // `maxcode >= 1 << 31` needs 32 bits, so `1 << bitcount` does not fit in a `u32`.
+        let data = [0xffu8; 16];
+        assert_eq!(read_code(&mut Bits::new(&data), u32::MAX), u32::MAX);
+        assert_eq!(read_code(&mut Bits::new(&data), 1 << 31), 1 << 31);
+        assert_eq!(read_code(&mut Bits::new(&[0u8; 16]), u32::MAX), 0);
+    }
+
+    #[test]
+    fn verify_mono_hybrid_block_with_negative_term_does_not_panic() {
+        // Negative terms are valid in the terms sub-block of a mono block, too. The pass used
+        // to index the history with a wrapped negative term.
+        let mut passes = [DecorrPass { term: -1, delta: 2, ..Default::default() }];
+        let mut ws = WordsState::default();
+        let zeros = [0u8; 64];
+        let wvc = WvcInput { bits: &zeros, crc: 0, shaping: &[], wvx: None };
+        let mut scratch = UnpackScratch::default();
+        let mut out = Vec::new();
+
+        let result = unpack_samples_v4v5(
+            MONO_DATA | HYBRID_FLAG,
+            8,
+            0,
+            &mut passes,
+            &mut ws,
+            &Int32Info::default(),
+            None,
+            None,
+            Some(&wvc),
+            &zeros,
+            &mut scratch,
+            &mut out,
+        );
+
+        // Zero words are all zero samples, whose CRC is not 0.
+        assert_eq!(result, Err(UnpackError::Crc));
+    }
 }

@@ -10,8 +10,8 @@
 // `decode_fast()`, `init_ptable()`, `init_dsd_block_high()`, `decode_high()`) of the WavPack
 // reference implementation by David Bryant (https://github.com/dbry/WavPack, BSD licence).
 
-use super::crc_accumulate;
 use super::v4v5::UnpackError;
+use super::{MAX_BLOCK_SAMPLES, crc_accumulate};
 use crate::block::MONO_DATA;
 
 /// The maximum number of history bits in DSD "fast" mode (`MAX_HISTORY_BITS`).
@@ -34,20 +34,18 @@ fn byte_ready(low: u32, high: u32) -> bool {
     (low ^ high) & 0xff00_0000 == 0
 }
 
-/// The largest block, in samples, that is accepted.
-const MAX_BLOCK_SAMPLES: u32 = 1 << 20;
-
 /// Decode the contents of an `ID_DSD_BLOCK` sub-block (`dsd_block`) of a block with
 /// `block_samples` samples (DSD bytes per channel) and the given header `flags` and `crc`.
 ///
-/// The returned vector has `block_samples` bytes per decoded channel, interleaved if there are
+/// `out` is replaced by `block_samples` bytes per decoded channel, interleaved if there are
 /// two channels. A `FALSE_STEREO` block decodes one channel. The CRC is verified.
 pub fn unpack_dsd(
     flags: u32,
     block_samples: u32,
     dsd_block: &[u8],
     header_crc: u32,
-) -> Result<Vec<i32>, UnpackError> {
+    out: &mut Vec<i32>,
+) -> Result<(), UnpackError> {
     // A mutated `block_samples` must not result in a huge allocation (see `unpack_samples_v4v5`).
     if block_samples > MAX_BLOCK_SAMPLES {
         return Err(UnpackError::Malformed);
@@ -65,8 +63,8 @@ pub fn unpack_dsd(
         return Err(UnpackError::Malformed);
     }
 
-    let mut out: Vec<i32> = Vec::new();
-    out.try_reserve_exact(total).map_err(|_| UnpackError::Malformed)?;
+    out.clear();
+    out.try_reserve(total).map_err(|_| UnpackError::Malformed)?;
 
     match *mode {
         0 => {
@@ -75,8 +73,8 @@ pub fn unpack_dsd(
             }
             out.extend(data.iter().map(|&b| i32::from(b)));
         }
-        1 => decode_fast(data, channels, total, &mut out)?,
-        3 => decode_high(data, channels, total, &mut out)?,
+        1 => decode_fast(data, channels, total, out)?,
+        3 => decode_high(data, channels, total, out)?,
         _ => return Err(UnpackError::Malformed),
     }
 
@@ -85,7 +83,7 @@ pub fn unpack_dsd(
         return Err(UnpackError::Crc);
     }
 
-    Ok(out)
+    Ok(())
 }
 
 /// A byte-wise reader of the range coder's input.
@@ -468,14 +466,21 @@ mod tests {
 
         let crc = bytes.iter().fold(u32::MAX, |c, &b| crc_accumulate(c, u32::from(b)));
 
-        let out = unpack_dsd(0, 2, &block, crc).unwrap();
+        let mut out = Vec::new();
+        unpack_dsd(0, 2, &block, crc, &mut out).unwrap();
         assert_eq!(out, [0x69, 0x96, 0x00, 0xff]);
 
         // A mismatching CRC, a wrong length and an unknown mode are errors.
-        assert_eq!(unpack_dsd(0, 2, &block, crc ^ 1), Err(UnpackError::Crc));
-        assert_eq!(unpack_dsd(0, 3, &block, crc), Err(UnpackError::Malformed));
-        assert_eq!(unpack_dsd(0, 2, &[2, 2, 0, 0, 0, 0], crc), Err(UnpackError::Malformed));
-        assert_eq!(unpack_dsd(0, 2, &[40, 0, 1, 2, 3, 4], crc), Err(UnpackError::Malformed));
+        assert_eq!(unpack_dsd(0, 2, &block, crc ^ 1, &mut out), Err(UnpackError::Crc));
+        assert_eq!(unpack_dsd(0, 3, &block, crc, &mut out), Err(UnpackError::Malformed));
+        assert_eq!(
+            unpack_dsd(0, 2, &[2, 2, 0, 0, 0, 0], crc, &mut out),
+            Err(UnpackError::Malformed)
+        );
+        assert_eq!(
+            unpack_dsd(0, 2, &[40, 0, 1, 2, 3, 4], crc, &mut out),
+            Err(UnpackError::Malformed)
+        );
     }
 
     #[test]
@@ -486,7 +491,7 @@ mod tests {
                     let mut block = vec![3u8, mode];
                     block.extend(std::iter::repeat_n(fill, len));
                     for flags in [0, MONO_DATA] {
-                        let _ = unpack_dsd(flags, 64, &block, 0);
+                        let _ = unpack_dsd(flags, 64, &block, 0, &mut Vec::new());
                     }
                 }
             }
