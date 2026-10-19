@@ -92,13 +92,16 @@ impl UsacSbrParser {
             (false, false)
         };
 
+        // The header is parsed into a copy, so that a stream error leaves the carried-over
+        // header and bands untouched.
         let prev = self.header;
+        let mut header = self.header;
 
         if info_present {
-            self.header.amp_res = read_flag(reader)?;
-            self.header.xover_band = read(reader, 4)? as u8;
+            header.amp_res = read_flag(reader)?;
+            header.xover_band = read(reader, 4)? as u8;
             // bs_sbr_preprocessing
-            self.header.pre_proc = read_flag(reader)?;
+            header.pre_proc = read_flag(reader)?;
             if self.cfg.pvc && read(reader, 2)? != 0 {
                 return Err(Error::SbrFreqBandInvalid);
             }
@@ -108,46 +111,46 @@ impl UsacSbrParser {
             if read_flag(reader)? {
                 // The default header of the SbrConfig().
                 let d = &self.cfg.dflt;
-                self.header.start_freq = d.start_freq;
-                self.header.stop_freq = d.stop_freq;
-                self.header.header_extra_1 = d.header_extra1;
-                self.header.header_extra_2 = d.header_extra2;
-                self.header.freq_scale = d.freq_scale;
-                self.header.alter_scale = d.alter_scale;
-                self.header.noise_bands = d.noise_bands;
-                self.header.limiter_bands = d.limiter_bands;
-                self.header.limiter_gains = d.limiter_gains;
-                self.header.interpol_freq = d.interpol_freq;
-                self.header.smoothing_mode = d.smoothing_mode;
+                header.start_freq = d.start_freq;
+                header.stop_freq = d.stop_freq;
+                header.header_extra_1 = d.header_extra1;
+                header.header_extra_2 = d.header_extra2;
+                header.freq_scale = d.freq_scale;
+                header.alter_scale = d.alter_scale;
+                header.noise_bands = d.noise_bands;
+                header.limiter_bands = d.limiter_bands;
+                header.limiter_gains = d.limiter_gains;
+                header.interpol_freq = d.interpol_freq;
+                header.smoothing_mode = d.smoothing_mode;
             }
             else {
-                self.header.start_freq = read(reader, 4)? as u8;
-                self.header.stop_freq = read(reader, 4)? as u8;
-                self.header.header_extra_1 = read_flag(reader)?;
-                self.header.header_extra_2 = read_flag(reader)?;
+                header.start_freq = read(reader, 4)? as u8;
+                header.stop_freq = read(reader, 4)? as u8;
+                header.header_extra_1 = read_flag(reader)?;
+                header.header_extra_2 = read_flag(reader)?;
 
-                if self.header.header_extra_1 {
-                    self.header.freq_scale = read(reader, 2)? as u8;
-                    self.header.alter_scale = read_flag(reader)?;
-                    self.header.noise_bands = read(reader, 2)? as u8;
+                if header.header_extra_1 {
+                    header.freq_scale = read(reader, 2)? as u8;
+                    header.alter_scale = read_flag(reader)?;
+                    header.noise_bands = read(reader, 2)? as u8;
                 }
                 else {
-                    self.header.freq_scale = DEFAULT_FREQ_SCALE;
-                    self.header.alter_scale = DEFAULT_ALTER_SCALE;
-                    self.header.noise_bands = DEFAULT_NOISE_BANDS;
+                    header.freq_scale = DEFAULT_FREQ_SCALE;
+                    header.alter_scale = DEFAULT_ALTER_SCALE;
+                    header.noise_bands = DEFAULT_NOISE_BANDS;
                 }
 
-                if self.header.header_extra_2 {
-                    self.header.limiter_bands = read(reader, 2)? as u8;
-                    self.header.limiter_gains = read(reader, 2)? as u8;
-                    self.header.interpol_freq = read_flag(reader)?;
-                    self.header.smoothing_mode = read_flag(reader)?;
+                if header.header_extra_2 {
+                    header.limiter_bands = read(reader, 2)? as u8;
+                    header.limiter_gains = read(reader, 2)? as u8;
+                    header.interpol_freq = read_flag(reader)?;
+                    header.smoothing_mode = read_flag(reader)?;
                 }
                 else {
-                    self.header.limiter_bands = DEFAULT_LIMITER_BANDS;
-                    self.header.limiter_gains = DEFAULT_LIMITER_GAINS;
-                    self.header.interpol_freq = DEFAULT_INTERPOL_FREQ;
-                    self.header.smoothing_mode = DEFAULT_SMOOTHING_MODE;
+                    header.limiter_bands = DEFAULT_LIMITER_BANDS;
+                    header.limiter_gains = DEFAULT_LIMITER_GAINS;
+                    header.interpol_freq = DEFAULT_INTERPOL_FREQ;
+                    header.smoothing_mode = DEFAULT_SMOOTHING_MODE;
                 }
             }
         }
@@ -157,28 +160,37 @@ impl UsacSbrParser {
             return Err(Error::SbrFreqBandInvalid);
         }
 
-        if !self.active || self.header.band_geometry_changed(&prev) {
-            self.bands = Some(self.header.derive_bands_usac(self.fs_sbr, self.ratio4)?);
+        let derived = if !self.active || header.band_geometry_changed(&prev) {
+            Some(header.derive_bands_usac(self.fs_sbr, self.ratio4)?)
         }
-        self.active = true;
+        else {
+            None
+        };
 
-        let Some(bands) = self.bands.as_ref()
+        let Some(bands) = derived.as_ref().or(self.bands.as_ref())
         else {
             return Err(Error::SbrFreqBandInvalid);
         };
 
         let element = if pair {
-            parse_pair(reader, bands, self.header.amp_res, independent)?
+            parse_pair(reader, bands, header.amp_res, independent)?
         }
         else {
-            parse_single(reader, bands, self.header.amp_res, independent)?
+            parse_single(reader, bands, header.amp_res, independent)?
         };
+
+        // Commit the header and the bands.
+        self.header = header;
+        if derived.is_some() {
+            self.bands = derived;
+        }
+        self.active = true;
 
         Ok(SbrExtensionData {
             crc: None,
             crc_region: None,
             header_present,
-            header: self.header,
+            header,
             element,
             num_sbr_bits: reader.bit_position() - start,
         })
@@ -306,3 +318,72 @@ fn parse_harmonics(reader: &mut BitReader<'_>, bands: &HiLoTables) -> Result<Vec
 }
 
 bit_readers!(Error::SbrHuffInvalid, read, read_flag);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use symphonia_common::mpeg::audio::usac::UsacSbrDefaultHeader;
+
+    fn parser() -> UsacSbrParser {
+        let dflt = UsacSbrDefaultHeader {
+            start_freq: 5,
+            stop_freq: 9,
+            freq_scale: 2,
+            alter_scale: true,
+            noise_bands: 2,
+            limiter_bands: 2,
+            limiter_gains: 2,
+            interpol_freq: true,
+            smoothing_mode: true,
+            header_extra1: false,
+            header_extra2: false,
+        };
+
+        let cfg = UsacSbrConfig { harmonic_sbr: false, inter_tes: false, pvc: false, dflt };
+        UsacSbrParser::new(cfg, 48000, false)
+    }
+
+    /// The `sbr_info()` and a non-default `sbr_header()` of an independent frame, with the given
+    /// start and stop frequency bands and no extra header parts.
+    fn explicit_header(start_freq: u8, stop_freq: u8) -> Vec<u8> {
+        // amp_res (1), bs_xover_band (4), bs_sbr_preprocessing (1), dflt_header flag (1),
+        // bs_start_freq (4), bs_stop_freq (4), header_extra_1 (1), header_extra_2 (1).
+        let fields: [(u32, u32); 8] = [
+            (0, 1),
+            (0, 4),
+            (0, 1),
+            (0, 1),
+            (u32::from(start_freq), 4),
+            (u32::from(stop_freq), 4),
+            (0, 1),
+            (0, 1),
+        ];
+
+        let mut bits = 0u64;
+        let mut n = 0;
+        for (value, width) in fields {
+            bits = (bits << width) | u64::from(value);
+            n += width;
+        }
+
+        // Left-align in 8 bytes: zero padding follows the header.
+        bits <<= 64 - n;
+        bits.to_be_bytes().to_vec()
+    }
+
+    #[test]
+    fn invalid_header_leaves_the_carried_header_untouched() {
+        let mut parser = parser();
+        let before = parser.header;
+
+        // start_freq 15 with stop_freq 0 has no valid band geometry.
+        let data = explicit_header(15, 0);
+        let mut reader = BitReader::new(&data);
+
+        assert!(parser.parse(&mut reader, false, true).is_err());
+        assert_eq!(parser.header, before);
+        assert!(!parser.active);
+        assert!(parser.bands.is_none());
+    }
+}

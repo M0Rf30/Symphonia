@@ -193,6 +193,8 @@ pub struct FdChannelState {
     pub tns: Tns,
     pub arith: ArithState,
     pub noise_seed: u32,
+    /// The seed that `reset()` restores `noise_seed` to.
+    initial_noise_seed: u32,
     /// The `fac_data()` of the frame (`fac_len` values and the gain index), if present.
     pub fac_present: bool,
     pub fac_gain: i32,
@@ -213,6 +215,7 @@ impl FdChannelState {
             tns: Tns::new(),
             arith: ArithState::new(),
             noise_seed,
+            initial_noise_seed: noise_seed,
             fac_present: false,
             fac_gain: 0,
             fac: [0; 128],
@@ -230,6 +233,10 @@ impl FdChannelState {
         self.ics = IcsInfo::new();
         self.tns.reset();
         self.arith.reset();
+        self.noise_seed = self.initial_noise_seed;
+        self.fac_present = false;
+        self.fac_gain = 0;
+        self.fac = [0; 128];
     }
 
     /// Parse `fd_channel_stream()` and dequantize the spectrum into `self.coeffs`.
@@ -687,7 +694,9 @@ impl FdFilterbank {
         }
 
         if let Some(lpd) = after_lpd {
-            lpd.bpf_fix(false, out);
+            // libxaac `ixheaacd_fd_imdct_short` passes `is_short_flag` 1 and
+            // `ixheaacd_fd_imdct_long` passes 0 to `ixheaacd_lpd_bpf_fix`.
+            lpd.bpf_fix(seq == EIGHT_SHORT, out);
         }
 
         Ok(())

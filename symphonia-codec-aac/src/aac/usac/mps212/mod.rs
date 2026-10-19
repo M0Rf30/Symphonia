@@ -186,6 +186,14 @@ impl Mps212Decoder {
         })
     }
 
+    /// Forget all parameter, decorrelator and hybrid filterbank history.
+    pub fn reset(&mut self) {
+        // The configuration was validated by `new()`, so rebuilding cannot fail.
+        if let Ok(fresh) = Self::new(self.cfg, self.params.time_slots) {
+            *self = fresh;
+        }
+    }
+
     /// Parse the `Mps212Data()` of a frame.
     pub fn parse(&mut self, bs: &mut BitReaderLtr<'_>, independent: bool) -> Result<()> {
         self.params.parse(bs, independent)

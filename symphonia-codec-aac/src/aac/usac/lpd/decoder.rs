@@ -273,6 +273,10 @@ impl LpdDecoder {
         self.last_short = false;
         self.lpc_prev = [0.0; ORDER + 1];
         self.acelp_in = [0.0; 1 + 2 * FAC_LENGTH];
+        self.lsf_prev = [0.0; ORDER];
+        self.lspold = [0.0; ORDER];
+        self.fac_gain = 0.0;
+        self.fac_fd_data = [0.0; FAC_LENGTH / 4];
     }
 
     /// Decode one LPD frame into `out` (`ccfl` samples, int16 scale) including the overlap-add

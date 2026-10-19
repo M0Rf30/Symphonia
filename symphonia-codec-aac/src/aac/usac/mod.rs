@@ -204,9 +204,13 @@ impl UsacDecoder {
                         return unsupported_error("aac: usac mps212 without sbr");
                     }
 
+                    // One QMF slot per 64 output samples: 32 slots with 2:1 and 8:3 eSBR, 64 with
+                    // 4:1.
+                    let time_slots = config.output_frame_length() / 64;
+
                     Element::Sce(SceState {
                         target: targets[0],
-                        mps: Some((Mps212Decoder::new(*mps_cfg, 32)?, targets[1])),
+                        mps: Some((Mps212Decoder::new(*mps_cfg, time_slots)?, targets[1])),
                         ch: FdChannelState::new(core_frame_len, sampling_index, NOISE_SEED_FIRST),
                         pcm: vec![0.0; core_frame_len],
                         sbr,
@@ -315,6 +319,10 @@ impl UsacDecoder {
     /// `priming` access unit is a pre-roll one: it is decoded to prime the decoder state and its
     /// own pre-roll payload is not interpreted.
     fn decode_access_unit(&mut self, data: &[u8], priming: bool) -> Result<()> {
+        // The pre-roll units are decoded before this unit renders into `self.buf`, which they
+        // use as well.
+        let primed = if priming || self.primed { true } else { self.prime(data)? };
+
         self.buf.clear();
         self.buf.render_uninit(None);
 
@@ -361,13 +369,8 @@ impl UsacDecoder {
                     elem_idx += 1;
                 }
                 UsacElementConfig::Ext(ext) => {
-                    let payload = Self::read_ext_element(ext, &mut bs)?;
-
-                    if ext.ext_type == UsacExtType::AudioPreroll && !priming && !self.primed {
-                        if let Some(payload) = payload {
-                            self.decode_preroll(&payload)?;
-                        }
-                    }
+                    // The pre-roll payload was handled by `prime()`.
+                    Self::read_ext_element(ext, &mut bs)?;
                 }
             }
         }
@@ -377,9 +380,53 @@ impl UsacDecoder {
             return decode_error("aac: usac access unit is truncated");
         }
 
-        self.primed = true;
+        if !priming {
+            self.primed = primed;
+        }
 
         Ok(())
+    }
+
+    /// Prime a decoder without history with the `AudioPreRoll()` of the access unit `data`.
+    /// Returns whether the decoder is primed. A pre-roll payload that cannot be decoded leaves
+    /// the decoder in its reset state and unprimed, so that the unit itself still decodes and a
+    /// later pre-roll can prime.
+    ///
+    /// The pre-roll element is looked for among the extension elements that open the unit: it
+    /// cannot be located behind a channel element without decoding the unit.
+    fn prime(&mut self, data: &[u8]) -> Result<bool> {
+        let mut bs = BitReaderLtr::new(data);
+
+        // usacIndependencyFlag.
+        bs.read_bool()?;
+
+        let mut payload = None;
+
+        for element in &self.config.elements {
+            let UsacElementConfig::Ext(ext) = element
+            else {
+                break;
+            };
+
+            let ext_payload = Self::read_ext_element(ext, &mut bs)?;
+
+            if ext.ext_type == UsacExtType::AudioPreroll {
+                payload = ext_payload;
+                break;
+            }
+        }
+
+        let Some(payload) = payload
+        else {
+            return Ok(true);
+        };
+
+        if self.decode_preroll(&payload).is_err() {
+            self.reset();
+            return Ok(false);
+        }
+
+        Ok(true)
     }
 
     /// Decode the pre-roll access units of an `AudioPreRoll()` payload (ISO/IEC 23003-3 Table
@@ -411,8 +458,7 @@ impl UsacDecoder {
             }
             au.resize(au_len + PAD_BITS / 8, 0);
 
-            // A pre-roll access unit that cannot be decoded only costs the priming.
-            let _ = self.decode_access_unit(&au, true);
+            self.decode_access_unit(&au, true)?;
         }
 
         Ok(())
@@ -830,6 +876,9 @@ impl AudioDecoder for UsacDecoder {
                     state.pcm.fill(0.0);
                     state.lpd.reset();
                     state.last_lpd = None;
+                    if let Some((mps, _)) = &mut state.mps {
+                        mps.reset();
+                    }
                     if let Some(sbr) = &mut state.sbr {
                         sbr.reset();
                     }
@@ -909,6 +958,8 @@ impl RegisterableAudioDecoder for UsacDecoder {
 mod tests {
     use super::*;
 
+    use symphonia_core::audio::Audio;
+
     fn fill_ext() -> UsacExtElementConfig {
         UsacExtElementConfig {
             ext_type: UsacExtType::Fill,
@@ -944,5 +995,110 @@ mod tests {
         let mut bs = BitReaderLtr::new(&data);
         assert!(UsacDecoder::read_ext_element(&fill_ext(), &mut bs).unwrap().is_none());
         assert_eq!(bs.bits_left(), 6);
+    }
+
+    /// An FD mono stream of the Fraunhofer encoder. Its configuration opens with an audio
+    /// pre-roll extension element and its first access unit carries a pre-roll payload.
+    const MONO_FIXTURE: &[u8] = include_bytes!("../../../tests/fixtures/usac_fd_mono.bin");
+
+    /// A decoder for the fixture stream (16-bit big-endian length prefixed records, the first
+    /// being the audio specific config) and its access units.
+    fn fixture() -> (UsacDecoder, Vec<&'static [u8]>) {
+        let mut records = vec![];
+        let mut pos = 0;
+        while pos < MONO_FIXTURE.len() {
+            let len = usize::from(u16::from_be_bytes([MONO_FIXTURE[pos], MONO_FIXTURE[pos + 1]]));
+            records.push(&MONO_FIXTURE[pos + 2..pos + 2 + len]);
+            pos += 2 + len;
+        }
+
+        let asc = records.remove(0);
+        let mut params = AudioCodecParameters::new();
+        params.for_codec(CODEC_ID_AAC).with_extra_data(asc.into());
+
+        (UsacDecoder::try_new(&params, &AudioDecoderOptions::default()).unwrap(), records)
+    }
+
+    fn decode_au(decoder: &mut UsacDecoder, au: &[u8]) -> Vec<f32> {
+        let mut data = au.to_vec();
+        data.resize(au.len() + PAD_BITS / 8, 0);
+        decoder.decode_access_unit(&data, false).unwrap();
+        decoder.buf.plane(0).unwrap().to_vec()
+    }
+
+    #[derive(Default)]
+    struct Bits {
+        bytes: Vec<u8>,
+        len: usize,
+    }
+
+    impl Bits {
+        fn put(&mut self, value: u32, n: usize) {
+            for i in (0..n).rev() {
+                if self.len % 8 == 0 {
+                    self.bytes.push(0);
+                }
+                *self.bytes.last_mut().unwrap() |= (((value >> i) & 1) as u8) << (7 - self.len % 8);
+                self.len += 1;
+            }
+        }
+
+        fn put_bytes(&mut self, bytes: &[u8]) {
+            for &b in bytes {
+                self.put(u32::from(b), 8);
+            }
+        }
+    }
+
+    /// The access unit `au` of the fixture with the payload of its pre-roll element (the first
+    /// element after the independency flag) replaced by the pre-roll units `pre`.
+    fn replace_preroll(decoder: &UsacDecoder, au: &[u8], pre: &[&[u8]]) -> Vec<u8> {
+        let UsacElementConfig::Ext(ext) = &decoder.config.elements[0]
+        else {
+            panic!("the fixture opens with an extension element");
+        };
+
+        let mut bs = BitReaderLtr::new(au);
+        bs.read_bool().unwrap();
+        UsacDecoder::read_ext_element(ext, &mut bs).unwrap();
+        let rest = au.len() * 8 - bs.bits_left() as usize;
+
+        let mut payload = Bits::default();
+        payload.put(0, 4); // configLen: no configuration
+        payload.put(0, 2); // applyCrossfade, reserved
+        payload.put(pre.len() as u32, 2); // numPreRollFrames
+        for pre_au in pre {
+            payload.put(pre_au.len() as u32, 16);
+            payload.put_bytes(pre_au);
+        }
+
+        let mut out = Bits::default();
+        out.put(u32::from(au[0] >> 7), 1); // usacIndependencyFlag
+        out.put(1, 1); // usacExtElementPresent
+        out.put(0, 1); // usacExtElementUseDefaultLength
+        assert!(payload.bytes.len() < 255);
+        out.put(payload.bytes.len() as u32, 8);
+        out.put_bytes(&payload.bytes);
+        for bit in rest..au.len() * 8 {
+            out.put(u32::from(au[bit / 8] >> (7 - bit % 8)) & 1, 1);
+        }
+
+        out.bytes
+    }
+
+    #[test]
+    fn undecodable_preroll_leaves_a_reset_unprimed_decoder() {
+        let (mut reference, aus) = fixture();
+        let clean = replace_preroll(&reference, aus[0], &[]);
+        let expected = decode_au(&mut reference, &clean);
+        assert!(reference.primed);
+
+        // The pre-roll unit is garbage that fails after it has touched the state.
+        let (mut decoder, _) = fixture();
+        let corrupt = replace_preroll(&decoder, aus[0], &[&[0xff; 24]]);
+        let actual = decode_au(&mut decoder, &corrupt);
+
+        assert!(!decoder.primed);
+        assert!(actual == expected);
     }
 }
