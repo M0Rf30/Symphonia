@@ -337,6 +337,9 @@ mod builder {
                 }
             }
 
+            // Cap the trim end so that dur + trim_start + trim_end == block_dur.
+            trim_end = trim_end.min(block_dur.saturating_sub(trim_start));
+
             let dur = block_dur.saturating_sub(trim_start).saturating_sub(trim_end);
 
             PacketBuilder { track_id, pts, dur: HasDur(dur), buf, dts, trim_start, trim_end }
@@ -515,6 +518,24 @@ mod tests {
         assert_eq!(
             trimmed_dur(-10, 100, Some(50)),
             (Duration::new(50), Duration::new(10), Duration::new(40))
+        );
+    }
+
+    #[test]
+    fn verify_trimmed_dur_packet_beyond_end() {
+        // The packet starts 50 frames after the end of the stream: all frames are trimmed.
+        assert_eq!(
+            trimmed_dur(200, 100, Some(150)),
+            (Duration::ZERO, Duration::ZERO, Duration::new(100))
+        );
+    }
+
+    #[test]
+    fn verify_trimmed_dur_packet_before_start_and_beyond_end() {
+        // The packet lies entirely before the start and beyond the end.
+        assert_eq!(
+            trimmed_dur(-200, 100, Some(-300)),
+            (Duration::ZERO, Duration::new(100), Duration::ZERO)
         );
     }
 

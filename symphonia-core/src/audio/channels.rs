@@ -334,6 +334,11 @@ impl Channels {
 
         match self {
             Channels::Positioned(positions) => {
+                // The position must be a member of the set.
+                if !positions.contains(pos) {
+                    return None;
+                }
+
                 // A channel position mask containing all positions that trail the selected
                 // position.
                 let trailing = positions.bits() & (pos.bits() - 1);
@@ -1260,4 +1265,20 @@ pub mod layouts {
     /// * Rear right
     /// * Low-frequency effects
     pub const CHANNEL_LAYOUT_OGG_7P1: Channels = CHANNEL_LAYOUT_7P1;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Channels, Position};
+
+    #[test]
+    fn verify_canonical_index_for_positioned_channel() {
+        let ch =
+            Channels::Positioned(Position::FRONT_LEFT | Position::FRONT_RIGHT | Position::LFE1);
+
+        assert_eq!(ch.get_canonical_index_for_positioned_channel(Position::FRONT_LEFT), Some(0));
+        assert_eq!(ch.get_canonical_index_for_positioned_channel(Position::LFE1), Some(2));
+        // Not in the set: must not alias another channel.
+        assert_eq!(ch.get_canonical_index_for_positioned_channel(Position::FRONT_CENTER), None);
+    }
 }
