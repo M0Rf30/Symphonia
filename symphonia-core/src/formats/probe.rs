@@ -317,8 +317,9 @@ pub trait ProbeableMetadata<'s>: MetadataReader + Scoreable {
 /// For example, the `Probe` cannot examine the extension or mime-type of the media because
 /// `MediaSourceStream` abstracts away such details. However, the embedder may have this information
 /// from a file path, HTTP header, email attachment metadata, etc. `Hint`s are optional, and won't
-/// lead the probe astray if they're wrong, but they may provide an informed initial guess and
-/// optimize the guessing process significantly especially as more formats are registered.
+/// lead the probe astray if they're wrong. A hint never excludes a reader, but when several
+/// readers in the same tier score equally for a stream, readers whose registered extensions or
+/// MIME types match the hint are preferred.
 #[derive(Clone, Debug, Default)]
 pub struct Hint {
     extension: Option<String>,
@@ -341,6 +342,23 @@ impl Hint {
     pub fn mime_type(&mut self, mime_type: &str) -> &mut Self {
         self.mime_type = Some(mime_type.to_owned());
         self
+    }
+
+    /// Returns `true` if the hinted extension or MIME type is one of those in `spec`.
+    ///
+    /// Extensions are compared case-insensitively, ignoring a leading dot. MIME types are compared
+    /// case-insensitively, ignoring any parameters (e.g., `; charset=utf-8`).
+    fn matches(&self, spec: &ProbeDataMatchSpec) -> bool {
+        let ext_match = self.extension.as_deref().is_some_and(|ext| {
+            let ext = ext.strip_prefix('.').unwrap_or(ext);
+            spec.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext))
+        });
+
+        ext_match
+            || self.mime_type.as_deref().is_some_and(|mime| {
+                let mime = mime.split(';').next().unwrap_or(mime).trim();
+                spec.mime_types.iter().any(|m| m.eq_ignore_ascii_case(mime))
+            })
     }
 }
 
@@ -634,7 +652,7 @@ impl Probe {
                 mss.seek_buffered_rel(-2);
 
                 if let Some(ProbeMatch::Metadata { factory, .. }) =
-                    self.find_best_reader(&mut mss, true)?
+                    self.find_best_reader(&mut mss, true, &Hint::new())?
                 {
                     let mut reader = factory(mss, meta_opts)?;
 
@@ -686,7 +704,7 @@ impl Probe {
 
     /// Scans the provided `MediaSourceStream` from the current position for the best next metadata
     /// or format reader. If a match is found, returns it.
-    fn next(&self, mss: &mut MediaSourceStream<'_>, _hint: &Hint) -> Result<ProbeMatch> {
+    fn next(&self, mss: &mut MediaSourceStream<'_>, hint: &Hint) -> Result<ProbeMatch> {
         let mut win = 0u16;
 
         let init_pos = mss.pos();
@@ -741,7 +759,7 @@ impl Probe {
                 mss.seek_buffered_rel(-2);
 
                 // Try to find the best matching format or metadata.
-                if let Some(probed) = self.find_best_reader(mss, false)? {
+                if let Some(probed) = self.find_best_reader(mss, false, hint)? {
                     warn_junk_bytes(mss.pos(), init_pos);
                     return Ok(probed);
                 }
@@ -811,10 +829,16 @@ impl Probe {
     }
 
     /// Find the best reader.
+    ///
+    /// The first tier (preferred, then standard, then fallback) containing a supported reader
+    /// wins. Within that tier, the reader with the highest score is selected. Ties are resolved
+    /// in favour of readers whose extensions or MIME types match the `hint`, and then in favour of
+    /// the reader registered first.
     fn find_best_reader(
         &self,
         mss: &mut MediaSourceStream<'_>,
         is_trailing: bool,
+        hint: &Hint,
     ) -> Result<Option<ProbeMatch>> {
         // Read upto a 16 byte window starting with the marker.
         let mut win = [0u8; 16];
@@ -828,21 +852,21 @@ impl Probe {
 
         // Try to find a descriptor in the preferred tier.
         if let Some(inst) =
-            find_reader(mss, &self.preferred, win, self.opts.max_score_depth, is_trailing)?
+            find_reader(mss, &self.preferred, win, self.opts.max_score_depth, is_trailing, hint)?
         {
             return Ok(Some(inst));
         }
 
         // Try to find a descriptor in the standard tier.
         if let Some(inst) =
-            find_reader(mss, &self.standard, win, self.opts.max_score_depth, is_trailing)?
+            find_reader(mss, &self.standard, win, self.opts.max_score_depth, is_trailing, hint)?
         {
             return Ok(Some(inst));
         }
 
         // Try to find a descriptor in the fallback tier.
         if let Some(inst) =
-            find_reader(mss, &self.fallback, win, self.opts.max_score_depth, is_trailing)?
+            find_reader(mss, &self.fallback, win, self.opts.max_score_depth, is_trailing, hint)?
         {
             return Ok(Some(inst));
         }
@@ -900,12 +924,22 @@ fn find_reader(
     win: &[u8],
     max_depth: u16,
     is_trailing: bool,
+    hint: &Hint,
 ) -> Result<Option<ProbeMatch>> {
     // Ensure the seekback buffer can satisfy the maximum amount of bytes a score operation may
     // consume.
     mss.ensure_seekback_buffer(usize::from(max_depth));
 
-    for desc in descs.iter().filter(|d| d.should_test(is_trailing)) {
+    // The highest score seen so far. Only a strictly higher score replaces it, so ties go to the
+    // candidate scored first: hinted candidates (first pass), then registration order.
+    let mut best: Option<(u8, ProbeMatch)> = None;
+
+    // Score candidates matching the hint first, then the rest.
+    let candidates = [true, false].into_iter().flat_map(|hinted| {
+        descs.iter().filter(move |d| d.should_test(is_trailing) && hint.matches(&d.spec) == hinted)
+    });
+
+    for desc in candidates {
         // If any format descriptor marker matches, then the format should be scored.
         let should_score = desc.spec.markers.iter().any(|marker| {
             // A marker longer than the bytes read (end of stream) cannot match.
@@ -920,21 +954,26 @@ fn find_reader(
 
         // If a match is found, then score using the descriptor's score function.
         if should_score {
-            // If supported, return the instantiate.
             if let Score::Supported(score) = score(desc, mss, max_depth)? {
                 match &desc.specific {
                     ProbeMatch::Format { info, .. } => {
-                        debug!("selected format reader '{}' with score {}", info.short_name, score)
+                        debug!("format reader '{}' scored {}", info.short_name, score)
                     }
                     ProbeMatch::Metadata { info, .. } => {
-                        debug!(
-                            "selected metadata reader '{}' with score {}",
-                            info.short_name, score
-                        )
+                        debug!("metadata reader '{}' scored {}", info.short_name, score)
                     }
                 }
 
-                return Ok(Some(desc.specific));
+                if best.is_none_or(|(best_score, _)| score > best_score) {
+                    best = Some((score, desc.specific));
+                }
+
+                // No later candidate can beat the maximum score.
+                if score == u8::MAX {
+                    break;
+                }
+
+                continue;
             }
 
             match &desc.specific {
@@ -948,7 +987,18 @@ fn find_reader(
         }
     }
 
-    Ok(None)
+    if let Some((score, specific)) = best {
+        match &specific {
+            ProbeMatch::Format { info, .. } => {
+                debug!("selected format reader '{}' with score {}", info.short_name, score)
+            }
+            ProbeMatch::Metadata { info, .. } => {
+                debug!("selected metadata reader '{}' with score {}", info.short_name, score)
+            }
+        }
+    }
+
+    Ok(best.map(|(_, specific)| specific))
 }
 
 fn score(
@@ -1190,7 +1240,7 @@ mod tests {
         let source = std::io::Cursor::new(bytes);
         let mut mss = MediaSourceStream::new(Box::new(source), Default::default());
 
-        match probe.find_best_reader(&mut mss, false).unwrap() {
+        match probe.find_best_reader(&mut mss, false, &Hint::new()).unwrap() {
             Some(ProbeMatch::Format { info, .. }) => Some(info.short_name),
             Some(ProbeMatch::Metadata { .. }) => panic!("unexpected metadata match"),
             None => None,
@@ -1209,6 +1259,100 @@ mod tests {
         // for the marker's zero bytes.
         assert_eq!(best_reader_short_name(b"AB"), None);
         assert_eq!(best_reader_short_name(b"AB\0"), None);
+    }
+
+    fn candidate(
+        name: &'static str,
+        exts: &'static [&'static str],
+        mimes: &'static [&'static str],
+        score: ScoreFn,
+    ) -> GenericProbeMatch {
+        GenericProbeMatch {
+            spec: ProbeDataMatchSpec { extensions: exts, mime_types: mimes, markers: &[b"SC"] },
+            score,
+            specific: ProbeMatch::Format {
+                info: FormatInfo { format: FormatId(0x5555), short_name: name, long_name: name },
+                factory: |_, _| crate::errors::unsupported_error("not instantiated"),
+            },
+            anchors: Anchors::None,
+        }
+    }
+
+    fn pick(probe: &Probe, hint: &Hint) -> Option<&'static str> {
+        let source = std::io::Cursor::new(b"SC rest of the stream");
+        let mut mss = MediaSourceStream::new(Box::new(source), Default::default());
+
+        match probe.find_best_reader(&mut mss, false, hint).unwrap() {
+            Some(ProbeMatch::Format { info, .. }) => Some(info.short_name),
+            Some(ProbeMatch::Metadata { .. }) => panic!("unexpected metadata match"),
+            None => None,
+        }
+    }
+
+    fn score_100(_: ScopedStream<&mut MediaSourceStream<'_>>) -> Result<Score> {
+        Ok(Score::Supported(100))
+    }
+
+    fn score_200(_: ScopedStream<&mut MediaSourceStream<'_>>) -> Result<Score> {
+        Ok(Score::Supported(200))
+    }
+
+    fn score_none(_: ScopedStream<&mut MediaSourceStream<'_>>) -> Result<Score> {
+        Ok(Score::Unsupported)
+    }
+
+    #[test]
+    fn best_score_in_tier_wins_over_registration_order() {
+        let mut probe = Probe::default();
+        probe.register(Tier::Standard, candidate("low", &[], &[], score_100));
+        probe.register(Tier::Standard, candidate("unsupported", &[], &[], score_none));
+        probe.register(Tier::Standard, candidate("high", &[], &[], score_200));
+
+        assert_eq!(pick(&probe, &Hint::new()), Some("high"));
+    }
+
+    #[test]
+    fn equal_scores_resolve_to_first_registered() {
+        let mut probe = Probe::default();
+        probe.register(Tier::Standard, candidate("a", &["a"], &[], score_100));
+        probe.register(Tier::Standard, candidate("b", &["b"], &[], score_100));
+
+        assert_eq!(pick(&probe, &Hint::new()), Some("a"));
+    }
+
+    #[test]
+    fn a_higher_tier_wins_regardless_of_score() {
+        let mut probe = Probe::default();
+        probe.register(Tier::Fallback, candidate("fallback", &[], &[], score_200));
+        probe.register(Tier::Standard, candidate("standard", &[], &[], score_100));
+
+        assert_eq!(pick(&probe, &Hint::new()), Some("standard"));
+    }
+
+    #[test]
+    fn hint_breaks_score_ties_but_does_not_override_scores() {
+        let mut probe = Probe::default();
+        probe.register(Tier::Standard, candidate("a", &["aa"], &["audio/a"], score_100));
+        probe.register(Tier::Standard, candidate("b", &["bb"], &["audio/b"], score_100));
+        probe.register(Tier::Standard, candidate("c", &["cc"], &[], score_200));
+
+        let mut hint = Hint::new();
+        hint.with_extension(".BB");
+        assert_eq!(pick(&probe, &hint), Some("c"));
+
+        let mut probe = Probe::default();
+        probe.register(Tier::Standard, candidate("a", &["aa"], &["audio/a"], score_100));
+        probe.register(Tier::Standard, candidate("b", &["bb"], &["audio/b"], score_100));
+
+        assert_eq!(pick(&probe, &hint), Some("b"));
+
+        let mut hint = Hint::new();
+        hint.mime_type("Audio/B; codecs=x");
+        assert_eq!(pick(&probe, &hint), Some("b"));
+
+        let mut hint = Hint::new();
+        hint.with_extension("zz");
+        assert_eq!(pick(&probe, &hint), Some("a"));
     }
 
     // Silence unused-import warnings for items only referenced through the dummy impl.

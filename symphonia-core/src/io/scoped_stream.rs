@@ -185,18 +185,31 @@ impl<B: ReadBytes + SeekBuffered> SeekBuffered for ScopedStream<B> {
 
     #[inline(always)]
     fn unread_buffer_len(&self) -> usize {
-        self.inner.unread_buffer_len().min((self.len - self.read) as usize)
+        let available = usize::try_from(self.len.saturating_sub(self.read)).unwrap_or(usize::MAX);
+        self.inner.unread_buffer_len().min(available)
     }
 
     #[inline(always)]
     fn read_buffer_len(&self) -> usize {
-        self.inner.read_buffer_len().min(self.read as usize)
+        self.inner.read_buffer_len().min(usize::try_from(self.read).unwrap_or(usize::MAX))
     }
 
     #[inline(always)]
     fn seek_buffered(&mut self, pos: u64) -> u64 {
         // Clamp the seekable position to within the bounds of the ScopedStream.
-        self.inner.seek_buffered(pos.clamp(self.start, self.start + self.len))
+        let pos = pos.clamp(self.start, self.start.saturating_add(self.len));
+        let cur = self.inner.pos();
+
+        // Seek relatively, which also clamps to the bounds of the buffered data and keeps the
+        // number of bytes read consistent with the position of the inner stream.
+        let delta = if pos >= cur {
+            (pos - cur).min(isize::MAX as u64) as isize
+        }
+        else {
+            -((cur - pos).min(isize::MAX as u64) as isize)
+        };
+
+        self.seek_buffered_rel(delta)
     }
 
     #[inline(always)]
@@ -204,7 +217,67 @@ impl<B: ReadBytes + SeekBuffered> SeekBuffered for ScopedStream<B> {
         // Clamp the delta value such that the absolute position after the buffered seek will be
         // within the bounds of the ScopedStream.
         let max_back = self.read.min(isize::MAX as u64) as isize;
-        let max_forward = (self.len - self.read).min(isize::MAX as u64) as isize;
-        self.inner.seek_buffered_rel(delta.clamp(-max_back, max_forward))
+        let max_forward = self.len.saturating_sub(self.read).min(isize::MAX as u64) as isize;
+        let new_pos = self.inner.seek_buffered_rel(delta.clamp(-max_back, max_forward));
+
+        // Keep the number of bytes read consistent with the position of the inner stream.
+        self.read = new_pos.saturating_sub(self.start).min(self.len);
+        new_pos
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io::MediaSourceStream;
+
+    fn mss() -> MediaSourceStream<'static> {
+        let data: Vec<u8> = (0..64).collect();
+        MediaSourceStream::new(Box::new(io::Cursor::new(data)), Default::default())
+    }
+
+    #[test]
+    fn verify_seek_buffered_rel_keeps_read_consistent() {
+        let mut mss = mss();
+        mss.ignore_bytes(4).unwrap();
+
+        let mut scoped = ScopedStream::new(&mut mss, 8);
+        scoped.ignore_bytes(6).unwrap();
+        assert_eq!(scoped.bytes_read(), 6);
+
+        assert_eq!(scoped.seek_buffered_rel(-4), 6);
+        assert_eq!(scoped.bytes_read(), 2);
+        assert_eq!(scoped.bytes_available(), 6);
+
+        // A backwards seek is limited to the start of the scope, a forward seek to its end.
+        scoped.seek_buffered_rel(-100);
+        assert_eq!(scoped.bytes_read(), 0);
+        scoped.seek_buffered_rel(100);
+        assert_eq!(scoped.bytes_read(), 8);
+        assert_eq!(scoped.bytes_available(), 0);
+    }
+
+    #[test]
+    fn verify_seek_buffered_keeps_read_consistent() {
+        let mut mss = mss();
+        mss.ignore_bytes(4).unwrap();
+
+        let mut scoped = ScopedStream::new(&mut mss, 8);
+        scoped.ignore_bytes(8).unwrap();
+
+        assert_eq!(scoped.seek_buffered(6), 6);
+        assert_eq!(scoped.bytes_read(), 2);
+        assert_eq!(scoped.read_byte().unwrap(), 6);
+
+        // Out of scope positions are clamped, and a scope length that overflows is not fatal.
+        assert_eq!(scoped.seek_buffered(u64::MAX), 12);
+        assert_eq!(scoped.bytes_read(), 8);
+        assert_eq!(scoped.seek_buffered(0), 4);
+        assert_eq!(scoped.bytes_read(), 0);
+
+        let mut unbounded = ScopedStream::new(&mut mss, u64::MAX);
+        let start = unbounded.inner().pos();
+        let pos = unbounded.seek_buffered(u64::MAX);
+        assert_eq!(unbounded.bytes_read(), pos - start);
     }
 }

@@ -120,14 +120,7 @@ impl Fft {
         }
 
         // Start FFT recursion.
-        match n {
-            1 => (),
-            2 => fft2(x.try_into().expect("length equals n")),
-            4 => fft4(x.try_into().expect("length equals n")),
-            8 => fft8(x.try_into().expect("length equals n")),
-            16 => fft16(x.try_into().expect("length equals n")),
-            _ => transform(x, n),
-        }
+        dispatch(x, n);
     }
 
     /// Calculate the FFT.
@@ -142,14 +135,7 @@ impl Fft {
         }
 
         // Start FFT recursion.
-        match n {
-            1 => (),
-            2 => fft2(y.try_into().expect("length equals n")),
-            4 => fft4(y.try_into().expect("length equals n")),
-            8 => fft8(y.try_into().expect("length equals n")),
-            16 => fft16(y.try_into().expect("length equals n")),
-            _ => transform(y, n),
-        }
+        dispatch(y, n);
     }
 }
 
@@ -188,7 +174,7 @@ impl Ifft {
         }
 
         // Do the forward FFT.
-        transform(y, n);
+        dispatch(y, n);
 
         // Output scaling.
         let c = 1.0 / n as f32;
@@ -217,7 +203,7 @@ impl Ifft {
         }
 
         // Do the forward FFT.
-        transform(x, n);
+        dispatch(x, n);
 
         // Output scaling.
         let c = 1.0 / n as f32;
@@ -225,6 +211,19 @@ impl Ifft {
         for x in x.iter_mut() {
             *x = Complex { re: c * x.im, im: c * x.re };
         }
+    }
+}
+
+/// Compute the FFT of the bit-reversed `x` of power-of-two length `n`, dispatching to a
+/// specialized function for small sizes.
+fn dispatch(x: &mut [Complex<f32>], n: usize) {
+    match n {
+        1 => (),
+        2 => fft2(x.try_into().expect("length equals n")),
+        4 => fft4(x.try_into().expect("length equals n")),
+        8 => fft8(x.try_into().expect("length equals n")),
+        16 => fft16(x.try_into().expect("length equals n")),
+        _ => transform(x, n),
     }
 }
 

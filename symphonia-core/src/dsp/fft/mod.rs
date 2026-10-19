@@ -249,6 +249,46 @@ mod tests {
     }
 
     #[test]
+    fn verify_small_sizes_reversible_and_match_naive() {
+        for n in (0..=6).map(|p| 1usize << p) {
+            let input: Vec<Complex<f32>> = (0..n)
+                .map(|i| Complex { re: (i as f32 * 0.7).sin() + 0.5, im: (i as f32 * 1.3).cos() })
+                .collect();
+
+            let mut fft = Fft::new(n);
+            let mut ifft = Ifft::new(n);
+
+            // Out-of-place round trip.
+            let mut freq = vec![Complex::default(); n];
+            let mut out = vec![Complex::default(); n];
+            fft.fft(&input, &mut freq);
+            ifft.ifft(&freq, &mut out);
+
+            for (&a, &e) in out.iter().zip(input.iter()) {
+                assert!(check_complex(a, e, 0.00001), "ifft(fft(x)) != x for n={n}");
+            }
+
+            // The IFFT must match the naive IDFT.
+            let mut naive = vec![Complex::default(); n];
+            idft_naive(&input, &mut naive);
+            ifft.ifft(&input, &mut out);
+
+            for (&a, &e) in out.iter().zip(naive.iter()) {
+                assert!(check_complex(a, e, 0.00001), "ifft != idft for n={n}");
+            }
+
+            // In-place round trip.
+            let mut buf = input.clone();
+            fft.fft_inplace(&mut buf);
+            ifft.ifft_inplace(&mut buf);
+
+            for (&a, &e) in buf.iter().zip(input.iter()) {
+                assert!(check_complex(a, e, 0.00001), "in-place round trip != x for n={n}");
+            }
+        }
+    }
+
+    #[test]
     fn verify_fft_extreme_sizes() {
         for n in [1, 2, super::MAX_SIZE] {
             assert_eq!(Fft::new(n).size(), n);

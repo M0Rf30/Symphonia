@@ -80,9 +80,9 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {
-    fn cause(&self) -> Option<&dyn error::Error> {
-        match *self {
-            Error::IoError(ref err) => Some(err),
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        match self {
+            Error::IoError(err) => Some(err),
             Error::DecodeError(_) => None,
             Error::SeekError(_) => None,
             Error::Unsupported(_) => None,
