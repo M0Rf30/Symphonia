@@ -16,7 +16,7 @@ use symphonia_core::codecs::CodecParameters;
 use symphonia_core::codecs::audio::AudioCodecParameters;
 use symphonia_core::common::FourCc;
 use symphonia_core::errors::{
-    Error, Result, SeekErrorKind, decode_error, seek_error, unsupported_error,
+    Error, Result, SeekErrorKind, decode_error, limit_error, seek_error, unsupported_error,
 };
 use symphonia_core::formats::TrackFlags;
 use symphonia_core::formats::prelude::*;
@@ -630,8 +630,11 @@ impl<'s> RealReader<'s> {
 
             let stream = streams.iter_mut().find(|s| s.track_id == stream_id);
 
+            // The size of an entry: 2 + 4 + (4 or 8) + 4 bytes.
+            let entry_len = if ver == 0 { 14 } else { 18 };
+
             let fits = match total {
-                Some(total) => total.saturating_sub(mss.pos()) / 14 >= u64::from(n_pkts),
+                Some(total) => total.saturating_sub(mss.pos()) / entry_len >= u64::from(n_pkts),
                 None => n_pkts <= MAX_INDEX_ENTRIES,
             };
 
@@ -689,18 +692,25 @@ impl<'s> RealReader<'s> {
         let (w, h) = (audio.frame_size, audio.sub_packet_h);
 
         let read_len = match audio.interleave {
-            Interleave::Genr | Interleave::Sipr => w,
-            Interleave::Int4 => h / 2 * audio.coded_frame_size,
-            Interleave::None if w == 0 => RAW_PACKET_LEN,
-            Interleave::None => audio.coded_frame_size * h / 2,
+            Interleave::Genr | Interleave::Sipr => Some(w),
+            Interleave::Int4 => (h / 2).checked_mul(audio.coded_frame_size),
+            Interleave::None if w == 0 => Some(RAW_PACKET_LEN),
+            Interleave::None => audio.coded_frame_size.checked_mul(h).map(|n| n / 2),
             Interleave::Vbr => return unsupported_error("real: variable bit rate in a .ra file"),
+        };
+
+        // Both the packet and the group are buffered: bound them like the interleaver group.
+        let read_len = match read_len {
+            Some(len) if len as u64 <= header::MAX_GROUP_LEN => len,
+            _ => return limit_error("real: packet size is too large"),
         };
 
         if read_len == 0 {
             return decode_error("real: invalid packet size");
         }
 
-        let group_len = if audio.is_grouped() { (read_len * h) as u64 } else { read_len as u64 };
+        let group_len =
+            if audio.is_grouped() { read_len as u64 * h as u64 } else { read_len as u64 };
 
         let text = audio.text.clone();
 

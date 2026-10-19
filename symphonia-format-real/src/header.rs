@@ -24,7 +24,7 @@ use symphonia_core::io::ReadBytes;
 const MAX_EXTRA_DATA_LEN: u32 = 1 << 20;
 
 /// The largest buffer of the de-interleaver (`frame_size * sub_packet_h`).
-const MAX_GROUP_LEN: u64 = 1 << 24;
+pub(crate) const MAX_GROUP_LEN: u64 = 1 << 24;
 
 /// The size of the packets of a RealAudio 1.0 (14.4k) stream that are read from a `.ra` file, in
 /// FFmpeg's `RAW_PACKET_SIZE`. It is a multiple of the frame size of 20 bytes.
