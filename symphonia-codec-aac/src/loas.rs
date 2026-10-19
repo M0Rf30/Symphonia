@@ -181,8 +181,15 @@ impl<'s> LoasReader<'s> {
 
         // The timeline of the track is in decoded frames, which are `ratio` per frame of the core
         // codec.
-        let ratio = u64::from(asc.output_sample_rate() / asc.sample_rate).max(1);
-        let packet_dur = Duration::new(asc.samples as u64 * ratio);
+        // A USAC stream carries the output frame length (the core length scaled by its eSBR ratio)
+        // in its config.
+        let packet_dur = match &asc.usac {
+            Some(usac) => Duration::new(usac.output_frame_length() as u64),
+            None => {
+                let ratio = u64::from(asc.output_sample_rate() / asc.sample_rate).max(1);
+                Duration::new(asc.samples as u64 * ratio)
+            }
+        };
 
         let mut codec_params = AudioCodecParameters::new();
 

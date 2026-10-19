@@ -780,7 +780,13 @@ impl UsacDecoder {
         else {
             let mut l = bs.read_bits_leq32(8)?;
             if l == 255 {
-                l += bs.read_bits_leq32(16)? - 2;
+                // ISO/IEC 23003-3 `UsacExtElement()`: `len += valueAdd - 2`, so a `valueAdd` below
+                // 2 is invalid.
+                let value_add = bs.read_bits_leq32(16)?;
+                match value_add.checked_sub(2) {
+                    Some(add) => l += add,
+                    None => return decode_error("aac: invalid usac extension payload length"),
+                }
             }
             l
         };
@@ -896,5 +902,47 @@ impl RegisterableAudioDecoder for UsacDecoder {
                 "Unified Speech and Audio Coding"
             )]
         )]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fill_ext() -> UsacExtElementConfig {
+        UsacExtElementConfig {
+            ext_type: UsacExtType::Fill,
+            default_length: None,
+            payload_frag: false,
+            config_data: Box::default(),
+        }
+    }
+
+    /// Present (1), explicit length (0), the escape 255, a 16-bit `valueAdd`, then `payload`
+    /// zero bytes.
+    fn escaped_length_element(value_add: u16, payload: usize) -> Vec<u8> {
+        let bits = (0b10u32 << 24) | (0xff << 16) | u32::from(value_add);
+        // 26 bits, MSB first, padded to 4 bytes.
+        let mut data = (bits << 6).to_be_bytes().to_vec();
+        data.extend(std::iter::repeat_n(0, payload));
+        data
+    }
+
+    #[test]
+    fn ext_element_length_escape_below_two_is_an_error() {
+        for value_add in [0, 1] {
+            let data = escaped_length_element(value_add, 300);
+            let mut bs = BitReaderLtr::new(&data);
+            assert!(UsacDecoder::read_ext_element(&fill_ext(), &mut bs).is_err());
+        }
+    }
+
+    #[test]
+    fn ext_element_length_escape_adds_value_minus_two() {
+        // 255 + (5 - 2) = 258 bytes are skipped.
+        let data = escaped_length_element(5, 258);
+        let mut bs = BitReaderLtr::new(&data);
+        assert!(UsacDecoder::read_ext_element(&fill_ext(), &mut bs).unwrap().is_none());
+        assert_eq!(bs.bits_left(), 6);
     }
 }
