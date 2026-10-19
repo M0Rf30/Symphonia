@@ -301,14 +301,13 @@ impl Ac3Es {
     /// it. Returns the header if the buffer holds the entire frame.
     fn sync(&mut self) -> Option<Ac3Header> {
         loop {
+            let pos = self
+                .buf
+                .seek_marker(|w| w.starts_with(&[0x0b, 0x77]) || w.starts_with(&[0x77, 0x0b]), 2)?;
+
+            self.buf.consume(pos);
+
             let data = &self.buf[..];
-
-            let pos = data.windows(2).position(|w| w == [0x0b, 0x77] || w == [0x77, 0x0b])?;
-
-            if pos > 0 {
-                self.buf.consume(pos);
-                continue;
-            }
 
             if data.len() < AC3_MIN_HEADER {
                 return None;
@@ -521,13 +520,19 @@ impl EsParser for Ac4Es {
 
     fn next_frame(&mut self, flush: bool) -> Option<EsFrame> {
         loop {
-            let data = &self.buf[..];
-            let pos = data.windows(2).position(|w| w == [0xac, 0x40] || w == [0xac, 0x41])?;
+            let Some(pos) = self
+                .buf
+                .seek_marker(|w| w.starts_with(&[0xac, 0x40]) || w.starts_with(&[0xac, 0x41]), 2)
+            else {
+                if flush {
+                    self.buf.clear();
+                }
+                return None;
+            };
 
-            if pos > 0 {
-                self.buf.consume(pos);
-                continue;
-            }
+            self.buf.consume(pos);
+
+            let data = &self.buf[..];
             if data.len() < AC4_MIN_HEADER {
                 if flush {
                     self.buf.clear();
@@ -804,10 +809,12 @@ pub fn dca_exss_size(buf: &[u8]) -> Option<usize> {
 }
 
 /// Find the next DTS sync word, core or extension substream, at or after `from`.
+fn dca_is_marker(buf: &[u8]) -> bool {
+    dca_core_form(buf).is_some() || buf.starts_with(&DCA_SYNC_EXSS.to_be_bytes())
+}
+
 fn dca_find_marker(buf: &[u8], from: usize) -> Option<usize> {
-    (from..buf.len().saturating_sub(5)).find(|&i| {
-        dca_core_form(&buf[i..]).is_some() || buf[i..].starts_with(&DCA_SYNC_EXSS.to_be_bytes())
-    })
+    (from..buf.len().saturating_sub(5)).find(|&i| dca_is_marker(&buf[i..]))
 }
 
 /// A DTS elementary stream parser. A frame is a core substream frame and the extension substream
@@ -833,12 +840,9 @@ impl EsParser for DcaEs {
     fn next_frame(&mut self, flush: bool) -> Option<EsFrame> {
         loop {
             // Skip to the next core frame. Extension substreams without a core are not decoded.
-            let pos = match dca_find_marker(&self.buf, 0) {
+            let pos = match self.buf.seek_marker(dca_is_marker, 6) {
                 Some(pos) => pos,
                 None => {
-                    // Keep the tail that may hold a partial sync word.
-                    let keep = self.buf.len().min(5);
-                    self.buf.consume(self.buf.len() - keep);
                     if flush {
                         self.buf.clear();
                     }
@@ -1135,28 +1139,22 @@ impl EsParser for TrueHdEs {
     fn next_frame(&mut self, flush: bool) -> Option<EsFrame> {
         loop {
             if !self.in_sync {
-                // Find the next major sync: it is 4 bytes into the access unit.
-                let data = &self.buf[..];
-
-                let pos = data.windows(4).position(|w| {
-                    u32::from_be_bytes([w[0], w[1], w[2], w[3]]) & 0xffff_fffe == 0xf872_6fba
-                });
+                // Find the next major sync: it is 4 bytes into the access unit, so the window
+                // covers the access unit header and the sync word.
+                let pos = self.buf.seek_marker(
+                    |w| {
+                        u32::from_be_bytes([w[MLP_AU_HEADER], w[5], w[6], w[7]]) & 0xffff_fffe
+                            == 0xf872_6fba
+                    },
+                    MLP_AU_HEADER + 4,
+                );
 
                 match pos {
-                    Some(pos) if pos >= MLP_AU_HEADER => {
-                        self.buf.consume(pos - MLP_AU_HEADER);
+                    Some(pos) => {
+                        self.buf.consume(pos);
                         self.in_sync = true;
                     }
-                    Some(pos) => {
-                        // The access unit header of this major sync was not received.
-                        self.buf.consume(pos + 1);
-                        continue;
-                    }
                     None => {
-                        // Keep the tail that may hold the access unit header and a partial sync
-                        // word.
-                        let keep = self.buf.len().min(MLP_AU_HEADER + 3);
-                        self.buf.consume(self.buf.len() - keep);
                         if flush {
                             self.buf.clear();
                         }
@@ -1247,5 +1245,123 @@ impl EsParser for TrueHdEs {
 
     fn frame_grid(&self) -> u64 {
         self.samples
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CHUNK: usize = 64 * 1024;
+
+    fn ac4_frame() -> Vec<u8> {
+        for r in 0u8..16 {
+            let mut f = vec![0u8; 20];
+            f[..4].copy_from_slice(&[0xac, 0x40, 0x00, 16]);
+            f[5] = 0b0000_0100 | (r >> 2);
+            f[6] = (r & 3) << 6;
+            if Ac4Header::parse(&f).is_some() {
+                return f;
+            }
+        }
+        panic!("no valid AC-4 frame");
+    }
+
+    #[test]
+    fn verify_ac3_buffer_bounded_without_sync() {
+        let mut es = Ac3Es::new();
+        for _ in 0..(8 * 1024 * 1024 / CHUNK) {
+            es.push(&[0u8; CHUNK]);
+            assert!(es.next_frame(false).is_none());
+            assert!(es.buf.len() < 16);
+        }
+    }
+
+    #[test]
+    fn verify_ac4_buffer_bounded_without_sync() {
+        let mut es = Ac4Es::new();
+        for _ in 0..(8 * 1024 * 1024 / CHUNK) {
+            es.push(&[0u8; CHUNK]);
+            assert!(es.next_frame(false).is_none());
+            assert!(es.buf.len() < 16);
+        }
+    }
+
+    #[test]
+    fn verify_dca_and_truehd_buffer_bounded_without_sync() {
+        let mut dca = DcaEs::new();
+        let mut thd = TrueHdEs::new();
+        for _ in 0..(8 * 1024 * 1024 / CHUNK) {
+            dca.push(&[0u8; CHUNK]);
+            thd.push(&[0u8; CHUNK]);
+            assert!(dca.next_frame(false).is_none());
+            assert!(thd.next_frame(false).is_none());
+            assert!(dca.buf.len() < 16);
+            assert!(thd.buf.len() < 16);
+        }
+    }
+
+    #[test]
+    fn verify_ac4_frames_found_after_garbage() {
+        let frame = ac4_frame();
+        let mut es = Ac4Es::new();
+        for _ in 0..64 {
+            es.push(&[0u8; CHUNK]);
+            assert!(es.next_frame(false).is_none());
+        }
+        // A frame split across pushes, preceded by a lone sync byte.
+        let mut data = vec![0xac];
+        data.extend_from_slice(&frame);
+        data.extend_from_slice(&frame);
+        es.push(&data[..10]);
+        assert!(es.next_frame(false).is_none());
+        es.push(&data[10..]);
+        let f = es.next_frame(false).expect("frame");
+        assert_eq!(f.data.len(), frame.len());
+        assert!(es.next_frame(true).is_some());
+    }
+
+    #[test]
+    fn verify_ac3_frames_found_after_garbage() {
+        let file = include_bytes!("../../../symphonia-codec-ac3/tests/data/ac3_mono.ac3");
+        let size = Ac3Header::parse(file).expect("header").frame_size;
+        let frame = &file[..size];
+
+        let mut es = Ac3Es::new();
+        for _ in 0..64 {
+            es.push(&[0u8; CHUNK]);
+            assert!(es.next_frame(false).is_none());
+        }
+        // A lone sync byte, then two frames split across pushes.
+        let mut data = vec![0x0b];
+        data.extend_from_slice(frame);
+        data.extend_from_slice(frame);
+        data.extend_from_slice(frame);
+        es.push(&data[..10]);
+        assert!(es.next_frame(false).is_none());
+        es.push(&data[10..]);
+        let f = es.next_frame(false).expect("frame");
+        assert_eq!(&f.data[..], frame);
+        assert!(es.next_frame(false).is_some());
+    }
+
+    #[test]
+    fn verify_truehd_skips_sync_without_au_header() {
+        let sync = [0xf8, 0x72, 0x6f, 0xba];
+        let mut data = Vec::new();
+        // A major sync at the very start: its access unit header was not received.
+        data.extend_from_slice(&sync);
+        data.extend_from_slice(&[0u8; 20]);
+        let au_start = data.len();
+        // An access unit of 32 bytes (16 words) with a major sync.
+        data.extend_from_slice(&[0x00, 0x10, 0, 0]);
+        data.extend_from_slice(&sync);
+        data.extend_from_slice(&[0u8; 24]);
+
+        let mut es = TrueHdEs::new();
+        es.push(&data[..au_start + 10]);
+        assert!(es.next_frame(false).is_none());
+        assert!(es.in_sync);
+        assert_eq!(es.buf.base(), au_start as u64);
     }
 }

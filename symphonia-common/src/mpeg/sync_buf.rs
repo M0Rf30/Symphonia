@@ -21,6 +21,8 @@ pub(crate) struct SyncBuffer {
     pos: usize,
     /// The absolute offset of the first unconsumed byte.
     base: u64,
+    /// The number of unconsumed bytes at the start that are known not to start a marker.
+    scanned: usize,
 }
 
 impl SyncBuffer {
@@ -51,11 +53,40 @@ impl SyncBuffer {
         let n = n.min(self.len());
 
         self.pos += n;
+        self.scanned = self.scanned.saturating_sub(n);
         self.base += n as u64;
 
         if self.pos == self.buf.len() {
             self.buf.clear();
             self.pos = 0;
+        }
+    }
+
+    /// Find the first offset at or after the search cursor where `pred` accepts the unconsumed
+    /// data from that offset on, which is at least `marker_len` bytes long.
+    ///
+    /// If no marker is found, all data that cannot be the start of a marker is discarded, keeping
+    /// the last `marker_len - 1` bytes that may hold a partial marker, and `None` is returned. The
+    /// search cursor lets a repeated search after `consume` skip the data already searched.
+    pub fn seek_marker(
+        &mut self,
+        pred: impl Fn(&[u8]) -> bool,
+        marker_len: usize,
+    ) -> Option<usize> {
+        let data = &self.buf[self.pos..];
+        let last = (data.len() + 1).saturating_sub(marker_len);
+
+        match (self.scanned..last).find(|&i| pred(&data[i..])) {
+            Some(i) => {
+                self.scanned = i;
+                Some(i)
+            }
+            None => {
+                let drop = last.min(data.len());
+                self.consume(drop);
+                self.scanned = 0;
+                None
+            }
         }
     }
 
@@ -96,5 +127,25 @@ mod tests {
         assert!(buf.is_empty());
         assert_eq!(buf.base(), 7);
         assert_eq!(buf.end_offset(), 7);
+    }
+
+    #[test]
+    fn verify_seek_marker_bounds_buffer() {
+        let mut buf = SyncBuffer::default();
+        let zeros = [0u8; 4096];
+
+        for _ in 0..(4 * 256) {
+            buf.push(&zeros);
+            assert_eq!(buf.seek_marker(|w| w.starts_with(&[0x0b, 0x77]), 2), None);
+            assert!(buf.len() <= 1);
+        }
+
+        // A marker split across pushes is kept.
+        buf.push(&[0x0b]);
+        assert_eq!(buf.seek_marker(|w| w.starts_with(&[0x0b, 0x77]), 2), None);
+        buf.push(&[0x77, 9]);
+        assert_eq!(buf.seek_marker(|w| w.starts_with(&[0x0b, 0x77]), 2), Some(0));
+        buf.consume(1);
+        assert_eq!(buf.seek_marker(|w| w.starts_with(&[0x0b, 0x77]), 2), None);
     }
 }
