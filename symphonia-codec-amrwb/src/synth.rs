@@ -15,6 +15,7 @@
 
 use core::f64::consts::LOG2_10;
 
+use crate::dtx::{CnFrame, Dtx, Rx, SidData, State};
 use crate::lsp::{amrwb_lsp2lpc, lsf2lspd, set_min_dist_lsf};
 use crate::params::{
     Frame, P_DELAY_MAX, SubFrame, decode_fixed_vector, decode_pitch_lag_high, decode_pitch_lag_low,
@@ -171,6 +172,19 @@ fn interpolate_pitch(buf: &mut [f32; EXC_BUF_LEN], in_start: usize, frac_pos: us
     }
 }
 
+/// High-band processing selection of a subframe.
+#[derive(Clone, Copy)]
+struct SubframeHb {
+    /// Quantized high-band gain index, if the gain is not derived from the low band.
+    gain_idx: Option<u16>,
+    /// Voice activity flag for deriving the gain from the low band.
+    vad: u16,
+    /// Synthesize with a 20th order filter extrapolated from the ISFs (6.60 kbit/s speech).
+    extrapolate: bool,
+    /// Apply the 7 kHz low-pass filter (23.85 kbit/s).
+    low_pass: bool,
+}
+
 /// Decoder state of the AMR-WB core (one channel).
 #[derive(Clone)]
 pub struct Core {
@@ -227,6 +241,16 @@ pub struct Core {
     /// White noise generator for the high-band excitation.
     prng: Lfg,
     first_frame: bool,
+
+    /// Comfort noise generation (discontinuous transmission) state.
+    dtx: Dtx,
+    /// Mode of the most recent speech frame; the comfort noise uses it to select the high-band
+    /// processing.
+    last_mode: usize,
+    /// Number of consecutive speech frames with the voice activity flag cleared.
+    vad_hist: u16,
+    /// Sum of the squares of the excitation of the frame being decoded.
+    exc_energy: f64,
 }
 
 impl Core {
@@ -264,6 +288,10 @@ impl Core {
             lpf_7_mem: [0.0; HB_FIR_SIZE],
             prng: Lfg::new(),
             first_frame: true,
+            dtx: Dtx::new(),
+            last_mode: MODE_6K60,
+            vad_hist: 0,
+            exc_energy: 0.0,
         }
     }
 
@@ -281,6 +309,7 @@ impl Core {
         set_min_dist_lsf(&mut self.isf_cur[..LP_ORDER - 1], MIN_ISF_SPACING);
 
         let stab_fac = stability_factor(&self.isf_cur, &self.isf_past_final);
+        let isf_dtx = self.isf_cur;
 
         self.isf_cur[LP_ORDER - 1] *= 2.0;
         lsf2lspd(&mut self.isp[3], &self.isf_cur);
@@ -296,6 +325,9 @@ impl Core {
             amrwb_lsp2lpc(&self.isp[sub], &mut self.lp_coef[sub], LP_ORDER);
         }
 
+        self.exc_energy = 0.0;
+        self.last_mode = mode;
+
         for (sub, (cur, sub_buf)) in
             frame.subframe.iter().zip(out.chunks_exact_mut(SFR_SIZE_16K)).enumerate()
         {
@@ -305,6 +337,87 @@ impl Core {
         // Update the state for the next frame.
         self.isp_sub4_past = self.isp[3];
         self.isf_past_final = self.isf_cur;
+
+        // Track the background noise for the comfort noise generation.
+        self.vad_hist = if frame.vad == 0 { self.vad_hist.saturating_add(1) } else { 0 };
+        self.dtx.activity_update(&isf_dtx, self.exc_energy);
+    }
+
+    /// Advances the DTX receive state machine for a frame of any type and returns the state the
+    /// frame must be synthesized in.
+    pub fn rx_state(&mut self, rx: Rx) -> State {
+        let state = self.dtx.rx_handler(rx);
+        if state == State::Speech {
+            self.dtx.global_state = State::Speech;
+        }
+        state
+    }
+
+    /// Generates a frame of comfort noise (TS 26.192) for a frame whose [`Core::rx_state`] was not
+    /// [`State::Speech`]. `rx` is the type of the frame, `sid` the decoded SID update payload.
+    pub fn decode_comfort_noise(
+        &mut self,
+        rx: Rx,
+        state: State,
+        sid: Option<&SidData>,
+        out: &mut [f32; FRAME_SAMPLES],
+    ) {
+        let CnFrame { mut isf, exc } = self.dtx.decode(state, sid);
+
+        // The high band of the noise is processed according to the bit rate of the last speech
+        // frame. If that was 23.85 kbit/s, the reference decoder reads its high-band gain index
+        // from a constant (1) for all frames but the lost or empty ones.
+        let mode = self.last_mode;
+        let bad = matches!(rx, Rx::NoData | Rx::SpeechBad | Rx::SpeechLost);
+        let hb_idx = (mode == MODE_23K85 && !bad).then_some(1);
+
+        // One set of LPC coefficients is used for the whole frame.
+        let mut isp = [0.0f64; LP_ORDER];
+        let mut lp = [0.0f32; LP_ORDER];
+        let isf_cn = isf;
+        isf[LP_ORDER - 1] *= 2.0;
+        lsf2lspd(&mut isp, &isf);
+        amrwb_lsp2lpc(&isp, &mut lp, LP_ORDER);
+        self.lp_coef = [lp; 4];
+
+        let vad = u16::from(self.vad_hist == 0);
+
+        for (sub, (sub_exc, sub_buf)) in
+            exc.chunks_exact(SFR_SIZE).zip(out.chunks_exact_mut(SFR_SIZE_16K)).enumerate()
+        {
+            let mut sub_exc_arr = [0.0f32; SFR_SIZE];
+            sub_exc_arr.copy_from_slice(sub_exc);
+
+            lp_synthesis(&mut self.samples_az, LP_ORDER, &self.lp_coef[sub], &sub_exc_arr);
+
+            self.finish_subframe(
+                sub,
+                sub_buf,
+                &sub_exc_arr,
+                SubframeHb {
+                    gain_idx: hb_idx,
+                    vad,
+                    extrapolate: false,
+                    low_pass: mode == MODE_23K85,
+                },
+            );
+        }
+
+        // The speech decoder memories are reset (`pvDecoder_AmrWb_Reset` without the codec
+        // memories); the past ISF vector is that of the noise.
+        self.excitation_buf.fill(0.0);
+        self.isf_q_past = [0.0; LP_ORDER];
+        self.first_frame = true;
+        self.pitch_gain = [0.0; 6];
+        self.fixed_gain = [0.0; 2];
+        self.tilt_coef = 0.0;
+        self.prev_ir_filter_nr = 0;
+        self.prev_tr_gain = 0.0;
+
+        self.isf_cur = isf_cn;
+        self.isf_cur[LP_ORDER - 1] *= 2.0;
+        self.isf_past_final = self.isf_cur;
+        self.dtx.global_state = state;
     }
 
     fn decode_subframe(
@@ -345,6 +458,7 @@ impl Core {
             *e *= self.pitch_gain[0];
             *e += self.fixed_gain[0] * self.fixed_vector[i];
             *e = e.trunc();
+            self.exc_energy += f64::from(*e) * f64::from(*e);
         }
 
         // Post-processing of the excitation elements.
@@ -367,6 +481,25 @@ impl Core {
         let mut synth_exc = [0.0f32; SFR_SIZE];
         self.synthesis(mode, sub, &mut synth_exc, synth_fixed_gain, &synth_fixed_vector);
 
+        let hb = SubframeHb {
+            gain_idx: (mode == MODE_23K85).then_some(cur.hb_gain),
+            vad,
+            extrapolate: mode == MODE_6K60,
+            low_pass: mode == MODE_23K85,
+        };
+        self.finish_subframe(sub, sub_buf, &synth_exc, hb);
+    }
+
+    /// Post-processes the 12.8 kHz synthesis of a subframe (already in `samples_az`): de-emphasis,
+    /// high-pass filtering, upsampling to 16 kHz and the addition of the high band, which is
+    /// synthesized from white noise scaled to the energy of the excitation `synth_exc`.
+    fn finish_subframe(
+        &mut self,
+        sub: usize,
+        sub_buf: &mut [f32],
+        synth_exc: &[f32; SFR_SIZE],
+        hb: SubframeHb,
+    ) {
         // Synthesis speech post-processing.
         self.de_emphasis();
 
@@ -395,19 +528,19 @@ impl Core {
             &mut self.hpf_400_mem,
         );
 
-        let hb_gain = self.find_hb_gain(mode, &hb_samples[..SFR_SIZE], cur.hb_gain, vad);
+        let hb_gain = self.find_hb_gain(hb.gain_idx, &hb_samples[..SFR_SIZE], hb.vad);
 
         let mut hb_exc = [0.0f32; SFR_SIZE_16K];
-        self.scaled_hb_excitation(&mut hb_exc, &synth_exc, hb_gain);
+        self.scaled_hb_excitation(&mut hb_exc, synth_exc, hb_gain);
 
-        self.hb_synthesis(mode, sub, &hb_exc);
+        self.hb_synthesis(hb.extrapolate, sub, &hb_exc);
 
         // High-band post-processing filters.
         let mut hb_in = [0.0f32; SFR_SIZE_16K];
         hb_in.copy_from_slice(&self.samples_hb[LP_ORDER_16K..]);
         hb_fir_filter(&mut hb_samples, &BPF_6_7_COEF, &mut self.bpf_6_7_mem, &hb_in);
 
-        if mode == MODE_23K85 {
+        if hb.low_pass {
             let tmp = hb_samples;
             hb_fir_filter(&mut hb_samples, &LPF_7_COEF, &mut self.lpf_7_mem, &tmp);
         }
@@ -610,9 +743,9 @@ impl Core {
 
     /// Calculates the high-band gain from the encoded index (23.85 kbit/s) or from the low-band
     /// speech signal and the voice activity flag (TS 26.190 clause 6.3.2).
-    fn find_hb_gain(&self, mode: usize, synth: &[f32], hb_idx: u16, vad: u16) -> f32 {
-        if mode == MODE_23K85 {
-            return f32::from(QUA_HB_GAIN[usize::from(hb_idx)]) * (1.0 / 16384.0);
+    fn find_hb_gain(&self, hb_idx: Option<u16>, synth: &[f32], vad: u16) -> f32 {
+        if let Some(idx) = hb_idx {
+            return f32::from(QUA_HB_GAIN[usize::from(idx) & 0xf]) * (1.0 / 16384.0);
         }
 
         let wsp = f64::from(u8::from(vad > 0));
@@ -644,10 +777,10 @@ impl Core {
     /// extrapolated from the ISFs in the 6.60 kbit/s mode, the weighted low-band filter in the
     /// other modes (TS 26.190 clauses 6.3.2 and 6.3.3). The samples are appended to
     /// `samples_hb`.
-    fn hb_synthesis(&mut self, mode: usize, sub: usize, exc: &[f32; SFR_SIZE_16K]) {
+    fn hb_synthesis(&mut self, extrapolate: bool, sub: usize, exc: &[f32; SFR_SIZE_16K]) {
         let mut hb_lpc = [0.0f32; LP_ORDER_16K];
 
-        if mode == MODE_6K60 {
+        if extrapolate {
             // ISF vector for extrapolation.
             let mut e_isf = [0.0f32; LP_ORDER_16K];
             let c = ISFP_INTER[sub];
@@ -670,7 +803,7 @@ impl Core {
             lpc_weighting(&mut hb_lpc[..LP_ORDER], 0.6);
         }
 
-        let order = if mode == MODE_6K60 { LP_ORDER_16K } else { LP_ORDER };
+        let order = if extrapolate { LP_ORDER_16K } else { LP_ORDER };
         lp_synthesis(&mut self.samples_hb, LP_ORDER_16K, &hb_lpc[..order], exc);
     }
 

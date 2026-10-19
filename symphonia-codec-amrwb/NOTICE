@@ -13,3 +13,9 @@ Copyright (c) 2010 Marcelo Galvao Povoa
 Copyright (c) 2007 Vladimir Voroshilov (shared `acelp_*` code)
 
 The LGPL-2.1+ terms apply to those derived portions.
+
+The discontinuous transmission (comfort noise) decoder in `src/dtx.rs` and the comfort noise ISF
+tables at the end of `src/tables.rs` (`mean_isf_noise` and `dico1..5_isf_noise` of TS 26.173
+`qisf_ns.tab`) were ported from the OpenCORE AMR-WB decoder (`dtx_decoder_amr_wb.cpp`,
+`qisf_ns.cpp`, `qisf_ns_tab.cpp`, `noise_gen_amrwb.cpp`), which is Copyright (C) 2009 PacketVideo
+and distributed under the Apache License, version 2.0.

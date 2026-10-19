@@ -14,3 +14,9 @@ Copyright (c) 2009 Colin McQuillan
 Copyright (c) 2007 Vladimir Voroshilov (shared `acelp_*` code)
 
 The LGPL-2.1+ terms apply to those derived portions.
+
+The discontinuous transmission (comfort noise) decoder in `src/dtx.rs` and the DTX tables at the
+end of `src/tables.rs` (`PAST_RQ_INIT`, `LSF_HIST_MEAN_SCALE`, `DTX_LOG_EN_ADJUST`) follow the
+ANSI-C reference code of 3GPP TS 26.073 (`dtx_dec.c`) as distributed in the OpenCORE AMR-NB decoder
+(`dtx_dec.cpp`), which is Copyright (C) 2009 PacketVideo and distributed under the Apache License,
+version 2.0.

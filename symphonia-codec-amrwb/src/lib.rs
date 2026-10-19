@@ -28,12 +28,25 @@
 //! (0 for a damaged frame). The speech bits are the class A, B and C bits in transmission order,
 //! padded with zero bits to a whole byte.
 //!
-//! # Lost, damaged and non-speech frames
+//! # Comfort noise, lost and damaged frames
 //!
-//! Like FFmpeg, frames with the type "no data" or "speech lost", and frames flagged as damaged
-//! (`Q = 0`), are decoded as 320 samples of silence without touching the decoder state.
-//! Reserved frame types (10 to 13) and packets shorter than the frame type requires are decode
-//! errors.
+//! SID frames (type 9) carry the parameters of the background noise (3GPP TS 26.192, the
+//! decoder-side of TS 26.193). A comfort noise frame is generated for a SID frame, and for "no
+//! data", "speech lost" and damaged frames received while the comfort noise is active, as in the
+//! OpenCORE AMR-WB decoder which is the reference for this implementation. The noise parameters
+//! are interpolated between SID updates, dithered if the SID says the background noise is not
+//! stationary, and faded out when no update is received for 50 frames. A SID that follows a
+//! hangover period of the encoder is replaced with the average of the last decoded speech frames,
+//! as specified.
+//!
+//! Frames with the type "no data" or "speech lost", and frames flagged as damaged (`Q = 0`), that
+//! are received during speech are decoded as 320 samples of silence without touching the decoder
+//! state (like FFmpeg). The specification suggests a "random signal" and "a muting technique";
+//! the bad frame handling of the reference decoder (gain and pitch muting and pitch lag
+//! concealment, TS 26.191) is not implemented. For the same reason, the first speech frame after
+//! comfort noise is decoded normally, whereas the reference decoder limits its gain if the noise
+//! was faded out. Reserved frame types (10 to 13) and packets shorter than the frame type requires
+//! are decode errors.
 
 #![warn(rust_2018_idioms)]
 #![forbid(unsafe_code)]
@@ -47,6 +60,7 @@
 #![allow(clippy::collapsible_else_if)]
 #![allow(clippy::needless_range_loop)]
 
+mod dtx;
 mod lsp;
 mod params;
 mod synth;
@@ -65,6 +79,7 @@ use symphonia_core::errors::{Result, decode_error, unsupported_error};
 use symphonia_core::packet::PacketRef;
 use symphonia_core::support_audio_codec;
 
+use crate::dtx::{Rx, SidData, State};
 use crate::synth::{Core, FRAME_SAMPLES};
 use crate::tables::CF_SIZES_WB;
 
@@ -122,6 +137,35 @@ impl AmrWbDecoder {
         let frame_type = usize::from((toc >> 3) & 0xf);
         let good = toc & 0x4 != 0;
 
+        // Classify the frame like the reference decoder (`mime_unsorting`).
+        let payload = &data[1..];
+
+        let rx = match frame_type {
+            0..FT_SID if good => Rx::SpeechGood,
+            0..FT_SID => Rx::SpeechBad,
+            FT_SID if !good => Rx::SidBad,
+            FT_SID => match SidData::is_update(payload) {
+                Some(true) => Rx::SidUpdate,
+                Some(false) => Rx::SidFirst,
+                None => return decode_error("amrwb: truncated frame"),
+            },
+            FT_SPEECH_LOST => Rx::SpeechLost,
+            FT_NO_DATA => Rx::NoData,
+            _ => return decode_error("amrwb: reserved frame type"),
+        };
+
+        // The speech bits of a good frame must be complete.
+        let speech = if matches!(rx, Rx::SpeechGood) {
+            let size = usize::from(CF_SIZES_WB[frame_type]).div_ceil(8);
+            match payload.get(..size) {
+                Some(speech) => speech,
+                None => return decode_error("amrwb: truncated frame"),
+            }
+        }
+        else {
+            payload
+        };
+
         self.buf.clear();
         self.buf.render_uninit(Some(FRAME_SAMPLES));
         let Some(Ok(out)) = self.buf.plane_mut(0).map(<&mut [f32; FRAME_SAMPLES]>::try_from)
@@ -129,27 +173,22 @@ impl AmrWbDecoder {
             return decode_error("amrwb: unexpected output buffer");
         };
 
-        if frame_type == FT_NO_DATA || frame_type == FT_SPEECH_LOST || !good {
+        let state = self.core.rx_state(rx);
+
+        if state != State::Speech {
+            // Comfort noise, generated from the SID parameters, in place of a SID frame, and in
+            // place of missing or damaged frames while the comfort noise is active.
+            let sid = if rx == Rx::SidUpdate { SidData::parse(speech) } else { None };
+            self.core.decode_comfort_noise(rx, state, sid.as_ref(), out);
+        }
+        else if rx == Rx::SpeechGood {
+            let frame = params::unpack(frame_type, speech);
+            self.core.decode_frame(frame_type, &frame, out);
+        }
+        else {
             // The specification suggests a "random signal" and "a muting technique" to gradually
             // decrease the output level; like FFmpeg, output silence.
             out.fill(0.0);
-        }
-        else if frame_type > FT_SID {
-            return decode_error("amrwb: reserved frame type");
-        }
-        else {
-            let size = usize::from(CF_SIZES_WB[frame_type]).div_ceil(8);
-            let Some(speech) = data[1..].get(..size)
-            else {
-                return decode_error("amrwb: truncated frame");
-            };
-
-            if frame_type == FT_SID {
-                return unsupported_error("amrwb: comfort noise frames are not supported");
-            }
-
-            let frame = params::unpack(frame_type, speech);
-            self.core.decode_frame(frame_type, &frame, out);
         }
 
         if self.opts.gapless {

@@ -20,9 +20,22 @@
 //! [TOC byte: P(1) FT(4) Q(1) P(2)] [speech bits, MSB first, zero padded to a whole byte]
 //! ```
 //!
-//! `FT` is the frame type (0-7 speech modes 4.75-12.2 kbit/s, 8 SID, 15 no data) and `Q` the
-//! frame quality bit. The size of the speech bits is given by `FT` (12, 13, 15, 17, 19, 20, 26,
-//! 31 bytes for the speech modes, 5 for SID).
+//! `FT` is the frame type (0-7 speech modes 4.75-12.2 kbit/s, 8 SID, 14 speech lost, 15 no data)
+//! and `Q` the frame quality bit. The size of the speech bits is given by `FT` (12, 13, 15, 17, 19,
+//! 20, 26, 31 bytes for the speech modes, 5 for SID, none for the others).
+//!
+//! # Discontinuous transmission
+//!
+//! SID frames and the frames without data that follow them decode to comfort noise, as specified
+//! in 3GPP TS 26.092 (decoder side of the reference code of TS 26.073): the spectrum and level
+//! are interpolated between SID updates and the noise is muted when no update arrives for a long
+//! time. A frame without data (or of the type "speech lost") outside of a DTX period decodes to
+//! silence without touching the decoder state, like in the AMR-WB decoder; the error concealment
+//! of lost speech frames of the specification is not implemented. Frame types 9 to 13 are reserved
+//! and decode errors.
+//!
+//! The first speech frame after comfort noise is decoded normally, without the muting of the
+//! specification's bad frame handling.
 
 #![warn(rust_2018_idioms)]
 #![forbid(unsafe_code)]
@@ -39,6 +52,7 @@
 
 mod celp;
 mod core;
+mod dtx;
 mod lsp;
 mod tables;
 
@@ -55,8 +69,13 @@ use symphonia_core::errors::{Result, decode_error, unsupported_error};
 use symphonia_core::packet::PacketRef;
 use symphonia_core::support_audio_codec;
 
-use crate::core::{Core, FRAME_SAMPLES};
+use crate::core::{Core, FRAME_SAMPLES, Frame};
 use crate::tables::FRAME_SIZES_NB;
+
+/// Frame type of a lost speech frame.
+const FT_SPEECH_LOST: u8 = 14;
+/// Frame type of a frame without data.
+const FT_NO_DATA: u8 = 15;
 
 /// Sample rate of AMR-NB.
 const SAMPLE_RATE: u32 = 8000;
@@ -122,23 +141,28 @@ impl AmrNbDecoder {
             };
 
             let mode = (toc >> 3) & 0x0f;
+            let good = toc & 0x04 != 0;
 
-            // Frame types 9..=14 and 15 (no data) carry no speech.
-            let Some(&size) = FRAME_SIZES_NB.get(usize::from(mode))
-            else {
-                return decode_error("amrnb: no data");
+            // Frame types 9..=13 are reserved.
+            let (frame, size) = match mode {
+                0..=7 | core::MODE_DTX => {
+                    let size = usize::from(FRAME_SIZES_NB[usize::from(mode)]);
+                    let Some(data) = rest.get(..size)
+                    else {
+                        return decode_error("amrnb: truncated frame");
+                    };
+                    if mode == core::MODE_DTX {
+                        (Frame::Sid { data, good }, size)
+                    }
+                    else {
+                        (Frame::Speech { mode, data }, size)
+                    }
+                }
+                FT_SPEECH_LOST | FT_NO_DATA => (Frame::NoData, 0),
+                _ => return decode_error("amrnb: reserved frame type"),
             };
-            let size = usize::from(size);
 
-            if rest.len() < size {
-                return decode_error("amrnb: truncated frame");
-            }
-
-            if mode == core::MODE_DTX {
-                return unsupported_error("amrnb: SID frames are not supported");
-            }
-
-            self.channels[ch].decode_speech(mode, &rest[..size], &mut self.scratch)?;
+            self.channels[ch].decode(frame, &mut self.scratch)?;
 
             let Some(plane) = self.buf.plane_mut(ch)
             else {

@@ -17,6 +17,7 @@ use crate::celp::{
     lp_synthesis, lp_zero_synthesis, order_2_filter, scale_to_sum_of_squares, tilt_compensation,
     weighted_sum,
 };
+use crate::dtx::{Dtx, Rx, SidData, State};
 use crate::lsp::{lsf2lsp, lsp2lpc, set_min_dist_lsf};
 use crate::tables::*;
 
@@ -52,7 +53,7 @@ const PRED_FAC_MODE_12K2: f64 = 0.65;
 /// LSF residual tables to Hertz.
 const LSF_R_FAC: f64 = 8000.0 / 32768.0;
 /// Minimum LSF spacing, ensures stability of the LPC filter.
-const MIN_LSF_SPACING: f64 = 50.0488 / 8000.0;
+pub(crate) const MIN_LSF_SPACING: f64 = 50.0488 / 8000.0;
 /// Initial prediction error energy in dB.
 const MIN_ENERGY: f32 = -14.0;
 /// Maximum sharpening factor. The specification says 0.8 (13107 in Q14) but the reference code
@@ -155,6 +156,22 @@ pub(crate) struct Core {
     samples_in: [f32; LP_ORDER + SUBFRAME],
     /// Unpacked parameters of the current frame.
     params: Params,
+    /// Energy of the synthesis (before the post-filter) of the current speech frame.
+    synth_energy: f32,
+    /// Comfort noise decoder state.
+    dtx: Dtx,
+    /// Mode of the previous frame, used by frames without data.
+    last_mode: u8,
+}
+
+/// A frame to decode.
+pub(crate) enum Frame<'a> {
+    /// A speech frame of a mode `0..=7` and its speech bytes.
+    Speech { mode: u8, data: &'a [u8] },
+    /// A SID frame (`MODE_DTX`) with its bytes and the frame quality indicator.
+    Sid { data: &'a [u8], good: bool },
+    /// A frame without data.
+    NoData,
 }
 
 impl Core {
@@ -185,6 +202,9 @@ impl Core {
             high_pass_mem: [0.0; 2],
             samples_in: [0.0; LP_ORDER + SUBFRAME],
             params: [0; FRAME_PARAMS],
+            synth_energy: 0.0,
+            dtx: Dtx::new(),
+            last_mode: MODE_4K75,
         });
 
         for i in 0..LP_ORDER {
@@ -197,13 +217,165 @@ impl Core {
         c
     }
 
+    /// Decodes a frame into `out`.
+    ///
+    /// Speech frames are synthesized. SID frames and, in the DTX state, frames without data
+    /// generate comfort noise (3GPP TS 26.092). A frame without data outside of DTX has nothing
+    /// to be concealed from and decodes as silence without touching the decoder state, like the
+    /// AMR-WB decoder.
+    pub fn decode(&mut self, frame: Frame<'_>, out: &mut [f32; FRAME_SAMPLES]) -> Result<()> {
+        let (rx, mode, sid) = match frame {
+            Frame::Speech { mode, data } => {
+                self.dtx.rx_handler(Rx::Speech);
+                self.decode_speech(mode, data, out)?;
+                self.dtx.activity_update(&self.lsf_q[3], self.synth_energy);
+                self.dtx.global_state = State::Speech;
+                self.last_mode = mode;
+                return Ok(());
+            }
+            Frame::Sid { data, good } => {
+                // The bits after the 35 comfort noise parameter bits are the SID type indicator
+                // (0: SID first, 1: SID update) and the 3 bits of the mode indication (LSB first).
+                let bit = |i: usize| data.get(i >> 3).map_or(0, |b| (b >> (7 - (i & 7))) & 1);
+                let mode_indication = bit(36) | (bit(37) << 1) | (bit(38) << 2);
+
+                if !good {
+                    // The contents of a damaged frame can not be trusted; keep the mode.
+                    (Rx::SidBad, self.last_mode, None)
+                }
+                else if bit(35) == 0 {
+                    (Rx::SidFirst, mode_indication, None)
+                }
+                else {
+                    (Rx::SidUpdate, mode_indication, Some(Self::decode_sid_data(data)))
+                }
+            }
+            Frame::NoData => (Rx::NoData, self.last_mode, None),
+        };
+
+        let state = self.dtx.rx_handler(rx);
+
+        if state == State::Speech {
+            out.fill(0.0);
+        }
+        else {
+            self.decode_comfort_noise(mode, state, sid.as_ref(), out);
+            self.last_mode = mode;
+        }
+        self.dtx.global_state = state;
+        Ok(())
+    }
+
+    /// Decodes the comfort noise parameters of a SID update frame (`Bits2prm` for `MRDTX` and
+    /// `D_plsf_3`). `data` has at least the 5 bytes of a SID frame.
+    fn decode_sid_data(data: &[u8]) -> SidData {
+        // Parameters of 3, 8, 9, 9 and 6 bits, MSB first.
+        let mut pos = 0;
+        let mut field = |bits: usize| {
+            let mut v = 0u16;
+            for _ in 0..bits {
+                let bit = data.get(pos >> 3).map_or(0, |b| (b >> (7 - (pos & 7))) & 1);
+                v = (v << 1) | u16::from(bit);
+                pos += 1;
+            }
+            v
+        };
+        let (init, i1, i2, i3, log_en_index) = (field(3), field(8), field(9), field(9), field(6));
+
+        // The LSF residuals are those of the speech modes with the predictor initialized from
+        // the table (instead of the previous frame), without the prediction factor. The index
+        // widths guarantee the table bounds.
+        let mut lsf_r = [0i16; LP_ORDER];
+        lsf_r[0..3].copy_from_slice(&LSF_3_1[usize::from(i1)]);
+        lsf_r[3..6].copy_from_slice(&LSF_3_2[usize::from(i2)]);
+        lsf_r[6..10].copy_from_slice(&LSF_3_3[usize::from(i3)]);
+
+        let mut lsf_q = [0.0f32; LP_ORDER];
+        for i in 0..LP_ORDER {
+            let v = i32::from(lsf_r[i]) + i32::from(PAST_RQ_INIT[usize::from(init)][i]);
+            lsf_q[i] = (f64::from(v) * (LSF_R_FAC / 8000.0)
+                + f64::from(LSF_3_MEAN[i]) * (1.0 / 8000.0)) as f32;
+        }
+        set_min_dist_lsf(&mut lsf_q, MIN_LSF_SPACING);
+
+        let mut lsp = [0.0f64; LP_ORDER];
+        lsf2lsp(&mut lsp, &lsf_q);
+
+        SidData { lsp, log_en_index }
+    }
+
+    /// Generates a frame of comfort noise, the post-filtered synthesis of a random excitation
+    /// (`dtx_dec` followed by the post-filter of the speech decoder).
+    fn decode_comfort_noise(
+        &mut self,
+        mode: u8,
+        state: State,
+        sid: Option<&SidData>,
+        out: &mut [f32; FRAME_SAMPLES],
+    ) {
+        let cn = self.dtx.decode(mode, state, sid);
+
+        // Reset the speech decoder like `Decoder_amr_reset` does for comfort noise: the memory of
+        // the synthesis filter, the post-filter and the gain predictor excepted.
+        self.excitation_buf.fill(0.0);
+        self.pitch_vector.fill(0.0);
+        self.fixed_vector.fill(0.0);
+        self.pitch_gain = [0.0; 5];
+        self.fixed_gain = [0.0; 5];
+        self.beta = 0.0;
+        self.pitch_lag_int = 40;
+        self.prev_sparse_fixed_gain = 0.0;
+        self.prev_ir_filter_nr = 0;
+        self.ir_filter_onset = 0;
+        self.prev_lsf_r = [0; LP_ORDER];
+        // The fixed gain smoothing starts in a hangover period.
+        self.diff_count = 20;
+        self.hang_count = 0;
+
+        if let Some(init) = cn.ma_pred_init {
+            self.prediction_error = [init; 4];
+        }
+
+        self.lpc = [cn.lpc; 4];
+
+        for subframe in 0..4 {
+            self.samples_in[LP_ORDER..].copy_from_slice(&cn.excitation[subframe]);
+            lp_synthesis(&mut self.samples_in, &cn.lpc_synth, SUBFRAME);
+
+            let mut sub_out = [0.0f32; SUBFRAME];
+            self.postfilter(subframe, mode, &mut sub_out);
+            out[subframe * SUBFRAME..(subframe + 1) * SUBFRAME].copy_from_slice(&sub_out);
+
+            self.samples_in.copy_within(SUBFRAME..SUBFRAME + LP_ORDER, 0);
+        }
+
+        order_2_filter(
+            out,
+            &HIGHPASS_ZEROS,
+            &HIGHPASS_POLES,
+            (f64::from(HIGHPASS_GAIN) * SAMPLE_SCALE) as f32,
+            &mut self.high_pass_mem,
+        );
+
+        // The spectrum of the noise is the state of the next speech frame.
+        let mut lsp = [0.0f64; LP_ORDER];
+        lsf2lsp(&mut lsp, &cn.lsf);
+        self.lsp = [lsp; 4];
+        self.prev_lsp_sub4 = lsp;
+        self.lsf_q = [cn.lsf; 4];
+
+        let old_avg = self.lsf_avg;
+        weighted_sum(&mut self.lsf_avg, &old_avg, &cn.lsf, 0.84, 0.16);
+    }
+
     /// Decodes a speech frame of mode `mode` from the speech bytes `data` into `out`.
-    pub fn decode_speech(
+    fn decode_speech(
         &mut self,
         mode: u8,
         data: &[u8],
         out: &mut [f32; FRAME_SAMPLES],
     ) -> Result<()> {
+        self.synth_energy = 0.0;
         unpack(&mut self.params, data, mode);
 
         if mode == MODE_12K2 {
@@ -283,6 +455,9 @@ impl Core {
                 // factor of 4, skipping the pitch emphasis.
                 self.synthesis(subframe, mode, synth_fixed_gain, &fixed_vector, true);
             }
+
+            let synth = &self.samples_in[LP_ORDER..];
+            self.synth_energy += dot(synth, synth);
 
             let mut sub_out = [0.0f32; SUBFRAME];
             self.postfilter(subframe, mode, &mut sub_out);

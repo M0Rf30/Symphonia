@@ -3936,6 +3936,47 @@ pub(crate) static HIGHPASS_ZEROS: [f32; 2] = [-2.0, 1.0];
 
 pub(crate) static HIGHPASS_POLES: [f32; 2] = [-1.933105469, 0.935913085];
 
+/// Initial LSF residuals of the SID frame LSF decoder, selected by the first 3 bits of a SID frame
+/// (`past_rq_init` of 3GPP TS 26.073 `q_plsf_3_tbl.c`), in units of 1/32768 of the sampling rate.
+pub(crate) static PAST_RQ_INIT: [[i16; 10]; 8] = [
+    [-258, -318, -439, -634, -656, -773, -711, -502, -268, -193],
+    [-2, 125, 122, -39, -9, 105, 129, 283, 372, 575],
+    [-277, -324, -197, -487, -445, -362, -292, -27, 177, 543],
+    [342, 517, 516, 130, 27, -104, -120, -140, -74, -56],
+    [-564, -943, -1520, -965, -814, -526, -322, -2, 159, 657],
+    [-312, -284, -386, -597, -493, -526, -418, -229, 105, 449],
+    [-557, -870, -1075, -919, -950, -752, -709, -316, 62, 486],
+    [-314, -191, -203, -330, -160, -103, -51, 131, 338, 515],
+];
+
+/// Scaling of the deviation of the stored LSF vectors from their mean, which gives the LSF
+/// variability of the comfort noise (`lsf_hist_mean_scale` of 3GPP TS 26.073 `dtx_dec.c`, Q15).
+pub(crate) static LSF_HIST_MEAN_SCALE: [f32; 10] = [
+    20000.0 / 32768.0,
+    20000.0 / 32768.0,
+    20000.0 / 32768.0,
+    20000.0 / 32768.0,
+    20000.0 / 32768.0,
+    18000.0 / 32768.0,
+    16384.0 / 32768.0,
+    8192.0 / 32768.0,
+    0.0,
+    0.0,
+];
+
+/// Comfort noise level adjustment per speech mode (4.75 ... 12.2 kbit/s) in log2 units
+/// (`dtx_log_en_adjust` of 3GPP TS 26.073 `dtx_dec.c`, Q11).
+pub(crate) static DTX_LOG_EN_ADJUST: [f32; 8] = [
+    -1023.0 / 2048.0,
+    -878.0 / 2048.0,
+    -732.0 / 2048.0,
+    -586.0 / 2048.0,
+    -440.0 / 2048.0,
+    -294.0 / 2048.0,
+    -148.0 / 2048.0,
+    0.0,
+];
+
 /// Number of 16-bit parameters in an unpacked frame: 5 LSF indices and 4 subframes of 13 values.
 pub(crate) const FRAME_PARAMS: usize = 57;
 /// Number of parameters per subframe.
