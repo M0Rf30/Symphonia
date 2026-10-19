@@ -379,6 +379,12 @@ impl Ac4Core {
             return decode_error("ac4: invalid number of substreams");
         }
         self.nb_substreams = nb_substreams;
+        self.substream_size = [0; 32];
+
+        // Every indexed substream must have been announced by a presentation or group.
+        if self.substream_type[..nb_substreams as usize].contains(&ST_UNASSIGNED) {
+            return decode_error("ac4: unassigned substream index");
+        }
 
         let size_present = if nb_substreams == 1 { br.get1() != 0 } else { true };
 
@@ -493,7 +499,13 @@ impl Ac4Core {
         Ok(())
     }
 
-    /// ac4dec.c: `ac4_substream_group_info`
+    /// Marks the substream a channel-coded group refers to as audio data (ST_SUBSTREAM).
+    fn mark_group_substream(&mut self, g: usize) -> Result<()> {
+        let index = self.ssgroup[g].ssinfo.substream_index;
+        self.set_substream_type(index, ST_SUBSTREAM)
+    }
+
+    /// ac4dec.c: `ac4_substream_info_chan`
     pub(crate) fn ac4_substream_group_info(
         &mut self,
         br: &mut BitReader<'_>,
@@ -521,8 +533,15 @@ impl Ac4Core {
                 let sus_ver = if self.version == 1 { br.get1() as i32 } else { 1 };
 
                 self.ac4_substream_info_chan(br, g, substreams_present, sus_ver)?;
+                if substreams_present {
+                    self.mark_group_substream(g)?;
+                }
                 if hsf_ext {
                     self.ac4_hsf_ext_substream_info(br, SsiRef::Group(g), substreams_present)?;
+                    if substreams_present {
+                        let index = self.ssgroup[g].ssinfo.hsf_ext_substream_index;
+                        self.set_substream_type(index, ST_SUBSTREAM)?;
+                    }
                 }
             }
         }
@@ -681,6 +700,10 @@ impl Ac4Core {
         }
         self.sequence_counter_prev = self.sequence_counter;
         self.sequence_counter = br.get(10) as i32;
+
+        // Per-frame state: ETSI TS 103 190-1 carries nothing over from the previous TOC.
+        self.total_groups = 0;
+        self.substream_type = [ST_UNASSIGNED; 32];
 
         self.wait_frames = br.get1() as i32;
         if self.wait_frames != 0 {
@@ -1079,7 +1102,7 @@ impl Ac4Core {
         }
 
         if br.bits_left() < 0 {
-            log::warn!("ac4: overread");
+            return decode_error("ac4: overread");
         }
 
         for ch in 0..channels {
@@ -1137,5 +1160,35 @@ impl Ac4Core {
     pub(crate) fn flush(&mut self) {
         self.have_iframe = false;
         self.sequence_counter_prev = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toc_resets_per_frame_state() {
+        let mut core = Ac4Core::new();
+        core.total_groups = 5;
+        core.substream_type[3] = ST_PRESENTATION;
+        // Fails somewhere after the header; the reset must already have happened.
+        let data = [0u8; 4];
+        let _ = core.ac4_toc(&mut BitReader::new(&data));
+        assert_eq!(core.total_groups, 0);
+        assert!(core.substream_type.iter().all(|&t| t == ST_UNASSIGNED));
+    }
+
+    #[test]
+    fn index_table_rejects_unassigned_and_clears_sizes() {
+        let mut core = Ac4Core::new();
+        core.substream_size[0] = 77;
+        // nb_substreams = 1 (01), size_present = 0.
+        let data = [0b0100_0000u8];
+        assert!(core.substream_index_table(&mut BitReader::new(&data)).is_err());
+
+        core.set_substream_type(0, ST_SUBSTREAM).unwrap();
+        core.substream_index_table(&mut BitReader::new(&data)).unwrap();
+        assert_eq!(core.substream_size[0], 0);
     }
 }

@@ -105,10 +105,9 @@ impl Ac4Core {
     pub(crate) fn four_channel_data(&mut self, br: &mut BitReader<'_>, iframe: i32) -> Result<()> {
         self.sf_info(br, 0, SF_ASF, 0, 0)?;
 
-        // Full channel copies (C: memcpy of the whole SubstreamChannel).
+        // Only the shared sf_info() state is needed by the other channels.
         for i in 1..4 {
-            let (head, tail) = self.substream.ssch.split_at_mut(i);
-            tail[0].clone_from(&head[0]);
+            self.copy_sf_info(0, i);
         }
 
         for i in 0..4 {

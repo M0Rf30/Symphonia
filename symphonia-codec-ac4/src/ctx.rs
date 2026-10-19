@@ -43,6 +43,8 @@ pub(crate) struct AcState {
 
 pub(crate) const ST_SUBSTREAM: i32 = 0;
 pub(crate) const ST_PRESENTATION: i32 = 1;
+/// Marks a substream index not referenced by any presentation or group in this frame.
+pub(crate) const ST_UNASSIGNED: i32 = -1;
 
 pub(crate) const SM_LEVEL: i32 = 0;
 pub(crate) const SM_BALANCE: i32 = 1;
@@ -667,6 +669,8 @@ pub(crate) struct Ac4Core {
     /// Inverse MDCT kernels, indexed `[frame_len_base_idx][transf_length_idx]`.
     pub(crate) imdct: ImdctSet,
     /// KBD windows, indexed `[frame_len_base_idx][transf_length_idx][n]`.
+    pub(crate) imdct_in: Vec<f32>,
+    pub(crate) imdct_out: Vec<f32>,
     pub(crate) kbd_window: Box<[[[f32; 2048]; 5]; 8]>,
     pub(crate) quant_lut: Box<[f32; 8192]>,
     pub(crate) cos_atab: Box<[[f32; 128]; 64]>,
@@ -780,10 +784,12 @@ impl Ac4Core {
             nb_substreams: 0,
             total_groups: 0,
             substream_size: [0; 32],
-            substream_type: [0; 32],
+            substream_type: [ST_UNASSIGNED; 32],
             winl: Box::new([0.0; 2048]),
             winr: Box::new([0.0; 2048]),
             imdct: ImdctSet::new(),
+            imdct_in: vec![0.0; 2048],
+            imdct_out: vec![0.0; 4096],
             kbd_window: kbd,
             quant_lut,
             cos_atab,

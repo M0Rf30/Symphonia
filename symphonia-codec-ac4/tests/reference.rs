@@ -139,3 +139,23 @@ fn corrupt_frames_do_not_panic() {
         }
     }
 }
+
+/// A packet cut short must be rejected rather than decoded from zero-filled reads.
+#[test]
+fn truncated_frame_is_an_error() {
+    let Some(src) = sample_path("ac4/KDAF_st.ac4")
+    else {
+        eprintln!("RMPD_SAMPLES not set or ac4/KDAF_st missing, skipping");
+        return;
+    };
+    let data = std::fs::read(src).unwrap();
+    let mut params = AudioCodecParameters::new();
+    params.for_codec(CODEC_ID_AC4);
+    let mut dec = Ac4Decoder::try_new(&params, &AudioDecoderOptions::default()).unwrap();
+
+    let frames = frames(&data);
+    assert!(dec.decode(&Packet::new(0, Timestamp::new(0), Duration::new(1), frames[0])).is_ok());
+    let cut = &frames[1][..frames[1].len() - 8];
+    let packet = Packet::new(0, Timestamp::new(1), Duration::new(1), cut);
+    assert!(dec.decode(&packet).is_err());
+}

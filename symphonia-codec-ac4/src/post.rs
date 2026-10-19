@@ -403,14 +403,23 @@ impl Ac4Core {
 
     fn spectral_synthesis_impl(&mut self, ch: usize) -> Result<()> {
         let nfull = self.frame_len_base;
-        let midx = self.frame_len_base_idx;
 
         if ch >= self.substream.ssch.len() || nfull < 0 || nfull > 2048 {
             return decode_error("ac4: invalid channel");
         }
 
-        let mut inp = [0.0f32; 2048];
-        let mut x = [0.0f32; 4096];
+        // Scratch buffers live in the struct; every element read below is written first.
+        let mut inp = std::mem::take(&mut self.imdct_in);
+        let mut x = std::mem::take(&mut self.imdct_out);
+        let result = self.spectral_synthesis_body(ch, &mut inp, &mut x);
+        self.imdct_in = inp;
+        self.imdct_out = x;
+        result
+    }
+
+    fn spectral_synthesis_body(&mut self, ch: usize, inp: &mut [f32], x: &mut [f32]) -> Result<()> {
+        let nfull = self.frame_len_base;
+        let midx = self.frame_len_base_idx;
 
         let num_groups = usize::from(self.substream.ssch[ch].scp.num_window_groups).min(16);
         let mut win = 0usize;
