@@ -190,7 +190,9 @@ fn location_position(loc: u8, quad: bool) -> Option<Position> {
 }
 
 /// Expands a custom channel map into a list of locations in coded channel order. Returns the
-/// number of locations.
+/// number of locations. A chanmap of all ones expands to 22 locations (ETSI TS 102 366 E.1.3.1.8),
+/// more than `out` holds: the excess is counted but not stored, so callers see a count that never
+/// matches a valid channel count and fall back to the audio coding mode.
 fn expand_chanmap(chanmap: u16, out: &mut [u8; MAX_AU_CHANNELS]) -> usize {
     const MAP: [&[u8]; 16] = [
         &[LOC_L],
@@ -215,7 +217,9 @@ fn expand_chanmap(chanmap: u16, out: &mut [u8; MAX_AU_CHANNELS]) -> usize {
     for (bit, locs) in MAP.iter().enumerate() {
         if chanmap & (0x8000 >> bit) != 0 {
             for &l in *locs {
-                out[n] = l;
+                if let Some(slot) = out.get_mut(n) {
+                    *slot = l;
+                }
                 n += 1;
             }
         }
@@ -556,5 +560,18 @@ impl RegisterableAudioDecoder for Ac3Decoder {
             support_audio_codec!(CODEC_ID_AC3, "ac3", "Dolby Digital (AC-3)"),
             support_audio_codec!(CODEC_ID_EAC3, "eac3", "Dolby Digital Plus (E-AC-3)"),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chanmap_overflow_does_not_panic() {
+        let mut out = [0u8; MAX_AU_CHANNELS];
+        let n = expand_chanmap(0xFFFF, &mut out);
+        assert_eq!(n, 22);
+        assert!(n > MAX_AU_CHANNELS);
     }
 }
