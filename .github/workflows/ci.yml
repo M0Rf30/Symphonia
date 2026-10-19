@@ -51,6 +51,15 @@ jobs:
       - name: Check fuzzers
         run: cargo check --manifest-path symphonia/fuzz/Cargo.toml --verbose
 
+      # A target without a [[bin]] entry is never built, and an entry without a source file does
+      # not build: both must stay in sync.
+      - name: Check fuzz targets are registered
+        if: runner.os == 'Linux'
+        run: |
+          grep -A1 '^\[\[bin\]\]' symphonia/fuzz/Cargo.toml | sed -n 's/^name = "\(.*\)"$/\1/p' | sort > bins.txt
+          ls symphonia/fuzz/fuzz_targets | sed 's/\.rs$//' | sort > files.txt
+          diff -u bins.txt files.txt
+
   msrv:
     name: MSRV (1.85)
 
@@ -136,11 +145,24 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libpulse-dev
 
+      # The ffmpeg reference tests skip silently when ffmpeg is missing. Installing it makes them
+      # run, and REQUIRE_REFERENCES turns a missing reference into a failure for the helpers of
+      # symphonia-testutil (`have_tool`, `require_reference`, `sample_path`, `open_sample`). Tests
+      # that probe for ffmpeg on their own (`Command::new("ffmpeg")` with a local skip) are not
+      # covered by it and still skip silently.
+      - name: Install reference tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y ffmpeg
+
       - name: Test default features
         run: cargo test --target ${{ matrix.config.target }} --all
+        env:
+          REQUIRE_REFERENCES: ${{ runner.os == 'Linux' && '1' || '' }}
 
       - name: Test all features
         run: cargo test --target ${{ matrix.config.target }} --all --all-features
+        env:
+          REQUIRE_REFERENCES: ${{ runner.os == 'Linux' && '1' || '' }}
 
   # Big-endian coverage. The decoders and bit readers are written for little-endian hosts first,
   # so byte-order bugs only show here. The scope is limited to the crates that read or convert raw

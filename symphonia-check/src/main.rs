@@ -65,6 +65,8 @@ struct TestResult {
     abs_max_delta: f32,
     tgt_unchecked_samples: u64,
     ref_unchecked_samples: u64,
+    /// The check stopped at the first failed packet, so the sample counts are incomplete.
+    stopped_early: bool,
 }
 
 /// Builds an ffmpeg command, optionally forcing the decoder of the input.
@@ -152,6 +154,9 @@ struct FlushStats {
 }
 
 struct DecoderInstance {
+    /// Treat an `UnexpectedEof` from the demuxer as the end of the stream. Only the reference
+    /// decoder's piped WAVE output has no length and ends this way; for the target it is an error.
+    eof_is_end: bool,
     format: Box<dyn FormatReader>,
     decoder: Box<dyn AudioDecoder>,
     dec_opts: AudioDecoderOptions,
@@ -163,6 +168,7 @@ impl DecoderInstance {
         mss: MediaSourceStream<'static>,
         fmt_opts: FormatOptions,
         dec_opts: AudioDecoderOptions,
+        eof_is_end: bool,
     ) -> Result<DecoderInstance> {
         // Use the default options for metadata and format readers, and the decoder.
         let meta_opts: MetadataOptions = Default::default();
@@ -173,7 +179,7 @@ impl DecoderInstance {
 
         let (decoder, track_id) = Self::make_decoder(format.as_ref(), &dec_opts)?;
 
-        Ok(DecoderInstance { format, decoder, dec_opts, track_id })
+        Ok(DecoderInstance { eof_is_end, format, decoder, dec_opts, track_id })
     }
 
     /// Creates a decoder for the default audio track of the format reader.
@@ -207,10 +213,13 @@ impl DecoderInstance {
             let packet = match self.format.next_packet() {
                 Ok(Some(packet)) => packet,
                 Ok(None) => return Ok(None),
-                Err(Error::IoError(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                Err(Error::IoError(err))
+                    if self.eof_is_end && err.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
                     // WavReader will always return an UnexpectedEof when it ends because the
                     // reference decoder is piping the decoded audio and cannot write out the
                     // actual length of the media. Treat UnexpectedEof as the end of the stream.
+                    // This is only done for the reference.
                     return Ok(None);
                 }
                 // The track list changed (e.g. a new link of a chained Ogg stream): recreate the
@@ -362,6 +371,8 @@ fn run_check(
 
     // Count how many samples were remaining for both the target and references if the loop did not
     // break out early due to a failed sample.
+    acct.stopped_early = early_fail;
+
     if !early_fail {
         let tgt_stats = tgt_inst.flush(true)?;
         let ref_stats = ref_inst.flush(true)?;
@@ -385,7 +396,8 @@ fn run_test(path: &Path, opts: &TestOptions, result: &mut TestResult) -> Result<
     }));
     let ref_mss = MediaSourceStream::new(ref_ms, Default::default());
 
-    let mut ref_inst = DecoderInstance::try_open(ref_mss, Default::default(), Default::default())?;
+    let mut ref_inst =
+        DecoderInstance::try_open(ref_mss, Default::default(), Default::default(), true)?;
 
     // 3. Instantiate a Symphonia decoder for the test target.
     let tgt_ms = Box::new(File::open(path)?);
@@ -394,10 +406,48 @@ fn run_test(path: &Path, opts: &TestOptions, result: &mut TestResult) -> Result<
     let tgt_fmt_opts = Default::default();
     let tgt_dec_opts = AudioDecoderOptions::default().gapless(opts.gapless);
 
-    let mut tgt_inst = DecoderInstance::try_open(tgt_mss, tgt_fmt_opts, tgt_dec_opts)?;
+    let mut tgt_inst = DecoderInstance::try_open(tgt_mss, tgt_fmt_opts, tgt_dec_opts, false)?;
 
     // 4. Begin check.
-    run_check(&mut ref_inst, &mut tgt_inst, opts, result)
+    let check = run_check(&mut ref_inst, &mut tgt_inst, opts, result);
+
+    // 5. Close the pipe and reap the reference process. A reference that failed must not pass the
+    // check on the samples it managed to produce. When the check stopped early the process is
+    // still writing, so it is killed rather than waited for.
+    drop(ref_inst);
+
+    if check.is_err() || result.stopped_early {
+        // Errors are ignored: the process may already have exited.
+        let _ = ref_process.child.kill();
+        let _ = ref_process.child.wait();
+        return check;
+    }
+
+    let status = ref_process.child.wait()?;
+
+    if !status.success() {
+        return Err(Error::DecodeError("check: reference decoder failed"));
+    }
+
+    check
+}
+
+/// Why a completed check did not pass, if it did not.
+fn verdict(res: &TestResult) -> Option<&'static str> {
+    if res.n_failed_samples > 0 {
+        Some("samples differ from the reference")
+    }
+    else if res.n_samples == 0 {
+        Some("no samples were compared")
+    }
+    else if !res.stopped_early
+        && (res.tgt_unchecked_samples != 0 || res.ref_unchecked_samples != 0)
+    {
+        Some("target and reference sample counts differ")
+    }
+    else {
+        None
+    }
 }
 
 fn main() {
@@ -510,15 +560,47 @@ fn main() {
     println!("  Absolute Maximum Sample Delta:       {:.8}", res.abs_max_delta);
     println!();
 
-    let ret = if res.n_failed_samples == 0 {
-        println!("PASS");
-        0
-    }
-    else {
-        println!("FAIL");
-        1
+    let ret = match verdict(&res) {
+        None => {
+            println!("PASS");
+            0
+        }
+        Some(why) => {
+            println!("FAIL: {why}");
+            1
+        }
     };
     println!();
 
     std::process::exit(ret);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn passing() -> TestResult {
+        TestResult { n_samples: 10, ..Default::default() }
+    }
+
+    #[test]
+    fn verdict_passes_a_clean_result() {
+        assert!(verdict(&passing()).is_none());
+    }
+
+    #[test]
+    fn verdict_fails_zero_compared_samples() {
+        assert!(verdict(&TestResult::default()).is_some());
+    }
+
+    #[test]
+    fn verdict_fails_sample_count_mismatch() {
+        assert!(verdict(&TestResult { tgt_unchecked_samples: 2, ..passing() }).is_some());
+        assert!(verdict(&TestResult { ref_unchecked_samples: 2, ..passing() }).is_some());
+    }
+
+    #[test]
+    fn verdict_fails_differing_samples() {
+        assert!(verdict(&TestResult { n_failed_samples: 1, ..passing() }).is_some());
+    }
 }

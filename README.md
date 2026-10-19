@@ -78,6 +78,11 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 | Format   | Status    | Gapless* | Feature Flag | Default | Crate                       |
 |----------|-----------|----------|--------------|---------|-----------------------------|
 | AIFF     | Excellent | Yes      | `aiff`       | No      | [`symphonia-format-riff`]   |
+| AAC ADTS (`.aac`), ADIF, LOAS/LATM | Great | No | `aac` | No | [`symphonia-codec-aac`] |
+| FLAC | Excellent | Yes | `flac` | Yes | [`symphonia-bundle-flac`] |
+| MP1, MP2, MP3 (MPEG audio, `.mp1`, `.mp2`, `.mp3`) | Excellent | Yes | `mp1`, `mp2`, `mp3`, `mpa` | No | [`symphonia-bundle-mp3`] |
+| NTT TwinVQ (`.vqf`) | Great | No | `vqf` | No | [`symphonia-format-vqf`] |
+| WavPack (`.wv`) | Great | Yes | `wavpack` | No | [`symphonia-codec-wavpack`] |
 | AU/SND (Sun/NeXT) | Great | Yes | `au` | No | [`symphonia-format-sound`] |
 | VOC (Creative Voice) | Great | Yes | `voc` | No | [`symphonia-format-sound`] |
 | IFF 8SVX/16SV | Great | Yes | `iff` | No | [`symphonia-format-sound`] |
@@ -139,6 +144,7 @@ A status of *Excellent* is only assigned after the feature passes all compliance
 [`symphonia-format-es`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-es
 [`symphonia-format-spdif`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-spdif
 [`symphonia-format-bt`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-bt
+[`symphonia-format-vqf`]: https://github.com/M0Rf30/Symphonia/tree/rmpd-next/symphonia-format-vqf
 
 > [!TIP]
 > All formats can be enabled with the `all-formats` feature flag.

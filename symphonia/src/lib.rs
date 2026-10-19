@@ -27,7 +27,12 @@
 //! | Format   | Feature Flag | Gapless* | Default |
 //! |----------|--------------|----------|---------|
 //! | AIFF     | `aiff`       | Yes      | No      |
-//! | ASF/WMA (`.wma`, `.asf`) | `asf` | Yes   | No      |
+//! | AAC ADTS (`.aac`), ADIF, LOAS/LATM | `aac` | No | No |
+//! | APE (Monkey's Audio) | `ape-format` | Yes | No |
+//! | DSD (DSF, DFF) | `dsd`  | Yes      | No      |
+//! | FLAC     | `flac`       | Yes      | Yes     |
+//! | MP1, MP2, MP3 (MPEG audio) | `mp1`, `mp2`, `mp3`, `mpa` | Yes | No |
+//! | ASF/WMA (`.wma`, `.asf`) | `asf` | No    | No      |
 //! | AVI (`.avi`, audio streams) | `avi` | No | No |
 //! | Nintendo GameCube DTK (`.adp`) | `adp` | Yes | No |
 //! | CRI ADX (`.adx`) | `adx` | Yes     | No      |
@@ -42,15 +47,16 @@
 //! | Raw PCM (explicit parameters, not probed) | `raw-pcm` | Yes | No |
 //! | AMR (`.amr`, `.awb`) | `amr` | No   | No      |
 //! | QCP (`.qcp`) | `qcp`    | No      | No      |
-//! | CAF      | `caf`        | No       | No      |
+//! | CAF      | `caf`        | Yes      | No      |
 //! | NTT TwinVQ (`.vqf`) | `vqf` | No     | No      |
-//! | Elementary streams (AC-3, E-AC-3, DTS, TrueHD/MLP, Dolby E) | `es` | No | No |
-//! | Bluetooth audio (`.sbc`, `.aptx`, `.aptxhd`, `.lc3`) | `bt` | No | No |
-//! | FLV (audio) | `flv`     | No       | No      |
-//! | ISO/MP4  | `isomp4`     | No       | No      |
+//! | Elementary streams (AC-3, E-AC-3, DTS, TrueHD/MLP, Dolby E) | `es` | Yes | No |
+//! | IEC 61937 / S/PDIF data bursts | `spdif` | No | No |
+//! | Bluetooth audio (`.sbc`, `.aptx`, `.aptxhd`, `.lc3`) | `bt` | Yes | No |
+//! | FLV (audio) | `flv`     | Yes      | No      |
+//! | ISO/MP4  | `isomp4`     | Yes      | No      |
 //! | RealMedia (audio: `.rm`, `.rmvb`, `.ra`) | `real` | No | No |
-//! | MPEG-PS (audio) | `mpegps` | No    | No      |
-//! | MPEG-TS (audio) | `mpegts` | No    | No      |
+//! | MPEG-PS (audio) | `mpegps` | Yes   | No      |
+//! | MPEG-TS (audio) | `mpegts` | Yes   | No      |
 //! | Musepack | `musepack`   | Yes      | No      |
 //! | Shorten (`.shn`) | `shorten` | Yes | No   |
 //! | TTA (`.tta`) | `tta`    | Yes      | No      |
@@ -58,10 +64,11 @@
 //! | MKV/WebM | `mkv`        | Yes      | Yes     |
 //! | OGG      | `ogg`        | Yes      | Yes     |
 //! | Wave     | `wav`        | Yes      | Yes     |
+//! | WavPack (`.wv`) | `wavpack` | Yes   | No      |
 //!
 //! \* Gapless playback requires support from both the demuxer and decoder.
 //!
-//! **Tip:** All formats can be enabled with the `all-codecs` feature flag.
+//! **Tip:** All formats can be enabled with the `all-formats` feature flag.
 //!
 //! ## Codecs
 //!
@@ -108,6 +115,9 @@
 //! | Opus     | `opus`       | Yes     | Yes     |
 //! | PCM      | `pcm`        | Yes     | Yes     |
 //! | Speex    | `speex`      | Yes     | No      |
+//! | WavPack  | `wavpack`    | Yes     | No      |
+//! | APE (Monkey's Audio) | `ape-format` | Yes | No |
+//! | DSD      | `dsd`        | Yes     | No      |
 //! | Siren, G.722.1, MSN Siren | `siren` | No | No |
 //! | SBC, mSBC | `sbc`       | Yes     | No      |
 //! | aptX, aptX HD | `aptx`  | Yes     | No      |
