@@ -174,3 +174,61 @@ fn garbage_is_not_a_stream() {
     let junk: Vec<u8> = (0..4096u32).map(|i| (i * 7 + 3) as u8).collect();
     assert!(SpdifReader::try_new(mss(junk), Default::default()).is_err());
 }
+
+/// The first `n` bursts (of `period` bytes) of the capture `name`.
+fn bursts(name: &str, period: usize, n: usize) -> Vec<Vec<u8>> {
+    data(name).chunks(period).take(n).map(<[u8]>::to_vec).collect()
+}
+
+/// A pause burst (IEC 61937-1 data type 3, no payload) of `period` bytes, little-endian.
+fn pause_burst(period: usize) -> Vec<u8> {
+    let mut b = vec![0; period];
+    b[..4].copy_from_slice(&[0x72, 0xf8, 0x1f, 0x4e]);
+    b[4] = 0x03;
+    b
+}
+
+fn packet_crcs(data: Vec<u8>) -> Vec<u32> {
+    let mut reader = SpdifReader::try_new(mss(data), Default::default()).unwrap();
+    let mut out = Vec::new();
+    while let Some(p) = reader.next_packet().unwrap() {
+        out.push(adler32(&p.data));
+    }
+    out
+}
+
+#[test]
+fn pause_burst_does_not_stop_playback() {
+    let ac3 = bursts("ac3.spdif", 6144, 2);
+    let (_, frames) = framecrc("ac3.framecrc");
+
+    let mut capture = ac3[0].clone();
+    capture.extend(pause_burst(6144));
+    capture.extend(&ac3[1]);
+
+    assert_eq!(packet_crcs(capture), vec![frames[0].crc, frames[1].crc]);
+}
+
+#[test]
+fn mpeg1_layer2_period_is_4608() {
+    use symphonia_core::formats::probe::{Score, Scoreable};
+    use symphonia_core::io::ScopedStream;
+
+    let mut stream = mss(data("mp2.spdif"));
+    let score = SpdifReader::score(ScopedStream::new(&mut stream, u64::MAX)).unwrap();
+    assert!(matches!(score, Score::Supported(255)));
+}
+
+#[test]
+fn probe_skips_false_sync_candidate() {
+    use symphonia_core::formats::probe::{Score, Scoreable};
+    use symphonia_core::io::ScopedStream;
+
+    // Sync words in leading junk, with an unsupported data type, before the real stream.
+    let mut capture = vec![0x72, 0xf8, 0x1f, 0x4e, 0x63, 0, 0, 0, 0, 0];
+    capture.extend(data("ac3.spdif"));
+
+    let mut stream = mss(capture);
+    let score = SpdifReader::score(ScopedStream::new(&mut stream, u64::MAX)).unwrap();
+    assert!(matches!(score, Score::Supported(255)));
+}

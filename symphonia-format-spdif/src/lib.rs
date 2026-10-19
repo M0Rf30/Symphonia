@@ -133,7 +133,9 @@ fn burst_layout(data_type: u8, payload: &[u8]) -> Option<(Payload, usize)> {
     Some(match data_type {
         data_type::AC3 => (Payload::Ac3, 1536 << 2),
         data_type::MPEG1_LAYER1 => (Payload::Mpeg, MPEG_PERIOD[1][0]),
-        data_type::MPEG1_LAYER23 => (Payload::Mpeg, MPEG_PERIOD[1][0]),
+        // IEC 61937-4: 1152 samples of 4 bytes. FFmpeg's spdifdec uses `[1][0]` (1536) here,
+        // which is the period of layer 1 and under-skips the padding.
+        data_type::MPEG1_LAYER23 => (Payload::Mpeg, MPEG_PERIOD[1][1]),
         data_type::MPEG2_EXT => (Payload::Mpeg, 4608),
         data_type::MPEG2_AAC => {
             // The ADTS header gives the number of raw data blocks, of 1024 samples each
@@ -217,7 +219,15 @@ struct Burst {
 /// Scan `buf` (the start of the stream) for the first burst. Returns the position, the byte
 /// order, and the burst; and the position of the next sync words implied by the repetition period.
 fn find_burst(buf: &[u8]) -> Option<(usize, bool, u8, Payload, usize, usize)> {
-    let pos = buf.windows(4).position(|w| w == SYNC_LE || w == SYNC_BE)?;
+    // Try every sync candidate: the sync words may occur by chance in preceding data.
+    buf.windows(4)
+        .enumerate()
+        .filter(|(_, w)| *w == SYNC_LE || *w == SYNC_BE)
+        .find_map(|(pos, _)| parse_burst_at(buf, pos))
+}
+
+/// Parse the burst whose sync words are at `pos` in `buf`.
+fn parse_burst_at(buf: &[u8], pos: usize) -> Option<(usize, bool, u8, Payload, usize, usize)> {
     let big_endian = buf[pos..pos + 4] == SYNC_BE;
 
     let hdr = buf.get(pos + 4..pos + BURST_HEADER_LEN)?;
@@ -269,6 +279,8 @@ pub struct SpdifReader<'s> {
     index: Vec<(i64, u64)>,
     /// True if `index` covers the whole stream.
     scanned: bool,
+    /// The total number of frames of the stream, known once scanned.
+    total_frames: u64,
     pending: Option<Packet>,
 }
 
@@ -295,6 +307,7 @@ impl<'s> SpdifReader<'s> {
             next_ts: 0,
             index: Vec::new(),
             scanned: false,
+            total_frames: 0,
             pending: None,
         };
 
@@ -337,8 +350,8 @@ impl<'s> SpdifReader<'s> {
             .with_start_ts(Timestamp::new(0));
 
         if self.scanned {
-            track.with_num_frames(self.next_ts as u64);
-            track.with_duration(Duration::new(self.next_ts as u64));
+            track.with_num_frames(self.total_frames);
+            track.with_duration(Duration::new(self.total_frames));
         }
 
         debug!("spdif: {:?}, {} Hz", info.params.codec, info.rate);
@@ -457,6 +470,7 @@ impl<'s> SpdifReader<'s> {
         self.scanned = true;
 
         let total = self.next_ts as u64;
+        self.total_frames = total;
 
         for track in &mut self.tracks {
             track.with_num_frames(total);
@@ -476,9 +490,14 @@ impl<'s> SpdifReader<'s> {
             return Ok(Some(packet));
         }
 
-        let Some(burst) = self.read_burst()?
-        else {
-            return Ok(None);
+        // Skip pause, null, and unsupported bursts, as the scan does.
+        let burst = loop {
+            match self.read_burst() {
+                Ok(Some(burst)) => break burst,
+                Ok(None) => return Ok(None),
+                Err(Error::DecodeError(_)) => (),
+                Err(e) => return Err(e),
+            }
         };
 
         // A different data type may be a different codec.
