@@ -150,7 +150,7 @@ impl Floor0 {
         bs: &mut BitReaderRtl<'_>,
         bs0_exp: u8,
         bs1_exp: u8,
-        max_codebook: u8,
+        max_codebook: usize,
     ) -> Result<Box<dyn Floor>> {
         let setup = Self::read_setup(bs, bs0_exp, bs1_exp, max_codebook)?;
 
@@ -161,7 +161,7 @@ impl Floor0 {
         bs: &mut BitReaderRtl<'_>,
         bs0_exp: u8,
         bs1_exp: u8,
-        max_codebook: u8,
+        max_codebook: usize,
     ) -> Result<Floor0Setup> {
         let floor0_order = bs.read_bits_leq32(8)? as u8;
         let floor0_rate = bs.read_bits_leq32(16)? as u16;
@@ -176,7 +176,7 @@ impl Floor0 {
         for book in &mut floor0_book_list[..end] {
             *book = bs.read_bits_leq32(8)? as u8;
 
-            if *book >= max_codebook {
+            if usize::from(*book) >= max_codebook {
                 return decode_error("vorbis: floor0, invalid codebook number");
             }
         }
@@ -218,6 +218,10 @@ impl Floor for Floor0 {
             // index.
             let floor_book_idx_bits = ilog(u32::from(self.setup.floor0_number_of_books));
             let floor_book_idx = io_try_or_ret!(bs.read_bits_leq32(floor_book_idx_bits)) as usize;
+
+            if floor_book_idx >= usize::from(self.setup.floor0_number_of_books) {
+                return decode_error("vorbis: floor0, invalid book index");
+            }
 
             // Get the actual codebook index from the floor's codebook list.
             let codebook_idx = self.setup.floor0_book_list[floor_book_idx] as usize;
@@ -438,7 +442,7 @@ pub struct Floor1 {
 }
 
 impl Floor1 {
-    pub fn try_read(bs: &mut BitReaderRtl<'_>, max_codebook: u8) -> Result<Box<dyn Floor>> {
+    pub fn try_read(bs: &mut BitReaderRtl<'_>, max_codebook: usize) -> Result<Box<dyn Floor>> {
         let setup = Self::read_setup(bs, max_codebook)?;
 
         let x_list_len = setup.floor1_x_list.len();
@@ -452,7 +456,7 @@ impl Floor1 {
         }))
     }
 
-    fn read_setup(bs: &mut BitReaderRtl<'_>, max_codebook: u8) -> Result<Floor1Setup> {
+    fn read_setup(bs: &mut BitReaderRtl<'_>, max_codebook: usize) -> Result<Floor1Setup> {
         // The number of partitions. 5-bit value, 0..31 range.
         let floor1_partitions = bs.read_bits_leq32(5)? as usize;
 
@@ -482,7 +486,7 @@ impl Floor1 {
                 if class.subclass_bits != 0 {
                     let masterbook = bs.read_bits_leq32(8)? as u8;
 
-                    if masterbook >= max_codebook {
+                    if usize::from(masterbook) >= max_codebook {
                         return decode_error("vorbis: floor1, invalid codebook for class");
                     }
 
@@ -500,7 +504,7 @@ impl Floor1 {
                         // The actual codebook used is the number read minus one.
                         *book -= 1;
 
-                        if *book >= max_codebook {
+                        if usize::from(*book) >= max_codebook {
                             return decode_error("vorbis: floor1, invalid codebook for subclass");
                         }
 
@@ -515,7 +519,8 @@ impl Floor1 {
         let rangebits = bs.read_bits_leq32(4)?;
 
         let mut floor1_x_list = Vec::new();
-        let mut floor1_x_list_unique = HashSet::new();
+        // The implicit X values 0 and 2^rangebits must also be unique (libvorbis rejects equal X).
+        let mut floor1_x_list_unique = HashSet::from([0, 1u32 << rangebits]);
 
         floor1_x_list.push(0);
         floor1_x_list.push(1 << rangebits);

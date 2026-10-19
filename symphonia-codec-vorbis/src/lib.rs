@@ -520,10 +520,10 @@ fn read_setup(reader: &mut BufReader<'_>, ident: &IdentHeader) -> Result<Setup> 
     read_time_domain_transforms(&mut bs)?;
 
     // Read floors.
-    let floors = read_floors(&mut bs, ident.bs0_exp, ident.bs1_exp, codebooks.len() as u8)?;
+    let floors = read_floors(&mut bs, ident.bs0_exp, ident.bs1_exp, codebooks.len())?;
 
     // Read residues.
-    let residues = read_residues(&mut bs, codebooks.len() as u8)?;
+    let residues = read_residues(&mut bs, codebooks.len())?;
 
     // Read channel mappings.
     let mappings =
@@ -584,7 +584,7 @@ fn read_floors(
     bs: &mut BitReaderRtl<'_>,
     bs0_exp: u8,
     bs1_exp: u8,
-    max_codebook: u8,
+    max_codebook: usize,
 ) -> Result<Vec<Box<dyn Floor>>> {
     let count = bs.read_bits_leq32(6)? + 1;
     (0..count).map(|_| read_floor(bs, bs0_exp, bs1_exp, max_codebook)).collect()
@@ -594,7 +594,7 @@ fn read_floor(
     bs: &mut BitReaderRtl<'_>,
     bs0_exp: u8,
     bs1_exp: u8,
-    max_codebook: u8,
+    max_codebook: usize,
 ) -> Result<Box<dyn Floor>> {
     let floor_type = bs.read_bits_leq32(16)?;
 
@@ -605,12 +605,12 @@ fn read_floor(
     }
 }
 
-fn read_residues(bs: &mut BitReaderRtl<'_>, max_codebook: u8) -> Result<Vec<Residue>> {
+fn read_residues(bs: &mut BitReaderRtl<'_>, max_codebook: usize) -> Result<Vec<Residue>> {
     let count = bs.read_bits_leq32(6)? + 1;
     (0..count).map(|_| read_residue(bs, max_codebook)).collect()
 }
 
-fn read_residue(bs: &mut BitReaderRtl<'_>, max_codebook: u8) -> Result<Residue> {
+fn read_residue(bs: &mut BitReaderRtl<'_>, max_codebook: usize) -> Result<Residue> {
     let residue_type = bs.read_bits_leq32(16)? as u16;
 
     match residue_type {
@@ -858,5 +858,111 @@ mod tests {
 
         let mut bs = BitReaderRtl::new(&buf);
         assert!(read_codebooks(&mut bs).is_err());
+    }
+
+    fn to_bytes(bits: &[bool]) -> Vec<u8> {
+        let mut buf = vec![0u8; bits.len().div_ceil(8) + 8];
+        for (i, _) in bits.iter().enumerate().filter(|(_, b)| **b) {
+            buf[i / 8] |= 1 << (i % 8);
+        }
+        buf
+    }
+
+    #[test]
+    fn verify_floor1_rejects_x_equal_to_implicit_zero() {
+        let mut bits = Vec::new();
+        push_bits(&mut bits, 1, 5); // partitions
+        push_bits(&mut bits, 0, 4); // class 0
+        push_bits(&mut bits, 0, 3); // dimensions - 1
+        push_bits(&mut bits, 0, 2); // subclass bits
+        push_bits(&mut bits, 0, 8); // subbook
+        push_bits(&mut bits, 0, 2); // multiplier
+        push_bits(&mut bits, 4, 4); // rangebits
+        push_bits(&mut bits, 0, 4); // x == implicit 0
+        let buf = to_bytes(&bits);
+        assert!(floor::Floor1::try_read(&mut BitReaderRtl::new(&buf), 1).is_err());
+    }
+
+    #[test]
+    fn verify_codebook_rejects_length_over_32() {
+        let mut bits = Vec::new();
+        push_bits(&mut bits, 0, 8); // 1 codebook
+        push_bits(&mut bits, 0x564342, 24);
+        push_bits(&mut bits, 1, 16);
+        push_bits(&mut bits, 4, 24);
+        push_bits(&mut bits, 1, 1); // ordered
+        push_bits(&mut bits, 31, 5); // start length 32
+        push_bits(&mut bits, 0, 3); // no entries of length 32, next length is 33
+        push_bits(&mut bits, 0, 3);
+        let buf = to_bytes(&bits);
+        assert!(read_codebooks(&mut BitReaderRtl::new(&buf)).is_err());
+    }
+
+    #[test]
+    fn verify_floor0_rejects_book_index_out_of_list() {
+        let mut bits = Vec::new();
+        push_bits(&mut bits, 1, 8); // order
+        push_bits(&mut bits, 1000, 16); // rate
+        push_bits(&mut bits, 10, 16); // bark map size
+        push_bits(&mut bits, 1, 6); // amplitude bits
+        push_bits(&mut bits, 0, 8); // amplitude offset
+        push_bits(&mut bits, 15, 4); // 16 books
+        for _ in 0..16 {
+            push_bits(&mut bits, 0, 8);
+        }
+        let buf = to_bytes(&bits);
+        let mut br = BitReaderRtl::new(&buf);
+        let mut floor = floor::Floor0::try_read(&mut br, 8, 11, 1).unwrap();
+
+        let mut bits = Vec::new();
+        push_bits(&mut bits, 1, 1); // amplitude
+        push_bits(&mut bits, 16, 5); // book index 16 of 16
+        let buf = to_bytes(&bits);
+        assert!(floor.read_channel(&mut BitReaderRtl::new(&buf), &[]).is_err());
+    }
+
+    #[test]
+    fn verify_256_codebooks_are_addressable() {
+        let mut bits = Vec::new();
+        push_bits(&mut bits, 1, 5);
+        push_bits(&mut bits, 0, 4);
+        push_bits(&mut bits, 0, 3);
+        push_bits(&mut bits, 1, 2); // 2 subclasses
+        push_bits(&mut bits, 255, 8); // masterbook
+        push_bits(&mut bits, 0, 16);
+        push_bits(&mut bits, 0, 2);
+        push_bits(&mut bits, 4, 4);
+        push_bits(&mut bits, 5, 4);
+        let buf = to_bytes(&bits);
+        assert!(floor::Floor1::try_read(&mut BitReaderRtl::new(&buf), 256).is_ok());
+        assert!(floor::Floor1::try_read(&mut BitReaderRtl::new(&buf), 255).is_err());
+
+        // Residue classbook 255.
+        let mut bits = Vec::new();
+        push_bits(&mut bits, 0, 24);
+        push_bits(&mut bits, 0, 24);
+        push_bits(&mut bits, 0, 24);
+        push_bits(&mut bits, 0, 6);
+        push_bits(&mut bits, 255, 8);
+        push_bits(&mut bits, 0, 4);
+        let buf = to_bytes(&bits);
+        assert!(residue::Residue::try_read(&mut BitReaderRtl::new(&buf), 0, 256).is_ok());
+        assert!(residue::Residue::try_read(&mut BitReaderRtl::new(&buf), 0, 255).is_err());
+    }
+
+    #[test]
+    fn verify_residue_accepts_book_zero() {
+        // Vorbis I spec 8.6.1: book 0 is a valid residue VQ book.
+        let mut bits = Vec::new();
+        push_bits(&mut bits, 0, 24);
+        push_bits(&mut bits, 0, 24);
+        push_bits(&mut bits, 0, 24);
+        push_bits(&mut bits, 0, 6);
+        push_bits(&mut bits, 0, 8); // classbook
+        push_bits(&mut bits, 1, 3); // book 0 used
+        push_bits(&mut bits, 0, 1);
+        push_bits(&mut bits, 0, 8); // book 0
+        let buf = to_bytes(&bits);
+        assert!(residue::Residue::try_read(&mut BitReaderRtl::new(&buf), 0, 1).is_ok());
     }
 }

@@ -291,6 +291,11 @@ impl VorbisCodebook {
                     0
                 };
 
+                // Codeword lengths are limited to 32 bits.
+                if cur_len > 32 {
+                    return decode_error("vorbis: invalid codebook, codeword length > 32");
+                }
+
                 let num = bs.read_bits_leq32(num_bits)?;
 
                 code_lens.extend(std::iter::repeat_n(cur_len as u8, num as usize));

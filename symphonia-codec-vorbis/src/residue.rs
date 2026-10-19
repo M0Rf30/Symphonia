@@ -63,7 +63,7 @@ impl Residue {
     pub fn try_read(
         bs: &mut BitReaderRtl<'_>,
         residue_type: u16,
-        max_codebook: u8,
+        max_codebook: usize,
     ) -> Result<Self> {
         let setup = Self::read_setup(bs, residue_type, max_codebook)?;
 
@@ -73,7 +73,7 @@ impl Residue {
     fn read_setup(
         bs: &mut BitReaderRtl<'_>,
         residue_type: u16,
-        max_codebook: u8,
+        max_codebook: usize,
     ) -> Result<ResidueSetup> {
         let residue_begin = bs.read_bits_leq32(24)?;
         let residue_end = bs.read_bits_leq32(24)?;
@@ -81,7 +81,7 @@ impl Residue {
         let residue_classifications = bs.read_bits_leq32(6)? as u8 + 1;
         let residue_classbook = bs.read_bits_leq32(8)? as u8;
 
-        if residue_classbook >= max_codebook {
+        if usize::from(residue_classbook) >= max_codebook {
             return decode_error("vorbis: invalid codebook for residue classbook");
         }
 
@@ -114,9 +114,9 @@ impl Residue {
                     // Read the codebook number.
                     *book = bs.read_bits_leq32(8)? as u8;
 
-                    // The codebook number cannot be 0 or exceed the number of codebooks in this
-                    // stream.
-                    if *book == 0 || *book >= max_codebook {
+                    // Vorbis I spec 8.6.1: the book number must index a valid codebook (0 is
+                    // valid, as in libvorbis).
+                    if usize::from(*book) >= max_codebook {
                         return decode_error("vorbis: invalid codebook for residue");
                     }
 
