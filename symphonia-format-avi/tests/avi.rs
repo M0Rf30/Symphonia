@@ -300,3 +300,86 @@ fn opendml_continuation_and_seek() {
     assert!((200..=300).contains(&actual));
     assert_eq!(decode_s16(reader.as_mut()), samples[actual..]);
 }
+
+// --- Seeking keeps the packets of the other tracks ---
+
+fn pcm_strl(rate: u32, id_len: u32) -> Vec<u8> {
+    let mut strh = b"auds".to_vec();
+    strh.extend([0; 4]);
+    strh.extend([0; 4 + 2 + 2 + 4]);
+    strh.extend(1u32.to_le_bytes());
+    strh.extend(rate.to_le_bytes());
+    strh.extend(0u32.to_le_bytes());
+    strh.extend(id_len.to_le_bytes());
+    strh.extend([0; 8]);
+    strh.extend(2u32.to_le_bytes());
+    strh.extend([0; 8]);
+
+    let mut strf = Vec::new();
+    strf.extend(1u16.to_le_bytes());
+    strf.extend(1u16.to_le_bytes());
+    strf.extend(rate.to_le_bytes());
+    strf.extend((rate * 2).to_le_bytes());
+    strf.extend(2u16.to_le_bytes());
+    strf.extend(16u16.to_le_bytes());
+
+    list(b"LIST", b"strl", &[chunk(b"strh", &strh), chunk(b"strf", &strf)].concat())
+}
+
+/// Two mono PCM tracks (8000 Hz and 4000 Hz) of 12.5 ms chunks. The chunk of the second track
+/// comes before that of the first for each interval.
+fn two_tracks() -> Vec<u8> {
+    let hdrl = list(
+        b"LIST",
+        b"hdrl",
+        &[chunk(b"avih", &[0; 56]), pcm_strl(8000, 800), pcm_strl(4000, 400)].concat(),
+    );
+
+    let mut movi = Vec::new();
+    for i in 0..8i16 {
+        movi.extend(chunk(b"01wb", &[i as u8; 100]));
+        movi.extend(chunk(b"00wb", &[i as u8; 200]));
+    }
+    let movi = list(b"LIST", b"movi", &movi);
+
+    let body = [hdrl, movi].concat();
+    let mut file = b"RIFF".to_vec();
+    file.extend(((body.len() + 4) as u32).to_le_bytes());
+    file.extend(b"AVI ");
+    file.extend(body);
+    file
+}
+
+#[test]
+fn seek_keeps_other_tracks() {
+    let file = two_tracks();
+
+    // The first packet of each track at the position of the seek, from a linear read.
+    let mut linear = open_bytes(file.clone());
+    assert_eq!(linear.tracks().len(), 2);
+    let (t0, t1) = (linear.tracks()[0].id, linear.tracks()[1].id);
+    let mut pkts = Vec::new();
+    while let Some(p) = linear.next_packet().unwrap() {
+        pkts.push((p.track_id, p.pts.get(), p.dur.get()));
+    }
+
+    // Track 0 is 8000 Hz: 250 is 31.25 ms, in the packet at 200. The packet of track 1 (4000 Hz)
+    // that covers that time starts at 100, and was read before the packet of track 0.
+    let mut reader = open_bytes(file);
+    let seeked = reader
+        .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(250), track_id: t0 })
+        .unwrap();
+    assert_eq!(seeked.actual_ts.get(), 200);
+
+    let first0 = pkts.iter().find(|p| p.0 == t0 && p.1 + p.2 as i64 > 250).unwrap();
+    let first1 = pkts.iter().find(|p| p.0 == t1 && (p.1 + p.2 as i64) * 2 > 250).unwrap();
+    assert_eq!(first1.1, 100);
+
+    let (mut got0, mut got1) = (None, None);
+    while let Some(p) = reader.next_packet().unwrap() {
+        let slot = if p.track_id == t0 { &mut got0 } else { &mut got1 };
+        slot.get_or_insert(p.pts.get());
+    }
+    assert_eq!(got0, Some(first0.1));
+    assert_eq!(got1, Some(first1.1));
+}

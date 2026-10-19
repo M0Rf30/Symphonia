@@ -549,11 +549,28 @@ impl<'s> AsfReader<'s> {
     }
 
     fn finish_seek(&mut self, idx: usize, required_ts: Timestamp, to: Landing) -> Result<SeekedTo> {
-        // The next packets are the landing unit, the first unit after the target (if any), and
-        // everything read after it.
+        // The next packets are the landing unit, the units of the other streams that were read
+        // while scanning and that end after the target time, the first unit after the target (if
+        // any), and everything read after it.
         if let Some(next) = to.next {
             self.ready.push_front(next);
         }
+
+        let target_ms = ts_to_ms(required_ts.get(), self.timing[idx].rate);
+
+        for unit in to.skipped.into_iter().rev() {
+            let Some(timing) = self.track_index(unit.stream).map(|i| self.timing[i])
+            else {
+                continue;
+            };
+
+            let (ts, dur) = self.unit_ts(&timing, &unit);
+
+            if ts_to_ms(ts.saturating_add(dur as i64), timing.rate) > target_ms {
+                self.ready.push_front(unit);
+            }
+        }
+
         let actual_ts = to.ts;
         self.ready.push_front(to.unit);
         self.last_ts[idx] = None;
@@ -570,6 +587,8 @@ impl<'s> AsfReader<'s> {
     /// returned when the scan started at the first data packet (`at_start`), otherwise `Before`.
     fn scan_to(&mut self, timing: &TrackTiming, required: i64, at_start: bool) -> Result<Scan> {
         let mut best: Option<(Unit, i64, u64)> = None;
+        // The units of the other streams that are read are kept for after the seek.
+        let mut skipped = Vec::new();
 
         loop {
             let Some(unit) = self.next_unit()?
@@ -577,13 +596,14 @@ impl<'s> AsfReader<'s> {
                 // The end of the data: the target is only valid within the last unit.
                 return Ok(match best {
                     Some((unit, ts, dur)) if required <= ts.saturating_add(dur as i64) => {
-                        Scan::Found(Landing { unit, ts, next: None })
+                        Scan::Found(Landing { unit, ts, next: None, skipped })
                     }
                     _ => Scan::Beyond,
                 });
             };
 
             if unit.stream != timing.stream {
+                skipped.push(unit);
                 continue;
             }
 
@@ -595,10 +615,10 @@ impl<'s> AsfReader<'s> {
             else {
                 return Ok(match best {
                     Some((best, ts, _)) => {
-                        Scan::Found(Landing { unit: best, ts, next: Some(unit) })
+                        Scan::Found(Landing { unit: best, ts, next: Some(unit), skipped })
                     }
                     // The target is before the first unit that was read.
-                    None if at_start => Scan::Found(Landing { unit, ts, next: None }),
+                    None if at_start => Scan::Found(Landing { unit, ts, next: None, skipped }),
                     None => Scan::Before,
                 });
             }
@@ -619,6 +639,8 @@ struct Landing {
     unit: Unit,
     ts: i64,
     next: Option<Unit>,
+    /// The units of the other streams that were read before `next`.
+    skipped: Vec<Unit>,
 }
 
 impl Scoreable for AsfReader<'_> {

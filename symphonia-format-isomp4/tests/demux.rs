@@ -210,3 +210,77 @@ fn fragmented_file_has_the_same_packets() {
         assert_eq!(reader.next_packet().unwrap().unwrap().pts.get(), actual);
     }
 }
+
+/// The fragmented two-track fixture: `frag_2aac.mp4` is made like `frag_aac_st_44k.mp4` from two
+/// sines (track 1: 0.5 s 8 kHz stereo, track 2: 0.3 s 16 kHz mono) with
+/// `-map 0 -map 1 -c:a aac -b:a 32k`; a single moof holds both track fragments.
+const FRAG_2TR: &str = "frag_2aac.mp4";
+
+fn read_bytes(name: &str) -> Vec<u8> {
+    std::fs::read(format!("{FIXTURES}/{name}")).unwrap()
+}
+
+/// Overwrite the big-endian u32 following the first `tag` found at or after `from`, `skip` bytes
+/// after the tag. Returns the offset of the patched field.
+fn patch_u32(data: &mut [u8], tag: &[u8; 4], from: usize, skip: usize, value: u32) -> usize {
+    let at = from + data[from..].windows(4).position(|w| w == tag).unwrap() + 4 + skip;
+    data[at..at + 4].copy_from_slice(&value.to_be_bytes());
+    at
+}
+
+fn try_open_bytes(data: Vec<u8>) -> Result<IsoMp4Reader<'static>, Error> {
+    let mss = MediaSourceStream::new(Box::new(std::io::Cursor::new(data)), Default::default());
+    IsoMp4Reader::try_new(mss, FormatOptions::default())
+}
+
+/// All packets as `(track_id, pts, bytes)`.
+fn read_all_tracks(reader: &mut IsoMp4Reader<'_>) -> Result<Vec<(u32, i64, usize)>, Error> {
+    let mut out = Vec::new();
+    while let Some(p) = reader.next_packet()? {
+        out.push((p.track_id, p.pts.get(), p.data.len()));
+    }
+    Ok(out)
+}
+
+#[test]
+fn fragments_are_matched_to_tracks_by_track_id_not_position() {
+    let original = read_all_tracks(&mut try_open_bytes(read_bytes(FRAG_2TR)).unwrap()).unwrap();
+    assert!(original.iter().any(|p| p.0 == 1) && original.iter().any(|p| p.0 == 2));
+
+    // Swap the IDs of the two tracks (tkhd and tfhd) but not the order of the trex atoms: the
+    // trex of the first trak is now the second one.
+    let mut data = read_bytes(FRAG_2TR);
+    let (mut tkhd, mut tfhd) = (0, 0);
+    for id in [2, 1] {
+        // tkhd: version/flags, ctime, mtime, then the track ID. tfhd: version/flags, then the ID.
+        tkhd = patch_u32(&mut data, b"tkhd", tkhd, 12, id);
+        tfhd = patch_u32(&mut data, b"tfhd", tfhd, 4, id);
+    }
+
+    let mut reader = try_open_bytes(data).unwrap();
+    let swapped = read_all_tracks(&mut reader).unwrap();
+    let expected: Vec<_> = original.iter().map(|&(id, pts, len)| (3 - id, pts, len)).collect();
+    let (mut swapped, mut expected) = (swapped, expected);
+    swapped.sort();
+    expected.sort();
+    assert_eq!(swapped, expected);
+}
+
+#[test]
+fn fragmented_file_without_a_trex_for_a_track_is_an_error() {
+    let mut data = read_bytes(FRAG_2TR);
+    // The trex of track 1 now describes a track that does not exist.
+    patch_u32(&mut data, b"trex", 0, 4, 9);
+    let result = try_open_bytes(data).and_then(|mut r| read_all_tracks(&mut r));
+    assert!(matches!(result, Err(Error::DecodeError(m)) if m.contains("trex")), "{result:?}");
+}
+
+#[test]
+fn several_track_fragments_for_one_track_in_a_moof_are_an_error() {
+    let mut data = read_bytes(FRAG_2TR);
+    // Both track fragments of the moof are now for track 1.
+    let first = patch_u32(&mut data, b"tfhd", 0, 4, 1);
+    patch_u32(&mut data, b"tfhd", first, 4, 1);
+    let result = try_open_bytes(data).and_then(|mut r| read_all_tracks(&mut r));
+    assert!(matches!(result, Err(Error::DecodeError(m)) if m.contains("multiple")), "{result:?}");
+}

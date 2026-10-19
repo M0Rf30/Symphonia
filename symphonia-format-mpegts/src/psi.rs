@@ -29,6 +29,9 @@ fn crc32_mpeg2(data: &[u8]) -> u32 {
 pub struct SectionAssembler {
     buf: Vec<u8>,
     active: bool,
+    /// A section completed by the tail bytes (before the pointer field target) of a packet that
+    /// also starts a new section.
+    tail: Option<Vec<u8>>,
 }
 
 impl SectionAssembler {
@@ -38,10 +41,23 @@ impl SectionAssembler {
     pub fn push(&mut self, pusi: bool, payload: &[u8]) -> Option<Vec<u8>> {
         if pusi {
             let pointer = usize::from(*payload.first()?);
-            let rest = payload.get(1 + pointer..)?;
 
-            // The end of a section started in a previous packet is discarded: it is only
-            // complete if it was complete in the previous packet.
+            let Some(rest) = payload.get(1 + pointer..)
+            else {
+                // A bad pointer field: the packet is damaged.
+                self.buf.clear();
+                self.active = false;
+                self.tail = None;
+                return None;
+            };
+
+            // The bytes before the pointer field target are the end of a section started in a
+            // previous packet (ISO/IEC 13818-1, pointer_field). Complete that section first.
+            if self.active && !self.buf.is_empty() {
+                self.buf.extend_from_slice(&payload[1..1 + pointer]);
+                self.tail = self.take_section();
+            }
+
             self.buf.clear();
             self.buf.extend_from_slice(rest);
             self.active = true;
@@ -59,6 +75,10 @@ impl SectionAssembler {
     /// Take the next complete section from the data buffered. Call after [`push`](Self::push)
     /// returns a section, until it returns `None`, since a packet may contain several sections.
     pub fn take_section(&mut self) -> Option<Vec<u8>> {
+        if let Some(tail) = self.tail.take() {
+            return Some(tail);
+        }
+
         if !self.active || self.buf.len() < 3 {
             return None;
         }
@@ -253,6 +273,46 @@ mod tests {
         let crc = crc32_mpeg2(&s);
         s.extend_from_slice(&crc.to_be_bytes());
         s
+    }
+
+    #[test]
+    fn verify_section_tail_before_pointer_field_is_kept() {
+        let first = build_section(2, 1, &[0xe1, 0x00, 0xf0, 0x00, 0x03, 0xe1, 0x01, 0xf0, 0x00]);
+        let second = build_section(2, 2, &[0xe1, 0x00, 0xf0, 0x00]);
+
+        // Packet 1 holds the first part of `first`; packet 2 holds the rest of `first`
+        // (pointer = rest length) followed by `second`.
+        let split = 10;
+        let mut asm = SectionAssembler::default();
+
+        let mut p1 = vec![0u8];
+        p1.extend_from_slice(&first[..split]);
+        assert!(asm.push(true, &p1).is_none());
+
+        let mut p2 = vec![(first.len() - split) as u8];
+        p2.extend_from_slice(&first[split..]);
+        p2.extend_from_slice(&second);
+        p2.resize(p2.len() + 5, 0xff);
+
+        assert_eq!(asm.push(true, &p2), Some(first));
+        assert_eq!(asm.take_section(), Some(second));
+        assert_eq!(asm.take_section(), None);
+    }
+
+    #[test]
+    fn verify_bad_pointer_clears_section_state() {
+        let sec = build_section(2, 1, &[0xe1, 0x00, 0xf0, 0x00]);
+        let mut asm = SectionAssembler::default();
+
+        let mut p1 = vec![0u8];
+        p1.extend_from_slice(&sec[..8]);
+        assert!(asm.push(true, &p1).is_none());
+
+        // The pointer points past the end of the packet.
+        assert!(asm.push(true, &[200, 1, 2, 3]).is_none());
+        // The continuation must not complete the discarded section.
+        assert!(asm.push(false, &sec[8..]).is_none());
+        assert_eq!(asm.take_section(), None);
     }
 
     #[test]

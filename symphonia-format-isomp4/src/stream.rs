@@ -78,11 +78,14 @@ struct SequenceInfo {
     /// If present in the moof segment, this is the index of the track fragment atom for the track
     /// this sequence information is associated with.
     traf_idx: Option<usize>,
+    /// The default sample duration of the track from its trex atom.
+    default_sample_duration: u32,
+    /// The default sample size of the track from its trex atom.
+    default_sample_size: u32,
 }
 
 pub struct MoofSegment {
     moof: MoofAtom,
-    moov: Arc<MoovAtom>,
     seq: Vec<SequenceInfo>,
 }
 
@@ -93,18 +96,38 @@ impl MoofSegment {
         moov: Arc<MoovAtom>,
         prev: &dyn StreamSegment,
     ) -> Result<MoofSegment> {
+        let track_ids: Vec<u32> = moov.traks.iter().map(|trak| trak.tkhd.id).collect();
+        Self::with_track_ids(moof, moov, &track_ids, prev)
+    }
+
+    /// Instantiate a new segment from a `MoofAtom` for the tracks with the IDs `track_ids`, in
+    /// track order.
+    fn with_track_ids(
+        moof: MoofAtom,
+        moov: Arc<MoovAtom>,
+        track_ids: &[u32],
+        prev: &dyn StreamSegment,
+    ) -> Result<MoofSegment> {
         let mvex = match moov.mvex.as_ref() {
             Some(v) => v,
             None => return decode_error("isomp4: fragmented stream missing mvex atom"),
         };
 
-        let mut seq = Vec::with_capacity(mvex.trexs.len());
+        let mut seq = Vec::with_capacity(track_ids.len());
 
         // Calculate the sequence information for each track, even if not present in the fragment.
-        for (track_num, trex) in mvex.trexs.iter().enumerate() {
+        for (track_num, &track_id) in track_ids.iter().enumerate() {
+            // ISO/IEC 14496-12 8.8.3: the trex is matched to the trak by track ID, not by position.
+            let Some(trex) = mvex.trexs.iter().find(|trex| trex.track_id == track_id)
+            else {
+                return decode_error("isomp4: missing trex atom for track");
+            };
+
             let mut info = SequenceInfo {
                 first_sample: prev.track_sample_range(track_num).end,
                 first_ts: prev.track_ts_range(track_num).end,
+                default_sample_duration: trex.default_sample_duration,
+                default_sample_size: trex.default_sample_size,
                 ..Default::default()
             };
 
@@ -112,6 +135,12 @@ impl MoofSegment {
             for (traf_idx, traf) in moof.trafs.iter().enumerate() {
                 if trex.track_id != traf.tfhd.track_id {
                     continue;
+                }
+
+                // Several track fragments for one track in a moof are not supported (the runs of
+                // each would need their own base data offset and defaults): reject.
+                if info.traf_idx.is_some() {
+                    return decode_error("isomp4: multiple track fragments for one track in moof");
                 }
 
                 // Calculate the total duration of all runs in the fragment for the track.
@@ -139,7 +168,7 @@ impl MoofSegment {
             seq.push(info);
         }
 
-        Ok(MoofSegment { moof, moov, seq })
+        Ok(MoofSegment { moof, seq })
     }
 
     /// Try to get the Track Fragment atom associated with the track identified by `track_num`.
@@ -172,14 +201,10 @@ impl StreamSegment for MoofSegment {
         };
         let mut trun_ts_offset = self.seq[track_num].first_ts;
 
-        let mvex = match self.moov.mvex.as_ref() {
-            Some(v) => v,
-            None => return decode_error("isomp4: fragmented stream missing mvex atom"),
-        };
         let default_dur = traf
             .tfhd
             .default_sample_duration
-            .unwrap_or(mvex.trexs[track_num].default_sample_duration);
+            .unwrap_or(self.seq[track_num].default_sample_duration);
 
         for trun in traf.truns.iter() {
             // If the sample is contained within the this track run, get the timing of of the
@@ -208,14 +233,10 @@ impl StreamSegment for MoofSegment {
         let mut sample_num = self.seq[track_num].first_sample;
         let mut ts_accum = self.seq[track_num].first_ts;
 
-        let mvex = match self.moov.mvex.as_ref() {
-            Some(v) => v,
-            None => return decode_error("isomp4: fragmented stream missing mvex atom"),
-        };
         let default_dur = traf
             .tfhd
             .default_sample_duration
-            .unwrap_or(mvex.trexs[track_num].default_sample_duration);
+            .unwrap_or(self.seq[track_num].default_sample_duration);
 
         for trun in traf.truns.iter() {
             // Get the total duration of this track run.
@@ -260,12 +281,8 @@ impl StreamSegment for MoofSegment {
         };
         let mut trun_offset = traf_base_pos;
 
-        let mvex = match self.moov.mvex.as_ref() {
-            Some(v) => v,
-            None => return decode_error("isomp4: fragmented stream missing mvex atom"),
-        };
         let default_size =
-            traf.tfhd.default_sample_size.unwrap_or(mvex.trexs[track_num].default_sample_size);
+            traf.tfhd.default_sample_size.unwrap_or(self.seq[track_num].default_sample_size);
 
         for trun in traf.truns.iter() {
             // If a data offset is present for this track fragment run, then calculate the new base
@@ -633,18 +650,15 @@ mod tests {
             meta: None,
         };
 
-        MoofSegment::new(moof, Arc::new(moov), prev)
+        MoofSegment::with_track_ids(moof, Arc::new(moov), &[1], prev)
     }
 
     #[test]
-    fn moof_segment_rejects_total_duration_overflow() {
-        // Two track fragments for the same track, each with a run whose default-duration product
-        // approaches 2^64.
-        let default_dur = u32::MAX.to_be_bytes();
-        let trafs =
-            [traf(0x8, &default_dur, 0, u32::MAX, &[]), traf(0x8, &default_dur, 0, u32::MAX, &[])];
+    fn moof_segment_rejects_several_track_fragments_for_one_track() {
+        let trafs = [traf(0, &[], 0, 1, &[]), traf(0, &[], 0, 1, &[])];
 
-        assert!(moof_segment(&trafs, &PrevSegment { sample_end: 0, ts_end: 0 }).is_err());
+        let err = moof_segment(&trafs, &PrevSegment { sample_end: 0, ts_end: 0 }).err();
+        assert!(matches!(err, Some(Error::DecodeError(m)) if m.contains("multiple")));
     }
 
     #[test]

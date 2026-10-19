@@ -1958,3 +1958,21 @@ fn codec_private_is_decoded() {
     assert!(reader.tracks()[0].codec_params.is_some());
     assert_eq!(reader.next_packet().unwrap().unwrap().data.len(), 100);
 }
+
+// 8-bit integer PCM is unsigned (as in WAVE), for both byte orders.
+#[test]
+fn eight_bit_integer_pcm_is_unsigned() {
+    use symphonia_core::codecs::CodecParameters;
+    use symphonia_core::codecs::audio::well_known::CODEC_ID_PCM_U8;
+
+    for codec in ["A_PCM/INT/LIT", "A_PCM/INT/BIG"] {
+        let track = Track { codec, bit_depth: Some(8), ..Track::pcm() };
+        let reader = open(pcm_file().to_bytes(&track));
+
+        let Some(CodecParameters::Audio(params)) = &reader.tracks()[0].codec_params
+        else {
+            panic!("{codec}: expected audio codec parameters");
+        };
+        assert_eq!(params.codec, CODEC_ID_PCM_U8, "{codec}");
+    }
+}

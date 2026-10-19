@@ -1089,21 +1089,24 @@ impl<'s> MkvReader<'s> {
         let cues = self.cues.as_ref().filter(|_| self.is_seekable);
 
         if let Some(cues) = cues {
-            // If the track has no cue points at all, fallback to using all cue points.
-            let track_has_cues =
-                cues.points.iter().any(|point| point.positions.track.get() == u64::from(id));
+            // Each cue point has a position for one or more tracks. If the track has no
+            // position at all, fallback to using the positions of all tracks.
+            let track_id = u64::from(id);
+            let track_has_cues = cues
+                .points
+                .iter()
+                .any(|point| point.positions.iter().any(|pos| pos.track.get() == track_id));
 
+            // The cue points are sorted by time.
             candidates.extend(
                 cues.points
                     .iter()
                     .take_while(|point| point.time.get() <= cue_ts)
-                    .filter(|point| !track_has_cues || point.positions.track.get() == u64::from(id))
-                    .map(|point| {
-                        let rel_pos = point
-                            .positions
-                            .cluster_rel_pos
-                            .filter(|_| point.positions.track.get() == u64::from(id));
-                        (point.positions.cluster_pos, rel_pos)
+                    .flat_map(|point| point.positions.iter())
+                    .filter(|pos| !track_has_cues || pos.track.get() == track_id)
+                    .map(|pos| {
+                        let rel_pos = pos.cluster_rel_pos.filter(|_| pos.track.get() == track_id);
+                        (pos.cluster_pos, rel_pos)
                     }),
             );
         }

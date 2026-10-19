@@ -136,7 +136,21 @@ fn examine(buf: &[u8], eof: bool) -> Option<(usize, bool)> {
                 let len = usize::from(u16::from_be_bytes([rest[4], rest[5]]));
 
                 if len == 0 {
-                    break;
+                    // An unbounded PES packet (only allowed for video) extends to the next system
+                    // start code (ISO/IEC 13818-1, PES_packet_length == 0). Scan for it rather
+                    // than stopping.
+                    let next = rest[6..]
+                        .windows(4)
+                        .position(|w| w[..3] == [0, 0, 1] && w[3] >= PROGRAM_END);
+
+                    match next {
+                        Some(n) => {
+                            pos += 6 + n;
+                            packets += 1;
+                            continue;
+                        }
+                        None => break,
+                    }
                 }
 
                 match code {
@@ -765,5 +779,28 @@ impl FormatReader for MpegPsReader<'_> {
         Self: 's,
     {
         self.reader
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pack_header() -> Vec<u8> {
+        vec![0, 0, 1, 0xba, 0x44, 0x00, 0x04, 0x00, 0x04, 0x01, 0x01, 0x89, 0xc3, 0xf8]
+    }
+
+    #[test]
+    fn verify_leading_unbounded_pes_does_not_end_examination() {
+        let mut buf = pack_header();
+        // An unbounded video PES packet with payload (including a slice start code), then an
+        // audio PES packet.
+        buf.extend_from_slice(&[0, 0, 1, 0xe0, 0, 0, 0x80, 0, 0, 0xaa, 0, 0, 1, 0x01, 0xbb]);
+        buf.extend_from_slice(&[0, 0, 1, 0xc0, 0, 8, 0x80, 0, 0, 1, 2, 3, 4, 5]);
+        buf.extend_from_slice(&[0, 0, 1, 0xc0, 0, 8, 0x80, 0, 0, 1, 2, 3, 4, 5]);
+
+        let (packets, audio) = examine(&buf, false).expect("program stream");
+        assert_eq!(packets, 3);
+        assert!(audio);
     }
 }

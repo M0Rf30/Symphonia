@@ -368,13 +368,17 @@ fn get_codec_id(track: &TrackElement) -> Option<CodecId> {
         "A_REAL/COOK" => CodecId::Audio(CODEC_ID_COOK),
         "A_REAL/SIPR" => CodecId::Audio(CODEC_ID_SIPR),
         "A_REAL/RALF" => CodecId::Audio(CODEC_ID_RALF),
+        // 8-bit integer PCM has no byte order, and is unsigned as in WAVE and Matroska's
+        // reference muxer (mkvmerge).
         "A_PCM/INT/BIG" => match bit_depth?.get() {
+            8 => CodecId::Audio(CODEC_ID_PCM_U8),
             16 => CodecId::Audio(CODEC_ID_PCM_S16BE),
             24 => CodecId::Audio(CODEC_ID_PCM_S24BE),
             32 => CodecId::Audio(CODEC_ID_PCM_S32BE),
             _ => return None,
         },
         "A_PCM/INT/LIT" => match bit_depth?.get() {
+            8 => CodecId::Audio(CODEC_ID_PCM_U8),
             16 => CodecId::Audio(CODEC_ID_PCM_S16LE),
             24 => CodecId::Audio(CODEC_ID_PCM_S24LE),
             32 => CodecId::Audio(CODEC_ID_PCM_S32LE),

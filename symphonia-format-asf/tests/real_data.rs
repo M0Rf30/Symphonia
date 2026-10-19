@@ -187,3 +187,151 @@ fn rejects_garbage() {
     }
     let _ = Hint::new();
 }
+
+// --- Seeking keeps the units of the other tracks ---
+
+fn guid(d1: u32, d2: u16, d3: u16, d4: [u8; 8]) -> Vec<u8> {
+    let mut v = d1.to_le_bytes().to_vec();
+    v.extend(d2.to_le_bytes());
+    v.extend(d3.to_le_bytes());
+    v.extend(d4);
+    v
+}
+
+fn object(id: Vec<u8>, body: &[u8]) -> Vec<u8> {
+    let mut v = id;
+    v.extend((24 + body.len() as u64).to_le_bytes());
+    v.extend(body);
+    v
+}
+
+fn stream_properties(number: u16, rate: u32) -> Vec<u8> {
+    let mut wave = Vec::new();
+    wave.extend(1u16.to_le_bytes());
+    wave.extend(1u16.to_le_bytes());
+    wave.extend(rate.to_le_bytes());
+    wave.extend((rate * 2).to_le_bytes());
+    wave.extend(2u16.to_le_bytes());
+    wave.extend(16u16.to_le_bytes());
+    wave.extend(0u16.to_le_bytes());
+
+    let mut b = guid(0xf869_9e40, 0x5b4d, 0x11cf, [0xa8, 0xfd, 0x00, 0x80, 0x5f, 0x5c, 0x44, 0x2b]);
+    b.extend([0; 16]);
+    b.extend([0; 8]);
+    b.extend((wave.len() as u32).to_le_bytes());
+    b.extend(0u32.to_le_bytes());
+    b.extend(number.to_le_bytes());
+    b.extend([0; 4]);
+    b.extend(wave);
+
+    object(guid(0xb7dc_0791, 0xa9b7, 0x11cf, [0x8e, 0xe6, 0x00, 0xc0, 0x0c, 0x20, 0x53, 0x65]), &b)
+}
+
+/// One data packet holding one media object: `data` is the payload, up to the end of the packet.
+fn data_packet(stream: u8, time_ms: u32, data: &[u8]) -> Vec<u8> {
+    let mut v = vec![0x00, 0x1d];
+    v.extend([0; 6]);
+    v.push(0x80 | stream);
+    v.push(0);
+    v.extend(0u32.to_le_bytes());
+    v.push(8);
+    v.extend((data.len() as u32).to_le_bytes());
+    v.extend(time_ms.to_le_bytes());
+    v.extend(data);
+    v
+}
+
+/// Two mono PCM streams, 1 (8000 Hz, 10 ms units) and 2 (4000 Hz, 20 ms units), with the unit of
+/// stream 2 stored before the units of stream 1 that start at the same time.
+fn two_streams() -> Vec<u8> {
+    let data = [7u8; 160];
+    let packet_len = data_packet(1, 0, &data).len() as u32;
+
+    let mut file_props = vec![0u8; 16 + 8 + 8 + 8];
+    file_props.extend(0u64.to_le_bytes());
+    file_props.extend(0u64.to_le_bytes());
+    file_props.extend(0u64.to_le_bytes());
+    file_props.extend(0u32.to_le_bytes());
+    file_props.extend(packet_len.to_le_bytes());
+    file_props.extend(packet_len.to_le_bytes());
+    file_props.extend(0u32.to_le_bytes());
+
+    let header_objects = [
+        object(
+            guid(0x8cab_dca1, 0xa947, 0x11cf, [0x8e, 0xe4, 0x00, 0xc0, 0x0c, 0x20, 0x53, 0x65]),
+            &file_props,
+        ),
+        stream_properties(1, 8000),
+        stream_properties(2, 4000),
+    ]
+    .concat();
+
+    let mut packets = Vec::new();
+    let mut count = 0u64;
+    for j in 0..8u32 {
+        packets.extend(data_packet(2, 20 * j, &data));
+        packets.extend(data_packet(1, 20 * j, &data));
+        packets.extend(data_packet(1, 20 * j + 10, &data));
+        count += 3;
+    }
+
+    let mut data_body = vec![0u8; 16];
+    data_body.extend(count.to_le_bytes());
+    data_body.extend([0; 2]);
+    data_body.extend(&packets);
+    let data_obj = object(
+        guid(0x75b2_2636, 0x668e, 0x11cf, [0xa6, 0xd9, 0x00, 0xaa, 0x00, 0x62, 0xce, 0x6c]),
+        &data_body,
+    );
+
+    let mut header_body = 3u32.to_le_bytes().to_vec();
+    header_body.extend([1, 2]);
+    header_body.extend(header_objects);
+    let mut file = object(
+        guid(0x75b2_2630, 0x668e, 0x11cf, [0xa6, 0xd9, 0x00, 0xaa, 0x00, 0x62, 0xce, 0x6c]),
+        &header_body,
+    );
+    file.extend(data_obj);
+    file
+}
+
+fn open_bytes(data: Vec<u8>) -> AsfReader<'static> {
+    let mss = MediaSourceStream::new(
+        Box::new(std::io::Cursor::new(data)),
+        MediaSourceStreamOptions::default(),
+    );
+    AsfReader::try_new(mss, FormatOptions::default()).unwrap()
+}
+
+#[test]
+fn seek_keeps_other_tracks() {
+    let file = two_streams();
+
+    let mut linear = open_bytes(file.clone());
+    assert_eq!(linear.tracks().len(), 2);
+    let mut pkts = Vec::new();
+    while let Some(p) = linear.next_packet().unwrap() {
+        pkts.push((p.track_id, p.pts.get(), p.dur.get()));
+    }
+
+    // 250 is 31.25 ms on stream 1, in the unit at 240. The unit of stream 2 that covers that time
+    // starts at 80 (20 ms), and was read before the target unit.
+    let mut reader = open_bytes(file);
+    let seeked = reader
+        .seek(SeekMode::Accurate, SeekTo::Timestamp { ts: Timestamp::new(250), track_id: 1 })
+        .unwrap();
+    assert_eq!(seeked.actual_ts.get(), 240);
+
+    let first1 = pkts.iter().find(|p| p.0 == 1 && p.1 + p.2 as i64 > 250).unwrap();
+    let first2 = pkts.iter().find(|p| p.0 == 2 && (p.1 + p.2 as i64) * 2 > 250).unwrap();
+    assert_eq!(first2.1, 80);
+
+    let (mut got1, mut got2) = (None, None);
+    while let Some(p) = reader.next_packet().unwrap() {
+        let slot = if p.track_id == 1 { &mut got1 } else { &mut got2 };
+        slot.get_or_insert(p.pts.get());
+    }
+    assert_eq!(got1, Some(240));
+    assert_eq!(got1, Some(first1.1.min(240)));
+    assert_eq!(got2, Some(first2.1));
+}

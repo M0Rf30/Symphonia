@@ -508,6 +508,10 @@ impl<'s> AviReader<'s> {
         }
     }
 
+    fn track_time_base(&self, track_id: u32) -> Option<TimeBase> {
+        self.tracks.iter().find(|t| t.id == track_id).and_then(|t| t.time_base)
+    }
+
     fn reset(&mut self) -> Result<()> {
         self.pending.clear();
         self.cur = self.first;
@@ -721,6 +725,10 @@ impl FormatReader for AviReader<'_> {
             self.reset()?;
         }
 
+        // Packets of the other tracks that are read while scanning are kept, so that every track
+        // resumes at its first packet that ends after the target time.
+        let mut skipped = Vec::new();
+
         loop {
             let Some(packet) = self.next_inner()?
             else {
@@ -728,6 +736,7 @@ impl FormatReader for AviReader<'_> {
             };
 
             if packet.track_id != track_id {
+                skipped.push(packet);
                 continue;
             }
 
@@ -736,6 +745,25 @@ impl FormatReader for AviReader<'_> {
 
             if target < end {
                 let actual_ts = packet.pts;
+                let time_base = self.tracks[si].time_base;
+
+                // Packets of the other tracks that end at or before the target time are
+                // dropped. They are given back before the packets that are still pending.
+                let target_time = time_base.and_then(|tb| tb.calc_time(required));
+
+                for p in skipped.into_iter().rev() {
+                    let before = match (target_time, self.track_time_base(p.track_id)) {
+                        (Some(t), Some(tb)) => {
+                            tb.calc_time(p.pts.saturating_add(p.dur)).is_some_and(|e| e <= t)
+                        }
+                        _ => false,
+                    };
+
+                    if !before {
+                        self.pending.push_front(p);
+                    }
+                }
+
                 self.pending.push_front(packet);
                 return Ok(SeekedTo { track_id, actual_ts, required_ts: required });
             }

@@ -140,6 +140,13 @@ impl PacketParser for OpusPacketParser {
                     // TOC byte is followed by number of frames. See page 18 section 3.2.5 code 3.
                     // The frame count byte is `v|p|M`: M is the low 6 bits (RFC 6716 figure 5).
                     let m = byte & 0b11_1111; // Note: it's actually called "M" in the rfc.
+
+                    // RFC 6716 section 3.2.5: M must be in 1..=48 (at most 120 ms of audio).
+                    if m == 0 || m > 48 {
+                        warn!("opus code 3 packet with invalid frame count {}", m);
+                        return (Duration::ZERO, Duration::ZERO);
+                    }
+
                     m as u64
                 }
                 None => {
@@ -313,6 +320,16 @@ mod tests {
         // CELT fullband 2.5 ms (configuration 28), code 3, 48 frames, CBR, no padding.
         let (dur, _) = parser.parse_next_packet_dur(&[0xe3, 48, 0, 0]);
         assert_eq!(dur, Duration::new(120 * 48));
+    }
+
+    /// RFC 6716 section 3.2.5: a code 3 packet with M == 0 or M > 48 is invalid.
+    #[test]
+    fn code_3_invalid_frame_count_is_rejected() {
+        let mut parser = OpusPacketParser::new(0);
+        for m in [0u8, 49, 63] {
+            let (dur, _) = parser.parse_next_packet_dur(&[0xe3, m, 0, 0]);
+            assert_eq!(dur, Duration::ZERO, "M = {m}");
+        }
     }
 
     #[test]

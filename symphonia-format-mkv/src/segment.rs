@@ -1171,6 +1171,10 @@ impl EbmlElement<MkvSchema> for CuesElement {
             }
         }
 
+        // Cue points should be in time order, but are not guaranteed to be: seeking depends on the
+        // order. The sort is stable so points with equal time keep their file order.
+        points.sort_by_key(|point: &CuePointElement| point.time.get());
+
         Ok(Self { points: points.into_boxed_slice() })
     }
 }
@@ -1180,7 +1184,8 @@ impl EbmlElement<MkvSchema> for CuesElement {
 pub(crate) struct CuePointElement {
     /// Time in segment ticks.
     pub(crate) time: MatroskaTicks,
-    pub(crate) positions: CueTrackPositionsElement,
+    /// The positions of the cue point, one for each track it is for (at least one).
+    pub(crate) positions: Box<[CueTrackPositionsElement]>,
 }
 
 impl EbmlElement<MkvSchema> for CuePointElement {
@@ -1188,7 +1193,7 @@ impl EbmlElement<MkvSchema> for CuePointElement {
 
     fn read<R: ReadEbml>(it: &mut MkvEbmlIterator<R>, hdr: &MkvEbmlElementHeader) -> Result<Self> {
         let mut time = None;
-        let mut positions = None;
+        let mut positions = Vec::new();
 
         while let Some(child) = it.next_header()? {
             match child.element_type() {
@@ -1197,8 +1202,8 @@ impl EbmlElement<MkvSchema> for CuePointElement {
                     time = Some(MatroskaTicks(it.read_u64_no_default()?));
                 }
                 MkvElement::CueTrackPositions => {
-                    // Mandatory element.
-                    positions = Some(it.read_master_element()?);
+                    // Mandatory element, one or more: each is for a different track.
+                    positions.push(it.read_master_element()?);
                 }
                 other => {
                     // Unexpected child element.
@@ -1207,9 +1212,13 @@ impl EbmlElement<MkvSchema> for CuePointElement {
             }
         }
 
+        if positions.is_empty() {
+            return Err(EbmlError::ElementError("mkv: missing positions in cue"));
+        }
+
         Ok(Self {
             time: time.ok_or(EbmlError::ElementError("mkv: missing time in cue"))?,
-            positions: positions.ok_or(EbmlError::ElementError("mkv: missing positions in cue"))?,
+            positions: positions.into_boxed_slice(),
         })
     }
 }
@@ -2291,5 +2300,79 @@ impl EbmlElement<MkvSchema> for ChapterDisplayElement {
             lang_bcp47,
             country,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use symphonia_core::io::{MediaSourceStream, MediaSourceStreamOptions};
+
+    use super::*;
+
+    fn el(id: &[u8], body: &[u8]) -> Vec<u8> {
+        let mut data = id.to_vec();
+        data.push(0x80 | body.len() as u8);
+        data.extend_from_slice(body);
+        data
+    }
+
+    fn uint(id: &[u8], val: u8) -> Vec<u8> {
+        el(id, &[val])
+    }
+
+    /// A CueTrackPositions: CueTrack, CueClusterPosition.
+    fn positions(track: u8, cluster_pos: u8) -> Vec<u8> {
+        el(&[0xb7], &[uint(&[0xf7], track), uint(&[0xf1], cluster_pos)].concat())
+    }
+
+    fn cue_point(time: u8, positions: &[Vec<u8>]) -> Vec<u8> {
+        el(&[0xbb], &[uint(&[0xb3], time), positions.concat()].concat())
+    }
+
+    fn read_cues(points: &[Vec<u8>]) -> Result<CuesElement> {
+        // Cues is a child of Segment, whose size is a 1-byte vint (the body is short).
+        let cues = el(&[0x1c, 0x53, 0xbb, 0x6b], &points.concat());
+        let data = el(&[0x18, 0x53, 0x80, 0x67], &cues);
+        let len = data.len() as u64;
+        let mss = MediaSourceStream::new(
+            Box::new(Cursor::new(data)),
+            MediaSourceStreamOptions::default(),
+        );
+        let mut it = MkvEbmlIterator::new(mss, MkvSchema, Some(len));
+        assert!(it.next_header()?.is_some());
+        it.push_element()?;
+        assert!(it.next_header()?.is_some());
+        it.read_master_element::<CuesElement>()
+    }
+
+    #[test]
+    fn cue_point_keeps_the_positions_of_all_tracks() {
+        let cues =
+            read_cues(&[cue_point(5, &[positions(1, 10), positions(2, 20)])]).expect("valid cues");
+
+        assert_eq!(cues.points.len(), 1);
+        let got: Vec<_> =
+            cues.points[0].positions.iter().map(|p| (p.track.get(), p.cluster_pos)).collect();
+        assert_eq!(got, [(1, 10), (2, 20)]);
+    }
+
+    #[test]
+    fn cue_point_without_positions_is_an_error() {
+        assert!(read_cues(&[cue_point(5, &[])]).is_err());
+    }
+
+    #[test]
+    fn cue_points_are_sorted_by_time() {
+        let cues = read_cues(&[
+            cue_point(9, &[positions(1, 3)]),
+            cue_point(2, &[positions(1, 1)]),
+            cue_point(5, &[positions(1, 2)]),
+        ])
+        .expect("valid cues");
+
+        let got: Vec<_> = cues.points.iter().map(|p| p.time.get()).collect();
+        assert_eq!(got, [2, 5, 9]);
     }
 }

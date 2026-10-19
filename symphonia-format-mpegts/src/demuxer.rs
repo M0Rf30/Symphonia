@@ -223,7 +223,19 @@ impl PesAssembler {
     /// being assembled is damaged and is discarded, and assembly resumes at the next PES packet.
     /// Completed PES packets are appended to `out`.
     fn push_packet(&mut self, pkt: &TsPacket, payload: &[u8], out: &mut Vec<Vec<u8>>) {
-        if !pkt.discontinuity {
+        if pkt.discontinuity {
+            // The packets before and after a discontinuity must not be spliced (ISO/IEC 13818-1,
+            // discontinuity_indicator). An unbounded PES packet can only end at a PES start, so
+            // what was received is kept; a bounded one is incomplete and damaged.
+            if self.buf.len() >= 6 && self.buf[..3] == [0, 0, 1] && self.buf[4..6] == [0, 0] {
+                out.extend(self.flush());
+            }
+            else {
+                self.buf.clear();
+            }
+            self.active = false;
+        }
+        else {
             if self.cc == Some(pkt.cc) {
                 // A duplicate: the packet was sent twice.
                 return;
@@ -1100,6 +1112,28 @@ mod tests {
 
         assert!(!out.is_empty());
         assert!(out.iter().all(|pes| pes.len() <= MAX_PES_LEN));
+    }
+
+    fn ts_pkt(pusi: bool, cc: u8, discontinuity: bool) -> TsPacket {
+        TsPacket { pos: 0, pid: 0x100, pusi, cc, discontinuity, payload: 0..0 }
+    }
+
+    #[test]
+    fn verify_discontinuity_does_not_splice_pes() {
+        let mut asm = PesAssembler::default();
+        let mut out = vec![];
+
+        // A bounded PES packet of 400 bytes, 184 received.
+        let mut first = vec![0, 0, 1, 0xc0, 0x01, 0x92, 0x80, 0, 0];
+        first.resize(184, 0xaa);
+        asm.push_packet(&ts_pkt(true, 0, false), &first, &mut out);
+
+        // A continuation with the discontinuity indicator and a valid counter must not be
+        // appended to the partial PES packet.
+        asm.push_packet(&ts_pkt(false, 1, true), &[0xbb; 184], &mut out);
+        asm.push_packet(&ts_pkt(false, 2, false), &[0xbb; 184], &mut out);
+        assert!(out.is_empty());
+        assert!(asm.flush().is_none());
     }
 
     fn pmt_stream(stream_type: u8, descriptors: StreamDescriptors) -> PmtStream {
