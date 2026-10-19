@@ -84,6 +84,11 @@ pub(crate) struct StreamInfo {
     pub encoder: Option<String>,
 }
 
+/// Upper bound on a stream's sample count and on seek targets (2^48 samples, over 28 000 years
+/// at 96 kHz). Rejecting larger values at parse time keeps all frame/sample arithmetic far from
+/// `u64` overflow.
+pub(crate) const MAX_SAMPLES: u64 = 1 << 48;
+
 impl StreamInfo {
     /// Number of frames in one packet (SV8 packs `2^block_pwr` frames into one `AP` block).
     pub fn block_frames(&self) -> u64 {
@@ -112,7 +117,10 @@ impl StreamInfo {
     /// declared length.
     pub fn packet(&self, block: u64, trim_until: u64, data: Vec<u8>) -> Option<Packet> {
         let frame_len = FRAME_LENGTH as u64;
-        let first_frame = block * self.block_frames();
+        let first_frame = block.checked_mul(self.block_frames())?;
+        if first_frame > MAX_SAMPLES {
+            return None;
+        }
         let frames = match self.total_frames {
             Some(total) if first_frame >= total => return None,
             Some(total) => self.block_frames().min(total - first_frame),
@@ -457,6 +465,10 @@ impl FormatReader for MpcReader<'_> {
         // Position in the output (gapless) timeline; anything before the start seeks to it.
         let target = required_ts.get().max(0) as u64;
 
+        if target > MAX_SAMPLES {
+            return seek_error(SeekErrorKind::OutOfRange);
+        }
+
         if self.info.total_frames.is_some() && target > self.info.display_samples {
             return seek_error(SeekErrorKind::OutOfRange);
         }
@@ -566,6 +578,13 @@ mod tests {
         // The last block holds only the frames that exist.
         let (_, dur, ts, te) = trims(&i, 4, 0).unwrap();
         assert_eq!(dur + ts + te, (i.total_frames.unwrap() - 16) * FRAME_LENGTH as u64);
+    }
+
+    #[test]
+    fn packet_rejects_overflowing_block_index() {
+        let mut i = info(20, 0, 100_000);
+        i.total_frames = None;
+        assert!(i.packet(u64::MAX / 2, 0, vec![]).is_none());
     }
 
     #[test]

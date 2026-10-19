@@ -510,7 +510,7 @@ impl FormatReader for AiffReader<'_> {
         let actual_ts = self.packet_info.get_actual_ts(required_ts);
 
         // Calculate the absolute byte offset of the desired audio frame.
-        let seek_pos = self.data_start_pos + self.packet_info.get_data_pos_at(actual_ts);
+        let seek_pos = self.packet_info.get_seek_pos(self.data_start_pos, actual_ts)?;
 
         // If the reader supports seeking we can seek directly to the frame's offset wherever it may
         // be.

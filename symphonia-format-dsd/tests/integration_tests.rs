@@ -1013,3 +1013,96 @@ fn test_dff_dsd_codec() {
     let reader = dff_reader(build_dff(2, 2822400, STEREO, &[0u8; 16], &[]));
     assert_eq!(audio_of(&reader).codec, CODEC_TYPE_DSD);
 }
+
+fn unseekable(raw: Vec<u8>) -> MediaSourceStream<'static> {
+    MediaSourceStream::new(Box::new(Unseekable(Cursor::new(raw))), Default::default())
+}
+
+/// A DSD chunk size near u64::MAX on a source of unknown length does not overflow.
+#[test]
+fn test_dff_huge_dsd_chunk_size_does_not_overflow() {
+    let mut sound = Vec::new();
+    sound.extend_from_slice(b"DSD ");
+    sound.extend_from_slice(&be_u64(u64::MAX));
+    sound.extend_from_slice(&[0u8; 16]);
+    let raw = build_dff_with(2, 2822400, STEREO, b"DSD ", &[], &sound, &[]);
+    if let Ok(mut reader) = DffReader::try_new(unseekable(raw), Default::default()) {
+        while let Ok(Some(_)) = reader.next_packet() {}
+    }
+}
+
+/// A DST frame information chunk and a DSTC chunk with sizes near u64::MAX do not overflow.
+#[test]
+fn test_dff_huge_dst_chunk_sizes_do_not_overflow() {
+    // FRTE size near u64::MAX.
+    let mut frte = Vec::new();
+    frte.extend_from_slice(b"FRTE");
+    frte.extend_from_slice(&be_u64(u64::MAX - 1));
+    frte.extend_from_slice(&[0u8; 6]);
+    let mut body = Vec::new();
+    body.extend_from_slice(b"DST ");
+    body.extend_from_slice(&be_u64(u64::MAX - 1));
+    body.extend(frte);
+    let raw = build_dff_with(2, 2822400, STEREO, b"DST ", &[], &body, &[]);
+    assert!(DffReader::try_new(unseekable(raw), Default::default()).is_err());
+
+    // DSTF followed by a DSTC and an unterminated DSTF with huge sizes.
+    let mut frte_body = 2u32.to_be_bytes().to_vec();
+    frte_body.extend_from_slice(&75u16.to_be_bytes());
+    let mut inner = chunk(b"FRTE", &frte_body);
+    inner.extend(chunk(b"DSTF", &[1, 2, 3, 4]));
+    inner.extend_from_slice(b"DSTC");
+    inner.extend_from_slice(&be_u64(u64::MAX));
+    inner.extend_from_slice(&[0u8; 4]);
+    let sound = chunk(b"DST ", &inner);
+    let raw = build_dff_with(2, 2822400, STEREO, b"DST ", &[], &sound, &[]);
+    if let Ok(mut reader) = DffReader::try_new(unseekable(raw), Default::default()) {
+        while let Ok(Some(_)) = reader.next_packet() {}
+    }
+
+    // Index scan across a chunk with a huge size.
+    let mut inner = chunk(b"FRTE", &frte_body);
+    inner.extend_from_slice(b"JUNK");
+    inner.extend_from_slice(&be_u64(u64::MAX));
+    let sound = chunk(b"DST ", &inner);
+    let raw = build_dff_with(2, 2822400, STEREO, b"DST ", &[], &sound, &[]);
+    if let Ok(mut reader) = DffReader::try_new(create_stream(raw), Default::default()) {
+        let to = SeekTo::Timestamp { ts: Timestamp::new(100_000), track_id: 0 };
+        assert!(reader.seek(SeekMode::Accurate, to).is_err());
+    }
+}
+
+/// A DSF data chunk size near u64::MAX on a source of unknown length does not overflow.
+#[test]
+fn test_dsf_huge_data_chunk_size_does_not_overflow() {
+    let mut raw = build_dsf(2, 2, 2822400, 16, 0, &[0u8; 64]);
+    let at = raw.len() - 64 - 8;
+    raw[at..at + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+    let reader = DsfReader::try_new(unseekable(raw), Default::default()).unwrap();
+    assert!(reader.tracks()[0].num_frames.is_some());
+}
+
+/// A seek to a time whose timestamp overflows is out-of-range, not a seek to the start.
+#[test]
+fn test_seek_time_overflow_is_out_of_range() {
+    use symphonia_core::errors::SeekErrorKind;
+    use symphonia_core::units::Time;
+
+    let to = SeekTo::Time { time: Time::MAX, track_id: Some(0) };
+    let mut dsf = DsfReader::try_new(
+        create_stream(build_dsf(2, 2, 2822400, 16, 512, &[0u8; 128])),
+        Default::default(),
+    )
+    .unwrap();
+    assert!(matches!(
+        dsf.seek(SeekMode::Accurate, to),
+        Err(Error::SeekError(SeekErrorKind::OutOfRange))
+    ));
+
+    let to = SeekTo::Time { time: Time::MAX, track_id: Some(0) };
+    let mut dff = dff_reader(build_dff(2, 2822400, STEREO, &[0u8; 64], &[]));
+    assert!(matches!(
+        dff.seek(SeekMode::Accurate, to),
+        Err(Error::SeekError(SeekErrorKind::OutOfRange))
+    ));
+}

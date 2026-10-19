@@ -810,3 +810,18 @@ fn v3_more_than_two_channels_returns_error() {
     let mss = MediaSourceStream::new(Box::new(Cursor::new(riff)), Default::default());
     assert!(WavPackReader::try_new(mss, FormatOptions::default()).is_err());
 }
+
+/// An unknown RIFF chunk whose size is `u32::MAX` must be skipped without overflowing the
+/// padded size (and then fail on the premature end of the stream).
+#[test]
+fn v3_unknown_chunk_with_max_size_returns_error() {
+    let mut riff = Vec::new();
+    riff.extend_from_slice(b"RIFF");
+    riff.extend_from_slice(&0u32.to_le_bytes());
+    riff.extend_from_slice(b"WAVE");
+    riff.extend_from_slice(b"junk");
+    riff.extend_from_slice(&u32::MAX.to_le_bytes());
+    riff.extend_from_slice(&[0u8; 16]);
+    let mss = MediaSourceStream::new(Box::new(Cursor::new(riff)), Default::default());
+    assert!(WavPackReader::try_new(mss, FormatOptions::default()).is_err());
+}

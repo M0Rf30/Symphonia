@@ -70,6 +70,9 @@ fn parse_sh(payload: &[u8]) -> Result<ShFields> {
     }
     let (samples, _) = r.read_size();
     let (beg_silence, _) = r.read_size();
+    if samples > super::MAX_SAMPLES {
+        return decode_error("musepack: sample count too large");
+    }
     if beg_silence > samples {
         return decode_error("musepack: beg_silence exceeds samples");
     }
@@ -530,6 +533,15 @@ mod tests {
             }
             mss.ignore_bytes(size).unwrap();
         }
+    }
+
+    #[test]
+    fn parse_sh_rejects_absurd_sample_count() {
+        // CRC, version 8, then `samples = 2^63 + ...` as a base-128 varint, `beg_silence = 0`.
+        let mut sh = vec![0, 0, 0, 0, 8];
+        sh.extend_from_slice(&[0x81, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]);
+        sh.extend_from_slice(&[0, 0, 0, 0]);
+        assert!(parse_sh(&sh).is_err());
     }
 
     #[test]

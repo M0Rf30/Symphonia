@@ -30,7 +30,7 @@ use symphonia_core::codecs::audio::well_known::{
     CODEC_ID_WMALOSSLESS, CODEC_ID_WMAPRO, CODEC_ID_WMAV1, CODEC_ID_WMAV2,
 };
 use symphonia_core::codecs::audio::{AudioCodecId, AudioCodecParameters};
-use symphonia_core::errors::{Error, Result, decode_error, unsupported_error};
+use symphonia_core::errors::{Error, Result, SeekErrorKind, decode_error, unsupported_error};
 use symphonia_core::formats::prelude::*;
 use symphonia_core::io::{MediaSourceStream, ReadBytes, ScopedStream};
 use symphonia_core::meta::MetadataRevision;
@@ -519,7 +519,7 @@ impl FormatAdpcm {
                 }
                 PacketInfo::with_blocks(self.block_align, samples)
             }
-            _ => unimplemented!("incomplete new adpcm codec"),
+            _ => unsupported_error("riff: unsupported codec"),
         }
     }
 }
@@ -711,14 +711,20 @@ impl PacketInfo {
             .expect("max_frames_per_packet is non-zero")
     }
 
-    /// Gets the byte offset, relative to the start of the data, of the block containing the frame
-    /// at `ts`. `ts` must be non-negative, and is rounded down to the start of its block.
+    /// Gets the absolute byte offset of the block containing the frame at `ts`, given the position
+    /// of the start of the data. `ts` is clamped to be non-negative, and is rounded down to the
+    /// start of its block.
     ///
     /// Note that the byte offset is a function of the number of *blocks* preceding the frame, not
     /// the number of frames. For formats with more than one frame per block (e.g., ADPCM) the two
     /// are not the same.
-    pub fn get_data_pos_at(&self, ts: Timestamp) -> u64 {
-        (ts.get().max(0) as u64 / self.frames_per_block.get()) * self.block_size.get()
+    ///
+    /// Returns an out-of-range seek error if the offset does not fit in a `u64`.
+    pub fn get_seek_pos(&self, data_start_pos: u64, ts: Timestamp) -> Result<u64> {
+        (ts.get().max(0) as u64 / self.frames_per_block.get())
+            .checked_mul(self.block_size.get())
+            .and_then(|data_pos| data_start_pos.checked_add(data_pos))
+            .ok_or(Error::SeekError(SeekErrorKind::OutOfRange))
     }
 }
 
@@ -870,6 +876,28 @@ mod tests {
     use symphonia_core::audio::Position;
 
     use super::*;
+
+    #[test]
+    fn verify_unsupported_adpcm_codec_is_an_error() {
+        let fmt = FormatAdpcm {
+            block_align: 64,
+            bits_per_sample: 4,
+            channels: Channels::Positioned(Position::from_count(1).unwrap()),
+            codec: CODEC_ID_PCM_F32LE,
+            extra_data: None,
+        };
+        assert!(matches!(fmt.make_packet_info(), Err(Error::Unsupported(_))));
+    }
+
+    #[test]
+    fn verify_seek_pos_overflow_is_out_of_range() {
+        let info = PacketInfo::with_blocks(u16::MAX, 1).unwrap();
+        assert_eq!(info.get_seek_pos(10, Timestamp::new(3)).unwrap(), 10 + 3 * 65535);
+        let err = info.get_seek_pos(0, Timestamp::new(i64::MAX)).unwrap_err();
+        assert!(matches!(err, Error::SeekError(SeekErrorKind::OutOfRange)));
+        let err = info.get_seek_pos(u64::MAX, Timestamp::new(1)).unwrap_err();
+        assert!(matches!(err, Error::SeekError(SeekErrorKind::OutOfRange)));
+    }
 
     #[test]
     fn verify_extensible_packet_info_does_not_overflow() {

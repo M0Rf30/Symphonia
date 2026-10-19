@@ -236,8 +236,11 @@ impl AudioDescription {
             return unsupported_error("caf: unsupported linear PCM packetization");
         }
 
-        // Cannot overflow: bytes_per_packet / channels_per_frame is at most u32::MAX.
-        Ok(8 * (self.bytes_per_packet / self.channels_per_frame))
+        // bytes_per_packet / channels_per_frame may be up to u32::MAX, so 8x can overflow.
+        match (self.bytes_per_packet / self.channels_per_frame).checked_mul(8) {
+            Some(bits) => Ok(bits),
+            None => unsupported_error("caf: linear PCM sample width too large"),
+        }
     }
 
     pub fn codec_id(&self) -> Result<AudioCodecId> {
@@ -1249,6 +1252,23 @@ mod tests {
         let mut source = MediaSourceStream::new(Box::new(cursor), Default::default());
 
         assert!(read_variable_length_integer(&mut source).is_err());
+    }
+
+    #[test]
+    fn lpcm_container_bits_overflow_is_an_error() {
+        let desc = AudioDescription {
+            sample_rate: 44100.0,
+            format_id: AudioDescriptionFormatId::LinearPCM {
+                floating_point: false,
+                little_endian: true,
+            },
+            bytes_per_packet: u32::MAX,
+            frames_per_packet: 1,
+            channels_per_frame: 1,
+            bits_per_channel: 16,
+        };
+        assert!(matches!(desc.lpcm_container_bits(), Err(Error::Unsupported(_))));
+        assert!(desc.codec_id().is_err());
     }
 
     fn open_stream(data: Vec<u8>) -> MediaSourceStream<'static> {

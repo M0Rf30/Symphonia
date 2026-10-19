@@ -310,8 +310,8 @@ impl<'s> WavPackReader<'s> {
                 }
 
                 _ => {
-                    let skip = chunk_size + (chunk_size % 2);
-                    mss.ignore_bytes(skip as u64)?;
+                    let skip = u64::from(chunk_size) + u64::from(chunk_size % 2);
+                    mss.ignore_bytes(skip)?;
                 }
             }
         }

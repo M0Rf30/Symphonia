@@ -276,6 +276,11 @@ impl WavPackDecoder {
         if hdr.total_samples as u32 > MAX_V3_BLOCK_SAMPLES {
             return decode_error("wavpack: block sample count out of range");
         }
+        // The precision shift is applied as `<<`/`>>` on 32-bit samples (unpack3.c), so it must
+        // be in 0..=31.
+        if !(0..=31).contains(&hdr.shift) {
+            return decode_error("wavpack: invalid v3 header shift");
+        }
         let sample_count = hdr.total_samples as u32;
         let num_channels = hdr.num_channels as u32;
 
@@ -785,6 +790,21 @@ mod tests {
         data.extend([0u8; 64]);
 
         assert!(decoder(None).decode(&packet(data)).is_err());
+    }
+
+    #[test]
+    fn verify_v3_block_with_out_of_range_shift_is_rejected() {
+        for shift in [32i16, 100, -1, i16::MIN] {
+            let mut data = vec![0u8; 32];
+            data[0..2].copy_from_slice(&3i16.to_le_bytes());
+            data[6..8].copy_from_slice(&shift.to_le_bytes());
+            data[8..12].copy_from_slice(&16i32.to_le_bytes());
+            data[28..30].copy_from_slice(&2u16.to_le_bytes());
+            data[30..32].copy_from_slice(&2u16.to_le_bytes());
+            data.extend([0u8; 64]);
+
+            assert!(decoder(None).decode(&packet(data)).is_err(), "shift {shift}");
+        }
     }
 
     #[test]

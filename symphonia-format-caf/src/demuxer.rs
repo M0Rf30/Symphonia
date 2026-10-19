@@ -302,9 +302,11 @@ impl FormatReader for CafReader<'_> {
                 // frame per packet so the duration from start must be converted from frames to
                 // packets by dividing by frames-per-packet. This is lossless since we're aligned
                 // to a multiple of frames-per-packet in all cases.
-                let seek_pos = self.data_start_pos
-                    + u64::from(bytes_per_packet.get()) * dur_from_start.get()
-                        / if is_uncompressed { 1 } else { frames_per_packet };
+                let seek_pos = u64::from(bytes_per_packet.get())
+                    .checked_mul(dur_from_start.get())
+                    .map(|b| b / if is_uncompressed { 1 } else { frames_per_packet })
+                    .and_then(|b| self.data_start_pos.checked_add(b))
+                    .ok_or(Error::SeekError(SeekErrorKind::OutOfRange))?;
 
                 if self.reader.is_seekable() {
                     self.reader.seek(SeekFrom::Start(seek_pos))?;

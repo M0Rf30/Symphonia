@@ -462,8 +462,8 @@ impl<'s> DffReader<'s> {
                 if props.compression == Some(DFF_DST_ID) {
                     warn!("dff: the compression type is DST but the sound data is not");
                 }
-                let end = data.start + data.size;
-                let samples_per_channel = data.size / channels * 8;
+                let end = data.start.saturating_add(data.size);
+                let samples_per_channel = (data.size / channels).saturating_mul(8);
                 params
                     .for_codec(CODEC_TYPE_DSD)
                     .with_max_frames_per_packet(DSD_PACKET_BYTES * 8)
@@ -484,7 +484,7 @@ impl<'s> DffReader<'s> {
                     .with_max_frames_per_packet(samples_per_frame)
                     .with_frames_per_block(samples_per_frame);
                 let state = DstState {
-                    end: data.start + data.size,
+                    end: data.start.saturating_add(data.size),
                     first_chunk: info.first_chunk,
                     samples_per_frame,
                     next_frame: 0,
@@ -549,13 +549,19 @@ impl<'s> DffReader<'s> {
         else {
             return decode_error("dff: DST chunk without frame information");
         };
-        if &id != b"FRTE" || size < 6 || size + DSDIFF_CHUNK_HEADER_LEN as u64 > body_len {
+        if &id != b"FRTE"
+            || size < 6
+            || size.saturating_add(DSDIFF_CHUNK_HEADER_LEN as u64) > body_len
+        {
             return decode_error("dff: DST chunk without frame information");
         }
         let num_frames = source.read_be_u32()?;
         let frame_rate = source.read_be_u16()?;
-        let first_chunk = body_pos + DSDIFF_CHUNK_HEADER_LEN as u64 + size + (size & 1);
-        source.ignore_bytes(size - 6 + (size & 1))?;
+        let first_chunk = body_pos
+            .saturating_add(DSDIFF_CHUNK_HEADER_LEN as u64)
+            .saturating_add(size)
+            .saturating_add(size & 1);
+        source.ignore_bytes((size - 6).saturating_add(size & 1))?;
         Ok(DstFrameInfo { num_frames, frame_rate, first_chunk })
     }
 
@@ -650,9 +656,11 @@ impl<'s> DffReader<'s> {
             // A frame may be followed by the CRC of its decoded data.
             let after = self.reader.pos();
             if let Some((next_id, next_size)) = read_chunk_header(&mut self.reader)? {
-                if &next_id == b"DSTC" && after.saturating_add(next_size + 12) <= dst.end {
+                if &next_id == b"DSTC"
+                    && after.saturating_add(next_size.saturating_add(12)) <= dst.end
+                {
                     let crc = read_up_to(&mut self.reader, next_size.min(4) as usize)?;
-                    let rest = next_size - crc.len() as u64 + (next_size & 1);
+                    let rest = (next_size - crc.len() as u64).saturating_add(next_size & 1);
                     let _ = self.reader.ignore_bytes(rest);
                     if let Ok(crc) = <[u8; 4]>::try_from(&crc[..]) {
                         buf[0] = 1;
@@ -698,7 +706,10 @@ impl<'s> DffReader<'s> {
             else {
                 return Ok(false);
             };
-            let next = (pos + DSDIFF_CHUNK_HEADER_LEN as u64).saturating_add(size + (size & 1));
+            let next = pos
+                .saturating_add(DSDIFF_CHUNK_HEADER_LEN as u64)
+                .saturating_add(size)
+                .saturating_add(size & 1);
             if &id == b"DSTF" {
                 dst.index.push(pos);
                 dst.scan = next;
@@ -764,7 +775,7 @@ impl FormatReader for DffReader<'_> {
             SeekTo::Time { time, .. } => {
                 let tb =
                     self.tracks[0].time_base.ok_or(Error::SeekError(SeekErrorKind::Unseekable))?;
-                tb.calc_timestamp(time).unwrap_or(Timestamp::ZERO)
+                tb.calc_timestamp(time).ok_or(Error::SeekError(SeekErrorKind::OutOfRange))?
             }
         };
         if required_ts.is_negative() {

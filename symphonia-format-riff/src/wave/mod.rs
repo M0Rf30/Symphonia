@@ -787,7 +787,7 @@ impl FormatReader for WavReader<'_> {
 
         // Calculate the absolute byte offset of the block containing the desired audio frame. The
         // offset is in whole blocks (not frames), which differ for block-based codecs (ADPCM).
-        let seek_pos = self.data_start_pos + self.packet_info.get_data_pos_at(actual_ts);
+        let seek_pos = self.packet_info.get_seek_pos(self.data_start_pos, actual_ts)?;
 
         // If the reader supports seeking we can seek directly to the frame's offset wherever it may
         // be.

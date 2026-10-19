@@ -213,7 +213,7 @@ impl<'s> DsfReader<'s> {
 
         let block = u64::from(fmt.block_size_per_channel);
         let channels = u64::from(fmt.channel_count);
-        let available_frames = bytes_per_channel_in(data_size, block, channels) * 8;
+        let available_frames = bytes_per_channel_in(data_size, block, channels).saturating_mul(8);
         // A sample count of zero is written by streaming writers that do not know the length.
         let num_frames = match fmt.sample_count {
             0 => available_frames,
@@ -375,7 +375,7 @@ impl FormatReader for DsfReader<'_> {
             SeekTo::Time { time, .. } => {
                 let tb =
                     self.tracks[0].time_base.ok_or(Error::SeekError(SeekErrorKind::Unseekable))?;
-                tb.calc_timestamp(time).unwrap_or(Timestamp::ZERO)
+                tb.calc_timestamp(time).ok_or(Error::SeekError(SeekErrorKind::OutOfRange))?
             }
         };
         if required_ts.is_negative() {

@@ -27,6 +27,7 @@
 //! * `alac_mono_8k.caf`: 3 variable size packets of 4096 frames, 9600 valid frames (the 2688
 //!   frames after them are the remainder of the last packet).
 
+use std::io::Cursor;
 use symphonia_core::codecs::audio::well_known::{
     CODEC_ID_ADPCM_IMA_QT, CODEC_ID_ALAC, CODEC_ID_PCM_S16BE,
 };
@@ -182,4 +183,34 @@ fn alac_packets_are_variable_size_and_the_last_one_is_trimmed() {
     assert_eq!(seek(&mut reader, 0).unwrap(), (0, 0));
     assert_eq!(read_all(&mut reader), packets);
     assert!(is_out_of_range(seek(&mut reader, 12289)));
+}
+
+/// A CAF file with a 16-bit stereo linear PCM `desc` chunk and a `data` chunk of unknown size
+/// (-1), so that the total frame count is not known.
+fn unknown_length_pcm() -> Vec<u8> {
+    let mut v = b"caff".to_vec();
+    v.extend_from_slice(&1u16.to_be_bytes());
+    v.extend_from_slice(&0u16.to_be_bytes());
+    v.extend_from_slice(b"desc");
+    v.extend_from_slice(&32i64.to_be_bytes());
+    v.extend_from_slice(&44100f64.to_be_bytes());
+    v.extend_from_slice(b"lpcm");
+    v.extend_from_slice(&2u32.to_be_bytes()); // little endian
+    for n in [4u32, 1, 2, 16] {
+        v.extend_from_slice(&n.to_be_bytes());
+    }
+    v.extend_from_slice(b"data");
+    v.extend_from_slice(&(-1i64).to_be_bytes());
+    v.extend_from_slice(&0u32.to_be_bytes()); // edit count
+    v.extend_from_slice(&[0u8; 64]);
+    v
+}
+
+/// A seek whose byte offset does not fit in 64 bits is out-of-range, not an overflow.
+#[test]
+fn seek_offset_overflow_is_out_of_range() {
+    let mss =
+        MediaSourceStream::new(Box::new(Cursor::new(unknown_length_pcm())), Default::default());
+    let mut reader = CafReader::try_new(mss, FormatOptions::default()).unwrap();
+    assert!(is_out_of_range(seek(&mut reader, i64::MAX)));
 }
