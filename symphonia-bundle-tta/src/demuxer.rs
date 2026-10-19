@@ -56,8 +56,9 @@ pub struct TtaReader<'s> {
     frame_length: u64,
     /// The number of samples of the last frame.
     last_frame_length: u64,
-    /// The size of every frame in bytes.
-    sizes: Vec<u32>,
+    /// The byte offset of every frame from the first frame, plus the total size as the last
+    /// entry: frame `i` is `offsets[i]..offsets[i + 1]`.
+    offsets: Vec<u64>,
     /// The position of the first frame in the stream.
     first_frame_pos: u64,
     /// The index of the frame `next_packet` reads next.
@@ -103,14 +104,16 @@ impl<'s> TtaReader<'s> {
 
         // The seek table. The number of entries is not trusted for allocating, a stream that is
         // too short for them is invalid.
-        let mut sizes = Vec::with_capacity((total_frames as usize).min(1 << 16));
+        let mut offsets = Vec::with_capacity((total_frames as usize).min(1 << 16) + 1);
+        offsets.push(0u64);
         let mut crc = Crc32Ieee::new(!0);
 
         for _ in 0..total_frames {
             let mut entry = [0u8; 4];
             read_table(&mut reader, &mut entry)?;
             crc.process_buf_bytes(&entry);
-            sizes.push(u32::from_le_bytes(entry));
+            let end = offsets[offsets.len() - 1] + u64::from(u32::from_le_bytes(entry));
+            offsets.push(end);
         }
 
         let mut stored = [0u8; 4];
@@ -147,7 +150,7 @@ impl<'s> TtaReader<'s> {
             metadata,
             frame_length,
             last_frame_length,
-            sizes,
+            offsets,
             first_frame_pos,
             next_frame: 0,
             next_pos: first_frame_pos,
@@ -216,13 +219,12 @@ impl FormatReader for TtaReader<'_> {
     }
 
     fn next_packet(&mut self) -> Result<Option<Packet>> {
-        let Some(&size) = self.sizes.get(self.next_frame)
-        else {
-            return Ok(None);
-        };
-
         let index = self.next_frame;
-        let size = size as usize;
+        if index + 1 >= self.offsets.len() {
+            return Ok(None);
+        }
+
+        let size = (self.offsets[index + 1] - self.offsets[index]) as usize;
 
         // The bytes the stream has for the frame decide how much to reserve.
         let capacity = match self.reader.byte_len() {
@@ -238,15 +240,19 @@ impl FormatReader for TtaReader<'_> {
         self.next_pos += size as u64;
 
         if data.len() < size {
-            self.next_frame = self.sizes.len();
+            self.next_frame = self.offsets.len();
             return Err(Error::IoError(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "tta: the stream ends in the middle of a frame",
             )));
         }
 
-        let dur =
-            if index + 1 == self.sizes.len() { self.last_frame_length } else { self.frame_length };
+        let dur = if index + 2 == self.offsets.len() {
+            self.last_frame_length
+        }
+        else {
+            self.frame_length
+        };
 
         Ok(Some(
             PacketBuilder::new()
@@ -284,8 +290,7 @@ impl FormatReader for TtaReader<'_> {
         // defined to be.
         let index = (required_ts.get() as u64 / self.frame_length) as usize;
 
-        let pos =
-            self.first_frame_pos + self.sizes[..index].iter().map(|&s| u64::from(s)).sum::<u64>();
+        let pos = self.first_frame_pos + self.offsets[index];
         self.reader.seek(SeekFrom::Start(pos))?;
 
         self.next_frame = index;

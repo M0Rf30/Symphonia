@@ -205,3 +205,29 @@ fn seek_table_and_scan_agree() {
     let b = decode_rest(&mut open(FILES[1]));
     assert_eq!(a, b);
 }
+
+#[test]
+fn reset_after_a_seek_does_not_report_a_false_md5_mismatch() {
+    let mut reader = open(FILES[0]);
+    let track = reader.default_track(TrackType::Audio).unwrap();
+    let Some(CodecParameters::Audio(params)) = track.codec_params.clone()
+    else {
+        panic!("no audio parameters");
+    };
+    let mut opts = AudioDecoderOptions::default();
+    opts.verify = true;
+    let mut decoder = FlacDecoder::try_new(&params, &opts).unwrap();
+
+    // Decode a few blocks, then skip ahead as a seek would, resetting the decoder.
+    for _ in 0..4 {
+        let packet = reader.next_packet().unwrap().unwrap();
+        decoder.decode(&packet).unwrap();
+    }
+    seek_ts(&mut reader, SeekMode::Accurate, 10 * BLOCK as i64).unwrap();
+    decoder.reset();
+    while let Some(packet) = reader.next_packet().unwrap() {
+        decoder.decode(&packet).unwrap();
+    }
+
+    assert_ne!(decoder.finalize().verify_ok, Some(false));
+}

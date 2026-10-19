@@ -173,10 +173,13 @@ impl Channel {
         }
 
         let mut value = if k != 0 {
-            if k > MAX_RICE_BITS || unary > (i32::MAX as u32) >> k {
+            if k > MAX_RICE_BITS || unary > (i32::MAX as u64) >> k {
                 return decode_error("tta: invalid rice code");
             }
-            ((unary << k) + br.read_bits(k)) as i32
+            (((unary as u32) << k) + br.read_bits(k)) as i32
+        }
+        else if unary > i32::MAX as u64 {
+            return decode_error("tta: invalid rice code");
         }
         else {
             unary as i32

@@ -31,7 +31,7 @@ use super::validate::Validator;
 
 fn decorrelate_left_side(left: &[i32], side: &mut [i32]) {
     for (s, l) in side.iter_mut().zip(left) {
-        *s = *l - *s;
+        *s = l.wrapping_sub(*s);
     }
 }
 
@@ -68,16 +68,18 @@ fn decorrelate_mid_side(mid: &mut [i32], side: &mut [i32]) {
         // Therefore the final equations yield:
         //      - L = (2*M + (S%2) + S) / 2
         //      - R = (2*M + (S%2) - S) / 2
-        let mid = (*m << 1) | (*s & 1);
-        let side = *s;
-        *m = (mid + side) >> 1;
-        *s = (mid - side) >> 1;
+        // Use 64-bit intermediates: at 31 bits per sample the doubled mid plus the 32-bit side
+        // exceeds 32 bits.
+        let side = i64::from(*s);
+        let mid = (i64::from(*m) << 1) | (side & 1);
+        *m = ((mid + side) >> 1) as i32;
+        *s = ((mid - side) >> 1) as i32;
     }
 }
 
 fn decorrelate_right_side(right: &[i32], side: &mut [i32]) {
     for (s, r) in side.iter_mut().zip(right) {
-        *s += *r;
+        *s = s.wrapping_add(*r);
     }
 }
 
@@ -308,7 +310,10 @@ impl AudioDecoder for FlacDecoder {
     }
 
     fn reset(&mut self) {
-        // No state is stored between packets, therefore do nothing.
+        // The running MD5 is meaningless after a discontinuity (e.g., a seek), so stop verifying
+        // rather than report a false mismatch.
+        self.validator = Default::default();
+        self.is_validating = false;
     }
 
     fn codec_params(&self) -> &AudioCodecParameters {
@@ -431,8 +436,15 @@ fn read_subframe_header<B: ReadBitsLtr>(bs: &mut B, frame_bps: u32) -> Result<(S
     // Bit 7 of the sub-frame header designates if there are any dropped (wasted in FLAC terms)
     // bits per sample in the audio sub-block. If the bit is set, unary decode the number of
     // dropped bits per sample.
-    let dropped_bps = if bs.read_bool()? { bs.read_unary_zeros()? + 1 } else { 0 };
-    if dropped_bps > frame_bps {
+    let dropped_bps = if bs.read_bool()? {
+        // A count that cannot be valid is rejected without overflowing.
+        bs.read_unary_zeros()?.saturating_add(1)
+    }
+    else {
+        0
+    };
+    // At least one bit per sample must remain after dropping the wasted bits.
+    if dropped_bps >= frame_bps {
         return decode_error(
             "flac: dropped bits per sample is greater than the frame bits per sample",
         );
@@ -770,6 +782,10 @@ fn decode_rice_partition<B: ReadBitsLtr>(
         for sample in buf.iter_mut() {
             let q = bs.read_unary_zeros()?;
             let r = bs.read_bits_leq32(rice_param)?;
+            // The quotient must not overflow when shifted into the 32-bit residual word.
+            if rice_param > 0 && (q >> (u32::BITS - rice_param)) != 0 {
+                return decode_error("flac: rice quotient out of range");
+            }
             *sample = rice_signed_to_i32((q << rice_param) | r);
         }
     }
@@ -1022,7 +1038,50 @@ fn lpc_predict_wide<const N: usize>(
 
 #[cfg(test)]
 mod tests {
-    use super::{fixed_predict, lpc_predict, lpc_predict_narrow};
+    use super::{
+        decode_rice_partition, decorrelate_mid_side, fixed_predict, lpc_predict,
+        lpc_predict_narrow, read_subframe_header,
+    };
+    use symphonia_core::io::BitReaderLtr;
+
+    #[test]
+    fn verify_rice_quotient_overflow_is_rejected() {
+        // Rice param 28 (5-bit field), quotient 16 (16 zeros then a one): 16 << 28 overflows 32
+        // bits.
+        let mut bits = String::from("11100");
+        bits.push_str(&"0".repeat(16));
+        bits.push('1');
+        bits.push_str(&"0".repeat(28));
+        let mut bytes = vec![0u8; bits.len().div_ceil(8)];
+        for (i, c) in bits.bytes().enumerate() {
+            if c == b'1' {
+                bytes[i / 8] |= 0x80 >> (i % 8);
+            }
+        }
+        let mut bs = BitReaderLtr::new(&bytes);
+        let mut buf = [0i32; 1];
+        assert!(decode_rice_partition(&mut bs, 5, &mut buf).is_err());
+    }
+
+    #[test]
+    fn verify_wasted_bits_must_leave_a_bit() {
+        // Constant sub-frame header, wasted bit flag set, unary 7 zeros then 1 => 8 dropped bits.
+        let bytes = [0b0000_0001u8, 0b0000_0001, 0, 0];
+        let mut bs = BitReaderLtr::new(&bytes);
+        assert!(read_subframe_header(&mut bs, 8).is_err());
+        let mut bs = BitReaderLtr::new(&bytes);
+        assert!(read_subframe_header(&mut bs, 9).is_ok());
+    }
+
+    #[test]
+    fn verify_mid_side_31_bit_does_not_overflow() {
+        let mut mid = [i32::MAX >> 1];
+        let mut side = [i32::MAX];
+        decorrelate_mid_side(&mut mid, &mut side);
+        let mid_w = ((i32::MAX >> 1) as i64) << 1 | 1;
+        assert_eq!(mid[0], ((mid_w + i32::MAX as i64) >> 1) as i32);
+        assert_eq!(side[0], ((mid_w - i32::MAX as i64) >> 1) as i32);
+    }
 
     struct XorShift(u64);
 

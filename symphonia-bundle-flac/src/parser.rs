@@ -230,7 +230,14 @@ impl PacketBuilder {
     fn try_build(&mut self, stream_info: &StreamInfo, frag: Fragment) -> Option<ParsedPacket> {
         let (header, data) = if frag.crc_match {
             // The fragment has a CRC that matches the expected CRC.
-            (frag.parse_header()?, frag.data)
+            match frag.parse_header() {
+                Some(header) => (header, frag.data),
+                None => {
+                    // Do not keep stale fragments after a header error.
+                    self.frags.clear();
+                    return None;
+                }
+            }
         }
         else {
             // The fragment does not have a CRC that matches the expected CRC.
@@ -257,7 +264,13 @@ impl PacketBuilder {
 
                 data.extend_from_slice(&frag.data);
 
-                (self.frags[i].parse_header()?, data.into_boxed_slice())
+                match self.frags[i].parse_header() {
+                    Some(header) => (header, data.into_boxed_slice()),
+                    None => {
+                        self.frags.clear();
+                        return None;
+                    }
+                }
             }
             else {
                 // A range of fragments has not been found that forms a packet.
@@ -410,7 +423,13 @@ impl PacketParser {
         // Do the initial read.
         //
         // Note: This will always read atleast a single byte, or return an error (i.e., EOF).
-        let mut end = reader.read_buf(&mut buf)?;
+        let mut end = match reader.read_buf(&mut buf) {
+            Ok(end) => end,
+            Err(err) => {
+                self.scratch = buf;
+                return Err(err.into());
+            }
+        };
 
         // Invariant: The packet parser was synchronized before starting to read_fragment.
         //
@@ -458,6 +477,7 @@ impl PacketParser {
             // been fully read, and the header for the next frame found, then synchronization has
             // been lost.
             if end >= FLAC_MAX_FRAME_SIZE + FLAC_MAX_FRAME_HEADER_SIZE {
+                self.scratch = buf;
                 return Ok(None);
             }
 
@@ -867,5 +887,19 @@ mod tests {
         let mut builder = PacketBuilder::default();
         builder.frags.push(Fragment::new(frame.into_boxed_slice()));
         assert!(builder.recover_final_fragment().is_none());
+    }
+
+    #[test]
+    fn header_error_drops_stale_fragments() {
+        let mut builder = PacketBuilder::default();
+        builder.frags.push(Fragment::new(frame_with_crc(&[1, 2, 3, 4, 5, 6]).into_boxed_slice()));
+
+        // The CRC matches, but the content is not a valid frame header.
+        let bad = Fragment::new(frame_with_crc(&[9, 9, 9, 9, 9, 9]).into_boxed_slice());
+        assert!(bad.crc_match);
+
+        let info = symphonia_common::xiph::audio::flac::StreamInfo::default();
+        assert!(builder.try_build(&info, bad).is_none());
+        assert!(builder.frags.is_empty());
     }
 }

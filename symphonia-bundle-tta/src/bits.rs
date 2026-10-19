@@ -57,8 +57,8 @@ impl<'a> BitReaderLe<'a> {
     /// FFmpeg's `get_unary(gb, 0, get_bits_left(gb))`: if the data ends before a 0 bit, all the
     /// bits are consumed, and their number is returned.
     #[inline]
-    pub fn read_unary_ones(&mut self) -> u32 {
-        let mut count = 0u32;
+    pub fn read_unary_ones(&mut self) -> u64 {
+        let mut count = 0u64;
 
         loop {
             let left = self.bits_left();
@@ -68,16 +68,16 @@ impl<'a> BitReaderLe<'a> {
             if ones < avail {
                 // The 0 bit is within the data.
                 self.pos += ones as usize + 1;
-                return count + ones;
+                return count + u64::from(ones);
             }
             else if left <= PEEK_BITS as usize {
                 // Only 1 bits to the end of the data.
                 self.pos += left;
-                return count + left as u32;
+                return count + left as u64;
             }
 
             self.pos += PEEK_BITS as usize;
-            count += PEEK_BITS;
+            count += u64::from(PEEK_BITS);
         }
     }
 
@@ -133,7 +133,7 @@ mod tests {
         for len in [1usize, 7, 8, 9, 20] {
             let data = vec![0xffu8; len];
             let mut br = BitReaderLe::new(&data);
-            assert_eq!(br.read_unary_ones(), (len * 8) as u32);
+            assert_eq!(br.read_unary_ones(), (len * 8) as u64);
             assert_eq!(br.bits_left(), 0);
             // Nothing is left: a read of the unary code yields 0.
             assert_eq!(br.read_unary_ones(), 0);

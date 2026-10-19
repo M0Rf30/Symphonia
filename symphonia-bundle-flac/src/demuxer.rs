@@ -377,16 +377,28 @@ impl FormatReader for FlacReader<'_> {
                 match index.search(ts) {
                     // Search from the start of stream up-to an ending point.
                     SeekSearchResult::Upper(upper) => {
-                        end_byte_offset = self.first_frame_offset + upper.byte_offset;
+                        end_byte_offset = self
+                            .first_frame_offset
+                            .checked_add(upper.byte_offset)
+                            .ok_or(Error::SeekError(SeekErrorKind::OutOfRange))?;
                     }
                     // Search from a starting point up-to the end of the stream.
                     SeekSearchResult::Lower(lower) => {
-                        start_byte_offset = self.first_frame_offset + lower.byte_offset;
+                        start_byte_offset = self
+                            .first_frame_offset
+                            .checked_add(lower.byte_offset)
+                            .ok_or(Error::SeekError(SeekErrorKind::OutOfRange))?;
                     }
                     // Search between two points of the stream.
                     SeekSearchResult::Range(lower, upper) => {
-                        start_byte_offset = self.first_frame_offset + lower.byte_offset;
-                        end_byte_offset = self.first_frame_offset + upper.byte_offset;
+                        start_byte_offset = self
+                            .first_frame_offset
+                            .checked_add(lower.byte_offset)
+                            .ok_or(Error::SeekError(SeekErrorKind::OutOfRange))?;
+                        end_byte_offset = self
+                            .first_frame_offset
+                            .checked_add(upper.byte_offset)
+                            .ok_or(Error::SeekError(SeekErrorKind::OutOfRange))?;
                     }
                     // Search the entire stream (default behaviour, so do nothing).
                     SeekSearchResult::Stream => (),
@@ -720,5 +732,29 @@ mod tests {
         let reader =
             probe.probe(&Default::default(), mss, Default::default(), Default::default()).unwrap();
         assert_eq!(reader.format_info().short_name, "flac");
+    }
+
+    #[test]
+    fn verify_seek_table_offset_overflow_is_out_of_range() {
+        let mut data = build_stream(BLOCK_LEN, &[BLOCK_LEN, BLOCK_LEN]);
+
+        // Clear the last-block flag of STREAMINFO and append a SEEKTABLE with a huge offset.
+        data[4] = 0x00;
+        let mut table = vec![0x83, 0, 0, 36];
+        for (sample, offset) in [(0u64, 0u64), (u64::from(BLOCK_LEN), u64::MAX)] {
+            table.extend_from_slice(&sample.to_be_bytes());
+            table.extend_from_slice(&offset.to_be_bytes());
+            table.extend_from_slice(&BLOCK_LEN.to_be_bytes());
+        }
+        data.splice(42..42, table);
+
+        let mut reader = open(data);
+        let to = SeekTo::Timestamp { ts: Timestamp::new(500), track_id: 0 };
+        match reader.seek(SeekMode::Accurate, to) {
+            Err(symphonia_core::errors::Error::SeekError(
+                symphonia_core::errors::SeekErrorKind::OutOfRange,
+            )) => (),
+            other => panic!("unexpected seek result: {other:?}"),
+        }
     }
 }
