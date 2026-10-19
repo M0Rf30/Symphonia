@@ -27,7 +27,9 @@ use symphonia_core::codecs::audio::well_known::{
 };
 use symphonia_core::codecs::audio::{AudioCodecId, AudioCodecParameters};
 use symphonia_core::common::FourCc;
-use symphonia_core::errors::{Result, SeekErrorKind, decode_error, seek_error, unsupported_error};
+use symphonia_core::errors::{
+    Result, SeekErrorKind, decode_error, limit_error, seek_error, unsupported_error,
+};
 use symphonia_core::formats::prelude::*;
 use symphonia_core::formats::probe::{ProbeFormatData, ProbeableFormat, Score, Scoreable};
 use symphonia_core::io::*;
@@ -51,6 +53,9 @@ const BFSTM_FORMAT_INFO: FormatInfo = FormatInfo {
 
 /// The largest number of channels.
 const MAX_CHANNELS: usize = 64;
+
+/// The largest block of one channel in bytes.
+const MAX_BLOCK_SIZE: u64 = 1 << 20;
 
 /// The number of samples in a full DSP-ADPCM frame, and its size in bytes.
 const DSP_FRAME_SAMPLES: u64 = 14;
@@ -280,6 +285,11 @@ impl<'s> BrstmReader<'s> {
         let last_block_used_bytes = u64::from(f.u32()?);
         let last_block_samples = u64::from(f.u32()?);
         let last_block_size = u64::from(f.u32()?);
+
+        // The sizes are untrusted and size the buffers of the packets.
+        if block_size > MAX_BLOCK_SIZE || last_block_size > MAX_BLOCK_SIZE {
+            return limit_error("brstm: block size is too large");
+        }
 
         if last_block_used_bytes > last_block_size {
             return decode_error("brstm: invalid last block");
@@ -644,5 +654,59 @@ impl FormatReader for BrstmReader<'_> {
         Self: 'a,
     {
         self.reader
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use symphonia_core::errors::Error;
+
+    use super::*;
+
+    /// A mono 16-bit BRSTM of one block of `block_size` bytes.
+    fn stream(block_size: u32, last_block_size: u32) -> Vec<u8> {
+        let mut d = vec![0u8; 0x1000];
+        d[..4].copy_from_slice(b"RSTM");
+        d[4..6].copy_from_slice(&[0xfe, 0xff]);
+        d[6] = 1;
+        d[12..14].copy_from_slice(&0x20u16.to_be_bytes());
+        d[0x20..0x24].copy_from_slice(b"HEAD");
+        d[0x24..0x28].copy_from_slice(&0x100u32.to_be_bytes());
+        // The offset of the stream info, from the start of the chunk.
+        d[0x2c..0x30].copy_from_slice(&0x20u32.to_be_bytes());
+        let h = 0x20 + 0x20 + 8;
+        d[h] = 1; // PCM16.
+        d[h + 2] = 1; // Channels.
+        d[h + 4..h + 6].copy_from_slice(&44100u16.to_be_bytes());
+        d[h + 12..h + 16].copy_from_slice(&1000u32.to_be_bytes()); // Duration.
+        d[h + 16..h + 20].copy_from_slice(&0x180u32.to_be_bytes()); // Data start.
+        d[h + 20..h + 24].copy_from_slice(&1u32.to_be_bytes()); // Block count.
+        d[h + 24..h + 28].copy_from_slice(&block_size.to_be_bytes());
+        d[h + 28..h + 32].copy_from_slice(&1000u32.to_be_bytes()); // Samples per block.
+        d[h + 32..h + 36].copy_from_slice(&2000u32.to_be_bytes()); // Last block bytes.
+        d[h + 36..h + 40].copy_from_slice(&1000u32.to_be_bytes()); // Last block samples.
+        d[h + 40..h + 44].copy_from_slice(&last_block_size.to_be_bytes());
+        d[0x120..0x124].copy_from_slice(b"DATA");
+        d[0x124..0x128].copy_from_slice(&0xe0u32.to_be_bytes());
+        d
+    }
+
+    fn open(data: Vec<u8>) -> Result<BrstmReader<'static>> {
+        let mss = MediaSourceStream::new(Box::new(Cursor::new(data)), Default::default());
+        BrstmReader::try_new(mss, FormatOptions::default())
+    }
+
+    #[test]
+    fn accepts_a_sane_block_size() {
+        let mut reader = open(stream(2048, 2048)).unwrap();
+        assert!(reader.next_packet().unwrap().is_some());
+    }
+
+    #[test]
+    fn rejects_a_huge_block_size() {
+        assert!(matches!(open(stream(0x8000_0000, 2048)), Err(Error::LimitError(_))));
+        assert!(matches!(open(stream(2048, 0xffff_ffff)), Err(Error::LimitError(_))));
     }
 }

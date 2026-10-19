@@ -68,7 +68,7 @@ const MAX_AFC_CHANNELS: u64 = 6;
 const MAX_PCM_CHANNELS: u64 = 64;
 
 /// The largest block of one channel in bytes.
-const MAX_BLOCK_LEN: u64 = 1 << 24;
+const MAX_BLOCK_LEN: u64 = 1 << 20;
 
 /// The size in bytes of an AFC frame, and the number of its samples.
 const AFC_FRAME_BYTES: u64 = 9;
@@ -204,12 +204,17 @@ impl<'s> AstReader<'s> {
                     break;
                 }
 
+                source.seek(SeekFrom::Start(end))?;
+
+                // A block without data holds no audio and is skipped.
+                if size == 0 {
+                    continue;
+                }
+
                 let frames = codec.frames_in(size);
                 index.push(Block { pos, pts, frames });
                 pts += frames;
                 max_block = max_block.max(size);
-
-                source.seek(SeekFrom::Start(end))?;
             }
 
             source.seek(SeekFrom::Start(base + HEADER_LEN))?;
@@ -315,15 +320,15 @@ impl FormatReader for AstReader<'_> {
             return Ok(None);
         }
 
-        let size = match read_block_header(&mut self.reader) {
-            Ok(Some(size)) => size,
-            Ok(None) => {
-                self.eof = true;
-                return Ok(None);
-            }
-            Err(e) => {
-                // Skip the chunk as FFmpeg does (the size was read before the error).
-                return Err(e);
+        let size = loop {
+            match read_block_header(&mut self.reader)? {
+                // A block without data holds no audio: go to the next.
+                Some(0) => (),
+                Some(size) => break size,
+                None => {
+                    self.eof = true;
+                    return Ok(None);
+                }
             }
         };
 
@@ -336,7 +341,7 @@ impl FormatReader for AstReader<'_> {
         let len = read_up_to(&mut self.reader, &mut buf)?;
 
         // A block that is cut short by the end of the stream is dropped.
-        if len < buf.len() || buf.is_empty() {
+        if len < buf.len() {
             self.eof = true;
             return Ok(None);
         }
@@ -415,5 +420,102 @@ impl FormatReader for AstReader<'_> {
         Self: 'a,
     {
         self.reader
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use symphonia_core::errors::Error;
+
+    use super::*;
+
+    /// A mono PCM AST stream whose blocks have the data sizes `sizes`.
+    fn stream(sizes: &[u32], duration: u32) -> Vec<u8> {
+        let mut d = vec![0u8; HEADER_LEN as usize];
+        d[..4].copy_from_slice(b"STRM");
+        d[8..10].copy_from_slice(&1u16.to_be_bytes());
+        d[10..12].copy_from_slice(&16u16.to_be_bytes());
+        d[12..14].copy_from_slice(&1u16.to_be_bytes());
+        d[16..20].copy_from_slice(&44100u32.to_be_bytes());
+        d[20..24].copy_from_slice(&duration.to_be_bytes());
+        d[32..36].copy_from_slice(&4u32.to_be_bytes());
+
+        for &size in sizes {
+            let mut b = vec![0u8; BLOCK_HEADER_LEN as usize];
+            b[..4].copy_from_slice(b"BLCK");
+            b[4..8].copy_from_slice(&size.to_be_bytes());
+            d.extend_from_slice(&b);
+            d.resize(d.len() + size as usize, 0x11);
+        }
+        d
+    }
+
+    fn open(data: Vec<u8>) -> Result<AstReader<'static>> {
+        let mss = MediaSourceStream::new(Box::new(Cursor::new(data)), Default::default());
+        AstReader::try_new(mss, FormatOptions::default())
+    }
+
+    /// A source that cannot seek, so that the blocks are not indexed.
+    struct Unseekable(Cursor<Vec<u8>>);
+
+    impl std::io::Read for Unseekable {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.0.read(buf)
+        }
+    }
+
+    impl std::io::Seek for Unseekable {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            self.0.seek(pos)
+        }
+    }
+
+    impl MediaSource for Unseekable {
+        fn is_seekable(&self) -> bool {
+            false
+        }
+
+        fn byte_len(&self) -> Option<u64> {
+            None
+        }
+    }
+
+    #[test]
+    fn zero_size_blocks_are_skipped() {
+        let mut reader = open(stream(&[4, 0, 0, 4], 0)).unwrap();
+        let a = reader.next_packet().unwrap().unwrap();
+        let b = reader.next_packet().unwrap().unwrap();
+        assert_eq!((a.pts.get(), b.pts.get()), (0, 2));
+        assert!(reader.next_packet().unwrap().is_none());
+    }
+
+    #[test]
+    fn zero_size_blocks_are_skipped_when_not_indexed() {
+        // The first block is zero-sized and the header holds the duration.
+        let mut reader = open(stream(&[0, 4], 2)).unwrap();
+        assert_eq!(reader.next_packet().unwrap().unwrap().pts.get(), 0);
+    }
+
+    #[test]
+    fn rejects_a_huge_first_block() {
+        let mut d = stream(&[], 0);
+        d[32..36].copy_from_slice(&0x4000_0000u32.to_be_bytes());
+        assert!(matches!(open(d), Err(Error::DecodeError(_))));
+    }
+
+    #[test]
+    fn rejects_a_huge_block_on_read() {
+        // Not indexed (the source cannot seek), so it is rejected when it is read.
+        let mut d = stream(&[4], 0);
+        let mut b = vec![0u8; BLOCK_HEADER_LEN as usize];
+        b[..4].copy_from_slice(b"BLCK");
+        b[4..8].copy_from_slice(&0x4000_0000u32.to_be_bytes());
+        d.extend_from_slice(&b);
+        let mss = MediaSourceStream::new(Box::new(Unseekable(Cursor::new(d))), Default::default());
+        let mut reader = AstReader::try_new(mss, FormatOptions::default()).unwrap();
+        assert!(reader.next_packet().unwrap().is_some());
+        assert!(matches!(reader.next_packet(), Err(Error::LimitError(_))));
     }
 }

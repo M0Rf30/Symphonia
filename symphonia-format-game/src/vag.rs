@@ -36,7 +36,9 @@ use symphonia_core::codecs::audio::well_known::{
 };
 use symphonia_core::codecs::audio::{AudioCodecId, AudioCodecParameters};
 use symphonia_core::common::FourCc;
-use symphonia_core::errors::{Result, SeekErrorKind, decode_error, seek_error, unsupported_error};
+use symphonia_core::errors::{
+    Result, SeekErrorKind, decode_error, limit_error, seek_error, unsupported_error,
+};
 use symphonia_core::formats::prelude::*;
 use symphonia_core::formats::probe::{ProbeFormatData, ProbeableFormat, Score, Scoreable};
 use symphonia_core::io::*;
@@ -100,6 +102,10 @@ const HEAD_LEN: usize = 0x1004;
 
 /// The packets of the frame interleaved layouts hold blocks up to this size, in bytes.
 const PACKET_BYTES: u64 = 4096;
+
+/// The largest block in bytes, of all the channels. The files in the wild use blocks of a few
+/// kilobytes per channel; the header fields are untrusted and size the buffers of the packets.
+const MAX_BLOCK_BYTES: u64 = 1 << 22;
 
 /// The number of frames decoded and discarded before the requested position of an accurate seek.
 /// The history of the ADPCM is not stored in the stream; its response to a wrong history decays
@@ -186,6 +192,9 @@ fn psx_layout(channels: u64, rate: u32, interleave: u64, data_start: u64) -> Res
     }
 
     let block_bytes = interleave * channels;
+    if block_bytes > MAX_BLOCK_BYTES {
+        return limit_error("vag: block size is too large");
+    }
 
     Ok(Layout {
         codec: CODEC_ID_ADPCM_PSX,
@@ -217,6 +226,10 @@ fn pcm_layout(
 
     if block_bytes == 0 || block_bytes % (2 * channels) != 0 {
         return decode_error("vag: invalid block size");
+    }
+
+    if block_bytes > MAX_BLOCK_BYTES {
+        return limit_error("vag: block size is too large");
     }
 
     Ok(Layout {
@@ -301,12 +314,17 @@ fn parse_vpk(h: &Head<'_>) -> Result<Layout> {
     layout.packet_blocks = 1;
 
     let block_frames = layout.block_frames();
-    let block_count = duration.div_ceil(block_frames);
+    let mut block_count = duration.div_ceil(block_frames);
 
     // A last block that is cut short holds only the frames of the declared length. FFmpeg also
-    // cuts a last block that is whole and so loses it, which is not done here.
+    // cuts a last block that is whole and so loses it, which is not done here. Only whole frames
+    // are stored: a tail of less than one frame per channel holds no audio and is dropped (a
+    // zero-size chunk per channel would also be invalid).
     let last_frames = duration % block_frames;
-    let last_bytes = last_frames * FRAME_BYTES * channels / FRAME_SAMPLES;
+    let last_bytes = last_frames / FRAME_SAMPLES * FRAME_BYTES * channels;
+    if last_frames != 0 && last_bytes == 0 {
+        block_count -= 1;
+    }
 
     layout.declared_frames = Some(duration);
     layout.vpk = Some(VpkTail { block_count, last_bytes });
@@ -726,5 +744,82 @@ impl FormatReader for VagReader<'_> {
         Self: 'a,
     {
         self.reader
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use symphonia_core::errors::Error;
+
+    use super::*;
+
+    fn open(data: Vec<u8>) -> Result<VagReader<'static>> {
+        let mss = MediaSourceStream::new(Box::new(Cursor::new(data)), Default::default());
+        VagReader::try_new(mss, FormatOptions::default())
+    }
+
+    /// A VPK stream of `size` data bytes (as the header counts them), the block alignment
+    /// `align`, `channels` channels and `blocks` whole blocks of data.
+    fn vpk(size: u32, align: u32, channels: u32, blocks: usize) -> Vec<u8> {
+        let mut d = vec![0u8; 0x800];
+        d[..4].copy_from_slice(b"VPK ");
+        d[4..8].copy_from_slice(&size.to_le_bytes());
+        d[8..12].copy_from_slice(&0x800u32.to_le_bytes());
+        d[12..16].copy_from_slice(&align.to_le_bytes());
+        d[16..20].copy_from_slice(&44100u32.to_le_bytes());
+        d[20..24].copy_from_slice(&channels.to_le_bytes());
+        d.resize(d.len() + blocks * align as usize, 0);
+        d
+    }
+
+    #[test]
+    fn vpk_tail_below_one_frame_per_channel_is_dropped() {
+        // 4 whole frames per channel in one block, then a tail of 1 sample: the tail holds no
+        // frame of a channel (this used to panic in `chunks_exact_mut(0)`).
+        let align = 2 * 4 * FRAME_BYTES as u32;
+        let size = 4 * FRAME_BYTES as u32;
+        let mut reader = open(vpk(size, align, 2, 1)).unwrap();
+        let mut n = 0;
+        while reader.next_packet().unwrap().is_some() {
+            n += 1;
+        }
+        assert_eq!(n, 1);
+
+        // A header whose duration leaves a partial frame in the tail.
+        let mut d = vpk(size + 1, align, 2, 2);
+        d[4..8].copy_from_slice(&(size + 1).to_le_bytes());
+        let mut reader = open(d).unwrap();
+        while reader.next_packet().unwrap().is_some() {}
+    }
+
+    #[test]
+    fn vpk_tail_of_whole_frames_is_read() {
+        // One block of 4 frames per channel and a tail of one frame per channel.
+        let align = 2 * 4 * FRAME_BYTES as u32;
+        let size = 5 * FRAME_BYTES as u32;
+        let mut reader = open(vpk(size, align, 2, 2)).unwrap();
+        let first = reader.next_packet().unwrap().unwrap();
+        let tail = reader.next_packet().unwrap().unwrap();
+        assert_eq!(first.data.len(), align as usize);
+        assert_eq!(tail.data.len(), 2 * FRAME_BYTES as usize);
+        assert!(reader.next_packet().unwrap().is_none());
+    }
+
+    #[test]
+    fn rejects_a_huge_block_size() {
+        let mut d = vpk(1600, 16 * 2, 2, 0);
+        d[12..16].copy_from_slice(&0x8000_0000u32.to_le_bytes());
+        assert!(matches!(open(d), Err(Error::LimitError(_))));
+
+        // An SVAG stream with a huge alignment.
+        let mut d = vec![0u8; 0x1000];
+        d[..4].copy_from_slice(b"Svag");
+        d[4..8].copy_from_slice(&1000u32.to_le_bytes());
+        d[8..12].copy_from_slice(&44100u32.to_le_bytes());
+        d[12..16].copy_from_slice(&2u32.to_le_bytes());
+        d[16..20].copy_from_slice(&0x8000_0000u32.to_le_bytes());
+        assert!(matches!(open(d), Err(Error::LimitError(_))));
     }
 }
