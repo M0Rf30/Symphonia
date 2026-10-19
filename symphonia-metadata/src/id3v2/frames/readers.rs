@@ -22,7 +22,7 @@ use symphonia_core::units::Time;
 use symphonia_core::util::text;
 
 use lazy_static::lazy_static;
-use log::debug;
+use log::{debug, warn};
 use smallvec::SmallVec;
 
 use crate::id3v2::frames::{FrameResult, Id3v2Chapter, Id3v2TableOfContents};
@@ -63,6 +63,38 @@ impl<'a> FrameInfo<'a> {
             major_version,
             raw_tag_parser,
         }
+    }
+}
+
+/// The maximum number of `CHAP`/`CTOC` frames that may be nested inside one another.
+const MAX_CHAPTER_NESTING: u32 = 2;
+
+thread_local! {
+    /// The number of `CHAP`/`CTOC` frames currently being read on this thread.
+    static CHAPTER_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Tracks `CHAP`/`CTOC` nesting. Decrements the depth when dropped.
+struct ChapterDepthGuard;
+
+impl ChapterDepthGuard {
+    /// Enter a `CHAP`/`CTOC` frame. Returns `None` if the nesting limit is exceeded.
+    fn enter() -> Option<Self> {
+        CHAPTER_DEPTH.with(|d| {
+            if d.get() >= MAX_CHAPTER_NESTING {
+                None
+            }
+            else {
+                d.set(d.get() + 1);
+                Some(ChapterDepthGuard)
+            }
+        })
+    }
+}
+
+impl Drop for ChapterDepthGuard {
+    fn drop(&mut self) {
+        CHAPTER_DEPTH.with(|d| d.set(d.get() - 1));
     }
 }
 
@@ -406,6 +438,12 @@ pub fn read_atxt_frame(mut reader: BufReader<'_>, frame: &FrameInfo<'_>) -> Resu
 
 /// Reads a `CHAP` (chapter) frame.
 pub fn read_chap_frame(mut reader: BufReader<'_>, frame: &FrameInfo<'_>) -> Result<FrameResult> {
+    let Some(_depth_guard) = ChapterDepthGuard::enter()
+    else {
+        warn!("id3v2: skipping {} frame nested too deeply", frame.id);
+        return Ok(FrameResult::Skipped);
+    };
+
     use crate::id3v2::frames::{
         min_frame_size, read_id3v2p2_frame, read_id3v2p3_frame, read_id3v2p4_frame,
     };
@@ -643,6 +681,12 @@ pub fn read_crm_frame(mut reader: BufReader<'_>, frame: &FrameInfo<'_>) -> Resul
 
 /// Reads a `CTOC` (table of contents) frame.
 pub fn read_ctoc_frame(mut reader: BufReader<'_>, frame: &FrameInfo<'_>) -> Result<FrameResult> {
+    let Some(_depth_guard) = ChapterDepthGuard::enter()
+    else {
+        warn!("id3v2: skipping {} frame nested too deeply", frame.id);
+        return Ok(FrameResult::Skipped);
+    };
+
     use crate::id3v2::frames::{
         min_frame_size, read_id3v2p2_frame, read_id3v2p3_frame, read_id3v2p4_frame,
     };
@@ -1467,6 +1511,43 @@ lazy_static! {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn verify_nested_chap_depth_limited() {
+        use crate::id3v2::frames::{FrameResult, read_id3v2p3_frame};
+
+        // Build CHAP frames nested 10,000 deep, each containing the next.
+        fn chap(inner: &[u8]) -> Vec<u8> {
+            let mut body = b"c\0".to_vec();
+            body.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
+            body.extend_from_slice(&[0xff; 8]);
+            body.extend_from_slice(inner);
+            let mut f = b"CHAP".to_vec();
+            f.extend_from_slice(&(body.len() as u32).to_be_bytes());
+            f.extend_from_slice(&[0, 0]);
+            f.extend_from_slice(&body);
+            f
+        }
+
+        let mut data = chap(&[]);
+        for _ in 0..10_000 {
+            data = chap(&data);
+        }
+
+        let result = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || {
+                read_id3v2p3_frame(&mut BufReader::new(&data)).map(|r| match r {
+                    FrameResult::Chapter(c) => Some(c.chapter.end_time.is_some()),
+                    _ => None,
+                })
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        assert_eq!(result.unwrap(), Some(true));
+    }
     use super::Encoding;
 
     use symphonia_core::io::BufReader;
